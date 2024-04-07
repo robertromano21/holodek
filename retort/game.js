@@ -3312,6 +3312,11 @@ if ((userInputNumber === 1 || userInputNumber === 2 || userInputNumber === 3) &&
     { role: "system", content: "" },
     { role: "user", content: userInput }
   ];
+
+    // Add the personal narrative to the latest response (system prompt)
+    if (personalNarrative) {
+      messages[1].content;
+    }
   
     fetch('http://childrenofthegrave.com/updateState', {
         method: 'POST',
@@ -3333,9 +3338,9 @@ if ((userInputNumber === 1 || userInputNumber === 2 || userInputNumber === 3) &&
     // Directly access the 'content' part of the response
     var content = response.response.content; // Adjust this based on the actual structure
                // Add the personal narrative to the latest response (system prompt)
-    if (personalNarrative) {
+  /*  if (personalNarrative) {
     response.response.content;
-   }
+   }*/
     
           console.log(content); // If you want to check the response as JSON
       // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
