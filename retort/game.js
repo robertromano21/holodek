@@ -102,15 +102,18 @@ function getFirstResponseForRoom(coordinates) {
 function addPromptAndResponse(prompt, assistantPrompt, systemPrompt, response, personalNarrative, conversationId, gameConsole) {
   const transaction = db.transaction(['conversation'], 'readwrite');
   const store = transaction.objectStore('conversation');
+  // Format the prompt and response
+  const formattedPrompt = `$.user ${prompt}`;
+  const formattedResponse = `$.assistant ${response}`;
 
   const newPromptAndResponse = {
-    prompt: prompt,
-    assistantPrompt: assistantPrompt,
-    systemPrompt: systemPrompt,
-    response: response,
-    personalNarrative: personalNarrative,
+    prompt: formattedPrompt,
+    assistantPrompt: `$.assistant ${assistantPrompt}`, // Format if necessary
+    systemPrompt: `$.system ${systemPrompt}`, // Format if necessary
+    response: formattedResponse,
+    personalNarrative: `personalNarrative \`${personalNarrative}\``, // Format if you're storing this as a single entry
     conversationId: conversationId,
-    gameConsole: gameConsole, // Add the game console to the object
+    gameConsole: gameConsole,
   };
 
   store.add(newPromptAndResponse);
