@@ -103,13 +103,13 @@ function addPromptAndResponse(prompt, assistantPrompt, systemPrompt, response, p
   const transaction = db.transaction(['conversation'], 'readwrite');
   const store = transaction.objectStore('conversation');
   // Format the prompt and response
-  const formattedPrompt = `$.user ${prompt}`;
-  const formattedResponse = `$.assistant ${response}`;
+  const formattedPrompt = `$.user \`${prompt}\``;
+  const formattedResponse = `$.assistant \`${response}\``;
 
   const newPromptAndResponse = {
     prompt: formattedPrompt,
-    assistantPrompt: `$.assistant ${assistantPrompt}`, // Format if necessary
-    systemPrompt: `$.system ${systemPrompt}`, // Format if necessary
+    assistantPrompt: `$.assistant \`${assistantPrompt}\``, // Format if necessary
+    systemPrompt: `$.system \`${systemPrompt}\``, // Format if necessary
     response: formattedResponse,
     personalNarrative: `personalNarrative \`${personalNarrative}\``, // Format if you're storing this as a single entry
     conversationId: conversationId,
