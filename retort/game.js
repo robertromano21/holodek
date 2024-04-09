@@ -102,6 +102,7 @@ function getFirstResponseForRoom(coordinates) {
 function addPromptAndResponse(prompt, assistantPrompt, systemPrompt, response, personalNarrative, conversationId, gameConsole) {
   const transaction = db.transaction(['conversation'], 'readwrite');
   const store = transaction.objectStore('conversation');
+
   // Format the prompt and response
   const formattedPrompt = `$.user \`${prompt}\``;
   const formattedResponse = `$.assistant \`${response}\``;
@@ -455,7 +456,7 @@ function generateMonstersForRoom(roomCoordinates) {
     const minLevel = 1; // Define the minimum level for monsters
     const maxLevel = 5; // Define the maximum level for monsters
 
-    const numMonsters = getRandomInt(1, 11); // Generate 1 to 10 monsters
+    const numMonsters = getRandomInt(1, 3); // Generate 1 to 10 monsters
 
     const monsters = [];
 
@@ -526,8 +527,8 @@ console.log("currentCoordinates:", currentCoordinates);
 console.log("visitedRoomCoordinates:", visitedRoomCoordinates);
 // Check if the room has not been visited
 if (!visitedRoomCoordinates.has(coordinatesToString(currentCoordinates))) {
-  // Generate monsters with a 38% probability
-  if (Math.random() < 0.38) {
+  // Generate monsters with a 20% probability
+  if (Math.random() < 0.20) {
     generateMonstersForRoom(roomKey);
     monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
   }
@@ -755,10 +756,10 @@ let character = null;
 
   // Construct a string to represent all characters in the characters array
   let charactersString = characters.map((char, index) => {
-  let equippedItems = char.Equipped.join(', '); // Get the equipped items
-  if (equippedItems.length < 1) {
-    equippedItems = "None"; // Add "Equipped" prefix
-  }
+//  let equippedItems = char.Equipped.join(', '); // Get the equipped items
+//  if (equippedItems.length < 1) {
+//    equippedItems = "None"; // Add "Equipped" prefix
+//  }
     return `${char.Name}
       ${char.Sex}
       ${char.Race}
@@ -766,8 +767,8 @@ let character = null;
       Level: ${char.Level}
       XP: ${char.XP}
       HP: ${char.HP}
-      MaxHP: ${char.MaxHP}
-      Equipped: ${equippedItems}`;
+      MaxHP: ${char.MaxHP}`;
+//      Equipped: ${equippedItems}`;
   }).join("\n");
   
 if (userInput === '1' && charactersString.length <= 0) {
@@ -1121,9 +1122,9 @@ Quests Achieved:
 Inventory: ${inventoryString}
 Equipped Items: ${equippedInventory.join(", ")}
 Turns: ${turns}
-Player Character: ${charactersString}
-Non-Player Characters (NPCs) in Party: ${npcsString}
-Monsters in Room not in Party: ${monstersInRoomString}
+PC: ${charactersString}
+NPCs in Party: ${npcsString}
+Monsters in Room: ${monstersInRoomString}
 Rooms Visited: ${numVisitedRooms}
 Coordinates of Connected Rooms: ${connectedRoomsString}
 `; // Add characters to the game console
@@ -2316,18 +2317,18 @@ const retort = require('retort-js').retort;
 
 const run = require('retort-js').run;
 
-  // Function to process user input by sending it to the server
-  async function chatbotprocessinput(textin) {
-      let userInput = document.getElementById("chatuserinput").value;
+async function chatbotprocessinput(textin) {
+  let userInput = document.getElementById("chatuserinput").value;
   document.getElementById("chatuserinput").value = "";
-  var chatLog = document.getElementById("chatlog");
+
   // Get the existing chat log
+  const chatLog = document.getElementById("chatlog");
   const chatHistory = chatLog.innerHTML;
 
   // Update the chat log with the "Loading..." message below the existing content
   chatLog.innerHTML = chatHistory + "<br><br>Loading...";
-  
-    // Generate a conversation ID or retrieve an existing one
+
+  // Generate a conversation ID or retrieve an existing one
   let conversationId = localStorage.getItem("conversationId");
   if (!conversationId) {
     conversationId = generateConversationId();
@@ -2483,10 +2484,10 @@ console.log('objectsInRoomString:', objectsInRoomString);
 // Construct a string to represent all characters in the characters array
 // Inside the updateGameConsole function
 let charactersString = characters.map((char, index) => {
-  let equippedItems = []; // Get the equipped items
-  if (equippedItems.length < 1) {
-    equippedItems = "None"; // Add "Equipped" prefix
-  }
+//  let equippedItems = char.Equipped.join(', '); // Get the equipped items
+//  if (equippedItems.length < 1) {
+//    equippedItems = "None"; // Add "Equipped" prefix
+//  }
   return `
     Name: ${char.Name}
     Sex: ${char.Sex}
@@ -2495,8 +2496,8 @@ let charactersString = characters.map((char, index) => {
     Level: ${char.Level}
     XP: ${char.XP}
     HP: ${char.HP}
-    MaxHP: ${char.MaxHP}
-    Equipped: ${equippedItems}`; // Include the "Equipped" items in the string
+    MaxHP: ${char.MaxHP}`;
+//    Equipped: ${equippedItems}`;  Include the "Equipped" items in the string
 }).join('\n');
  
   // Define updatedUserInput and updatedUserWords
@@ -2508,8 +2509,17 @@ let selectedRace = characterRaces[raceIndex];
 let classIndex = parseInt(character.Class) - 1;
 let selectedClass = characterClasses[classIndex];
 
-// Check if a character creation is requested
-if (userWords[0] === "3" && charactersString.length <= 0) {
+if (userWords[0] === '1' && charactersString.length <= 0) {
+  userInput = document.getElementById("chatuserinput").value;
+  document.getElementById("chatuserinput").value = "";
+  userWords = "";
+  character = createMortaciaCharacter();
+} else if (userWords[0] === '2' && charactersString.length <= 0) {
+  userInput = document.getElementById("chatuserinput").value;
+  document.getElementById("chatuserinput").value = "";
+  userWords = "";
+  character = createSuzerainCharacter();
+} else if (userWords[0] === "3" && charactersString.length <= 0) {
   // Check if character creation is already in progress
   if (!isCharacterCreationInProgress()) {
     // Start character creation by setting characterCreationStep to 1
@@ -2520,20 +2530,6 @@ if (userWords[0] === "3" && charactersString.length <= 0) {
     return;
   }
 }
-
-
-// Check if a character creation is requested
-if (userWords[0] === "3" && charactersString.length <= 0) {
-  // Check if character creation is already in progress
-  if (!isCharacterCreationInProgress()) {
-    // Start character creation by setting characterCreationStep to 1
-    characterCreationStep = 1;
-    displayMessage('Step 1: Enter character name'); // Display the first step
-    console.log('charactersString:', charactersString);
-    console.log('character:', character);
-    return;
-  }
-} 
 
 // If character creation is in progress, continue it
 if (isCharacterCreationInProgress()) {
@@ -2593,10 +2589,6 @@ if (isCharacterCreationInProgress()) {
 
         // Update charactersString with the new character data
         charactersString = characters.map((char, index) => {
-            let equippedItems = []; // Get the equipped items
-  if (equippedItems.length < 1) {
-    equippedItems = "None"; // Add "Equipped" prefix
-  }
           return `
             Name: ${char.Name}
             Sex: ${char.Sex}
@@ -2605,8 +2597,7 @@ if (isCharacterCreationInProgress()) {
             Level: ${char.Level}
             XP: ${char.XP}
             HP: ${char.HP}
-            MaxHP: ${char.MaxHP}
-            Equipped: ${equippedItems}`;
+            MaxHP: ${char.MaxHP}`;
         }).join('\n');
         
                if (characters.length === 1) {
@@ -3278,26 +3269,7 @@ if (equipMatch) {
   return;
     }
   }
-  
-// Assuming the user input is a number
-const userInputNumber = parseInt(userInput);
 
-// Check if the user input is 1, 2, or 3 and charactersString is less than 1 in length
-if ((userInputNumber === 1 || userInputNumber === 2 || userInputNumber === 3) && charactersString.length < 1) {
-  // Construct the input message
-  const messages = [
-    { role: "assistant", content: "" },
-    { role: "system", content: "" },
-    { role: "user", content: userInput + "You chose option" + userInput + "." }
-  ];
-
-  // Add the user input to the prompts and responses in the database
-  addPromptAndResponse(userInput, messages[0].content, messages[1].content, "", "", conversationId, "");
-
-  // Log to the console for debugging purposes
-  console.log("User input added to the database:", userInput);
-
-}
   // Update the game console based on user inputs and get the updated game console
  let updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   console.log('updatedGameConsole:', updatedGameConsole);
@@ -3309,17 +3281,17 @@ if ((userInputNumber === 1 || userInputNumber === 2 || userInputNumber === 3) &&
 
   // Perform dynamic search using the Sentence Transformer model
   let personalNarrative = await performDynamicSearch(combinedHistory);
-  
+
     const messages = [
     { role: "assistant", content: "" },
     { role: "system", content: "" },
     { role: "user", content: userInput }
   ];
-
-    // Add the personal narrative to the latest response (system prompt)
-    if (personalNarrative) {
-      messages[1].content;
-    }
+  
+      // Add the personal narrative to the latest response (system prompt)
+  if (personalNarrative) {
+    messages[1].content;
+  }
   
     fetch('http://childrenofthegrave.com/updateState', {
         method: 'POST',
