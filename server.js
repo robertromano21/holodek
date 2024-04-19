@@ -12,7 +12,9 @@ app.use(cors());
 app.post('/processInput', async (req, res) => {
     const { userInput } = req.body;
     const response = await retortWithUserInput(userInput);
-    res.json({ response });
+    const updatedGameConsole = sharedState.getUpdatedGameConsole();
+    console.log("Sending updatedGameConsole to client:", updatedGameConsole); // Debug log
+    res.json({ response, updatedGameConsole });
 });
 
 app.post('/updateState', async (req, res) => {
