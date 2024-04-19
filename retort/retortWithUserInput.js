@@ -36,7 +36,12 @@ function coordinatesToString(coordinates) {
 
 // Function to generate non-party NPCs and monsters for a room
 async function generateMonstersForRoomUsingGPT($, roomCoordinates) {
-    const numMonsters = getRandomInt(1, 3); // Random number of monsters
+    if (Math.random() > 0.45) {
+        console.log("No monsters encountered this time.");
+        return; // Exit function if no monsters are to be generated
+    }
+    
+    const numMonsters = getRandomInt(1, 4); // Random number of monsters
     const monsters = [];
 
     for (let i = 0; i < numMonsters; i++) {
