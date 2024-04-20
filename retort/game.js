@@ -577,9 +577,10 @@ function parseMonstersFromString(monstersDataString) {
           Race: parts[2],
           Class: parts[3],
           Level: parseInt(parts[4]),
-          XP: parseInt(parts[5]),
-          HP: parseInt(parts[6]),
-          MaxHP: parseInt(parts[7])
+          AC: parseInt(parts[5]),
+          XP: parseInt(parts[6]),
+          HP: parseInt(parts[7]),
+          MaxHP: parseInt(parts[8])
       };
   });
 }
@@ -594,9 +595,10 @@ function parseMonsters(monstersString) {
           Race: details[2],
           Class: details[3],
           Level: parseInt(details[4], 10),
-          XP: parseInt(details[5], 10),
-          HP: parseInt(details[6], 10),
-          MaxHP: parseInt(details[7], 10)
+          AC: parseInt(details[5], 10),
+          XP: parseInt(details[6], 10),
+          HP: parseInt(details[7], 10),
+          MaxHP: parseInt(details[8], 10)
       };
   });
 }
@@ -675,6 +677,7 @@ let monstersInRoomString = monstersInRoom.length > 0
     ${monster.Race}
     ${monster.Class}
     Level: ${monster.Level}
+    AC: ${monster.AC}
     XP: ${monster.XP}
     HP: ${monster.HP}
     MaxHP: ${monster.MaxHP}`;
@@ -913,6 +916,7 @@ let charactersString = characters.map((char, index) => {
     ${char.Race}
     ${char.Class}
     Level: ${char.Level}
+    AC: ${char.AC}
     XP: ${char.XP}
     HP: ${char.HP}
     MaxHP: ${char.MaxHP}`;
@@ -944,6 +948,7 @@ let npcsString = npcs.length > 0
       ${char.Race}
       ${char.Class}
       Level: ${char.Level}
+      AC: ${char.AC}
       XP: ${char.XP}
       HP: ${char.HP}
       MaxHP: ${char.MaxHP}`;
@@ -958,6 +963,8 @@ const newLevel = Math.floor(char.XP / 15000) + 1;
 // Check if the level has increased
 if (newLevel > char.Level) {
   char.Level = newLevel;
+      // Calculate AC starting at 10 and increasing by 1 for every ten levels
+  char.AC = 10 + Math.floor(char.Level / 10);
 
   // Define character classes and their respective HP generation
   const characterClasses = [
@@ -1030,6 +1037,9 @@ const newLevel = Math.floor(npc.XP / 15000) + 1;
 // Check if the level has increased
 if (newLevel > npc.Level) {
   npc.Level = newLevel;
+  
+      // Calculate AC for NPCs
+  npc.AC = 10 + Math.floor(npc.Level / 10);
 
   // Define character classes and their respective HP generation
   const characterClasses = [
@@ -1135,6 +1145,7 @@ if (monsterIndex !== -1) {
         ${monster.Race}
         ${monster.Class}
         Level: ${monster.Level}
+        AC: ${monster.AC}
         XP: ${monster.XP}
         HP: ${monster.HP}
         MaxHP: ${monster.MaxHP}`;
@@ -1149,6 +1160,7 @@ if (monsterIndex !== -1) {
         ${char.Race}
         ${char.Class}
         Level: ${char.Level}
+        AC: ${char.AC}
         XP: ${char.XP}
         HP: ${char.HP}
         MaxHP: ${char.MaxHP}`;
@@ -1195,6 +1207,7 @@ if (characterIndex !== -1) {
         ${char.Race}
         ${char.Class}
         Level: ${char.Level}
+        AC: ${char.AC}
         XP: ${char.XP}
         HP: ${char.HP}
         MaxHP: ${char.MaxHP}`;
@@ -1212,6 +1225,7 @@ if (characterIndex !== -1) {
         ${monster.Race}
         ${monster.Class}
         Level: ${monster.Level}
+        AC: ${monster.AC}
         XP: ${monster.XP}
         HP: ${monster.HP}
         MaxHP: ${monster.MaxHP}`;
@@ -1305,7 +1319,7 @@ if (npcsStringUpdated) {
 let npcDataLines = npcsString.split('\n');
 
 // Calculate the number of lines per NPC dynamically (assuming each NPC has 8 lines)
-const linesPerNPC = 8;
+const linesPerNPC = 9;
 
 // Find the corresponding <td> element by index
 const npcDataElement = document.querySelectorAll('.character-column')[npcNumber + 1]; // +1 to account for the PC column
@@ -1578,6 +1592,7 @@ let character = {
   Race: '',
   Class: '',
   Level: 1,
+  AC: 10,
   XP: 0,
   HP: 0,
   MaxHP: 0,
@@ -2203,6 +2218,7 @@ const mortacia = {
   Race: 'Goddess',
   Class: 'Assassin-Fighter-Necromancer-Goddess',
   Level: 50,
+  AC: 15,
   XP: 750000,
   HP: initialHP,
   MaxHP: initialHP, // Set MaxHP to the same value as HP
@@ -2228,6 +2244,7 @@ const character = {
   Class: 'Assassin-Fighter-Necromancer-Goddess',
   Level: 50,
   XP: 750000,
+  AC: 15,
   HP: initialHP,
   MaxHP: initialHP, // Set MaxHP to the same value as HP
   Equipped: [] // Initialize an array to store equipped items
@@ -2250,6 +2267,7 @@ const character = {
   Race: 'Human',
   Class: 'Knight of Atinus',
   Level: 25,
+  AC: 12,
   XP: 375000,
   HP: initialHP, // HP = 80 + 1d20 hitpoints
   MaxHP: initialHP,
@@ -2415,6 +2433,7 @@ const npc = {
   Race: randomRace.name,
   Class: randomClass.name,
   Level: 1,
+  AC: 10,
   XP: 0,
 };
 // Calculate NPC HP based on class
@@ -2643,6 +2662,7 @@ return `
   Race: ${char.Race}
   Class: ${char.Class}
   Level: ${char.Level}
+  AC: ${char.AC}
   XP: ${char.XP}
   HP: ${char.HP}
   MaxHP: ${char.MaxHP}`;
@@ -2744,6 +2764,7 @@ switch (characterCreationStep) {
           Race: ${char.Race}
           Class: ${char.Class}
           Level: ${char.Level}
+          AC: ${char.AC}
           XP: ${char.XP}
           HP: ${char.HP}
           MaxHP: ${char.MaxHP}`;
@@ -2772,6 +2793,7 @@ return `
     Race: ${char.Race}
     Class: ${char.Class}
     Level: ${char.Level}
+    AC: ${char.AC}
     XP: ${char.XP}
     HP: ${char.HP}
     MaxHP: ${char.MaxHP}`;
@@ -2788,6 +2810,7 @@ return `
           Race: ${char.Race}
           Class: ${char.Class}
           Level: ${char.Level}
+          AC: ${char.AC}
           XP: ${char.XP}
           HP: ${char.HP}
           MaxHP: ${char.MaxHP}`;
