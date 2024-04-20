@@ -3468,7 +3468,7 @@ if (personalNarrative) {
   messages[1].content;
 }
 
-  fetch('http://childrenofthegrave.com/updateState', {
+  fetch('/updateState', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ personalNarrative, updatedGameConsole }),
@@ -3479,7 +3479,7 @@ if (personalNarrative) {
   
 //   var userInput = $('#chatuserinput').val(); // Get user input
   $.ajax({
-    url: 'http://childrenofthegrave.com/processInput', // Adjust this URL to your server's endpoint
+    url: '/processInput', // Adjust this URL to your server's endpoint
     type: 'POST',
     contentType: 'application/json',
     data: JSON.stringify({ userInput: userInput }), // Send user input
