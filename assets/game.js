@@ -125,9 +125,9 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
       let roomHistory = serverGameConsole.match(/Room Description: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipmentString = serverGameConsole.match(/Objects in Room: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipment = roomEquipmentString ? roomEquipmentString.split(', ').map(item => item.trim()) : [];
-      const monstersInRoom = serverGameConsole.match(/Monsters in Room: ([\s\S]+?)(?=Rooms Visited:)/);
+   //   const monstersInRoom = serverGameConsole.match(/Monsters in Room: ([\s\S]+?)(?=Rooms Visited:)/);
       console.log(roomName);
-      console.log(monstersInRoom);
+   //   console.log(monstersInRoom);
 
       // Define excluded keywords for cleanup
       const excludedKeywords = [
@@ -524,65 +524,39 @@ function calculateXP(level) {
 return level * 15000;
 }
 
-// Function to generate non-party NPCs and monsters for a room
 function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
-  // Check if monsters are already provided by the server and parse them
-  if (serverGameConsole) {
-      const monstersDataString = serverGameConsole.match(/Monsters in Room: (.+)/)?.[1];
-      if (monstersDataString) {
-          const parsedMonsters = parseMonstersFromString(monstersDataString);
-          monstersInVisitedRooms.set(roomCoordinates, parsedMonsters);
-          return; // Exit the function as we do not need to generate new monsters
-      }
-  }
-
-  // Generate new monsters if none are provided by the server
   if (!monstersInVisitedRooms.has(roomCoordinates)) {
-      const minLevel = 1; // Define the minimum level for monsters
-      const maxLevel = 5; // Define the maximum level for monsters
-      const numMonsters = getRandomInt(1, 3); // Generate between 1 and 3 monsters
+      let monsters = [];
 
-      const monsters = [];
-      for (let i = 0; i < numMonsters; i++) {
-          const randomRace = monsterRaces[Math.floor(Math.random() * monsterRaces.length)];
-          const randomClass = monsterClasses[Math.floor(Math.random() * monsterClasses.length)];
-          const randomLevel = getRandomInt(minLevel, maxLevel);
-          const hpIncrease = getRandomInt(1, 11) * randomLevel; // Generate HP as 1d10 times the level
+      // Update regex to ensure it captures the entire monsters section properly
+      const monsterDataMatch = serverGameConsole.match(/Monsters in Room:([\s\S]+?)(?=Rooms Visited:|$)/);
+      if (monsterDataMatch) {
+          // Correctly split monster entries by looking for two consecutive newlines or start of a new monster entry
+          const monsterEntries = monsterDataMatch[1].trim().split(/\n(?=\w)/);
+          monsters = monsterEntries.map(monsterBlock => {
+              const lines = monsterBlock.split('\n').map(line => line.trim());
+              if (lines.length < 9) {
+                  console.error("Unexpected format in monsterBlock:", lines);
+                  return null; // Skip improperly formatted blocks
+              }
+              return {
+                  Name: lines[0],
+                  Sex: lines[1],
+                  Race: lines[2],
+                  Class: lines[3],
+                  Level: parseInt(lines[4].split(' ')[1]),
+                  AC: parseInt(lines[5].split(' ')[1]),
+                  XP: parseInt(lines[6].split(' ')[1]),
+                  HP: parseInt(lines[7].split(' ')[1]),
+                  MaxHP: parseInt(lines[8].split(' ')[1])
+              };
+          }).filter(Boolean); // Remove any null entries
 
-          const monster = {
-              Name: generateMonsterName(getRandomSex()), // Generate name based on sex
-              Sex: getRandomSex(),
-              Race: randomRace.name,
-              Class: randomClass.name,
-              Level: randomLevel,
-              XP: calculateXP(randomLevel), // Calculate XP based on level
-              HP: hpIncrease,
-              MaxHP: hpIncrease,
-          };
-
-          monsters.push(monster);
+          monstersInVisitedRooms.set(roomCoordinates, monsters);
+      } else {
+          console.log("No monster data found or regex failed to match.");
       }
-
-      monstersInVisitedRooms.set(roomCoordinates, monsters);
   }
-}
-
-// Helper function to parse monster string from serverGameConsole
-function parseMonstersFromString(monstersDataString) {
-  return monstersDataString.split(',').map(monsterInfo => {
-      const parts = monsterInfo.split(' ').map(part => part.trim());
-      return {
-          Name: parts[0],
-          Sex: parts[1],
-          Race: parts[2],
-          Class: parts[3],
-          Level: parseInt(parts[4]),
-          AC: parseInt(parts[5]),
-          XP: parseInt(parts[6]),
-          HP: parseInt(parts[7]),
-          MaxHP: parseInt(parts[8])
-      };
-  });
 }
 
 // Helper function to parse monsters from the string
@@ -630,49 +604,17 @@ let userWords = userInput.split(/\s+/).map(word => word.toLowerCase());
 const matchingConsole = findMatchingConsoleByCoordinates(conversationHistory, currentCoordinates);
 let roomName = "";
 let roomHistory = ""; // Initialize roomHistory
-
+//  const roomKey = coordinatesToString(currentCoordinates);
 let roomEquipment = [];
 let characterString = [];
-let monstersInRoom = [];
-
-// Define visitedRoomCoordinates as a Set with visited coordinates
-let visitedRoomCoordinates = new Set(Array.from(visitedRooms).map(coordinatesToString));
-console.log("currentCoordinates:", currentCoordinates);
-console.log("visitedRoomCoordinates:", visitedRoomCoordinates);
-
-// Check if serverGameConsole is defined and has the expected content
-if (serverGameConsole && !visitedRoomCoordinates.has(coordinatesToString(currentCoordinates))) {
-  let roomNameMatch = serverGameConsole.match(/Room Name: (.+)/);
-  if (roomNameMatch) roomName = roomNameMatch[1];
-
-  let roomHistoryMatch = serverGameConsole.match(/Room Description: (.+)/);
-  if (roomHistoryMatch) roomHistory = roomHistoryMatch[1];
-
-  let roomMonstersMatch = serverGameConsole.match(/Monsters in Room: ([\s\S]+)/);
-      if (roomMonstersMatch) {
-                  let monstersData = roomMonstersMatch[1];
-      // Parse monstersData to create monster objects and store them in monstersInVisitedRooms
-      // This assumes you have a function to parse the detailed string into monster objects
-  //    let parsedMonsters = parseMonstersData(monstersData);
-  //    monstersInVisitedRooms.set(roomKey, parsedMonsters);
-      
-  //    monstersInRoomString = monstersData;  // Store the raw string if needed elsewhere
-      }
-      const roomKey = coordinatesToString(currentCoordinates);
-  monstersInVisitedRooms.set(roomKey, monstersInRoom[1]);
-  generateMonstersForRoom(roomKey);
-  monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
-  console.log(monstersInVisitedRooms.get(roomKey));
-  console.log(monstersInRoom);
-
-  }
-
-  // Use monstersInRoom to set or update monsters in the visited rooms map
+const roomKey = coordinatesToString(currentCoordinates);
+    
+  let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
 
 // Format the list of monsters in the current room as a string
 let monstersInRoomString = monstersInRoom.length > 0
-? monstersInRoom.map(monster => {
-  return `${monster.Name}
+  ? monstersInRoom.map(monster => {
+    return `${monster.Name}
     ${monster.Sex}
     ${monster.Race}
     ${monster.Class}
@@ -681,8 +623,78 @@ let monstersInRoomString = monstersInRoom.length > 0
     XP: ${monster.XP}
     HP: ${monster.HP}
     MaxHP: ${monster.MaxHP}`;
-}).join("\n")
-: "None";
+  }).join("\n")
+  : "None";
+
+console.log("Monsters in Room:", monstersInRoomString);
+
+console.log("monstersInRoom:", monstersInRoom);
+
+//  let roomKey = coordinatesToString(currentCoordinates);
+
+  // First, process any monsters data from serverGameConsole
+//    generateMonstersForRoom(roomKey, serverGameConsole);
+
+
+// Define visitedRoomCoordinates as a Set with visited coordinates
+let visitedRoomCoordinates = new Set(Array.from(visitedRooms).map(coordinatesToString));
+console.log("currentCoordinates:", currentCoordinates);
+console.log("visitedRoomCoordinates:", visitedRoomCoordinates);
+
+// Check if serverGameConsole is defined and has the expected content
+if (serverGameConsole) {
+  let roomNameMatch = serverGameConsole.match(/Room Name: (.+)/);
+  if (roomNameMatch) roomName = roomNameMatch[1];
+
+  let roomHistoryMatch = serverGameConsole.match(/Room Description: (.+)/);
+  if (roomHistoryMatch) roomHistory = roomHistoryMatch[1];
+  
+generateMonstersForRoom(roomKey, serverGameConsole);
+monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+
+// Format the list of monsters in the current room as a string
+monstersInRoomString = monstersInRoom.length > 0
+  ? monstersInRoom.map(monster => {
+    return `${monster.Name}
+    ${monster.Sex}
+    ${monster.Race}
+    ${monster.Class}
+    Level: ${monster.Level}
+    AC: ${monster.AC}
+    XP: ${monster.XP}
+    HP: ${monster.HP}
+    MaxHP: ${monster.MaxHP}`;
+  }).join("\n")
+  : "None";
+
+console.log("Monsters in Room:", monstersInRoomString);
+
+//   let roomMonstersMatch = serverGameConsole.match(/Monsters in Room: ([\s\S]+)/);
+//      if (roomMonstersMatch) {
+//                    let monstersData = roomMonstersMatch[1];
+
+      // Generate or update monsters for the room from server game console data
+   //   generateMonstersForRoom(roomKey, serverGameConsole);
+   //   monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+      // Parse monstersData to create monster objects and store them in monstersInVisitedRooms
+      // This assumes you have a function to parse the detailed string into monster objects
+  //    let parsedMonsters = parseMonstersData(monstersData);
+  //    monstersInVisitedRooms.set(roomKey, parsedMonsters);
+      
+  //    monstersInRoomString = monstersData;  // Store the raw string if needed elsewhere
+   //   }
+      
+//    monstersInVisitedRooms.set(roomKey, monstersInRoom[1]);
+//   generateMonstersForRoom(roomKey);
+//    monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+//    console.log(monstersInVisitedRooms.get(roomKey));
+//    console.log(monstersInRoom);
+
+  }
+
+  // Use monstersInRoom to set or update monsters in the visited rooms map
+
+
 
 // if (serverGameConsole) {
 //     monstersInRoomString = serverGameConsole.match(/Monsters in Room: (.+)/)?.[1];
@@ -785,7 +797,7 @@ if (roomHistoryObj) {
   // Ensure that roomName and roomHistory are updated based on the first response in the room's conversation history
   roomName = roomHistoryObj.roomName; // Provide a default if undefined
   roomHistory = roomHistoryObj.roomHistory; 
-  monstersInRoomString = roomHistoryObj.monstersInRoom[1];// Provide a default if undefined
+//   monstersInRoomString = roomHistoryObj.monstersInRoom[1];// Provide a default if undefined
   console.log("Room History Object:", roomHistoryObj);
 console.log("Full object inspection:", JSON.stringify(roomHistoryObj, null, 2));
 }
@@ -1020,7 +1032,10 @@ if (newLevel > char.Level) {
   } else if (characterClass && characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
     // Calculate additional HP based on the character's current level
     hpIncrease = rollDice(newLevel, 11); // Increase by 1d10 for each level
-  } 
+  } else {
+    // For generic or unknown classes, use a default 1d10 HP increase per level
+    hpIncrease = rollDice(newLevel, 10); // Increase by 1d10 for each level
+  }
   
 
   // Calculate new HP and MaxHP
@@ -1101,10 +1116,10 @@ if (newLevel > npc.Level) {
   } else if (characterClass && characterClass.name === 'Shaman') {
     // Calculate additional HP based on the character's current level
     hpIncrease = rollDice(newLevel, 6); // Increase by 1d10 for each level
+  } else {
+    // For generic or unknown classes, use a default 1d10 HP increase per level
+    hpIncrease = rollDice(newLevel, 10); // Increase by 1d10 for each level
   }
-
-
-
 
   // Calculate new HP and MaxHP
   npc.HP += hpIncrease;
