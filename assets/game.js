@@ -59,7 +59,7 @@ const roomConversationHistories = {};
 let roomEquipment = [];
 
 // Function to save a room's conversation history on a per-coordinate basis
-function saveRoomConversationHistory(coordinates, roomHistory, roomEquipment) {
+function saveRoomConversationHistory(coordinates, roomHistory, roomEquipment, objectMetadata) {
 const coordinatesString = coordinatesToString(coordinates);
 
 if (!roomConversationHistories[coordinatesString]) {
@@ -94,7 +94,8 @@ const filteredRoomEquipment = roomEquipment.join(", "); // Convert roomEquipment
 roomConversationHistories[coordinatesString].push({
   prompt: prompt,
   response: filteredRoomHistory,
-  roomEquipment: filteredRoomEquipment, // Store roomEquipment in the history entry
+  roomEquipment: filteredRoomEquipment,
+  objectMetadata: objectMetadata,// Store roomEquipment in the history entry
 });
 }
 
@@ -125,14 +126,23 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
       let roomHistory = serverGameConsole.match(/Room Description: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipmentString = serverGameConsole.match(/Objects in Room: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipment = roomEquipmentString ? roomEquipmentString.split(', ').map(item => item.trim()) : [];
+      const objectMetadata = serverGameConsole.match(/Objects in Room Properties: (.*?)\s*$/m)?.[1]?.trim();
+/*   if (objectPropertiesMatch) {
+      try {
+          objectMetadata = JSON.parse(objectPropertiesMatch[1]);
+      } catch (e) {
+          console.error("Failed to parse object properties:", e);
+      }
+  }*/
    //   const monstersInRoom = serverGameConsole.match(/Monsters in Room: ([\s\S]+?)(?=Rooms Visited:)/);
       console.log(roomName);
+      console.log(objectMetadata);
    //   console.log(monstersInRoom);
 
       // Define excluded keywords for cleanup
       const excludedKeywords = [
           "Current Game Information:", "Updated Game Information", "Seed:",
-          "Room Description:", "Coordinates:", "Objects in Room:", "Exits:",
+          "Room Description:", "Coordinates:", "Objects in Room:", "Objects in Room Properties:", "Exits:",
           "XP:", "Score:", "Artifacts Found:", "Quests Achieved:", "HP:",
           "Inventory:", "PC:", "NPCs:", "Rooms Visited:", "Turns:",
           "north", "south", "east", "west", "northeast", "southeast",
@@ -155,6 +165,7 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
           prompt: "",  // Add your actual prompt logic here
           response: "",
           roomEquipment,
+          objectMetadata,
           roomName,
           roomHistory,
           monstersInRoom
@@ -196,19 +207,24 @@ store.add(newPromptAndResponse);
 // Extract room equipment from gameConsole
 const roomEquipment = gameConsole.match(/Objects in Room: ([^\n]+)/) ? gameConsole.match(/Objects in Room: ([^\n]+)/)[1].split(", ") : [];
 
+// Extract objectMetadata from gameConsole
+const objectMetadata = gameConsole.match(/Objects in Room Properties: ([^\n]+)/) ? gameConsole.match(/Objects in Room Properties: ([^\n]+)/)[1].split(", ") : [];
+
 // Define the conversationHistory here
 const roomHistory = {
   prompt: prompt,
   response: response,
   roomEquipment: roomEquipment,
+  objectMetadata: objectMetadata, // Include objectMetadata in roomHistory
   prompts: [] // Add an array to store user prompts
 };
 
 // Push the user prompt into the prompts array
 roomHistory.prompts.push(prompt);
 
-  // Save the conversation history in the room's conversation histories
-saveRoomConversationHistory(currentCoordinates, roomHistory, roomEquipment);
+// Save the conversation history in the room's conversation histories
+saveRoomConversationHistory(currentCoordinates, roomHistory, roomEquipment, objectMetadata); // Save with objectMetadata
+
 
 // If the room's conversation history entry doesn't exist yet, create it
 const coordinatesString = coordinatesToString(currentCoordinates);
@@ -606,6 +622,7 @@ let roomName = "";
 let roomHistory = ""; // Initialize roomHistory
 //  const roomKey = coordinatesToString(currentCoordinates);
 let roomEquipment = [];
+let objectMetadata = [];
 let characterString = [];
 const roomKey = coordinatesToString(currentCoordinates);
     
@@ -739,8 +756,8 @@ if (!roomEquipment.some(existingObject => areItemsEqual(existingObject, randomEq
 } else if (currentCoordinates.x === 0 && currentCoordinates.y === 0 && currentCoordinates.z === 0 && matchingConsole) {
   const lines = conversationHistory.split("\n");
   const coordinatesIndex = lines.indexOf(matchingConsole);
-  if (coordinatesIndex !== -1 && lines.length >= coordinatesIndex + 3) {
-    exits = lines[coordinatesIndex + 2].replace("Exits: ", "").split(", ");
+  if (coordinatesIndex !== -1 && lines.length >= coordinatesIndex + 4) {
+    exits = lines[coordinatesIndex + 3].replace("Exits: ", "").split(", ");
         // Extract equipment from the conversation history
     roomEquipment = roomConversationHistories[coordinatesString][roomConversationHistories[coordinatesString].length - 1].roomEquipment;
   // Check if the item to take is in the inventory
@@ -788,8 +805,8 @@ if (!roomEquipment.some(existingObject => areItemsEqual(existingObject, randomEq
 } else {
 const lines = conversationHistory.split("\n");
 const coordinatesIndex = lines.indexOf(matchingConsole);
-if (coordinatesIndex !== -1 && lines.length >= coordinatesIndex + 3) {
-  exits = lines[coordinatesIndex + 2].replace("Exits: ", "").split(", ");
+if (coordinatesIndex !== -1 && lines.length >= coordinatesIndex + 4) {
+  exits = lines[coordinatesIndex + 3].replace("Exits: ", "").split(", ");
   // Extract equipment from the conversation history
 updateRoomConversationFirstResponse(currentCoordinates, serverGameConsole);
 const roomHistoryObj = getFirstResponseForRoom(currentCoordinates); // Get the room's first response based on coordinates
@@ -811,10 +828,21 @@ const lastRoomHistory =
     roomConversationHistories[coordinatesString].length - 1
   ];
 
-// Check if it has roomEquipment and update roomEquipment accordingly
-if (lastRoomHistory.roomEquipment) {
-  roomEquipment = lastRoomHistory.roomEquipment;
-}
+                  // Get second last history entry (where objectMetadata is expected)
+                  const secondLastRoomHistory =
+                      roomConversationHistories[coordinatesString][
+                          roomConversationHistories[coordinatesString].length - 2
+                      ];
+
+                  // Update roomEquipment
+                  if (lastRoomHistory.roomEquipment) {
+                      roomEquipment = lastRoomHistory.roomEquipment;
+                  }
+
+                  // Update objectMetadata
+                  if (secondLastRoomHistory.objectMetadata) {
+                      objectMetadata = secondLastRoomHistory.objectMetadata;
+                  } 
 }
 
   // Check if the item to take is in the inventory
@@ -1268,6 +1296,8 @@ const inventoryString = inventory.length > 0 ? inventory.join(", ") : "Empty";
 const exitsString = exits.join(", ");
 // Format the equipment items as a string
 const equipmentString = roomEquipment.length > 0 ? roomEquipment.map(item => item.trim()).join(", ") : "None";
+  // Use the object metadata directly as a plain text string
+const metadataString = objectMetadata.length > 0 ? objectMetadata : "None";
 // Calculate the number of visited rooms
 const numVisitedRooms = calculateNumVisitedRooms();
 // Calculate the connected rooms
@@ -1292,7 +1322,8 @@ Seed:
 Room Name: ${roomName}
 Room Description: ${roomHistory}
 Coordinates: X: ${x}, Y: ${y}, Z: ${z}
-Objects in Room: ${equipmentString} 
+Objects in Room: ${equipmentString}
+Objects in Room Properties: ${metadataString}
 Exits: ${exitsString}
 Score: 
 Artifacts Found: 
@@ -3483,7 +3514,7 @@ if (personalNarrative) {
   messages[1].content;
 }
 
-  fetch('http://childrenofthegrave.com/updateState', {
+  fetch('http://childrenofthegrave.com/updateState2', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ personalNarrative, updatedGameConsole }),
@@ -3494,7 +3525,7 @@ if (personalNarrative) {
   
 //   var userInput = $('#chatuserinput').val(); // Get user input
   $.ajax({
-    url: 'http://childrenofthegrave.com/processInput', // Adjust this URL to your server's endpoint
+    url: 'http://childrenofthegrave.com/processInput2', // Adjust this URL to your server's endpoint
     type: 'POST',
     contentType: 'application/json',
     data: JSON.stringify({ userInput: userInput }), // Send user input
