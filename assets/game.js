@@ -1327,8 +1327,11 @@ Objects in Room Properties: ${metadataString}
 Exits: ${exitsString}
 Score: 
 Artifacts Found: 
+Next Artifact:
+Current Quest:
 Quests Achieved: 
 Inventory: ${inventoryString}
+Inventory Properties:
 Equipped Items: ${equippedInventory.join(", ")}
 Turns: ${turns}
 PC: ${charactersString}
@@ -3514,7 +3517,7 @@ if (personalNarrative) {
   messages[1].content;
 }
 
-  fetch('http://childrenofthegrave.com/updateState', {
+  fetch('http://childrenofthegrave.com/updateState2', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ personalNarrative, updatedGameConsole }),
@@ -3525,7 +3528,7 @@ if (personalNarrative) {
   
 //   var userInput = $('#chatuserinput').val(); // Get user input
   $.ajax({
-    url: 'http://childrenofthegrave.com/processInput', // Adjust this URL to your server's endpoint
+    url: 'http://childrenofthegrave.com/processInput2', // Adjust this URL to your server's endpoint
     type: 'POST',
     contentType: 'application/json',
     data: JSON.stringify({ userInput: userInput }), // Send user input
