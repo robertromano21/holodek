@@ -126,18 +126,18 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
       let roomHistory = serverGameConsole.match(/Room Description: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipmentString = serverGameConsole.match(/Objects in Room: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipment = roomEquipmentString ? roomEquipmentString.split(', ').map(item => item.trim()) : [];
-      const objectMetadata = serverGameConsole.match(/Objects in Room Properties: (.*?)\s*$/m)?.[1]?.trim();
-/*   if (objectPropertiesMatch) {
-      try {
-          objectMetadata = JSON.parse(objectPropertiesMatch[1]);
-      } catch (e) {
-          console.error("Failed to parse object properties:", e);
+      
+      let objectMetadata = serverGameConsole.match(/Objects in Room Properties: (.*?)\s*$/m)?.[1]?.trim();
+      if (objectMetadata) {
+          objectMetadata = objectMetadata.split(/(?<=\}),\s*(?={)/).map(str => {
+              return str.trim();
+          });
+      } else {
+          objectMetadata = [];
       }
-  }*/
-   //   const monstersInRoom = serverGameConsole.match(/Monsters in Room: ([\s\S]+?)(?=Rooms Visited:)/);
+
       console.log(roomName);
       console.log(objectMetadata);
-   //   console.log(monstersInRoom);
 
       // Define excluded keywords for cleanup
       const excludedKeywords = [
@@ -168,7 +168,8 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
           objectMetadata,
           roomName,
           roomHistory,
-          monstersInRoom
+          monstersInRoom,
+          monstersEquippedProperties
       };
 
       // Check if there's already a conversation history for these coordinates
@@ -181,7 +182,6 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
       }
   }
 }
-
 
 // add a prompt, assistant prompt, system prompt, response, and personal narrative to the database
 function addPromptAndResponse(prompt, assistantPrompt, systemPrompt, response, personalNarrative, conversationId, gameConsole) {
@@ -532,17 +532,19 @@ return inventory;
 // Define experienceToAdd
 const experienceToAdd = getRandomInt(10000, 50000);
 
-// Define a map to store generated monsters in visited rooms
-const monstersInVisitedRooms = new Map();
-
 // Function to calculate XP based on character level
 function calculateXP(level) {
 return level * 15000;
 }
 
+// Define a map to store generated monsters in visited rooms
+const monstersInVisitedRooms = new Map();
+const monstersEquippedPropertiesByRoom = new Map();
+
 function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
   if (!monstersInVisitedRooms.has(roomCoordinates)) {
       let monsters = [];
+      let monstersEquippedProperties = [];
 
       // Update regex to ensure it captures the entire monsters section properly
       const monsterDataMatch = serverGameConsole.match(/Monsters in Room:([\s\S]+?)(?=Rooms Visited:|$)/);
@@ -551,10 +553,39 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
           const monsterEntries = monsterDataMatch[1].trim().split(/\n(?=\w)/);
           monsters = monsterEntries.map(monsterBlock => {
               const lines = monsterBlock.split('\n').map(line => line.trim());
-              if (lines.length < 9) {
+              if (lines.length < 13) {
                   console.error("Unexpected format in monsterBlock:", lines);
                   return null; // Skip improperly formatted blocks
               }
+
+              // Parse equipped items correctly
+              const equippedItems = parseEquippedItems(lines[9]);
+
+              // Store equipped items properties
+              for (const slot in equippedItems) {
+                  const itemName = equippedItems[slot];
+                  if (itemName !== "None") {
+                      const itemProperties = serverGameConsole.match(new RegExp(`{name: "${itemName}".*?}`));
+                      if (itemProperties) {
+                          const props = itemProperties[0].replace(/[{}]/g, '').split(', ').reduce((acc, prop) => {
+                              const [key, value] = prop.split(': ').map(str => str.trim().replace(/"/g, ''));
+                              acc[key] = isNaN(value) ? value : Number(value);
+                              return acc;
+                          }, {});
+                          monstersEquippedProperties.push(props);
+                      } else {
+                          // Fallback for missing properties
+                          monstersEquippedProperties.push({
+                              name: itemName,
+                              type: slot,
+                              attack_modifier: 0,
+                              damage_modifier: 0,
+                              ac: 0
+                          });
+                      }
+                  }
+              }
+
               return {
                   Name: lines[0],
                   Sex: lines[1],
@@ -564,11 +595,19 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
                   AC: parseInt(lines[5].split(' ')[1]),
                   XP: parseInt(lines[6].split(' ')[1]),
                   HP: parseInt(lines[7].split(' ')[1]),
-                  MaxHP: parseInt(lines[8].split(' ')[1])
+                  MaxHP: parseInt(lines[8].split(' ')[1]),
+                  Equipped: equippedItems,
+                  Attack: parseInt(lines[10].split(' ')[1]),
+                  Damage: parseInt(lines[11].split(' ')[1]),
+                  Armor: parseInt(lines[12].split(' ')[1]),
               };
           }).filter(Boolean); // Remove any null entries
 
           monstersInVisitedRooms.set(roomCoordinates, monsters);
+          monstersEquippedPropertiesByRoom.set(roomCoordinates, monstersEquippedProperties);
+
+          // Log the equipped properties for verification
+          console.log(`Stored monsters equipped properties for room ${roomCoordinates}:`, monstersEquippedProperties);
       } else {
           console.log("No monster data found or regex failed to match.");
       }
@@ -588,16 +627,73 @@ function parseMonsters(monstersString) {
           AC: parseInt(details[5], 10),
           XP: parseInt(details[6], 10),
           HP: parseInt(details[7], 10),
-          MaxHP: parseInt(details[8], 10)
+          MaxHP: parseInt(details[8], 10),
+          Equipped: parseInt(details[9], 10),
+          Attack: parseInt(details[10], 10),
+          Damage: parseInt(details[11], 10),
+          Armor: parseInt(details[12], 10),
       };
   });
 }
 
 let equippedInventory = [];
+let currentQuest = "";
+let nextArtifact = "";
+let globalQuestsAchieved = 0;
+let globalArtifactsFound = 0;
+let score = 0;
+let inventoryProperties = [];
+let monstersInRoom = [];
+let monstersEquippedProperties = [];
+let npcsInPartyString = [];
+let npcsInParty = [];
 
+async function completeQuestIfArtifactFound() {
+ 
+  const lowerCaseInventory = inventory.map(item => item.toLowerCase());
+  const lowerCaseNextArtifact = nextArtifact.toLowerCase();
+
+  // Check if the artifact specified in Next Artifact is in the inventory
+  if (lowerCaseInventory.includes(lowerCaseNextArtifact)) {
+      console.log(`Artifact ${nextArtifact} found in inventory. Completing quest.`);
+
+      // Increment quests achieved and artifacts found
+      globalQuestsAchieved += 1;
+      globalArtifactsFound += 1;
+
+      // Reset Current Quest and Next Artifact to blank
+      currentQuest = "";
+      nextArtifact = "";
+
+      // Log the updated global variables for debugging
+      console.log(`Quests Achieved: ${globalQuestsAchieved}/15`);
+      console.log(`Artifacts Found: ${globalArtifactsFound}/21`);
+  }
+}
+
+// Function to parse equipped items from a line
+function parseEquippedItems(line) {
+  const equippedItems = {
+      Weapon: "None",
+      Armor: "None",
+      Shield: "None",
+      Other: "None"
+  };
+  const itemPairs = line.replace("Equipped:", "").split(",");
+  itemPairs.forEach(pair => {
+      const [type, item] = pair.split(":").map(str => str.trim());
+      equippedItems[type] = item;
+  });
+  return equippedItems;
+}
+
+// Function to find item properties from monstersEquippedProperties
+function findItemProperties(itemName) {
+  return monstersEquippedProperties.find(item => item.name.toLowerCase() === itemName.toLowerCase());
+}
 
 // Function to update the game console based on user inputs and get the updated game console
-function updateGameConsole(userInput, currentCoordinates, conversationHistory, itemToTake, serverGameConsole) {
+function updateGameConsole(userInput, currentCoordinates, conversationHistory, itemToTake, serverGameConsole, equippedItems, characterStats) {
 
 // Initialize the coordinates
 let { x, y, z } = currentCoordinates;
@@ -619,72 +715,232 @@ let userWords = userInput.split(/\s+/).map(word => word.toLowerCase());
 // Check if the updated coordinates are already present in the conversation history
 const matchingConsole = findMatchingConsoleByCoordinates(conversationHistory, currentCoordinates);
 let roomName = "";
-let roomHistory = ""; // Initialize roomHistory
+let roomHistory = "";
 //  const roomKey = coordinatesToString(currentCoordinates);
 let roomEquipment = [];
 let objectMetadata = [];
 let characterString = [];
 const roomKey = coordinatesToString(currentCoordinates);
-    
-  let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+let monstersEquippedProperties = monstersEquippedPropertiesByRoom.get(roomKey) || [];
+
+// Extract monsters data from the matchingConsole
+if (matchingConsole) {
+  const monstersRegex = /Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s;
+  const monstersMatch = matchingConsole.match(monstersRegex);
+
+  if (monstersMatch) {
+      const monstersDataString = monstersMatch[1].trim();
+
+      // Check if there are any monsters listed or if it's just "None"
+      if (monstersDataString !== "None") {
+          const monsterEntries = monstersDataString.split(/\n(?=\w)/);
+          const monstersData = monsterEntries.map(monsterBlock => {
+              const lines = monsterBlock.trim().split('\n').map(line => line.trim());
+              const equippedItems = parseEquippedItems(lines[9]); // Parse equipped items
+
+              const monster = {
+                  Name: lines[0],
+                  Sex: lines[1],
+                  Race: lines[2],
+                  Class: lines[3],
+                  Level: parseInt(lines[4].split(':')[1].trim()),
+                  AC: parseInt(lines[5].split(':')[1].trim()),
+                  XP: parseInt(lines[6].split(':')[1].trim()),
+                  HP: parseInt(lines[7].split(':')[1].trim()),
+                  MaxHP: parseInt(lines[8].split(':')[1].trim()),
+                  Equipped: equippedItems, // Use parsed equipped items
+                  Attack: parseInt(lines[10].split(':')[1].trim()),
+                  Damage: parseInt(lines[11].split(':')[1].trim()),
+                  Armor: parseInt(lines[12].split(':')[1].trim())
+              };
+              return monster;
+          });
+          monstersInRoom = monstersData;
+      } else {
+          monstersInRoom = []; // No monsters in the room
+      }
+  }
+
+  // Extract monsters equipped properties from the matchingConsole
+  const equippedPropertiesRegex = /Monsters Equipped Properties:(.*?)(?=Rooms Visited:|$)/s;
+  const equippedPropertiesMatch = matchingConsole.match(equippedPropertiesRegex);
+
+  if (equippedPropertiesMatch) {
+      const equippedPropertiesString = equippedPropertiesMatch[1].trim();
+
+      // Check if there are any equipped properties listed or if it's just "None"
+      if (equippedPropertiesString !== "None") {
+          monstersEquippedProperties = equippedPropertiesString.split(/},\s*{/).map(equip => {
+              const props = equip.replace(/[{}]/g, '').split(', ').reduce((acc, prop) => {
+                  const [key, value] = prop.split(': ').map(str => str.trim().replace(/"/g, ''));
+                  acc[key] = isNaN(value) ? value : Number(value);
+                  return acc;
+              }, {});
+              return props;
+          });
+      } else {
+          monstersEquippedProperties = []; // No equipped properties
+      }
+
+      // Log the equipped properties for verification
+      console.log(`Parsed monsters equipped properties from matchingConsole for room ${roomKey}:`, monstersEquippedProperties);
+  }
+}
+
+// Log the parsed monsters to verify correct parsing
+console.log("Parsed monsters from matchingConsole:", monstersInRoom);
+console.log("Parsed monsters equipped properties from matchingConsole:", monstersEquippedProperties);
+
+// Convert monster.Equipped to a string before rendering
+monstersInRoom.forEach(monster => {
+  console.log("Before conversion, monster.Equipped:", monster.Equipped);
+  if (typeof monster.Equipped === 'object') {
+      const equippedItemsString = Object.entries(monster.Equipped)
+          .map(([slot, item]) => `${slot}: ${item}`)
+          .join(", ");
+      monster.Equipped = equippedItemsString;
+  }
+  console.log("After conversion, monster.Equipped:", monster.Equipped);
+});
 
 // Format the list of monsters in the current room as a string
 let monstersInRoomString = monstersInRoom.length > 0
   ? monstersInRoom.map(monster => {
-    return `${monster.Name}
-    ${monster.Sex}
-    ${monster.Race}
-    ${monster.Class}
-    Level: ${monster.Level}
-    AC: ${monster.AC}
-    XP: ${monster.XP}
-    HP: ${monster.HP}
-    MaxHP: ${monster.MaxHP}`;
+      return `${monster.Name}
+      ${monster.Sex}
+      ${monster.Race}
+      ${monster.Class}
+      Level: ${monster.Level}
+      AC: ${monster.AC}
+      XP: ${monster.XP}
+      HP: ${monster.HP}
+      MaxHP: ${monster.MaxHP}
+      Equipped: ${monster.Equipped}
+      Attack: ${monster.Attack}
+      Damage: ${monster.Damage}
+      Armor: ${monster.Armor}`;
   }).join("\n")
   : "None";
 
-console.log("Monsters in Room:", monstersInRoomString);
-
-console.log("monstersInRoom:", monstersInRoom);
-
-//  let roomKey = coordinatesToString(currentCoordinates);
-
-  // First, process any monsters data from serverGameConsole
-//    generateMonstersForRoom(roomKey, serverGameConsole);
-
-
-// Define visitedRoomCoordinates as a Set with visited coordinates
-let visitedRoomCoordinates = new Set(Array.from(visitedRooms).map(coordinatesToString));
-console.log("currentCoordinates:", currentCoordinates);
-console.log("visitedRoomCoordinates:", visitedRoomCoordinates);
-
-// Check if serverGameConsole is defined and has the expected content
-if (serverGameConsole) {
-  let roomNameMatch = serverGameConsole.match(/Room Name: (.+)/);
-  if (roomNameMatch) roomName = roomNameMatch[1];
-
-  let roomHistoryMatch = serverGameConsole.match(/Room Description: (.+)/);
-  if (roomHistoryMatch) roomHistory = roomHistoryMatch[1];
-  
-generateMonstersForRoom(roomKey, serverGameConsole);
-monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
-
-// Format the list of monsters in the current room as a string
-monstersInRoomString = monstersInRoom.length > 0
-  ? monstersInRoom.map(monster => {
-    return `${monster.Name}
-    ${monster.Sex}
-    ${monster.Race}
-    ${monster.Class}
-    Level: ${monster.Level}
-    AC: ${monster.AC}
-    XP: ${monster.XP}
-    HP: ${monster.HP}
-    MaxHP: ${monster.MaxHP}`;
-  }).join("\n")
+let monstersEquippedPropertiesString = monstersEquippedProperties.length > 0
+  ? monstersEquippedProperties.map(equip => `{name: "${equip.name}", type: "${equip.type}", attack_modifier: ${equip.attack_modifier}, damage_modifier: ${equip.damage_modifier}, ac: ${equip.ac}}`).join(', ')
   : "None";
 
-console.log("Monsters in Room:", monstersInRoomString);
+  console.log("Monsters in Room:", monstersInRoomString);
+
+  // Check if serverGameConsole is defined and has the expected content
+  if (serverGameConsole) {
+      let roomNameMatch = serverGameConsole.match(/Room Name: (.+)/);
+      if (roomNameMatch) roomName = roomNameMatch[1];
+
+      let roomHistoryMatch = serverGameConsole.match(/Room Description: (.+)/);
+      if (roomHistoryMatch) roomHistory = roomHistoryMatch[1];
+
+      let currentQuestMatch = serverGameConsole.match(/Current Quest: (.+)/);
+      if (currentQuestMatch) currentQuest = currentQuestMatch[1];
+
+      let nextArtifactMatch = serverGameConsole.match(/Next Artifact: (.+)/);
+      if (nextArtifactMatch) nextArtifact = nextArtifactMatch[1];
+
+      generateMonstersForRoom(roomKey, serverGameConsole);
+      monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+      monstersEquippedProperties = monstersEquippedPropertiesByRoom.get(roomKey) || [];
+
+      // Extract monsters data from the serverGameConsole
+      const monstersRegex = /Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s;
+      const monstersMatch = serverGameConsole.match(monstersRegex);
+
+      if (monstersMatch) {
+          const monstersDataString = monstersMatch[1].trim();
+
+          // Check if there are any monsters listed or if it's just "None"
+          if (monstersDataString !== "None") {
+              const monsterEntries = monstersDataString.split(/\n(?=\w)/);
+              const monstersData = monsterEntries.map(monsterBlock => {
+                  const lines = monsterBlock.trim().split('\n').map(line => line.trim());
+                  const equippedItems = parseEquippedItems(lines[9]); // Parse equipped items
+
+                  const monster = {
+                      Name: lines[0],
+                      Sex: lines[1],
+                      Race: lines[2],
+                      Class: lines[3],
+                      Level: parseInt(lines[4].split(':')[1].trim()),
+                      AC: parseInt(lines[5].split(':')[1].trim()),
+                      XP: parseInt(lines[6].split(':')[1].trim()),
+                      HP: parseInt(lines[7].split(':')[1].trim()),
+                      MaxHP: parseInt(lines[8].split(':')[1].trim()),
+                      Equipped: equippedItems, // Use parsed equipped items
+                      Attack: parseInt(lines[10].split(':')[1].trim()),
+                      Damage: parseInt(lines[11].split(':')[1].trim()),
+                      Armor: parseInt(lines[12].split(':')[1].trim())
+                  };
+                  return monster;
+              });
+              monstersInRoom = monstersData;
+          } else {
+              monstersInRoom = []; // No monsters in the room
+          }
+      }
+
+      // Extract monsters equipped properties from the serverGameConsole
+      const equippedPropertiesRegex = /Monsters Equipped Properties:(.*?)(?=Rooms Visited:|$)/s;
+      const equippedPropertiesMatch = serverGameConsole.match(equippedPropertiesRegex);
+
+      if (equippedPropertiesMatch) {
+          const equippedPropertiesString = equippedPropertiesMatch[1].trim();
+
+          // Check if there are any equipped properties listed or if it's just "None"
+          if (equippedPropertiesString !== "None") {
+              monstersEquippedProperties = equippedPropertiesString.split('}, {').map(equip => {
+                  const props = equip.replace(/[{|}]/g, '').split(', ').reduce((acc, prop) => {
+                      const [key, value] = prop.split(': ').map(str => str.trim().replace(/"/g, ''));
+                      acc[key] = isNaN(value) ? value : Number(value);
+                      return acc;
+                  }, {});
+                  return props;
+              });
+          } else {
+              monstersEquippedProperties = []; // No equipped properties
+          }
+      }
+
+      // Log the parsed monsters to verify correct parsing
+      console.log("Parsed monsters from serverGameConsole:", monstersInRoom);
+
+      // Convert monster.Equipped to a string before rendering
+      monstersInRoom.forEach(monster => {
+          console.log("Before conversion, monster.Equipped:", monster.Equipped);
+          if (typeof monster.Equipped === 'object') {
+              const equippedItemsString = Object.entries(monster.Equipped)
+                  .map(([slot, item]) => `${slot}: ${item}`)
+                  .join(", ");
+              monster.Equipped = equippedItemsString;
+          }
+          console.log("After conversion, monster.Equipped:", monster.Equipped);
+      });
+
+      // Format the list of monsters in the current room as a string
+      monstersInRoomString = monstersInRoom.length > 0
+          ? monstersInRoom.map(monster => {
+              return `${monster.Name}
+              ${monster.Sex}
+              ${monster.Race}
+              ${monster.Class}
+              Level: ${monster.Level}
+              AC: ${monster.AC}
+              XP: ${monster.XP}
+              HP: ${monster.HP}
+              MaxHP: ${monster.MaxHP}
+              Equipped: ${monster.Equipped}
+              Attack: ${monster.Attack}
+              Damage: ${monster.Damage}
+              Armor: ${monster.Armor}`;
+          }).join("\n")
+          : "None";
+          
+      console.log("Monsters in Room:", monstersInRoomString);
 
 //   let roomMonstersMatch = serverGameConsole.match(/Monsters in Room: ([\s\S]+)/);
 //      if (roomMonstersMatch) {
@@ -937,9 +1193,24 @@ const firstResponseForRoom = getFirstResponseForRoom(currentCoordinates);
 if (firstResponseForRoom) {
   // Add sentences to the first response about the newly found equipment
   const addedSentences = newAdditionalEquipment.map(item => `There is ${item} here.`);
-  firstResponseForRoom.response = `${firstResponseForRoom.response} ${addedSentences.join(' ')}`;
+  firstResponseForRoom.response = `${firstResponseForRoom.response} ${addedSentences.join(' ')}`;equip
 }
 }
+
+  // Include the equipped items in the game console
+/*const equippedItemsString = characters[0].Equipped
+  ? Object.entries(characters[0].Equipped)
+      .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+      .join(", ")
+  : "None";
+  console.log(`Equipped items string: ${equippedItemsString}`);*/
+
+  // Format character stats for display
+/*    const characterStatsString = `
+      Attack: ${characters[0].Attack}
+      Damage: ${characters[0].Damage}
+      Armor: ${characters[0].Armor}
+  `.trim().replace(/^\s+/gm, ''); // Trim and remove leading spaces*/
 
 // Create the character based on the player's choice
 let character = null;
@@ -947,20 +1218,33 @@ let character = null;
 
 // Construct a string to represent all characters in the characters array
 let charactersString = characters.map((char, index) => {
-//  let equippedItems = char.Equipped.join(', '); // Get the equipped items
-//  if (equippedItems.length < 1) {
-//    equippedItems = "None"; // Add "Equipped" prefix
-//  }
+  // Ensure char.Equipped is defined and is an object
+  if (!char.Equipped) {
+      char.Equipped = {
+          Weapon: null,
+          Armor: null,
+          Shield: null,
+          Other: null
+      };
+  }
+
+  const equippedItemsString = Object.entries(char.Equipped)
+      .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+      .join(", ");
+  const totalAC = char.AC + (char.Armor || 0);
   return `${char.Name}
     ${char.Sex}
     ${char.Race}
     ${char.Class}
     Level: ${char.Level}
-    AC: ${char.AC}
+    AC: ${totalAC}
     XP: ${char.XP}
     HP: ${char.HP}
-    MaxHP: ${char.MaxHP}`;
-//      Equipped: ${equippedItems}`;
+    MaxHP: ${char.MaxHP}
+    Equipped: ${equippedItemsString}
+    Attack: ${char.Attack}
+    Damage: ${char.Damage}
+    Armor: ${char.Armor}`;
 }).join("\n");
 
 if (userInput === '1' && charactersString.length <= 0) {
@@ -983,15 +1267,33 @@ userWords = "";
 // Create a string representing NPCs and Mortacia
 let npcsString = npcs.length > 0
 ? npcs.map((char, index) => {
+  // Ensure char.Equipped is defined and is an object
+  if (!char.Equipped) {
+      char.Equipped = {
+          Weapon: null,
+          Armor: null,
+          Shield: null,
+          Other: null
+      };
+  }
+
+  const equippedItemsString = Object.entries(char.Equipped)
+      .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+      .join(", ");
+  const totalAC = char.AC + (char.Armor || 0);
   return `${char.Name}
       ${char.Sex}
       ${char.Race}
       ${char.Class}
       Level: ${char.Level}
-      AC: ${char.AC}
+      AC: ${totalAC}
       XP: ${char.XP}
       HP: ${char.HP}
-      MaxHP: ${char.MaxHP}`;
+      MaxHP: ${char.MaxHP}
+      Equipped: ${equippedItemsString}
+      Attack: ${char.Attack || 0}
+      Damage: ${char.Damage || 0}
+      Armor: ${char.Armor || 0}`;
 }).join('\n')
 : "None";
 
@@ -1155,139 +1457,330 @@ if (newLevel > npc.Level) {
 }
 });
 
-
-
+// Helper function to parse the Equipped string into an object
+function parseEquippedString(equippedStr) {
+  const equippedObj = {};
+  const items = equippedStr.split(',').map(item => item.trim());
+  items.forEach(item => {
+      const [slot, itemName] = item.split(':').map(part => part.trim());
+      equippedObj[slot] = itemName;
+  });
+  return equippedObj;
+}
 
 // Your modified code for adding monsters to NPCs
 const addMonsterToPartyPattern = /^add\s+([a-zA-Z\s]+)\s+to\s+party$/i;
 
 if (addMonsterToPartyPattern.test(userInput)) {
-const match = userInput.match(addMonsterToPartyPattern);
-const monsterName = match[1].trim(); // Extract the monster name
+  const match = userInput.match(addMonsterToPartyPattern);
+  const monsterName = match[1].trim(); // Extract the monster name
 
-// Find the index of the monster in monstersInRoom
-const monsterIndex = monstersInRoom.findIndex(
-  (monster) => monster.Name.toLowerCase() === monsterName.toLowerCase()
-);
+  // Find the index of the monster in monstersInRoom
+  const monsterIndex = monstersInRoom.findIndex(
+      (monster) => monster.Name.toLowerCase() === monsterName.toLowerCase()
+  );
 
-if (monsterIndex !== -1) {
-  // Get the monster details
-  const monsterDetails = monstersInRoom[monsterIndex];
+  if (monsterIndex !== -1) {
+      // Get the monster details
+      const monsterDetails = monstersInRoom[monsterIndex];
 
-  // Remove the monster from monstersInRoom
-  monstersInRoom.splice(monsterIndex, 1);
+      console.log('Monster Details:', monsterDetails);
 
-  // Add the removed monster to npcs
-  npcs.push(monsterDetails);
+      // Parse the Equipped string into an object
+      let equippedObj = {};
+      if (typeof monsterDetails.Equipped === 'string') {
+          equippedObj = parseEquippedString(monsterDetails.Equipped);
+      } else if (typeof monsterDetails.Equipped === 'object') {
+          equippedObj = monsterDetails.Equipped;
+      }
 
-  // Format the list of monsters in the current room as a string
-  const monstersInRoomStringUpdated = monstersInRoom
-    .map((monster) => {
-      return `${monster.Name}
-        ${monster.Sex}
-        ${monster.Race}
-        ${monster.Class}
-        Level: ${monster.Level}
-        AC: ${monster.AC}
-        XP: ${monster.XP}
-        HP: ${monster.HP}
-        MaxHP: ${monster.MaxHP}`;
-    })
-    .join("\n");
+      console.log('Parsed Equipped Object:', equippedObj);
 
-  // Format the list of NPCs as a string
-  const npcsStringUpdated = npcs
-    .map((char, index) => {
-      return `${char.Name}
-        ${char.Sex}
-        ${char.Race}
-        ${char.Class}
-        Level: ${char.Level}
-        AC: ${char.AC}
-        XP: ${char.XP}
-        HP: ${char.HP}
-        MaxHP: ${char.MaxHP}`;
-    })
-    .join("\n");
+      // Capture the equipped items before resetting them
+      const equippedSlots = ["Weapon", "Armor", "Shield", "Other"];
+      const itemsToTransfer = {};
+      equippedSlots.forEach(slot => {
+          const item = equippedObj[slot];
+          if (item && item !== "None") {
+              itemsToTransfer[slot] = item;
+          }
+      });
 
-  // Append the result to the conversation history
-  conversationHistory += `\nYou added ${monsterName} to the party.\n`;
-  conversationHistory += `\nMonsters in the room:\n${monstersInRoomStringUpdated}\n`;
-  conversationHistory += `\nNPCs in the party:\n${npcsStringUpdated}\n`;
-} else {
-  // Handle the case where the specified monster was not found in the room
-  conversationHistory += `\n${monsterName} is not in the room.\n`;
-}
+      console.log('Items to Transfer:', itemsToTransfer);
+
+      // Transfer the items to inventory
+      const itemsTransferred = [];
+      for (const [slot, item] of Object.entries(itemsToTransfer)) {
+          if (item !== "None" && item !== null) {
+              // Add the item to the inventory
+              inventory.push(item);
+              itemsTransferred.push(item); // Keep track of the transferred items
+              // Find the item's properties in monstersEquippedProperties
+              const itemPropertiesIndex = monstersEquippedProperties.findIndex(prop => prop.name === item);
+              if (itemPropertiesIndex !== -1) {
+                  inventoryProperties.push(JSON.stringify(monstersEquippedProperties[itemPropertiesIndex]));
+                  // Remove the item's properties from Monsters Equipped Properties
+                  monstersEquippedProperties.splice(itemPropertiesIndex, 1);
+              }
+          }
+      }
+
+      console.log('Updated Inventory:', inventory);
+      console.log('Updated Inventory Properties:', inventoryProperties);
+
+      // Now reset the equipped items
+      monsterDetails.Attack = 0;
+      monsterDetails.Damage = 0;
+      monsterDetails.Armor = 0;
+      monsterDetails.Equipped = {
+          Weapon: null,
+          Armor: null,
+          Shield: null,
+          Other: null
+      };
+
+      // Remove the monster from monstersInRoom
+      monstersInRoom.splice(monsterIndex, 1);
+
+      // Add the removed monster to npcs
+      npcs.push(monsterDetails);
+
+      // Equip the transferred items to the newly added NPC
+      itemsTransferred.forEach(item => {
+          const equipResult = equipItem(item, monsterName);
+          console.log(equipResult);
+          conversationHistory += `\n${equipResult}`;
+      });
+
+      // Format the list of monsters in the current room as a string
+      const monstersInRoomStringUpdated = monstersInRoom
+          .map((monster) => {
+              let equippedItemsString = '';
+              if (typeof monster.Equipped === 'object') {
+                  equippedItemsString = Object.entries(monster.Equipped)
+                      .map(([slot, item]) => `${slot}: ${item}`)
+                      .join(", ");
+              } else {
+                  equippedItemsString = monster.Equipped;
+              }
+              return `${monster.Name}
+              ${monster.Sex}
+              ${monster.Race}
+              ${monster.Class}
+              Level: ${monster.Level}
+              AC: ${monster.AC}
+              XP: ${monster.XP}
+              HP: ${monster.HP}
+              MaxHP: ${monster.MaxHP}
+              Equipped: ${equippedItemsString}
+              Attack: ${monster.Attack}
+              Damage: ${monster.Damage}
+              Armor: ${monster.Armor}`;
+          })
+          .join("\n");
+
+      // Format the list of NPCs as a string
+      const npcsStringUpdated = npcs
+          .map((char, index) => {
+              let equippedItemsString = '';
+              if (typeof char.Equipped === 'object') {
+                  equippedItemsString = Object.entries(char.Equipped)
+                      .map(([slot, item]) => `${slot}: ${item}`)
+                      .join(", ");
+              } else {
+                  equippedItemsString = char.Equipped;
+              }
+              return `${char.Name}
+              ${char.Sex}
+              ${char.Race}
+              ${char.Class}
+              Level: ${char.Level}
+              AC: ${char.AC}
+              XP: ${char.XP}
+              HP: ${char.HP}
+              MaxHP: ${char.MaxHP}
+              Equipped: ${equippedItemsString}
+              Attack: ${char.Attack}
+              Damage: ${char.Damage}
+              Armor: ${char.Armor}`;
+          })
+          .join("\n");
+
+      // Append the result to the conversation history
+      conversationHistory += `\nYou added ${monsterName} to the party.\n`;
+      conversationHistory += `\nMonsters in the room:\n${monstersInRoomStringUpdated}\n`;
+      conversationHistory += `\nNPCs in the party:\n${npcsStringUpdated}\n`;
+  } else {
+      // Handle the case where the specified monster was not found in the room
+      conversationHistory += `\n${monsterName} is not in the room.\n`;
+  }
 }
 
 // Your code for removing a character from NPCs and putting it back in Monsters
 const removeMonsterFromPartyPattern = /^remove\s+([a-zA-Z\s]+)\s+from\s+party$/i;
 
 if (removeMonsterFromPartyPattern.test(userInput)) {
-const match = userInput.match(removeMonsterFromPartyPattern);
-const characterName = match[1].trim(); // Extract the character name
+  const match = userInput.match(removeMonsterFromPartyPattern);
+  const characterName = match[1].trim(); // Extract the character name
 
-// Find the index of the character in npcs
-const characterIndex = npcs.findIndex(
-  (character) => character.Name.toLowerCase() === characterName.toLowerCase()
-);
+  // Find the index of the character in npcs
+  const characterIndex = npcs.findIndex(
+      (character) => character.Name.toLowerCase() === characterName.toLowerCase()
+  );
 
-if (characterIndex !== -1) {
-  // Get the character details
-  const characterDetails = npcs[characterIndex];
+  if (characterIndex !== -1) {
+      // Get the character details
+      const characterDetails = npcs[characterIndex];
 
-  // Remove the character from npcs
-  npcs.splice(characterIndex, 1);
+      // Unequip all items from the character and store them in the inventory
+      const equippedSlots = ["Weapon", "Armor", "Shield", "Other"];
+      const unequippedItems = [];
 
-  // Add the removed character back to monstersInRoom
-  monstersInRoom.push(characterDetails);
+      equippedSlots.forEach(slot => {
+          const item = characterDetails.Equipped[slot];
+          if (item) {
+              const unequipResult = unequipItem(item.name, characterName);
+              console.log(unequipResult);
+              conversationHistory += `\n${unequipResult}`;
+              unequippedItems.push(item.name);
+          }
+      });
 
-  // Format the list of NPCs as a string
-  const npcsStringUpdated = npcs
-    .map((char, index) => {
-      return `${char.Name}
-        ${char.Sex}
-        ${char.Race}
-        ${char.Class}
-        Level: ${char.Level}
-        AC: ${char.AC}
-        XP: ${char.XP}
-        HP: ${char.HP}
-        MaxHP: ${char.MaxHP}`;
-    })
-    .join("\n");
+      // Remove the character from npcs
+      npcs.splice(characterIndex, 1);
 
-  // Update npcsString with the new data
-  npcsString = npcsStringUpdated;
+      // Reset the modifiers for the new monster version
+      characterDetails.Attack = 0;
+      characterDetails.Damage = 0;
+      characterDetails.Armor = 0;
 
-  // Format the list of monsters in the current room as a string
-  const monstersInRoomStringUpdated = monstersInRoom
-    .map((monster) => {
-      return `${monster.Name}
-        ${monster.Sex}
-        ${monster.Race}
-        ${monster.Class}
-        Level: ${monster.Level}
-        AC: ${monster.AC}
-        XP: ${monster.XP}
-        HP: ${monster.HP}
-        MaxHP: ${monster.MaxHP}`;
-    })
-    .join("\n");
+      // Add the removed character back to monstersInRoom
+      monstersInRoom.push(characterDetails);
 
-  // Append the result to the conversation history
-  conversationHistory += `\nYou removed ${characterName} from the party.\n`;
-  conversationHistory += `\nMonsters in the room:\n${monstersInRoomStringUpdated}\n`;
-  conversationHistory += `\nNPCs in the party:\n${npcsString}\n`;
+      // Transfer the unequipped items from inventory to the monster's Equipped slots and Monsters Equipped Properties
+      unequippedItems.forEach(itemName => {
+          // Find the item in the inventory
+          const itemIndex = inventory.findIndex(item => item.toLowerCase() === itemName.toLowerCase());
+          if (itemIndex === -1) {
+              conversationHistory += `\nItem ${itemName} not found in inventory.`;
+              return;
+          }
 
-  // Now, call the displayAllNPCData function to update the displayed data for all NPC slots
-  for (let i = 0; i < 6; i++) {
-    displayAllNPCData(npcsString, i);
+          // Find the item's properties in the inventoryProperties
+          const itemPropertyIndex = inventoryProperties.findIndex(prop => {
+              const propObj = eval('(' + prop + ')');
+              return propObj.name.toLowerCase() === itemName.toLowerCase();
+          });
+
+          if (itemPropertyIndex === -1) {
+              conversationHistory += `\nProperties for ${itemName} not found in inventoryProperties.`;
+              return;
+          }
+
+          const itemProperties = eval('(' + inventoryProperties[itemPropertyIndex] + ')');
+
+          // Determine the slot for the item
+          let slot;
+          if (itemProperties.type === 'weapon') {
+              slot = 'Weapon';
+          } else if (itemProperties.type === 'armor') {
+              slot = 'Armor';
+          } else if (itemProperties.type === 'shield') {
+              slot = 'Shield';
+          } else {
+              slot = 'Other';
+          }
+
+          // Equip the item back to the monster's Equipped slot
+          characterDetails.Equipped[slot] = itemProperties;
+
+          // Add the item properties back to Monsters Equipped Properties
+          monstersEquippedProperties.push({
+              name: itemProperties.name,
+              type: itemProperties.type,
+              attack_modifier: itemProperties.attack_modifier || 0,
+              damage_modifier: itemProperties.damage_modifier || 0,
+              ac: itemProperties.ac || 0
+          });
+
+          // Apply the item's modifiers to the monster's stats
+          characterDetails.Attack += itemProperties.attack_modifier || 0;
+          characterDetails.Damage += itemProperties.damage_modifier || 0;
+          characterDetails.Armor += itemProperties.ac || 0;
+
+          // Remove the item from inventory and inventoryProperties
+          inventory.splice(itemIndex, 1);
+          inventoryProperties.splice(itemPropertyIndex, 1);
+      });
+
+      // Ensure that only the removed character's Equipped items are serialized for display
+      const updatedMonster = monstersInRoom.find(monster => monster.Name === characterDetails.Name);
+      if (updatedMonster) {
+          const equippedItemsString = Object.entries(updatedMonster.Equipped)
+              .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+              .join(", ");
+          updatedMonster.Equipped = equippedItemsString;
+      }
+
+      // Format the list of NPCs as a string
+      const npcsStringUpdated = npcs
+          .map((char, index) => {
+              let equippedItemsString = '';
+              if (char.Equipped && typeof char.Equipped === 'object') {
+                  equippedItemsString = Object.entries(char.Equipped)
+                      .map(([slot, item]) => `${slot}: ${item ? item.name || item : 'None'}`)
+                      .join(", ");
+              } else {
+                  equippedItemsString = char.Equipped || 'None';
+              }
+              return `${char.Name}
+              ${char.Sex}
+              ${char.Race}
+              ${char.Class}
+              Level: ${char.Level}
+              AC: ${char.AC}
+              XP: ${char.XP}
+              HP: ${char.HP}
+              MaxHP: ${char.MaxHP}
+              Equipped: ${equippedItemsString}
+              Attack: ${char.Attack}
+              Damage: ${char.Damage}
+              Armor: ${char.Armor}`;
+          })
+          .join("\n");
+
+      // Format the list of monsters in the current room as a string
+      const monstersInRoomStringUpdated = monstersInRoom
+          .map((monster) => {
+              return `${monster.Name}
+              ${monster.Sex}
+              ${monster.Race}
+              ${monster.Class}
+              Level: ${monster.Level}
+              AC: ${monster.AC}
+              XP: ${monster.XP}
+              HP: ${monster.HP}
+              MaxHP: ${monster.MaxHP}
+              Equipped: ${monster.Equipped}
+              Attack: ${monster.Attack}
+              Damage: ${monster.Damage}
+              Armor: ${monster.Armor}`;
+          })
+          .join("\n");
+
+      // Append the result to the conversation history
+      conversationHistory += `\nYou removed ${characterName} from the party.\n`;
+      conversationHistory += `\nMonsters in the room:\n${monstersInRoomStringUpdated}\n`;
+      conversationHistory += `\nNPCs in the party:\n${npcsStringUpdated}\n`;
+
+      // Now, call the displayAllNPCData function to update the displayed data for all NPC slots
+      for (let i = 0; i < 6; i++) {
+          displayAllNPCData(npcsStringUpdated, i);
+      }
+  } else {
+      // Handle the case where the specified character was not found in the party
+      conversationHistory += `\n${characterName} is not in the party.\n`;
   }
-} else {
-  // Handle the case where the specified character was not found in the party
-  conversationHistory += `\n${characterName} is not in the party.\n`;
-}
 }
 
 // Format the inventory as a string
@@ -1296,8 +1789,33 @@ const inventoryString = inventory.length > 0 ? inventory.join(", ") : "Empty";
 const exitsString = exits.join(", ");
 // Format the equipment items as a string
 const equipmentString = roomEquipment.length > 0 ? roomEquipment.map(item => item.trim()).join(", ") : "None";
+//  const metadataString = objectMetadata.length > 0 ? objectMetadata.map(item => item.trim()).join(", ") : "None";
+// const metadataString = objectMetadata.length > 0 ? objectMetadata.map(prop => JSON.stringify(prop)).join(", ") : "None";
+ //  const inventoryPropertiesString = objectMetadata.length > 0 ? inventoryProperties.map(item => item.trim()).join(", ") : "None";
+  const metadataString = objectMetadata.length > 0 ? objectMetadata.map(item => item.trim()).join(", ") : "None";
+       // Format objectMetadata as a string of objects
+//  const metadataString = objectMetadata.length > 0 ? objectMetadata.join(', ') : "None";
+
+  // Format inventoryProperties as a string of objects
+  const inventoryPropertiesString = inventoryProperties.length > 0 ? inventoryProperties.join(', ') : "None";
+
+  // Convert monstersEquippedProperties to a formatted string
+  monstersEquippedPropertiesString = monstersEquippedProperties.length > 0
+      ? monstersEquippedProperties.map(equip => `{name: "${equip.name}", type: "${equip.type}", attack_modifier: ${equip.attack_modifier}, damage_modifier: ${equip.damage_modifier}, ac: ${equip.ac}}`).join(', ')
+      : "None";
+
+
+// const inventoryPropertiesString = inventoryProperties.length > 0 ? inventoryProperties.map(prop => JSON.stringify(prop)).join(", ") : "None";
+  console.log("equipmentString:", equipmentString);
+console.log("metadataString:", metadataString);
+console.log("objectMetadata:", objectMetadata);
+console.log("inventoryPropertiesString:", inventoryPropertiesString);
+console.log("inventoryProperties:", inventoryProperties);
+
   // Use the object metadata directly as a plain text string
-const metadataString = objectMetadata.length > 0 ? objectMetadata : "None";
+// const metadataString = objectMetadata.length > 0 ? objectMetadata.map(prop => JSON.stringify(prop)).join(", ") : "None";
+//  const inventoryPropertiesString = inventoryProperties.length > 0 ? inventoryProperties.map(prop => JSON.stringify(prop)).join(", ") : "None";
+
 // Calculate the number of visited rooms
 const numVisitedRooms = calculateNumVisitedRooms();
 // Calculate the connected rooms
@@ -1316,6 +1834,9 @@ displayAllNPCData(npcsString, 4);
 displayAllNPCData(npcsString, 5);
 displayPCData(charactersString);
 
+completeQuestIfArtifactFound();
+score = (globalArtifactsFound * 55) + (globalQuestsAchieved * 55);
+
 // Return the updated game console as a formatted string
 return `
 Seed: 
@@ -1325,18 +1846,18 @@ Coordinates: X: ${x}, Y: ${y}, Z: ${z}
 Objects in Room: ${equipmentString}
 Objects in Room Properties: ${metadataString}
 Exits: ${exitsString}
-Score: 
-Artifacts Found: 
-Next Artifact:
-Current Quest:
-Quests Achieved: 
+Score: ${score}
+Artifacts Found: ${globalArtifactsFound}/15
+Quests Achieved: ${globalQuestsAchieved}/21
+Next Artifact: ${nextArtifact}
+Current Quest: ${currentQuest}
 Inventory: ${inventoryString}
-Inventory Properties:
-Equipped Items: ${equippedInventory.join(", ")}
+Inventory Properties: ${inventoryPropertiesString}
 Turns: ${turns}
 PC: ${charactersString}
 NPCs in Party: ${npcsString}
 Monsters in Room: ${monstersInRoomString}
+Monsters Equipped Properties: ${monstersEquippedPropertiesString}
 Rooms Visited: ${numVisitedRooms}
 Coordinates of Connected Rooms: ${connectedRoomsString}
 `; // Add characters to the game console
@@ -1368,7 +1889,7 @@ if (npcsStringUpdated) {
 let npcDataLines = npcsString.split('\n');
 
 // Calculate the number of lines per NPC dynamically (assuming each NPC has 8 lines)
-const linesPerNPC = 9;
+const linesPerNPC = 13;
 
 // Find the corresponding <td> element by index
 const npcDataElement = document.querySelectorAll('.character-column')[npcNumber + 1]; // +1 to account for the PC column
@@ -1645,6 +2166,10 @@ let character = {
   XP: 0,
   HP: 0,
   MaxHP: 0,
+  Equipped: '',
+  Attack: 0,
+  Damage: 0,
+  Armor: 0,
 };
 
 console.log('characters:', characters);
@@ -2260,6 +2785,12 @@ character.Race = selectedRace.name;
 function createMortaciaNPC() {
 // Calculate the initial HP value
 const initialHP = 120 + rollDice(20);
+const equipped = {
+  Weapon: null,
+  Armor: null,
+  Shield: null,
+  Other: null
+};
 
 const mortacia = {
   Name: 'Mortacia',
@@ -2270,8 +2801,19 @@ const mortacia = {
   AC: 15,
   XP: 750000,
   HP: initialHP,
-  MaxHP: initialHP, // Set MaxHP to the same value as HP
+  MaxHP: initialHP,
+  Equipped: equipped,
+  Attack: 0,
+  Damage: 0,
+  Armor: 0,// Set MaxHP to the same value as HP
 };
+
+  // Generate equipped items string
+  const equippedItemsString = Object.values(mortacia.Equipped).some(item => item !== null)
+      ? Object.entries(mortacia.Equipped)
+          .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+          .join(", ")
+      : "None";
 
 // Calculate NPC HP based on class
 //calculateCharacterHP(mortacia);
@@ -2283,33 +2825,54 @@ return mortacia;
 
 // Function to create Mortacia character
 function createMortaciaCharacter() {
-// Calculate the initial HP value
-const initialHP = 120 + rollDice(20);
+  // Calculate the initial HP value
+  const initialHP = 120 + rollDice(20);
+  const equipped = {
+      Weapon: null,
+      Armor: null,
+      Shield: null,
+      Other: null
+  };
 
-const character = {
-  Name: 'Mortacia',
-  Sex: 'Female',
-  Race: 'Goddess',
-  Class: 'Assassin-Fighter-Necromancer-Goddess',
-  Level: 50,
-  XP: 750000,
-  AC: 15,
-  HP: initialHP,
-  MaxHP: initialHP, // Set MaxHP to the same value as HP
-  Equipped: [] // Initialize an array to store equipped items
-};
+  const character = {
+      Name: 'Mortacia',
+      Sex: 'Female',
+      Race: 'Goddess',
+      Class: 'Assassin-Fighter-Necromancer-Goddess',
+      Level: 50,
+      XP: 750000,
+      AC: 15,
+      HP: initialHP,
+      MaxHP: initialHP, // Set MaxHP to the same value as HP
+      Equipped: equipped,
+      Attack: 0,
+      Damage: 0,
+      Armor: 0,
+  };
 
-// Add the character to the characters array
-characters.push(character);
+  // Generate equipped items string
+  const equippedItemsString = Object.values(character.Equipped).some(item => item !== null)
+      ? Object.entries(character.Equipped)
+          .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+          .join(", ")
+      : "None";
 
-return character;
-return;
+  // Add the character to the characters array
+  characters.push(character);
+
+  return character;
 }
 
 // Function to create Suzerain character
 function createSuzerainCharacter() {
  // Calculate the initial HP value
 const initialHP = 80 + rollDice(20);
+const equipped = {
+    Weapon: null,
+    Armor: null,
+    Shield: null,
+    Other: null
+    };
 const character = {
   Name: 'Suzerain',
   Sex: 'Male',
@@ -2320,14 +2883,146 @@ const character = {
   XP: 375000,
   HP: initialHP, // HP = 80 + 1d20 hitpoints
   MaxHP: initialHP,
-  Equipped: []// Max HP can be calculated if needed
+  Equipped: equipped,
+  Attack: 0,
+  Damage: 0,
+  Armor: 0,// Max HP can be calculated if needed
 };
+
+  // Generate equipped items string
+  const equippedItemsString = Object.values(character.Equipped).some(item => item !== null)
+      ? Object.entries(character.Equipped)
+          .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+          .join(", ")
+      : "None";
 
 // Add the character to the characters array
 characters.push(character);
 
 return character;
 return;
+}
+
+function equipItem(itemName, targetCharacterName = null) {
+  // Find the item in the inventory
+  const itemIndex = inventory.findIndex(item => item.toLowerCase() === itemName.toLowerCase());
+  if (itemIndex === -1) {
+      return `You don't have ${itemName} in your inventory.`;
+  }
+
+  // Find the item's properties in the inventoryProperties
+  const itemPropertyIndex = inventoryProperties.findIndex(prop => {
+      const propObj = eval('(' + prop + ')');
+      return propObj.name.toLowerCase() === itemName.toLowerCase();
+  });
+
+  if (itemPropertyIndex === -1) {
+      return `${itemName} cannot be equipped.`;
+  }
+
+  const itemProperties = eval('(' + inventoryProperties[itemPropertyIndex] + ')');
+
+  // Determine the slot for the item
+  let slot;
+  if (itemProperties.type === 'weapon') {
+      slot = 'Weapon';
+  } else if (itemProperties.type === 'armor') {
+      slot = 'Armor';
+  } else if (itemProperties.type === 'shield') {
+      slot = 'Shield';
+  } else {
+      slot = 'Other';
+  }
+
+  // Determine the character to equip the item to
+  let character;
+  if (targetCharacterName) {
+      character = npcs.find(npc => npc.Name.toLowerCase() === targetCharacterName.toLowerCase());
+      if (!character) {
+          return `NPC named ${targetCharacterName} not found.`;
+      }
+  } else {
+      character = characters[0]; // Default to the PC if no target character is specified
+  }
+
+  // Ensure the character has the Equipped object initialized
+  if (!character.Equipped) {
+      character.Equipped = {
+          Weapon: null,
+          Armor: null,
+          Shield: null,
+          Other: null
+      };
+  }
+
+  // Initialize Attack, Damage, and Armor if not already defined
+  if (character.Attack === undefined) character.Attack = 0;
+  if (character.Damage === undefined) character.Damage = 0;
+  if (character.Armor === undefined) character.Armor = 0;
+
+  // Equip the item to the character
+  character.Equipped[slot] = itemProperties;
+  console.log(`Equipped items for ${character.Name}:`, character.Equipped);
+
+  // Update the character's stats
+  character.Attack += itemProperties.attack_modifier || 0;
+  character.Damage += itemProperties.damage_modifier || 0;
+  character.Armor += itemProperties.ac || 0;
+  console.log(`Updated character stats for ${character.Name} - Attack: ${character.Attack}, Damage: ${character.Damage}, Armor: ${character.Armor}`);
+
+  // Remove the item from inventory and inventoryProperties
+  inventory.splice(itemIndex, 1);
+  inventoryProperties.splice(itemPropertyIndex, 1);
+
+  return `${itemName} has been equipped to ${slot} of ${character.Name}.`;
+}
+
+function unequipItem(itemName, targetCharacterName = null) {
+  // Determine the character to unequip the item from
+  let character;
+  if (targetCharacterName) {
+      character = npcs.find(npc => npc.Name.toLowerCase() === targetCharacterName.toLowerCase());
+      if (!character) {
+          return `NPC named ${targetCharacterName} not found.`;
+      }
+  } else {
+      character = characters[0]; // Default to the PC if no target character is specified
+  }
+
+  // Ensure the character has the Equipped object initialized
+  if (!character.Equipped) {
+      return `${character.Name} has no items equipped.`;
+  }
+
+  // Find the item in the equipped slots
+  let item = null;
+  let slot = null;
+  for (const [key, value] of Object.entries(character.Equipped)) {
+      if (value && value.name.toLowerCase() === itemName.toLowerCase()) {
+          item = value;
+          slot = key;
+          break;
+      }
+  }
+
+  if (!item) {
+      return `${character.Name} does not have ${itemName} equipped.`;
+  }
+
+  // Update the character's stats
+  character.Attack -= item.attack_modifier || 0;
+  character.Damage -= item.damage_modifier || 0;
+  character.Armor -= item.ac || 0;
+  console.log(`Updated character stats for ${character.Name} - Attack: ${character.Attack}, Damage: ${character.Damage}, Armor: ${character.Armor}`);
+
+  // Add the item back to inventory and inventoryProperties
+  inventory.push(item.name);
+  inventoryProperties.push(`{name: "${item.name}", type: "${item.type}", attack_modifier: ${item.attack_modifier}, damage_modifier: ${item.damage_modifier}, ac: ${item.ac}}`);
+
+  // Remove the item from the character's equipped slot
+  character.Equipped[slot] = null;
+
+  return `${item.name} has been unequipped from ${slot} of ${character.Name}.`;
 }
 
 function rollDice(sides) {
@@ -2371,8 +3066,6 @@ const sexes = ["Male", "Female"];
 const randomIndex = Math.floor(Math.random() * sexes.length);
 return sexes[randomIndex];
 }
-
-let monstersInRoom = [];
 
 function generateMonsterName(sex) {
 // Define arrays of name components
@@ -2527,8 +3220,52 @@ const filteredLines = lines.filter(line => !allExcludedKeywords.some(keyword => 
 return filteredLines.join('\n');
 }*/
 
-let gameMode = [];
+async function updateNpcsInParty(updatedGameConsole) {
+  let conversationId = localStorage.getItem("conversationId");
+  if (!conversationId) {
+      conversationId = generateConversationId();
+      localStorage.setItem("conversationId", conversationId);
+  }
 
+  // Retrieve all prompts and responses for the conversation from the database
+  const promptAndResponses = await getPromptsAndResponsesForConversation(conversationId);
+
+  // Find the most recent game console data
+  let latestGameConsole = null;
+  for (let i = promptAndResponses.length - 1; i >= 0; i--) {
+      if (promptAndResponses[i].gameConsole) {
+          latestGameConsole = promptAndResponses[i].gameConsole;
+          break;
+      }
+  }
+
+  // If a specific game console is provided, use it; otherwise, use the latest from the history
+  const gameConsoleData = updatedGameConsole || latestGameConsole;
+
+  if (!gameConsoleData) {
+      console.error("No game console data found.");
+      return;
+  }
+
+  // Extract NPCs in Party from the gameConsole string
+  const npcsStringMatch = gameConsoleData.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim() || "";
+  console.log("npcsStringMatch:", npcsStringMatch);
+
+  npcsInPartyString = npcsStringMatch.split(/\n(?=\w)/);
+
+  npcsInParty = npcsInPartyString.map(npcBlock => {
+      const lines = npcBlock.trim().split('\n').map(line => line.trim());
+      return {
+          Name: lines[0],
+          // Add more fields if necessary
+      };
+  });
+
+  console.log("Updated npcsInPartyString:", npcsInPartyString);
+  console.log("Updated npcsInParty:", npcsInParty);
+}
+
+let gameMode = [];
 
 const retort = require('retort-js').retort;
 
@@ -2714,8 +3451,16 @@ return `
   AC: ${char.AC}
   XP: ${char.XP}
   HP: ${char.HP}
-  MaxHP: ${char.MaxHP}`;
-//    Equipped: ${equippedItems}`;  Include the "Equipped" items in the string
+  MaxHP: ${char.MaxHP}
+  Equipped: {
+      Weapon: null,
+      Armor: null,
+      Shield: null,
+      Other: null
+      }, 
+  Attack: 
+  Damage: 
+  Armor: `;  
 }).join('\n');
 
 // Define updatedUserInput and updatedUserWords
@@ -2816,7 +3561,11 @@ switch (characterCreationStep) {
           AC: ${char.AC}
           XP: ${char.XP}
           HP: ${char.HP}
-          MaxHP: ${char.MaxHP}`;
+          MaxHP: ${char.MaxHP}
+          Equipped: 
+          Attack: 
+          Damage: 
+          Armor: `;
       }).join('\n');
       
              if (characters.length === 1) {
@@ -2845,7 +3594,11 @@ return `
     AC: ${char.AC}
     XP: ${char.XP}
     HP: ${char.HP}
-    MaxHP: ${char.MaxHP}`;
+    MaxHP: ${char.MaxHP}
+    Equipped: 
+    Attack: 0 
+    Damage: 0
+    Armor: 0`;
 }).join('\n');
 
       // Notify the user that NPCs have been added
@@ -2862,7 +3615,11 @@ return `
           AC: ${char.AC}
           XP: ${char.XP}
           HP: ${char.HP}
-          MaxHP: ${char.MaxHP}`;
+          MaxHP: ${char.MaxHP}
+          Equipped: 
+          Attack: 0
+          Damage: 0
+          Armor: 0`;
       }).join('\n');
     }
 
@@ -2948,264 +3705,290 @@ displayMessage(`You chose to ${startMenuOption}.`);
 return character;
 }
 
-
-
 if (userWords.length > 1 && userWords[0] === "take") {
-const itemsToTake = userWords.slice(1).join(" ");
+  const itemsToTake = userWords.slice(1).join(" ");
 
-if (itemsToTake.toLowerCase() === "all") {
-const newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);    
-// Handle taking specific items as before (comma or "and" separated)
-const itemsToTakeArray = itemsToTake.split(/, | and /); // Split by comma or "and"
+  if (itemsToTake.toLowerCase() === "all") {
+      const newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+      const itemsToTakeArray = itemsToTake.split(/, | and /);
 
-// Find the matching console in promptAndResponses
-const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+      const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+      let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
 
-let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
-console.log('combinedEquipment:', combinedEquipment);
+      let objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
+      let objectsInRoomPropertiesString = combinedEquipment.match(/Objects in Room Properties: ([^\n]+)/);
 
-// Extract the "Objects in Room" part from combinedEquipment
-objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
-if (objectsInRoomString) {
-objectsInRoomString = objectsInRoomString[1];
-} else {
-objectsInRoomString = "None"; // Set a default value if "Objects in Room" is not found
-}
+      if (objectsInRoomString) {
+          objectsInRoomString = objectsInRoomString[1];
+      } else {
+          objectsInRoomString = "None";
+      }
 
-// Split objectsInRoomString into an array of items
-let itemsInRoom = objectsInRoomString.split(', ').map(item => item.trim());
-console.log('itemsInRoom:', itemsInRoom);
+      let itemsInRoom = objectsInRoomString.split(', ').map(item => item.trim());
+      console.log('itemsInRoom:', itemsInRoom);
 
-if (objectsInRoomString.trim().toLowerCase() === "none" || !objectsInRoomString) {
-const message = `The room is empty.`;
-chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-scrollToBottom();
-return; // Prevent further execution
-}
+      if (objectsInRoomString.trim().toLowerCase() === "none" || !objectsInRoomString) {
+          const message = `The room is empty.`;
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+          return;
+      }
 
-  // Take all items in the room
-  if (objectsInRoomString || itemsInRoom) {
-  // Get newAdditionalEquipment from updateGameConsole
+      if (objectsInRoomString || itemsInRoom) {
+          const canTakeAllItems = itemsInRoom.every(item => {
+              return inventory.includes(item) || newAdditionalEquipment.includes(item);
+          });
 
-// Check if all items can be taken
-const canTakeAllItems = itemsInRoom.every(item => {
-return inventory.includes(item) || newAdditionalEquipment.includes(item);
-});
+          if (canTakeAllItems) {
+              inventory.push(...itemsInRoom);
+              inventory = removeNoneFromInventory(inventory);
 
-if (canTakeAllItems) {
-// Update inventory
-inventory.push(...itemsInRoom);
+              // Move properties to inventoryProperties
+              if (objectsInRoomPropertiesString && objectsInRoomPropertiesString[1].trim()) {
+                  let roomProperties = objectsInRoomPropertiesString[1]
+                      .split(/(?<=\}),\s*(?={)/)
+                      .map(str => str.endsWith('}') ? str : str + '}')
+                      .filter(prop => prop !== null);
 
-inventory = removeNoneFromInventory(inventory);
+                  // Add properties of taken items to inventoryProperties
+                  const updatedRoomProperties = roomProperties.filter(property => {
+                      const propertyObj = eval('(' + property + ')'); // Treat the string as a regular object
+                      if (itemsInRoom.includes(propertyObj.name)) {
+                          inventoryProperties.push(property);
+                          return false;
+                      }
+                      return true;
+                  });
 
-// Remove taken items from combinedEquipment
-combinedEquipment = combinedEquipment
-  .split(/Objects in Room: ([^\n]+)/)
-  .map(part => {
-    if (part.includes("Objects in Room:")) {
-      // Filter and join the remaining items
-      const remainingItems = itemsInRoom.join(', ');
-      return `Objects in Room: ${remainingItems}`;
-    }
-    return part;
-  })
-  .join('');
+                  objectsInRoomPropertiesString = updatedRoomProperties.length > 0 ? updatedRoomProperties.join(', ') : "None";
+              } else {
+                  objectsInRoomPropertiesString = "None";
+              }
 
-if (itemsInRoom.length === 0) {
-  objectsInRoomString = "None"; // Set to "None" when there are no items left
-}
+              combinedEquipment = combinedEquipment
+                  .split(/Objects in Room: ([^\n]+)/)
+                  .map(part => {
+                      if (part.includes("Objects in Room:")) {
+                          const remainingItems = itemsInRoom.join(', ');
+                          return `Objects in Room: ${remainingItems}`;
+                      }
+                      return part;
+                  })
+                  .join('');
 
-console.log('objectsInRoomString:', objectsInRoomString);
+              combinedEquipment = combinedEquipment
+                  .split(/Objects in Room Properties: ([^\n]+)/)
+                  .map(part => {
+                      if (part.includes("Objects in Room Properties:")) {
+                          return `Objects in Room Properties: ${objectsInRoomPropertiesString}`;
+                      }
+                      return part;
+                  })
+                  .join('');
 
-// Update room equipment in the room's conversation history
-const roomHistory = roomConversationHistories[coordinatesToString(currentCoordinates)];
+              if (itemsInRoom.length === 0) {
+                  objectsInRoomString = "None";
+              }
 
-if (roomHistory) {
-  // Use the getFirstResponseForRoom function to get the first response
-  const firstResponseForRoom = getFirstResponseForRoom(currentCoordinates);
+              console.log('objectsInRoomString:', objectsInRoomString);
 
-  if (firstResponseForRoom) {
-    // Remove sentences that mention the taken items from the first response
-    itemsInRoom.forEach(item => {
-      firstResponseForRoom.response = firstResponseForRoom.response.replace(new RegExp(`\\b${item}\\b`, 'gi'), '');
-    });
+              const roomHistory = roomConversationHistories[coordinatesToString(currentCoordinates)];
 
-// Update itemsInRoom and remove taken items
-itemsInRoom = itemsInRoom.filter(item => !inventory.includes(item));
+              if (roomHistory) {
+                  const firstResponseForRoom = getFirstResponseForRoom(currentCoordinates);
 
-    // Update the game console data with the modified "Objects in Room"
-    let updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
-    
-    updatedGameConsole = gameConsoleData.replace(
-      /Objects in Room: ([^\n]+)/,
-      `Objects in Room: ${itemsInRoom.join(', ')}`
-    );
+                  if (firstResponseForRoom) {
+                      itemsInRoom.forEach(item => {
+                          firstResponseForRoom.response = firstResponseForRoom.response.replace(new RegExp(`\\b${item}\\b`, 'gi'), '');
+                      });
 
-    // Update the promptAndResponses array with the modified game console data
-    promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+                      itemsInRoom = itemsInRoom.filter(item => !inventory.includes(item));
 
-    // Update the conversation history with the modified game console data
-    conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+                      let updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+                      updatedGameConsole = gameConsoleData.replace(
+                          /Objects in Room: ([^\n]+)/,
+                          `Objects in Room: ${itemsInRoom.join(', ')}`
+                      );
 
-    // Remove taken items from combinedEquipment
-    combinedEquipment = combinedEquipment.replace(new RegExp(`\\b${itemsInRoom.join('\\b|\\b')}\\b`, 'gi'), '');
+                      updatedGameConsole = updatedGameConsole.replace(
+                          /Objects in Room Properties: ([^\n]+)/,
+                          `Objects in Room Properties: ${objectsInRoomPropertiesString}`
+                      );
 
-    itemsInRoom = itemsInRoom.length > 0 ? itemsInRoom : ["None"];
-    console.log('itemsInRoom:', itemsInRoom);
+                      // Convert inventoryProperties to a string format for display in the game console
+                      const inventoryPropertiesString = inventoryProperties.join(', ');
 
-    // Combine the game console, conversation history, and user input
-    const combinedHistory = conversationHistory + "\n" + userInput;
+                      updatedGameConsole = updatedGameConsole.replace(
+                          /Inventory Properties: ([^\n]+)/,
+                          `Inventory Properties: ${inventoryPropertiesString}`
+                      );
 
-    // Perform dynamic search using the Sentence Transformer model
-    let personalNarrative = await performDynamicSearch(combinedHistory);
+                      promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+                      conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
 
-    // Construct the input message, including the previous response if it exists
-    const messages = [
-      { role: "assistant", content: "" },
-      { role: "system", content: "" },
-      { role: "user", content: userInput }
-    ];
+                      combinedEquipment = combinedEquipment.replace(new RegExp(`\\b${itemsInRoom.join('\\b|\\b')}\\b`, 'gi'), '');
+                      itemsInRoom = itemsInRoom.length > 0 ? itemsInRoom : ["None"];
+                      console.log('itemsInRoom:', itemsInRoom);
 
-    const message = `Taken.`;
-    chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-    scrollToBottom();
-    // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-    addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
-    // Pass the updated game console to the database
-    // Update the game console based on user inputs and get the updated game console
-    updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, itemsInRoom.join(', '));
-    conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-    updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
-    console.log("Game Console:", updatedGameConsole);
-    console.log('itemsInRoom:', itemsInRoom);
-    turns++;
-    return;
+                      const combinedHistory = conversationHistory + "\n" + userInput;
+
+                      let personalNarrative = await performDynamicSearch(combinedHistory);
+
+                      const messages = [
+                          { role: "assistant", content: "" },
+                          { role: "system", content: "" },
+                          { role: "user", content: userInput }
+                      ];
+
+                      const message = `Taken.`;
+                      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+                      scrollToBottom();
+                      addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+                      updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, itemsInRoom.join(', '));
+                      conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+                      updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+                      console.log("Game Console:", updatedGameConsole);
+                      console.log('itemsInRoom:', itemsInRoom);
+                      turns++;
+                      return;
+                  }
+              }
+          }
+      }
+  } else {
+      const itemsToTakeArray = itemsToTake.split(/, | and /).map(item => item.trim());
+
+      const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+      let newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+      let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+
+      let objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
+      let objectsInRoomPropertiesString = combinedEquipment.match(/Objects in Room Properties: ([^\n]+)/);
+
+      if (objectsInRoomString) {
+          objectsInRoomString = objectsInRoomString[1].split(',').map(item => item.trim());
+      } else {
+          objectsInRoomString = ["None"];
+      }
+      let itemsInRoom = objectsInRoomString.join(', ').split(', ').map(item => item.trim());
+      console.log('itemsInRoom:', itemsInRoom);
+
+      const invalidItems = itemsToTakeArray.filter(itemToTake => {
+          return !itemsInRoom.includes(itemToTake);
+      });
+
+      const itemsAlreadyInInventory = itemsToTakeArray.filter(item => inventory.includes(item));
+
+      if (!itemsInRoom.some(item => itemsToTakeArray.includes(item)) && itemsAlreadyInInventory.length > 0) {
+          const message = `You already have the ${itemsAlreadyInInventory.join(' and ')} in your inventory.`;
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+          return;
+      }
+
+      if (invalidItems.length > 0) {
+          const message = `There is no ${invalidItems.join(' and ')} here.`;
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+          return;
+      }
+
+      console.log('itemsInRoom:', itemsInRoom);
+      console.log('roomEquipment:', roomEquipment);
+      console.log('objectsInRoomString:', objectsInRoomString);
+
+      if (itemsInRoom.some(item => itemsToTakeArray.includes(item)) || newAdditionalEquipment.some(item => itemsToTakeArray.includes(item))) {
+          itemsToTakeArray.forEach(item => {
+              itemsInRoom = itemsInRoom.filter(roomItem => !itemsToTakeArray.includes(roomItem));
+              objectsInRoomString = objectsInRoomString.filter(roomItem => !roomItem.includes(item.trim()));
+          });
+
+          if (combinedEquipment.length === 0) {
+              itemsInRoom = ["None"];
+          }
+
+          console.log('itemsInRoom:', itemsInRoom);
+
+          inventory.push(...itemsToTakeArray);
+          inventory = removeNoneFromInventory(inventory);
+
+          // Move properties to inventoryProperties
+          if (objectsInRoomPropertiesString && objectsInRoomPropertiesString[1].trim()) {
+              let roomProperties = objectsInRoomPropertiesString[1]
+                  .split(/(?<=\}),\s*(?={)/)
+                  .map(str => str.endsWith('}') ? str : str + '}')
+                  .filter(prop => prop !== null);
+
+              // Add properties of taken items to inventoryProperties
+              const updatedRoomProperties = roomProperties.filter(property => {
+                  const propertyObj = eval('(' + property + ')'); // Treat the string as a regular object
+                  if (itemsToTakeArray.includes(propertyObj.name)) {
+                      inventoryProperties.push(property);
+                      return false;
+                  }
+                  return true;
+              });
+
+              objectsInRoomPropertiesString = updatedRoomProperties.length > 0 ? updatedRoomProperties.join(', ') : "None";
+          } else {
+              objectsInRoomPropertiesString = "None";
+          }
+
+          const roomHistory = roomConversationHistories[coordinatesToString(currentCoordinates)];
+          if (roomHistory) {
+              const firstResponseForRoom = getFirstResponseForRoom(currentCoordinates);
+
+              if (firstResponseForRoom) {
+                  itemsToTakeArray.forEach(item => {
+                      firstResponseForRoom.response = firstResponseForRoom.response.replace(new RegExp(`\\b${item}\\b`, 'gi'), '');
+                  });
+
+                  let updatedGameConsole = gameConsoleData.replace(
+                      /Objects in Room: ([^\n]+)/,
+                      `Objects in Room: ${objectsInRoomString.join(', ')}`
+                  );
+
+                  updatedGameConsole = updatedGameConsole.replace(
+                      /Objects in Room Properties: ([^\n]+)/,
+                      `Objects in Room Properties: ${objectsInRoomPropertiesString}`
+                  );
+
+                  // Convert inventoryProperties to a string format for display in the game console
+                  const inventoryPropertiesString = inventoryProperties.join(', ');
+
+                  updatedGameConsole = updatedGameConsole.replace(
+                      /Inventory Properties: ([^\n]+)/,
+                      `Inventory Properties: ${inventoryPropertiesString}`
+                  );
+
+                  promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+                  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+                  const combinedHistory = conversationHistory + "\n" + userInput;
+
+                  let personalNarrative = await performDynamicSearch(combinedHistory);
+
+                  const messages = [
+                      { role: "assistant", content: "" },
+                      { role: "system", content: "" },
+                      { role: "user", content: userInput }
+                  ];
+
+                  const message = `Taken.`;
+                  chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+                  scrollToBottom();
+                  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+                  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+                  conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+                  console.log("Game Console:", updatedGameConsole);
+                  turns++;
+                  return;
+              }
+          }
+      }
   }
-}
-}
-} 
-} else {
-// Handle taking specific items as before (comma or "and" separated)
-const itemsToTakeArray = itemsToTake.split(/, | and /).map(item => item.trim()); // Split by comma or "and"
-
-// Find the matching console in promptAndResponses
-const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
-let newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
-let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
-console.log('combinedEquipment:', combinedEquipment);
-
-// Extract the "Objects in Room" part from combinedEquipment
-let objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
-
-if (objectsInRoomString) {
-objectsInRoomString = objectsInRoomString[1].split(',').map(item => item.trim());
-} else {
-objectsInRoomString = ["None"]; // Set a default value if "Objects in Room" is not found
-}
-let itemsInRoom = objectsInRoomString.join(', ').split(', ').map(item => item.trim()); // Establish itemsInRoom
-
-console.log('itemsInRoom:', itemsInRoom);
-
-const invalidItems = itemsToTakeArray.filter(itemToTake => {
-return !itemsInRoom.includes(itemToTake);
-});
-
-// Check if any of the items in itemsToTakeArray are already in the inventory
-const itemsAlreadyInInventory = itemsToTakeArray.filter(item => inventory.includes(item));
-
-if (!itemsInRoom.some(item => itemsToTakeArray.includes(item)) && itemsAlreadyInInventory.length > 0) {
-const message = `You already have the ${itemsAlreadyInInventory.join(' and ')} in your inventory.`;
-chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-scrollToBottom();
-return; // Prevent further execution
-}
-
-if (invalidItems.length > 0) {
-const message = `There is no ${invalidItems.join(' and ')} here.`;
-chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-scrollToBottom();
-return; // Prevent further execution
-}
-
-console.log('itemsInRoom:', itemsInRoom);
-
-console.log('roomEquipment:', roomEquipment);
-console.log('objectsInRoomString:', objectsInRoomString);
-
-if (itemsInRoom.some(item => itemsToTakeArray.includes(item)) || newAdditionalEquipment.some(item => itemsToTakeArray.includes(item))) {
-// Get newAdditionalEquipment from updateGameConsole
-
-// Remove taken items from "Objects in Room"
-itemsToTakeArray.forEach(item => {
-  itemsInRoom = itemsInRoom.filter(roomItem => !itemsToTakeArray.includes(roomItem));
-  objectsInRoomString = objectsInRoomString.filter(roomItem => !roomItem.includes(item.trim()));
-});
-
-// Check if there are items left in combinedEquipment
-if (combinedEquipment.length === 0) {
-  itemsInRoom = ["None"]; // Set to "None" when there are no items left
-}
-
-console.log('itemsInRoom:', itemsInRoom);
-
-// Update inventory and room equipment
-inventory.push(...itemsToTakeArray);
-
-inventory = removeNoneFromInventory(inventory);
-
-// Update room equipment in the room's conversation history
-const roomHistory = roomConversationHistories[coordinatesToString(currentCoordinates)];
-if (roomHistory) {
-  // Use the getFirstResponseForRoom function to get the first response
-  const firstResponseForRoom = getFirstResponseForRoom(currentCoordinates);
-
-  if (firstResponseForRoom) {
-    // Remove the sentence that mentions the taken items from the first response
-    itemsToTakeArray.forEach(item => {
-      firstResponseForRoom.response = firstResponseForRoom.response.replace(new RegExp(`\\b${item}\\b`, 'gi'), '');
-    });
-
-    // Update the game console data with the modified "Objects in Room"
-    let updatedGameConsole = gameConsoleData.replace(
-      /Objects in Room: ([^\n]+)/,
-      `Objects in Room: ${objectsInRoomString.join(', ')}`
-    );
-
-    // Update the promptAndResponses array with the modified game console data
-    promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
-
-    // Update the conversation history with the modified game console data
-    conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
-
-    // Combine the game console, conversation history, and user input
-    const combinedHistory = conversationHistory + "\n" + userInput;
-
-    // Perform dynamic search using the Sentence Transformer model
-    let personalNarrative = await performDynamicSearch(combinedHistory);
-
-    // Construct the input message, including the previous response if it exists
-    const messages = [
-      { role: "assistant", content: "" },
-      { role: "system", content: "" },
-      { role: "user", content: userInput }
-    ];
-
-    const message = `Taken.`;
-    chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-    scrollToBottom();
-    // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-    addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
-
-    // Update the game console based on user inputs and get the updated game console
-    updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
-    conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-    console.log("Game Console:", updatedGameConsole);
-    turns++;
-    return;
-  }
-}
-}
-}
 }
 
 gameConsoleData = null;
@@ -3232,68 +4015,264 @@ objectsInRoomString = objectsInRoomMatch[1].split(',').map(item => item.trim());
 console.log('objectsInRoomString:', objectsInRoomString);
 
 if (userWords.length > 1 && userWords[0] === "drop") {
-const itemsToDrop = userWords.slice(1).join(" ");
-const itemsToDropArray = itemsToDrop.split(/, | and /); // Split by comma or "and"
+  const itemsToDrop = userWords.slice(1).join(" ");
+  const itemsToDropArray = itemsToDrop.split(/, | and /); // Split by comma or "and"
 
-const invalidItems = itemsToDropArray.filter(item => {
-  return !inventory.includes(item);
-});
+  const isEquipped = (character, itemName) => {
+      return Object.values(character.Equipped).some(equip => equip && equip.name.toLowerCase() === itemName.toLowerCase());
+  };
 
-// Find the matching console in promptAndResponses
-const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+  const invalidItems = itemsToDropArray.filter(item => {
+      return !inventory.includes(item) && !isEquipped(characters[0], item) && !npcs.some(npc => isEquipped(npc, item));
+  });
 
-if (itemsToDrop.toLowerCase() === "all") {
-  if (!inventory.length) {
-    const message = `Your inventory is empty.`;
-    chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-    scrollToBottom();
-    return;
+  const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+  let newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+  let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+
+  let objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
+  let objectsInRoomPropertiesString = combinedEquipment.match(/Objects in Room Properties: ([^\n]+)/);
+
+  if (objectsInRoomString) {
+      objectsInRoomString = objectsInRoomString[1].split(', ').map(item => item.trim());
+  } else {
+      objectsInRoomString = ["None"];
   }
 
-  // Exclude the word "all" from itemsToDropArray
-  const itemsToDropExcludingAll = itemsToDropArray.filter(item => item.toLowerCase() !== "all");
-
-  // Check if objectsInRoomString is an array or a string
-  if (Array.isArray(objectsInRoomString)) {
-    objectsInRoomString = objectsInRoomString.join(", ");
+  if (objectsInRoomPropertiesString) {
+      objectsInRoomPropertiesString = objectsInRoomPropertiesString[1];
+  } else {
+      objectsInRoomPropertiesString = "None";
   }
 
-  // Append all items in inventory to objectsInRoomString
-  if (itemsToDropExcludingAll.length > 0) {
-    if (typeof objectsInRoomString === "string") {
-      objectsInRoomString += ", " + itemsToDropExcludingAll.join(", ");
-    } else {
-      objectsInRoomString = itemsToDropExcludingAll.join(", ");
-    }
+  let objectsInRoomProperties = objectsInRoomPropertiesString !== "None" ? objectsInRoomPropertiesString.split(', ').map(item => item.trim()) : [];
+
+  const unequipItem = (character, itemName) => {
+      for (let slot in character.Equipped) {
+          if (character.Equipped[slot] && character.Equipped[slot].name.toLowerCase() === itemName.toLowerCase()) {
+              const itemProperties = character.Equipped[slot];
+
+              // Update the character's stats
+              character.Attack -= itemProperties.attack_modifier || 0;
+              character.Damage -= itemProperties.damage_modifier || 0;
+              character.Armor -= itemProperties.ac || 0;
+
+              // Add the item back to inventory and inventory properties
+              inventory.push(itemProperties.name);
+              inventoryProperties.push(`{name: "${itemProperties.name}", type: "${itemProperties.type}", attack_modifier: ${itemProperties.attack_modifier}, damage_modifier: ${itemProperties.damage_modifier}, ac: ${itemProperties.ac}}`);
+
+              // Remove the item from the equipped slot
+              character.Equipped[slot] = null;
+
+              return true;
+          }
+      }
+      return false;
+  };
+
+  if (itemsToDrop.toLowerCase() === "all") {
+      if (!inventory.length && !Object.values(characters[0].Equipped).some(equip => equip) && !npcs.some(npc => Object.values(npc.Equipped).some(equip => equip))) {
+          const message = `Your inventory is empty.`;
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+          return;
+      }
+
+      // Unequip all items if equipped
+      Object.values(characters[0].Equipped).forEach(equip => {
+          if (equip) unequipItem(characters[0], equip.name);
+      });
+
+      npcs.forEach(npc => {
+          Object.values(npc.Equipped).forEach(equip => {
+              if (equip) unequipItem(npc, equip.name);
+          });
+      });
+
+      // Append all items in inventory to existing objects in the room
+      objectsInRoomString = objectsInRoomString.filter(item => item !== "None").concat(inventory); // Merge existing items and inventory
+
+      // Move all inventory properties to room properties
+      objectsInRoomProperties = objectsInRoomProperties.filter(prop => prop !== 'None').concat(inventoryProperties);
+
+      inventory = []; // Clear the inventory
+      inventoryProperties = []; // Clear the inventory properties
+
+      // Update the game console data with the modified "Objects in Room"
+      let updatedGameConsole = gameConsoleData.replace(
+          /Objects in Room: ([^\n]+)/,
+          `Objects in Room: ${objectsInRoomString.join(', ')}`
+      );
+
+      updatedGameConsole = updatedGameConsole.replace(
+          /Objects in Room Properties: ([^\n]+)/,
+          `Objects in Room Properties: ${objectsInRoomProperties.join(', ')}`
+      );
+
+      updatedGameConsole = updatedGameConsole.replace(
+          /Inventory Properties: ([^\n]+)/,
+          `Inventory Properties: ${inventoryProperties.join(', ')}`
+      );
+
+      // Update the promptAndResponses array with the modified game console data
+      promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+
+      // Update the conversation history with the modified game console data
+      conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+      itemsInRoom = objectsInRoomString;
+
+      // Combine the game console, conversation history, and user input
+      const combinedHistory = conversationHistory + "\n" + userInput;
+
+      // Perform dynamic search using the Sentence Transformer model
+      let personalNarrative = await performDynamicSearch(combinedHistory);
+
+      // Construct the input message, including the previous response if it exists
+      const messages = [
+          { role: "assistant", content: "" },
+          { role: "system", content: "" },
+          { role: "user", content: userInput }
+      ];
+
+      const message = `Dropped.`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
+      addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+      // Pass the updated game console to the database
+      // Update the game console based on user inputs and get the updated game console
+      updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+      conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+      console.log("Game Console:", updatedGameConsole);
+      console.log('itemsInRoom:', itemsInRoom);
+      turns++;
+      return;
+  } else {
+      itemsToDropArray.forEach(item => {
+          // Unequip the item if equipped by the PC or any NPC
+          unequipItem(characters[0], item);
+          npcs.forEach(npc => unequipItem(npc, item));
+      });
+
+      if (inventory.some(item => itemsToDropArray.includes(item))) {
+          inventory = inventory.filter(item => !itemsToDropArray.includes(item));
+
+          if (invalidItems.length > 0) {
+              const message = `You don't have the ${invalidItems.join(", ")}.`;
+              chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+              scrollToBottom();
+              return;
+          }
+
+          // Check if objectsInRoomString is ["None"] and update it accordingly
+          if (objectsInRoomString.length === 1 && objectsInRoomString[0] === "None") {
+              objectsInRoomString = itemsToDropArray.slice(); // Make a copy
+          } else {
+              // Update objectsInRoomString to include the dropped items
+              itemsToDropArray.forEach(item => {
+                  if (!objectsInRoomString.includes(item)) {
+                      objectsInRoomString.push(item);
+                  }
+              });
+          }
+
+          // Move properties to objectsInRoomProperties
+          if (inventoryProperties.length > 0) {
+              const updatedInventoryProperties = inventoryProperties.filter(property => {
+                  const propertyObj = eval('(' + property + ')'); // Treat the string as a regular object
+                  if (itemsToDropArray.includes(propertyObj.name)) {
+                      objectsInRoomProperties.push(property);
+                      return false;
+                  }
+                  return true;
+              });
+
+              inventoryProperties = updatedInventoryProperties;
+          }
+
+          // Remove 'None' if objectsInRoomProperties is populated
+          if (objectsInRoomProperties.length > 0) {
+              objectsInRoomProperties = objectsInRoomProperties.filter(prop => prop !== 'None');
+          }
+
+          let updatedGameConsole = gameConsoleData.replace(
+              /Objects in Room: ([^\n]+)/,
+              `Objects in Room: ${objectsInRoomString.join(', ')}`
+          );
+
+          updatedGameConsole = updatedGameConsole.replace(
+              /Objects in Room Properties: ([^\n]+)/,
+              `Objects in Room Properties: ${objectsInRoomProperties.join(', ')}`
+          );
+
+          updatedGameConsole = updatedGameConsole.replace(
+              /Inventory Properties: ([^\n]+)/,
+              `Inventory Properties: ${inventoryProperties.join(', ')}`
+          );
+
+          // Update the promptAndResponses array with the modified game console data
+          promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+
+          // Update the conversation history with the modified game console data
+          conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+          itemsInRoom = objectsInRoomString;
+
+          // Combine the game console, conversation history, and user input
+          const combinedHistory = conversationHistory + "\n" + userInput;
+
+          // Perform dynamic search using the Sentence Transformer model
+          let personalNarrative = await performDynamicSearch(combinedHistory);
+
+          // Construct the input message, including the previous response if it exists
+          const messages = [
+              { role: "assistant", content: "" },
+              { role: "system", content: "" },
+              { role: "user", content: userInput }
+          ];
+
+          const message = `Dropped.`;
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+
+          // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
+          addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+          // Pass the updated game console to the database
+          // Update the game console based on user inputs and get the updated game console
+          updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+          conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+          console.log("Game Console:", updatedGameConsole);
+          console.log('itemsInRoom:', itemsInRoom);
+          turns++;
+          return;
+      }
+  }
+}
+
+if (userWords.length > 1 && userWords[0] === "equip") {
+  let itemName = userWords.slice(1).join(" ");
+  let targetCharacterName = null;
+
+  // Check if there is a target character specified
+  if (userWords.includes("to")) {
+      const toIndex = userWords.indexOf("to");
+      targetCharacterName = userWords.slice(toIndex + 1).join(" ");
+      itemName = userWords.slice(1, toIndex).join(" ");
   }
 
-  if (inventory.length > 0) {
-    if (typeof objectsInRoomString === "string") {
-      objectsInRoomString += ", " + inventory.join(", ");
-    } else {
-      objectsInRoomString = inventory.join(", ");
-    }
-  }
+  const message = equipItem(itemName, targetCharacterName);
 
-  // Update the game console data with the modified "Objects in Room"
-  let updatedGameConsole = gameConsoleData.replace(
-    /Objects in Room: ([^\n]+)/,
-    `Objects in Room: ${objectsInRoomString}`
-  );
+  // Update the game console
+  const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+  let updatedGameConsole = matchingConsoleData;
 
-  // Update the promptAndResponses array with the modified game console data
-  promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+  // Re-generate the equipped items string for the game console
+  let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
 
   // Update the conversation history with the modified game console data
-  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
-
-  inventory = []; // Clear the inventory
-
-  if (typeof objectsInRoomString === "string") {
-    itemsInRoom = objectsInRoomString.split(', ').map(item => item.trim());
-  } else {
-    itemsInRoom = ["None"];
-  }
+  conversationHistory = conversationHistory.replace(matchingConsoleData, combinedEquipment);
 
   // Combine the game console, conversation history, and user input
   const combinedHistory = conversationHistory + "\n" + userInput;
@@ -3303,17 +4282,17 @@ if (itemsToDrop.toLowerCase() === "all") {
 
   // Construct the input message, including the previous response if it exists
   const messages = [
-    { role: "assistant", content: "" },
-    { role: "system", content: "" },
-    { role: "user", content: userInput }
+      { role: "assistant", content: "" },
+      { role: "system", content: "" },
+      { role: "user", content: userInput }
   ];
 
-  const message = `Dropped.`;
   chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
   scrollToBottom();
+
   // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
-  // Pass the updated game console to the database
+  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, combinedEquipment);
+
   // Update the game console based on user inputs and get the updated game console
   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
@@ -3321,177 +4300,369 @@ if (itemsToDrop.toLowerCase() === "all") {
   console.log('itemsInRoom:', itemsInRoom);
   turns++;
   return;
-} else {
-if (inventory.some(item => itemsToDropArray.includes(item))) {
-inventory = inventory.filter(item => !itemsToDropArray.includes(item));
+}
 
-if (invalidItems.length > 0) {
-  const message = `You don't have the ${invalidItems.join(", ")}.`;
+// Handle unequip command
+if (userWords.length > 1 && userWords[0] === "unequip") {
+  const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+  let newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+  let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+
+  let updatedGameConsole = gameConsoleData;
+
+  let objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
+  let objectsInRoomPropertiesString = combinedEquipment.match(/Objects in Room Properties: ([^\n]+)/);
+
+  let itemName = userWords.slice(1).join(" ");
+  let targetCharacterName = null;
+
+  // Check if there is a target character specified
+  if (userWords.includes("from")) {
+      const fromIndex = userWords.indexOf("from");
+      targetCharacterName = userWords.slice(fromIndex + 1).join(" ");
+      itemName = userWords.slice(1, fromIndex).join(" ");
+  }
+
+  const message = unequipItem(itemName, targetCharacterName);
+  promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+
+  // Update the conversation history with the modified game console data
+  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+  itemsInRoom = objectsInRoomString;
+
+  // Combine the game console, conversation history, and user input
+  const combinedHistory = conversationHistory + "\n" + userInput;
+
+  // Perform dynamic search using the Sentence Transformer model
+  let personalNarrative = await performDynamicSearch(combinedHistory);
+
+  // Construct the input message, including the previous response if it exists
+  const messages = [
+      { role: "assistant", content: "" },
+      { role: "system", content: "" },
+      { role: "user", content: userInput }
+  ];
+
   chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
   scrollToBottom();
+
+  // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
+  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+  // Update the game console based on user inputs and get the updated game console
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+  console.log("Game Console:", updatedGameConsole);
+  console.log('itemsInRoom:', itemsInRoom);
+  turns++;
   return;
 }
 
-// Check if objectsInRoomString is ["None"] and update it accordingly
-if (objectsInRoomString.length === 1 && objectsInRoomString[0] === "None") {
-  objectsInRoomString = itemsToDropArray.slice(); // Make a copy
-} else {
-  // Update objectsInRoomString to include the dropped items
-  itemsToDropArray.forEach(item => {
-    if (!objectsInRoomString.includes(item)) {
-      objectsInRoomString.push(item);
-    }
-  });
-}
+gameConsoleData = null;
+gameConsoleIndex = -1;
+objectsInRoomMatch = [];
+// New variable to hold the NPCs in Party string
 
-// Update the game console data with the modified "Objects in Room"
-let updatedGameConsole = gameConsoleData.replace(
-  /Objects in Room: ([^\n]+)/,
-  `Objects in Room: ${objectsInRoomString.join(', ')}`
-);
-
-// Update the promptAndResponses array with the modified game console data
-promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
-
-// Update the conversation history with the modified game console data
-conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
-
-itemsInRoom = objectsInRoomString;
-
-// Combine the game console, conversation history, and user input
-const combinedHistory = conversationHistory + "\n" + userInput;
-
-// Perform dynamic search using the Sentence Transformer model
-let personalNarrative = await performDynamicSearch(combinedHistory);
-
-// Construct the input message, including the previous response if it exists
-const messages = [
-  { role: "assistant", content: "" },
-  { role: "system", content: "" },
-  { role: "user", content: userInput }
-];
-
-const message = `Dropped.`;
-chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-scrollToBottom();
-
-// Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
-
-// Pass the updated game console to the database
-// Update the game console based on user inputs and get the updated game console
-updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
-conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-console.log("Game Console:", updatedGameConsole);
-console.log('itemsInRoom:', itemsInRoom);
-turns++;
-return;
+// Search for the latest game console data and extract NPCs in Party
+for (let i = promptAndResponses.length - 1; i >= 0; i--) {
+  if (promptAndResponses[i].gameConsole) {
+      gameConsoleData = promptAndResponses[i].gameConsole;
+      gameConsoleIndex = i; // Save the index of the game console in promptAndResponses
+      objectsInRoomMatch = gameConsoleData.match(/Objects in Room: ([^\n]+)/) || []; // Ensure objectsInRoomMatch is an array
+// Extract NPCs in Party
+      if (objectsInRoomMatch.length > 0 ) {
+          break; // Found the most recent gameConsole with "Objects in Room" or "NPCs in Party"
+      }
   }
 }
-} 
 
-// Check if the user input contains "ready" or "equip" followed by an item
-const equipPattern = /^(ready|equip)\s+(.+)/i;
-const equipMatch = userInput.match(equipPattern);
+objectsInRoomString = [];
+if (Array.isArray(objectsInRoomMatch) && objectsInRoomMatch.length > 1) {
+  objectsInRoomString = objectsInRoomMatch[1].split(',').map(item => item.trim());
+  // Split by comma and trim each item
+}
 
-if (equipMatch) {
-const equipAction = equipMatch[1].toLowerCase();
-const equipItem = equipMatch[2].toLowerCase();
+// New code to access monsters in the room
+const roomKey = coordinatesToString(currentCoordinates);
+let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
 
-// Check if the equipItem is in the player's inventory
-if (inventory.includes(equipItem)) {
-  // Remove the item from the inventory
-  inventory = inventory.filter(item => item !== equipItem);
+// Process adding a monster to the party
+if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length - 2] === "to" && userWords[userWords.length - 1] === "party") {
+  let monsterNameInput = userWords.slice(1, userWords.length - 2).join(" "); // Extract the monster name input
 
-  // Add the item to the equipped inventory
-  equippedInventory.push(equipItem);
+  // Capitalize the first letter of npcNameInput
+  monsterNameInput = monsterNameInput.charAt(0).toUpperCase() + monsterNameInput.slice(1);
 
-  // Add the item to the equipped section of the character
-  characters[0].Equipped.push(equipItem);
-    
-    let updatedGameConsole = gameConsoleData;
-     // Update the promptAndResponses array with the modified game console data
-promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+  // Find all monsters that match the input name (case-insensitive comparison)
+  const matchingMonsters = monstersInRoom.filter(
+      (monster) => monster.Name.toLowerCase().startsWith(monsterNameInput.toLowerCase())
+  );
 
-// Update the conversation history with the modified game console data
-conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
-
-itemsInRoom = objectsInRoomString;
-
-// Combine the game console, conversation history, and user input
-const combinedHistory = conversationHistory + "\n" + userInput;
-
-// Perform dynamic search using the Sentence Transformer model
-let personalNarrative = await performDynamicSearch(combinedHistory);
-
-// Construct the input message, including the previous response if it exists
-const messages = [
-  { role: "assistant", content: "" },
-  { role: "system", content: "" },
-  { role: "user", content: userInput }
-];
-
-const message = `\nYou have ${equipAction}ped the ${equipItem}.\n`;
-chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-scrollToBottom();
-
-// Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
-
-// Pass the updated game console to the database
-// Update the game console based on user inputs and get the updated game console
-      // Update the game console with a message
-    conversationHistory += `\nYou have ${equipAction}ped the ${equipItem}.\n`;
-updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
-conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-console.log("Game Console:", updatedGameConsole);
-console.log('itemsInRoom:', itemsInRoom);
-turns++;
-return;
-  } else {
-      
-      let updatedGameConsole = gameConsoleData;
-      
-             // Update the promptAndResponses array with the modified game console data
-promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
-
-// Update the conversation history with the modified game console data
-conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
-
-itemsInRoom = objectsInRoomString;
-
-// Combine the game console, conversation history, and user input
-const combinedHistory = conversationHistory + "\n" + userInput;
-
-// Perform dynamic search using the Sentence Transformer model
-let personalNarrative = await performDynamicSearch(combinedHistory);
-
-// Construct the input message, including the previous response if it exists
-const messages = [
-  { role: "assistant", content: "" },
-  { role: "system", content: "" },
-  { role: "user", content: userInput }
-];
-
-const message = `\nYou don't have ${equipItem} in your inventory.\n`;
-chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-scrollToBottom();
-
-// Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
-
-// Pass the updated game console to the database
-// Update the game console based on user inputs and get the updated game console
-      // Update the game console with a message
-          // Update the game console with an error message
-    conversationHistory += `\nYou don't have ${equipItem} in your inventory.\n`;
-updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
-conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-console.log("Game Console:", updatedGameConsole);
-console.log('itemsInRoom:', itemsInRoom);
-turns++;
-return;
+  if (matchingMonsters.length === 0) {
+      const message = `${monsterNameInput} is not in the room.`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
   }
+
+  if (matchingMonsters.length > 1) {
+      const monsterNamesList = matchingMonsters.map(monster => monster.Name).join(", ");
+      const message = `Which do you mean? ${monsterNamesList}`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  }
+
+  const correctCasedMonsterName = matchingMonsters[0].Name;
+  userInput = `add ${correctCasedMonsterName} to party`;
+
+  const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+  let updatedGameConsole = matchingConsoleData;
+
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  console.log('updatedGameConsole:', updatedGameConsole);
+
+  // Refresh npcsInPartyString and npcsInParty after adding the monster to the party
+ /* npcsInPartyString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim() || "";
+
+  if (npcsInPartyString) {
+      try {
+          const npcBlocks = npcsInPartyString.split(/\n(?=\w)/);
+          npcsInParty = npcBlocks.map(npcBlock => {
+              const lines = npcBlock.trim().split('\n').map(line => line.trim());
+              return {
+                  Name: lines[0]
+              };
+          });
+      } catch (error) {
+          console.error("Error parsing npcsInPartyString after adding:", error);
+      }
+  }*/
+
+  const message = `You added ${correctCasedMonsterName} to the party.`;
+
+  promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+
+  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+  itemsInRoom = objectsInRoomString;
+
+  const combinedHistory = conversationHistory + "\n" + userInput;
+
+  let personalNarrative = await performDynamicSearch(combinedHistory);
+      // Construct the input message, including the previous response if it exists
+  const messages = [
+      { role: "assistant", content: "" },
+      { role: "system", content: "" },
+      { role: "user", content: userInput }
+  ];
+
+  chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+  scrollToBottom();
+
+  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+// Call the helper function to update npcsInParty and npcsInPartyString
+  updateNpcsInParty(updatedGameConsole);
+  console.log("Game Console:", updatedGameConsole);
+  console.log('itemsInRoom:', itemsInRoom);
+  turns++;
+  return;
+}
+
+// Process removing an NPC from the party
+if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.length - 2] === "from" && userWords[userWords.length - 1] === "party") {
+  let npcNameInput = userWords.slice(1, userWords.length - 2).join(" "); // Extract the NPC name input
+
+  // Capitalize the first letter of npcNameInput
+  npcNameInput = npcNameInput.charAt(0).toUpperCase() + npcNameInput.slice(1);
+  
+  const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+
+  let updatedGameConsole = matchingConsoleData;
+  
+  // Call the helper function to update npcsInParty and npcsInPartyString
+  updateNpcsInParty(updatedGameConsole);
+
+/*  npcsInPartyString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim() || "";
+
+  if (npcsInPartyString) {
+      try {
+          const npcBlocks = npcsInPartyString.split(/\n(?=\w)/);
+          npcsInParty = npcBlocks.map(npcBlock => {
+              const lines = npcBlock.trim().split('\n').map(line => line.trim());
+              return {
+                  Name: lines[0]
+              };
+          });
+      } catch (error) {
+          console.error("Error parsing npcsInPartyString:", error);
+      }
+  }*/
+
+  const matchingNpcs = npcsInParty.filter(
+      (npc) => npc.Name.toLowerCase().startsWith(npcNameInput.toLowerCase())
+  );
+
+  if (matchingNpcs.length === 0) {
+      const message = `${npcNameInput} is not in the party.`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  }
+
+  if (matchingNpcs.length > 1) {
+      const npcNamesList = matchingNpcs.map(npc => npc.Name).join(", ");
+      const message = `Which do you mean? ${npcNamesList}`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  }
+
+  const correctCasedNpcName = matchingNpcs[0].Name;
+  userInput = `remove ${correctCasedNpcName} from party`;
+
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  console.log('updatedGameConsole:', updatedGameConsole);
+
+  const message = `You removed ${correctCasedNpcName} from the party.`;
+
+  promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+
+  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+  itemsInRoom = objectsInRoomString;
+
+  const combinedHistory = conversationHistory + "\n" + userInput;
+
+  let personalNarrative = await performDynamicSearch(combinedHistory);
+  
+      // Construct the input message, including the previous response if it exists
+  const messages = [
+      { role: "assistant", content: "" },
+      { role: "system", content: "" },
+      { role: "user", content: userInput }
+  ];
+
+  chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+  scrollToBottom();
+
+  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+  console.log("Game Console:", updatedGameConsole);
+  console.log('itemsInRoom:', itemsInRoom);
+  turns++;
+  return;
+}
+
+gameConsoleData = null;
+gameConsoleIndex = -1;
+objectsInRoomMatch = [];
+// New variable to hold the NPCs in Party string
+
+// Search for the latest game console data and extract NPCs in Party
+for (let i = promptAndResponses.length - 1; i >= 0; i--) {
+  if (promptAndResponses[i].gameConsole) {
+      gameConsoleData = promptAndResponses[i].gameConsole;
+      gameConsoleIndex = i; // Save the index of the game console in promptAndResponses
+      objectsInRoomMatch = gameConsoleData.match(/Objects in Room: ([^\n]+)/) || []; // Ensure objectsInRoomMatch is an array
+
+      if (objectsInRoomMatch.length > 0 ) {
+          break; // Found the most recent gameConsole with "Objects in Room" or "NPCs in Party"
+      }
+  }
+}
+
+objectsInRoomString = [];
+if (Array.isArray(objectsInRoomMatch) && objectsInRoomMatch.length > 1) {
+  objectsInRoomString = objectsInRoomMatch[1].split(',').map(item => item.trim());
+  // Split by comma and trim each item
+}
+
+// Ensure npcsInPartyString is not undefined, null, or empty
+
+console.log("npcsInParty:", npcsInParty);
+
+// New code to access monsters in the room
+monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+
+
+// Process removing an NPC from the party
+if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.length - 2] === "from" && userWords[userWords.length - 1] === "party") {
+  let npcNameInput = userWords.slice(1, userWords.length - 2).join(" "); // Extract the NPC name input
+
+  // Capitalize the first letter of npcNameInput
+  npcNameInput = npcNameInput.charAt(0).toUpperCase() + npcNameInput.slice(1);
+
+  npcsInPartyString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim() || "";
+
+  if (npcsInPartyString) {
+      try {
+          const npcBlocks = npcsInPartyString.split(/\n(?=\w)/);
+          npcsInParty = npcBlocks.map(npcBlock => {
+              const lines = npcBlock.trim().split('\n').map(line => line.trim());
+              return {
+                  Name: lines[0]
+              };
+          });
+      } catch (error) {
+          console.error("Error parsing npcsInPartyString:", error);
+      }
+  }
+
+  const matchingNpcs = npcsInParty.filter(
+      (npc) => npc.Name.toLowerCase().startsWith(npcNameInput.toLowerCase())
+  );
+
+  if (matchingNpcs.length === 0) {
+      const message = `${npcNameInput} is not in the party.`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  }
+
+  if (matchingNpcs.length > 1) {
+      const npcNamesList = matchingNpcs.map(npc => npc.Name).join(", ");
+      const message = `Which do you mean? ${npcNamesList}`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  }
+
+  const correctCasedNpcName = matchingNpcs[0].Name;
+  userInput = `remove ${correctCasedNpcName} from party`;
+
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  console.log('updatedGameConsole:', updatedGameConsole);
+
+  const message = `You removed ${correctCasedNpcName} from the party.`;
+
+  promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+
+  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+  itemsInRoom = objectsInRoomString;
+
+  const combinedHistory = conversationHistory + "\n" + userInput;
+
+  let personalNarrative = await performDynamicSearch(combinedHistory);
+
+  chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+  scrollToBottom();
+
+  addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+  updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+  conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+  console.log("Game Console:", updatedGameConsole);
+  console.log('itemsInRoom:', itemsInRoom);
+  turns++;
+  return;
 }
 
 // Update the game console based on user inputs and get the updated game console
@@ -3544,13 +4715,19 @@ if (personalNarrative) {
   let newRoomName = serverGameConsole.match(/Room Name: (.+)/)?.[1];
   let newRoomHistory = serverGameConsole.match(/Room Description: (.+)/)?.[1];
   let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: (.+)/)?.[1];
-  let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();;
+  let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();
+  let newMonstersEquippedPropertiesString = serverGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+  let currentQuest = serverGameConsole.match(/Current Quest: (.+)/)?.[1];
+  let nextArtifact = serverGameConsole.match(/Next Artifact: (.+)/)?.[1];
 
-// Update the game console with new room details and exits
-updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${newRoomName}`);
-updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
-updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
-updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
+  // Update the game console with new room details and exits
+  updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${newRoomName}`);
+  updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
+  updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
+  updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
+  updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${newMonstersEquippedPropertiesString}`);
+  updatedGameConsole = updatedGameConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
+  updatedGameConsole = updatedGameConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
 
   var content = response.response.content; // Adjust this based on the actual structure
   console.log("Server response:", response); // Debug log to inspect the structure
