@@ -189,7 +189,7 @@ console.log("personalNarrative:", personalNarrative);
             $.user`This is the ${roomName}'s description: "${roomDescription}" Store its contents and await the next prompt.`;
 
             // Generate action and threshold for each NPC
-            await $.assistant`Generate a potential action by ${npcName}, including interacting with the player, NPCs, monsters, or the room. Assign a threshold, ranging from 1 being extremely likely and 20 being extremely unlikely to occur. Format the response exactly as "Action: [description] Threshold: Y" with no additional text. Do not include the dice roll. Do not create any new objects. Do not create any new characters. If the player is engaging in dialogue with the NPCs, lower the difficulty and formulate the actions as knowledge checks but don't include quotes, just descriptions of what additional knowledge they might possess and are able or willing to share.`;
+            await $.assistant`Generate any potential action by ${npcName}, including interacting with the player, NPCs, monsters, or the room. Assign a threshold, ranging from 1 being extremely likely and 20 being extremely unlikely to occur. Format the response exactly as "Action: [description] Threshold: Y" with no additional text. Do not include the dice roll. Do not create any new objects. Do not create any new characters.`;
             const npcActionResult = await $.assistant.generation();
             const npcActionMatch = npcActionResult.content.trim().match(/^(.*)\s*Threshold:\s*(\d+)\s*$/);
 
@@ -220,7 +220,7 @@ console.log("personalNarrative:", personalNarrative);
             $.user`This is the ${roomName}'s description: "${roomDescription}" Store its contents and await the next prompt.`;
 
             // Generate action and threshold for each Monster
-            await $.assistant`Generate a potential action by ${monsterName}, including interacting with the player, NPCs, other monsters, or the room. Assign a threshold, ranging from 1 being extremely likely and 20 being extremely unlikely to occur. Format the response exactly as "Action: [description] Threshold: Y" with no additional text. Do not include the dice roll. Do not create any new objects. Do not create any new characters. If the player is engaging in dialogue with the NPCs, lower the difficulty and formulate the actions as knowledge checks but don't include quotes, just descriptions of what additional knowledge they might possess and are able or willing to share.`;
+            await $.assistant`Generate any potential action by ${monsterName}, including interacting with the player, NPCs, other monsters, or the room. Assign a threshold, ranging from 1 being extremely likely and 20 being extremely unlikely to occur. Format the response exactly as "Action: [description] Threshold: Y" with no additional text. Do not include the dice roll. Do not create any new objects. Do not create any new characters.`;
             const monsterActionResult = await $.assistant.generation();
             const monsterActionMatch = monsterActionResult.content.trim().match(/^(.*)\s*Threshold:\s*(\d+)\s*$/);
 
@@ -788,7 +788,7 @@ console.log("personalNarrative:", personalNarrative);
     const roomDetails = sharedState.getUpdatedGameConsole();
     const outcomes = await $.run($ => adjudicateAction($, roomDetails)); 
     
-  $.user`Check the current game console, if there are any NPCs and/or monsters, these are the current actions being taken by NPCs and monsters in the room: ${outcomes}. If a roll equals or exceeds the roll threshold, then the action was successful and if it less than the roll threshold, it fails, but don't report the outcomes yet. Store this information in memory and await the next prompt.`;
+   $.user`Check the current game console, if there are any NPCs and/or monsters, these are the current actions being taken by NPCs and monsters in the room: ${outcomes}. If a roll equals or exceeds the roll threshold, then the action was successful and if it less than the roll threshold, it fails. Store this information in memory and await the next prompt.`;
    
 
     // Include the outcomes in the GPT's response
