@@ -3883,6 +3883,7 @@ let selectedRace = characterRaces[raceIndex];
 let classIndex = parseInt(character.Class) - 1;
 let selectedClass = characterClasses[classIndex];
 
+if (!isCharacterCreationInProgress()) {
 if (userWords[0] === '1' && charactersString.length <= 0) {
 userInput = document.getElementById("chatuserinput").value;
 document.getElementById("chatuserinput").value = "";
@@ -3895,13 +3896,14 @@ userWords = "";
 character = createSuzerainCharacter();
 } else if (userWords[0] === "3" && charactersString.length <= 0) {
 // Check if character creation is already in progress
-if (!isCharacterCreationInProgress()) {
+
   // Start character creation by setting characterCreationStep to 1
   characterCreationStep = 1;
   displayMessage('Step 1: Enter character name'); // Display the first step
   console.log('charactersString:', charactersString);
   console.log('character:', character);
   return;
+
 }
 }
 
@@ -3910,51 +3912,80 @@ if (isCharacterCreationInProgress()) {
 // Use characterCreationStep to determine which step to execute
 switch (characterCreationStep) {
   case 1:
-    character.Name = userInput;
+    if (!userInput.trim()) {  // Check if the name is blank
+      displayMessage('Name cannot be blank. Please enter a valid character name:');
+      return;
+    }
+    character.Name = userInput.trim();
     displayMessage('Step 2: Choose character sex (Male or Female)');
     characterCreationStep++;
     break;
-  case 2:
-    character.Sex = userInput;
-    displayMessage('Step 3: Choose character race (Enter the race number)');
-    
-    // Display character's class selection as a single message
-    let raceSelectionMessage = 'Choose character\'s race:\n';
 
+  case 2:
+    if (!userInput.trim() /*|| !['Male', 'Female'].includes(userInput.trim())*/) {  // Validate sex input
+      displayMessage('Please enter "Male" or "Female" for character sex:');
+      return;
+    }
+    character.Sex = userInput.trim();
+    displayMessage('Step 3: Choose character race (Enter the race number or name)');
+
+    // Display character's race selection as a single message
+    let raceSelectionMessage = 'Choose character\'s race:\n';
     characterRaces.forEach((race, index) => {
       raceSelectionMessage += `${index + 1}) ${race.name} - ${race.description}\n`;
     });
-
     displayMessage(raceSelectionMessage);
-    
+
     characterCreationStep++;
     break;
+
   case 3:
-    character.Race = userInput; // Set the user's input as the character's race
-    raceIndex = parseInt(character.Race) - 1;
-    selectedRace = characterRaces[raceIndex];
-  
-    // Now that selectedRace is defined, call calculateCharacterRace
+    let raceInput = userInput.trim();
+    raceIndex = isNaN(parseInt(raceInput)) ? -1 : parseInt(raceInput) - 1;
+
+    if (raceIndex >= 0 && raceIndex < characterRaces.length) {
+      selectedRace = characterRaces[raceIndex];
+    } else {
+      selectedRace = characterRaces.find(race => race.name.toLowerCase() === raceInput.toLowerCase());
+    }
+
+    if (!selectedRace) {  // Validate race input
+      displayMessage('Invalid race. Please enter a valid race number or name:');
+      return;
+    }
+
+    character.Race = selectedRace.name;
+
+    // Call calculateCharacterRace now that selectedRace is defined
     calculateCharacterRace(character, selectedRace);
-    
-// Convert user input to class index (assuming user input is a valid class number)
-      // Display character's class selection as a single message
-      let classSelectionMessage = 'Choose character\'s class:\n';
 
-      characterClasses.forEach((cls, index) => {
-        classSelectionMessage += `${index + 1}) ${cls.name} - ${cls.description}\n`;
-      });
+    // Display character's class selection as a single message
+    let classSelectionMessage = 'Choose character\'s class:\n';
+    characterClasses.forEach((cls, index) => {
+      classSelectionMessage += `${index + 1}) ${cls.name} - ${cls.description}\n`;
+    });
+    displayMessage(classSelectionMessage);
 
-      displayMessage(classSelectionMessage);
+    characterCreationStep++;
+    break;
 
-      characterCreationStep++;
-      break;
-    case 4:
-      character.Class = userInput;
-      classIndex = parseInt(character.Class) - 1;
+  case 4:
+    let classInput = userInput.trim();
+    classIndex = isNaN(parseInt(classInput)) ? -1 : parseInt(classInput) - 1;
+
+    if (classIndex >= 0 && classIndex < characterClasses.length) {
       selectedClass = characterClasses[classIndex];
-      // Calculate character HP based on class
-      calculateCharacterHP(character, selectedClass);
+    } else {
+      selectedClass = characterClasses.find(cls => cls.name.toLowerCase() === classInput.toLowerCase());
+    }
+
+    if (!selectedClass) {  // Validate class input
+      displayMessage('Invalid class. Please enter a valid class number or name:');
+      return;
+    }
+
+    character.Class = selectedClass.name;
+    calculateCharacterHP(character, selectedClass); 
 // Character creation is complete, add the created character to the characters array
       characters.push(character);
       
