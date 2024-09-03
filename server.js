@@ -18,7 +18,7 @@ app.post('/processInput', async (req, res) => {
     const response = await retortWithUserInput(userInput);
     const updatedGameConsole = sharedState.getUpdatedGameConsole();
     console.log("Sending updatedGameConsole to client:", updatedGameConsole);
-    res.json({ response, updatedGameConsole });
+    res.json({ response: response.content, updatedGameConsole, imageUrl: response.imageUrl });
 });
 
 app.post('/updateState', async (req, res) => {
