@@ -537,7 +537,7 @@ return inventory;
 }
 
 // Define experienceToAdd
-const experienceToAdd = getRandomInt(100, 500);
+const experienceToAdd = getRandomInt(0, 1);
 
 // Function to calculate XP based on character level
 function calculateXP(level) {
@@ -547,16 +547,22 @@ return level * 15000;
 // Define a map to store generated monsters in visited rooms
 const monstersInVisitedRooms = new Map();
 const monstersEquippedPropertiesByRoom = new Map();
+const monstersStateByRoom = new Map();
 
 function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
   if (!monstersInVisitedRooms.has(roomCoordinates)) {
       let monsters = [];
       let monstersEquippedProperties = [];
+      let monstersState = "";
 
       // Update regex to ensure it captures the entire monsters section properly
-      const monsterDataMatch = serverGameConsole.match(/Monsters in Room:([\s\S]+?)(?=Rooms Visited:|$)/);
+      const monsterDataMatch = serverGameConsole.match(/Monsters in Room:([\s\S]+?)(?=Monsters Equipped Properites:|$)/);
       if (monsterDataMatch) {
           // Correctly split monster entries by looking for two consecutive newlines or start of a new monster entry
+          const monstersStateMatch = serverGameConsole.match(/Monsters State:([\s\S]+?)(?=Rooms Visited:|$)/);
+          if (monstersStateMatch) {
+              monstersState = monstersStateMatch[1].trim(); // Extract the captured group
+          }
           const monsterEntries = monsterDataMatch[1].trim().split(/\n(?=\w)/);
           monsters = monsterEntries.map(monsterBlock => {
               const lines = monsterBlock.split('\n').map(line => line.trim());
@@ -614,6 +620,8 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
 
           monstersInVisitedRooms.set(roomCoordinates, monsters);
           monstersEquippedPropertiesByRoom.set(roomCoordinates, monstersEquippedProperties);
+          monstersStateByRoom.set(roomCoordinates, monstersState);
+          
 
           // Log the equipped properties for verification
           console.log(`Stored monsters equipped properties for room ${roomCoordinates}:`, monstersEquippedProperties);
@@ -655,8 +663,11 @@ let score = 0;
 let inventoryProperties = [];
 let monstersInRoom = [];
 let monstersEquippedProperties = [];
+let monstersState = "";
 let npcsInPartyString = [];
 let npcsInParty = [];
+let characters = [];
+let npcs = [];
 
 async function completeQuestIfArtifactFound() {
  
@@ -702,6 +713,249 @@ function findItemProperties(itemName) {
   return monstersEquippedProperties.find(item => item.name.toLowerCase() === itemName.toLowerCase());
 }
 
+// Define the extractDetails function
+function extractDetails(details) {
+  const lines = details.split('\n').map(line => line.trim());
+  const characters = [];
+  for (let i = 0; i < lines.length; i += 14) {
+      const name = lines[i] || 'Unknown';
+      const className = lines[i + 3] ? lines[i + 3].trim() : 'Unknown';
+      const ac = lines[i + 5] ? parseInt(lines[i + 5].split(':')[1].trim()) : 0;
+      const hp = lines[i + 7] ? parseInt(lines[i + 7].split(':')[1].trim()) : 0;
+      const attack = lines[i + 10] ? parseInt(lines[i + 10].split(':')[1].trim()) : 0;
+      const damage = lines[i + 11] ? parseInt(lines[i + 11].split(':')[1].trim()) : 0;
+
+      if (name && className && !isNaN(ac) && !isNaN(hp) && !isNaN(attack) && !isNaN(damage)) {
+          characters.push({
+              name,
+              className,
+              ac,
+              hp,
+              attack,
+              damage,
+          });
+      } else {
+          console.error(`Failed to parse character details correctly at line ${i + 1}`);
+      }
+  }
+  return characters;
+}
+
+// Function to roll a dice and sum results for each level above the current level
+function rollTotalHP(currentLevel, newLevel, diceSize) {
+let hpTotal = 0;
+const levelsToRoll = newLevel - currentLevel;
+
+for (let i = 0; i < levelsToRoll; i++) {
+  hpTotal += Math.floor(Math.random() * diceSize) + 1;
+}
+return hpTotal;
+}
+
+// Function to calculate XP thresholds that double per level until level 9, then increment at a fixed rate
+function calculateXpThresholds(xpThreshold, level) {
+  if (level < 9) {
+      // Doubling per level until level 9
+      return xpThreshold * Math.pow(2, level - 2);
+  } else {
+      // Fixed rate after level 9
+      return xpThreshold * Math.pow(2, 7);
+  }
+}
+
+// Function to determine the level based on XP
+function calculateLevel(xp, xpThreshold, className) {
+  let level = 1;
+  let xpForNextLevel;
+
+  while (true) {
+      // Handle if xpThreshold is a function (for classes like "Assassin-Fighter-Necromancer-Goddess")
+      if (typeof xpThreshold === 'function') {
+          xpForNextLevel = xpThreshold(level);
+      } else {
+          xpForNextLevel = calculateXpThresholds(xpThreshold, level);
+      }
+
+      if (xp < xpForNextLevel) {
+          break;
+      }
+
+      xp -= xpForNextLevel;
+      level++;
+  }
+
+  return level;
+}
+
+const xpThresholds = {
+  'Knight of Atinus': 1750,
+  'Knight of Atricles': 2000,
+  'Wizard': 2500,
+  'Witch': 2500,
+  'Necromancer': 2500,
+  'Warlock': 3000,
+  'Sorcerer': 3000,
+  'Thief': 1500,
+  'Assassin': 1500,
+  'Barbarian': 2000,
+  'Assassin-Fighter-Necromancer-Goddess': (level) => {
+      if (level < 9) {
+          return 3500 * Math.pow(2, level - 2);
+      } else if (level >= 50 && level < 58) {
+          return 3500 * Math.pow(2, level - 50); // Resetting thresholds
+      } else {
+          return 3500 * Math.pow(2, 7); // Fixed rate after level 9 or 57
+      }
+  }
+};
+
+// Define XP thresholds for different classes
+/*const xpThresholds = {
+  'Knight of Atinus': 12000,
+  'Knight of Atricles': 13000,
+  'Wizard': 14000,
+  'Witch': 14000,
+  'Necromancer': 14000,
+  'Warlock': 16000,
+  'Sorcerer': 16000,
+  'Thief': 11000,
+  'Assassin': 11000,
+  'Barbarian': 12000,
+  'Assassin-Fighter-Necromancer-Goddess': 15000,
+  // Add other classes if needed
+};*/
+
+// Function to calculate increases based on the level difference
+function calculateIncrease(currentLevel, newLevel, factor) {
+  return Math.floor((newLevel - currentLevel) / factor);
+}
+
+// Ensure that PC properties exist and initialize them if not
+function ensurePCProperties(char) {
+  // Initialize the properties if not already set
+  if (char.Attack === undefined) char.Attack = 0;
+  if (char.Damage === undefined) char.Damage = 0;
+  if (char.Armor === undefined) char.Armor = 0;
+  if (char.Magic === undefined) char.Magic = 0;
+
+  // Check if base modifiers have already been applied
+  if (!char.baseModifiersApplied) {
+      // Define base modifiers for each class
+      const baseClassModifiers = {
+          'Knight of Atinus': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
+          'Knight of Atricles': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
+          'Wizard': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
+          'Witch': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
+          'Necromancer': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
+          'Warlock': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
+          'Sorcerer': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
+          'Thief': { Attack: 0, Damage: 0, Armor: 1, Magic: 0 },
+          'Assassin': { Attack: 1, Damage: 0, Armor: 0, Magic: 0 },
+          'Barbarian': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
+          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: 0, Magic: 5 },
+          // Add other classes here
+      };
+
+      // Define base modifiers for each race
+      const baseRaceModifiers = {
+          'Human': { Attack: 0, Damage: 0, Armor: 0, Magic: 0 },
+          'Dwarf': { Attack: 0, Damage: 1, Armor: 0, Magic: -1 },
+          'High Elf': { Attack: -1, Damage: -1, Armor: 1, Magic: 2 },
+          'Unseelie Elf': { Attack: -1, Damage:-1, Armor: 1, Magic: 2 },
+          'Half-Elf': { Attack: -1, Damage: 0, Armor: 0, Magic: 1 },
+          'Halfling': { Attack: -1, Damage: -1, Armor: 2, Magic: 0 },
+          'Fey': { Attack: -1, Damage: -2, Armor: 0, Magic: 3 },
+          'Raakshasa': { Attack: -1, Damage: 0, Armor: -1, Magic: 2 },
+          'Gnome': { Attack: -1, Damage: -1, Armor: 0, Magic: 2 },
+          // Add other races here
+      };
+
+      // Apply the base modifiers if the class and race are found
+      const classModifiers = baseClassModifiers[char.Class];
+      const raceModifiers = baseRaceModifiers[char.Race];
+
+      if (classModifiers) {
+          char.Attack += classModifiers.Attack;
+          char.Damage += classModifiers.Damage;
+          char.Armor += classModifiers.Armor;
+          char.Magic += classModifiers.Magic;
+      }
+
+      if (raceModifiers) {
+          char.Attack += raceModifiers.Attack;
+          char.Damage += raceModifiers.Damage;
+          char.Armor += raceModifiers.Armor;
+          char.Magic += raceModifiers.Magic;
+      }
+
+      // Mark that base modifiers have been applied
+      char.baseModifiersApplied = true;
+  }
+}
+
+// Ensure that npc properties exist and initialize them if not
+function ensureNPCProperties(npc) {
+  // Initialize the properties if not already set
+  if (npc.Attack === undefined) npc.Attack = 0;
+  if (npc.Damage === undefined) npc.Damage = 0;
+  if (npc.Armor === undefined) npc.Armor = 0;
+  if (npc.Magic === undefined) npc.Magic = 0;
+
+  // Check if base modifiers have already been applied
+  if (!npc.baseModifiersApplied) {
+      // Define base modifiers for each class
+      const baseClassModifiers = {
+          'Knight of Atinus': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
+          'Knight of Atricles': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
+          'Wizard': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
+          'Witch': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
+          'Necromancer': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
+          'Warlock': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
+          'Sorcerer': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
+          'Thief': { Attack: 0, Damage: 0, Armor: 1, Magic: 0 },
+          'Assassin': { Attack: 1, Damage: 0, Armor: 0, Magic: 0 },
+          'Barbarian': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
+          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: 0, Magic: 5 },
+          // Add other classes here
+      };
+
+      // Define base modifiers for each race
+      const baseRaceModifiers = {
+          'Human': { Attack: 0, Damage: 0, Armor: 0, Magic: 0 },
+          'Dwarf': { Attack: 0, Damage: 1, Armor: 0, Magic: -1 },
+          'High Elf': { Attack: -1, Damage: -1, Armor: 1, Magic: 2 },
+          'Unseelie Elf': { Attack: -1, Damage:-1, Armor: 1, Magic: 2 },
+          'Half-Elf': { Attack: -1, Damage: 0, Armor: 0, Magic: 1 },
+          'Halfling': { Attack: -1, Damage: -1, Armor: 2, Magic: 0 },
+          'Fey': { Attack: -1, Damage: -2, Armor: 0, Magic: 3 },
+          'Raakshasa': { Attack: -1, Damage: 0, Armor: -1, Magic: 2 },
+          'Gnome': { Attack: -1, Damage: -1, Armor: 0, Magic: 2 },
+          // Add other races here
+      };
+
+      // Apply the base modifiers if the class and race are found
+      const classModifiers = baseClassModifiers[npc.Class];
+      const raceModifiers = baseRaceModifiers[npc.Race];
+
+      if (classModifiers) {
+          npc.Attack += classModifiers.Attack;
+          npc.Damage += classModifiers.Damage;
+          npc.Armor += classModifiers.Armor;
+          npc.Magic += classModifiers.Magic;
+      }
+
+      if (raceModifiers) {
+          npc.Attack += raceModifiers.Attack;
+          npc.Damage += raceModifiers.Damage;
+          npc.Armor += raceModifiers.Armor;
+          npc.Magic += raceModifiers.Magic;
+      }
+
+      // Mark that base modifiers have been applied
+      npc.baseModifiersApplied = true;
+  }
+}
+
 // Function to update the game console based on user inputs and get the updated game console
 function updateGameConsole(userInput, currentCoordinates, conversationHistory, itemToTake, serverGameConsole, equippedItems, characterStats) {
 
@@ -734,6 +988,7 @@ const roomKey = coordinatesToString(currentCoordinates);
 let adjacentRooms = [];
 let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
 let monstersEquippedProperties = monstersEquippedPropertiesByRoom.get(roomKey) || [];
+let monstersState = monstersStateByRoom.get(roomKey) || "";
 
 // Extract monsters data from the matchingConsole
 if (matchingConsole) {
@@ -769,13 +1024,14 @@ if (matchingConsole) {
               return monster;
           });
           monstersInRoom = monstersData;
+
       } else {
           monstersInRoom = []; // No monsters in the room
       }
   }
 
   // Extract monsters equipped properties from the matchingConsole
-  const equippedPropertiesRegex = /Monsters Equipped Properties:(.*?)(?=Rooms Visited:|$)/s;
+  const equippedPropertiesRegex = /Monsters Equipped Properties:(.*?)(?=Monsters State:|$)/s;
   const equippedPropertiesMatch = matchingConsole.match(equippedPropertiesRegex);
 
   if (equippedPropertiesMatch) {
@@ -842,6 +1098,329 @@ let monstersEquippedPropertiesString = monstersEquippedProperties.length > 0
 
   console.log("Monsters in Room:", monstersInRoomString);
 
+if (serverGameConsole && turns >= 0) {
+  // Match and update PC details
+  let pcMatch = serverGameConsole.match(/PC:([\s\S]*?)(?=(NPCs in Party|Rooms Visited))/);
+  if (pcMatch && characters.length > 0) {
+      const pcDetails = pcMatch[1].trim();
+      const pcLines = pcDetails.split('\n').map(line => line.trim());
+      
+      if (pcLines.length >= 14) {
+          const newLevel = parseInt(pcLines[4].split(': ')[1]); // Assuming Level is on line 4
+          const newXP = parseInt(pcLines[6].split(': ')[1]);
+          const newHP = parseInt(pcLines[7].split(': ')[1]);
+          const newMaxHP = parseInt(pcLines[8].split(': ')[1]); // Assuming MaxHP is on line 8
+          characters[0].Level = newLevel;  // Update the Level of the PC
+          characters[0].XP = newXP;        // Update the XP of the PC
+          characters[0].HP = newHP;        // Update the HP of the PC
+          characters[0].MaxHP = newMaxHP;  // Update the MaxHP of the PC
+      }
+  }
+
+  // Match and update NPCs in Party details
+  let npcsMatch = serverGameConsole.match(/NPCs in Party:([\s\S]*?)(?=(Monsters in Room|Rooms Visited))/);
+  if (npcsMatch && npcs.length > 0) {
+      const npcsDetails = npcsMatch[1].trim();
+      const npcsBlocks = npcsDetails.split(/\n(?=\w)/);  // Split by lines starting with a word character
+
+      npcsBlocks.forEach((npcBlock, index) => {
+          const lines = npcBlock.trim().split('\n').map(line => line.trim());
+          
+          if (lines.length >= 14 && index < npcs.length) {
+              const newLevel = parseInt(lines[4].split(': ')[1]); // Assuming Level is on line 4
+              const newXP = parseInt(lines[6].split(': ')[1]);
+              const newHP = parseInt(lines[7].split(': ')[1]);
+              const newMaxHP = parseInt(lines[8].split(': ')[1]); // Assuming MaxHP is on line 8
+              npcs[index].Level = newLevel;  // Update the Level of each NPC
+              npcs[index].XP = newXP;        // Update the XP of each NPC
+              npcs[index].HP = newHP;        // Update the HP of each NPC
+              npcs[index].MaxHP = newMaxHP;  // Update the MaxHP of each NPC
+          }
+      });
+  }
+
+characters.forEach(char => {
+  ensurePCProperties(char);
+  char.AC = 10 + Math.floor(char.Level / 10);
+});
+
+npcs.forEach(npc => {
+  ensureNPCProperties(npc);
+  npc.AC = 10 + Math.floor(npc.Level / 10);
+});
+
+/*// Update HP and level for chars
+characters.forEach(char => {
+  // Determine the XP threshold for the char's class
+  const xpThreshold = xpThresholds[char.Class] || 3500; // Default to 15000 if class not found
+
+  // Calculate the new level based on XP and the class-specific threshold
+ // const newLevel = Math.floor(char.XP / xpThreshold) + 1;
+  // Calculate the new level based on XP and the class-specific threshold
+  const newLevel = calculateLevel(char.XP, xpThresholds[char.Class]);
+
+  ensurePCProperties(char);
+
+  // Define character classes and their respective HP generation
+  const characterClasses = [
+      { name: 'Knight of Atinus', baseHP: 10 },
+      { name: 'Knight of Atricles', baseHP: 12 },
+      { name: 'Wizard', baseHP: 6 },
+      { name: 'Witch', baseHP: 6 }, 
+      { name: 'Necromancer', baseHP: 6 }, 
+      { name: 'Warlock', baseHP: 4 }, 
+      { name: 'Sorcerer', baseHP: 4 }, 
+      { name: 'Thief', baseHP: 8 }, 
+      { name: 'Assassin', baseHP: 8 }, 
+      { name: 'Barbarian', baseHP: 12 },
+      { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 }, 
+      // Add other classes here
+  ];
+
+  // Find the char's class
+  const characterClass = characterClasses.find(cls => cls.name === char.Class);
+
+  // Calculate HP, attack, damage, and armor increases based on the class's HP generation and level difference
+  let hpIncrease = 0;
+  let attackIncrease = 0;
+  let damageIncrease = 0;
+  let armorIncrease = 0;
+  let magicIncrease = 0;
+
+  if (characterClass) {
+      if (characterClass.name === 'Knight of Atinus') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 10);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Knight of Atricles') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 12);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 5);
+      } else if (characterClass.name === 'Wizard') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
+      } else if (characterClass.name === 'Witch') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
+      } else if (characterClass.name === 'Necromancer') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
+      } else if (characterClass.name === 'Warlock') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 4);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 1/3);
+      } else if (characterClass.name === 'Sorcerer') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 4);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 1/3);
+      } else if (characterClass.name === 'Thief') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 8);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 7);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 5);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Assassin') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 8);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Barbarian') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 12);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
+          hpIncrease = rollTotalHP(char.Level, newLevel, 11);
+          attackIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 5);
+          damageIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 7);
+          armorIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 10);
+          magicIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 1/3);
+      } else {
+          // For generic or unknown classes, use a default 1d10 HP increase per level
+          hpIncrease = rollTotalHP(char.Level, newLevel, 10);
+          attackIncrease = calculateIncrease(char.Level, newLevel, 7);
+          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
+          magicIncrease = calculateIncrease(char.Level, newLevel, 3);
+      }
+  }
+
+  // Check if the level has increased
+  if (newLevel > char.Level) {
+      char.Level = newLevel;
+
+      // Calculate AC for chars
+      char.AC = 10 + Math.floor(char.Level / 10);
+
+      // Update char attributes
+      char.HP += hpIncrease;
+      char.MaxHP += hpIncrease;
+      char.Attack += attackIncrease;
+      char.Damage += damageIncrease;
+      char.Armor += armorIncrease;
+      char.Magic += magicIncrease;
+
+      // Debugging log to verify updates
+      console.log(`Updated ${char.Name} (Class: ${char.Class}) - Level: ${char.Level}, HP: ${char.HP}, MaxHP: ${char.MaxHP}, Attack: ${char.Attack}, Damage: ${char.Damage}, Armor: ${char.Armor}, Magic: ${char.Magic}`);
+  }
+});
+
+// Update HP and level for NPCs
+npcs.forEach(npc => {
+  // Determine the XP threshold for the NPC's class
+  const xpThreshold = xpThresholds[npc.Class] || 3500; // Default to 15000 if class not found
+
+  // Calculate the new level based on XP and the class-specific threshold
+//   const newLevel = Math.floor(npc.XP / xpThreshold) + 1;
+      // Calculate the new level based on XP and the class-specific threshold
+  const newLevel = calculateLevel(npc.XP, xpThresholds[npc.Class]);
+
+// Ensure NPC properties exist
+ensureNPCProperties(npc);
+
+  // Define character classes and their respective HP generation
+  const characterClasses = [
+      { name: 'Knight of Atinus', baseHP: 10 },
+      { name: 'Knight of Atricles', baseHP: 12 },
+      { name: 'Wizard', baseHP: 6 },
+      { name: 'Witch', baseHP: 6 }, 
+      { name: 'Necromancer', baseHP: 6 }, 
+      { name: 'Warlock', baseHP: 4 }, 
+      { name: 'Sorcerer', baseHP: 4 }, 
+      { name: 'Thief', baseHP: 8 }, 
+      { name: 'Assassin', baseHP: 8 }, 
+      { name: 'Barbarian', baseHP: 12 },
+      { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 }, 
+      // Add other classes here
+  ];
+
+  // Find the NPC's class
+  const characterClass = characterClasses.find(cls => cls.name === npc.Class);
+
+  // Calculate HP, attack, damage, and armor increases based on the class's HP generation and level difference
+  let hpIncrease = 0;
+  let attackIncrease = 0;
+  let damageIncrease = 0;
+  let armorIncrease = 0;
+  let magicIncrease = 0;
+
+  if (characterClass) {
+      if (characterClass.name === 'Knight of Atinus') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 10);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Knight of Atricles') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 12);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 5);
+      } else if (characterClass.name === 'Wizard') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
+      } else if (characterClass.name === 'Witch') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
+      } else if (characterClass.name === 'Necromancer') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
+      } else if (characterClass.name === 'Warlock') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 4);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/3);
+      } else if (characterClass.name === 'Sorcerer') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 4);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/3);
+      } else if (characterClass.name === 'Thief') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 8);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 5);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Assassin') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 8);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Barbarian') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 12);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          magicIncrease = 0;
+      } else if (characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 11);
+          attackIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 5);
+          damageIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 7);
+          armorIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 10);
+          magicIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 1/3);
+      } else {
+          // For generic or unknown classes, use a default 1d10 HP increase per level
+          hpIncrease = rollTotalHP(npc.Level, newLevel, 10);
+          attackIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
+          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
+          magicIncrease = calculateIncrease(npc.Level, newLevel, 3);
+      }
+  }
+
+  // Check if the level has increased
+  if (newLevel > npc.Level) {
+      npc.Level = newLevel;
+
+      // Calculate AC for NPCs
+      npc.AC = 10 + Math.floor(npc.Level / 10);
+
+      // Update NPC attributes
+      npc.HP += hpIncrease;
+      npc.MaxHP += hpIncrease;
+      npc.Attack += attackIncrease;
+      npc.Damage += damageIncrease;
+      npc.Armor += armorIncrease;
+      npc.Magic += magicIncrease;
+
+      // Debugging log to verify updates
+      console.log(`Updated ${npc.Name} (Class: ${npc.Class}) - Level: ${npc.Level}, HP: ${npc.HP}, MaxHP: ${npc.MaxHP}, Attack: ${npc.Attack}, Damage: ${npc.Damage}, Armor: ${npc.Armor}, Magic: ${npc.Magic}`);
+  }
+});*/
+}
+
   // Check if serverGameConsole is defined and has the expected content
   if (serverGameConsole) {
       let roomNameMatch = serverGameConsole.match(/Room Name: (.+)/);
@@ -855,7 +1434,7 @@ let monstersEquippedPropertiesString = monstersEquippedProperties.length > 0
 
       let nextArtifactMatch = serverGameConsole.match(/Next Artifact: (.+)/);
       if (nextArtifactMatch) nextArtifact = nextArtifactMatch[1];
-
+      
 // Extract adjacent rooms
 let adjacentRoomsMatch = serverGameConsole.match(/Adjacent Rooms: ([^\n]+)/);
 if (adjacentRoomsMatch) adjacentRooms = adjacentRoomsMatch ? adjacentRoomsMatch[1].split(', ').reduce((acc, room) => {
@@ -872,6 +1451,7 @@ console.log("roomNameDatabase:", roomNameDatabase);
       generateMonstersForRoom(roomKey, serverGameConsole);
       monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
       monstersEquippedProperties = monstersEquippedPropertiesByRoom.get(roomKey) || [];
+      monstersState = monstersStateByRoom.get(roomKey) || "";
 
       // Extract monsters data from the serverGameConsole
       const monstersRegex = /Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s;
@@ -912,7 +1492,7 @@ console.log("roomNameDatabase:", roomNameDatabase);
       }
 
       // Extract monsters equipped properties from the serverGameConsole
-      const equippedPropertiesRegex = /Monsters Equipped Properties:(.*?)(?=Rooms Visited:|$)/s;
+      const equippedPropertiesRegex = /Monsters Equipped Properties:(.*?)(?=Monsters State:|$)/s;
       const equippedPropertiesMatch = serverGameConsole.match(equippedPropertiesRegex);
 
       if (equippedPropertiesMatch) {
@@ -932,7 +1512,17 @@ console.log("roomNameDatabase:", roomNameDatabase);
               monstersEquippedProperties = []; // No equipped properties
           }
       }
+      
+              // Extract monsters equipped properties from the serverGameConsole
+      const monstersStateRegex = /Monsters State:(.*?)(?=Rooms Visited:|$)/s;
+      const monstersStateMatch = serverGameConsole.match(monstersStateRegex);
 
+      if (monstersStateMatch) {
+              const monstersState = monstersStateMatch;
+          } else {
+              monstersState = "";
+              }    
+      
       // Log the parsed monsters to verify correct parsing
       console.log("Parsed monsters from serverGameConsole:", monstersInRoom);
 
@@ -969,27 +1559,9 @@ console.log("roomNameDatabase:", roomNameDatabase);
           : "None";
           
       console.log("Monsters in Room:", monstersInRoomString);
-
-//   let roomMonstersMatch = serverGameConsole.match(/Monsters in Room: ([\s\S]+)/);
-//      if (roomMonstersMatch) {
-//                    let monstersData = roomMonstersMatch[1];
-
-      // Generate or update monsters for the room from server game console data
-   //   generateMonstersForRoom(roomKey, serverGameConsole);
-   //   monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
-      // Parse monstersData to create monster objects and store them in monstersInVisitedRooms
-      // This assumes you have a function to parse the detailed string into monster objects
-  //    let parsedMonsters = parseMonstersData(monstersData);
-  //    monstersInVisitedRooms.set(roomKey, parsedMonsters);
       
-  //    monstersInRoomString = monstersData;  // Store the raw string if needed elsewhere
-   //   }
-      
-//    monstersInVisitedRooms.set(roomKey, monstersInRoom[1]);
-//   generateMonstersForRoom(roomKey);
-//    monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
-//    console.log(monstersInVisitedRooms.get(roomKey));
-//    console.log(monstersInRoom);
+  // Update monsters in the room
+  monstersInVisitedRooms.set(roomKey, monstersInRoom);
 
   }
 
@@ -1329,431 +1901,7 @@ let npcsString = npcs.length > 0
 }).join('\n')
 : "None";
 
-// Function to roll a dice and sum results for each level above the current level
-function rollTotalHP(currentLevel, newLevel, diceSize) {
-let hpTotal = 0;
-const levelsToRoll = newLevel - currentLevel;
 
-for (let i = 0; i < levelsToRoll; i++) {
-  hpTotal += Math.floor(Math.random() * diceSize) + 1;
-}
-return hpTotal;
-}
-
-// Define XP thresholds for different classes
-const xpThresholds = {
-  'Knight of Atinus': 12000,
-  'Knight of Atricles': 13000,
-  'Wizard': 14000,
-  'Witch': 14000,
-  'Necromancer': 14000,
-  'Warlock': 16000,
-  'Sorcerer': 16000,
-  'Thief': 11000,
-  'Assassin': 11000,
-  'Barbarian': 12000,
-  'Assassin-Fighter-Necromancer-Goddess': 15000,
-  // Add other classes if needed
-};
-
-// Function to calculate increases based on the level difference
-function calculateIncrease(currentLevel, newLevel, factor) {
-  return Math.floor((newLevel - currentLevel) / factor);
-}
-
-// Ensure that PC properties exist and initialize them if not
-function ensurePCProperties(char) {
-  // Initialize the properties if not already set
-  if (char.Attack === undefined) char.Attack = 0;
-  if (char.Damage === undefined) char.Damage = 0;
-  if (char.Armor === undefined) char.Armor = 0;
-  if (char.Magic === undefined) char.Magic = 0;
-
-  // Check if base modifiers have already been applied
-  if (!char.baseModifiersApplied) {
-      // Define base modifiers for each class
-      const baseClassModifiers = {
-          'Knight of Atinus': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Knight of Atricles': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Wizard': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
-          'Witch': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
-          'Necromancer': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
-          'Warlock': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
-          'Sorcerer': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
-          'Thief': { Attack: 0, Damage: 0, Armor: 1, Magic: 0 },
-          'Assassin': { Attack: 1, Damage: 0, Armor: 0, Magic: 0 },
-          'Barbarian': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: 0, Magic: 5 },
-          // Add other classes here
-      };
-
-      // Define base modifiers for each race
-      const baseRaceModifiers = {
-          'Human': { Attack: 0, Damage: 0, Armor: 0, Magic: 0 },
-          'Dwarf': { Attack: 0, Damage: 1, Armor: 0, Magic: -1 },
-          'High Elf': { Attack: -1, Damage: -1, Armor: 1, Magic: 2 },
-          'Unseelie Elf': { Attack: -1, Damage:-1, Armor: 1, Magic: 2 },
-          'Half-Elf': { Attack: -1, Damage: 0, Armor: 0, Magic: 1 },
-          'Halfling': { Attack: -1, Damage: -1, Armor: 2, Magic: 0 },
-          'Fey': { Attack: -1, Damage: -2, Armor: 0, Magic: 3 },
-          'Raakshasa': { Attack: -1, Damage: 0, Armor: -1, Magic: 2 },
-          'Gnome': { Attack: -1, Damage: -1, Armor: 0, Magic: 2 },
-          // Add other races here
-      };
-
-      // Apply the base modifiers if the class and race are found
-      const classModifiers = baseClassModifiers[char.Class];
-      const raceModifiers = baseRaceModifiers[char.Race];
-
-      if (classModifiers) {
-          char.Attack += classModifiers.Attack;
-          char.Damage += classModifiers.Damage;
-          char.Armor += classModifiers.Armor;
-          char.Magic += classModifiers.Magic;
-      }
-
-      if (raceModifiers) {
-          char.Attack += raceModifiers.Attack;
-          char.Damage += raceModifiers.Damage;
-          char.Armor += raceModifiers.Armor;
-          char.Magic += raceModifiers.Magic;
-      }
-
-      // Mark that base modifiers have been applied
-      char.baseModifiersApplied = true;
-  }
-}
-
-
-// Update HP and level for chars
-characters.forEach(char => {
-  // Determine the XP threshold for the char's class
-  const xpThreshold = xpThresholds[char.Class] || 15000; // Default to 15000 if class not found
-
-  // Calculate the new level based on XP and the class-specific threshold
-  const newLevel = Math.floor(char.XP / xpThreshold) + 1;
-  
-  ensurePCProperties(char);
-
-  // Define character classes and their respective HP generation
-  const characterClasses = [
-      { name: 'Knight of Atinus', baseHP: 10 },
-      { name: 'Knight of Atricles', baseHP: 12 },
-      { name: 'Wizard', baseHP: 6 },
-      { name: 'Witch', baseHP: 6 }, 
-      { name: 'Necromancer', baseHP: 6 }, 
-      { name: 'Warlock', baseHP: 4 }, 
-      { name: 'Sorcerer', baseHP: 4 }, 
-      { name: 'Thief', baseHP: 8 }, 
-      { name: 'Assassin', baseHP: 8 }, 
-      { name: 'Barbarian', baseHP: 12 },
-      { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 }, 
-      // Add other classes here
-  ];
-
-  // Find the char's class
-  const characterClass = characterClasses.find(cls => cls.name === char.Class);
-
-  // Calculate HP, attack, damage, and armor increases based on the class's HP generation and level difference
-  let hpIncrease = 0;
-  let attackIncrease = 0;
-  let damageIncrease = 0;
-  let armorIncrease = 0;
-  let magicIncrease = 0;
-
-  if (characterClass) {
-      if (characterClass.name === 'Knight of Atinus') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Knight of Atricles') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 5);
-      } else if (characterClass.name === 'Wizard') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Witch') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Necromancer') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Warlock') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Sorcerer') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Thief') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 5);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Barbarian') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 11);
-          attackIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 5);
-          damageIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 7);
-          armorIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 10);
-          magicIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 1/3);
-      } else {
-          // For generic or unknown classes, use a default 1d10 HP increase per level
-          hpIncrease = rollTotalHP(char.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 3);
-      }
-  }
-
-  // Check if the level has increased
-  if (newLevel > char.Level) {
-      char.Level = newLevel;
-
-      // Calculate AC for chars
-      char.AC = 10 + Math.floor(char.Level / 10);
-
-      // Update char attributes
-      char.HP += hpIncrease;
-      char.MaxHP += hpIncrease;
-      char.Attack += attackIncrease;
-      char.Damage += damageIncrease;
-      char.Armor += armorIncrease;
-      char.Magic += magicIncrease;
-
-      // Debugging log to verify updates
-      console.log(`Updated ${char.Name} (Class: ${char.Class}) - Level: ${char.Level}, HP: ${char.HP}, MaxHP: ${char.MaxHP}, Attack: ${char.Attack}, Damage: ${char.Damage}, Armor: ${char.Armor}, Magic: ${char.Magic}`);
-  }
-});
-
-// Ensure that npc properties exist and initialize them if not
-function ensureNPCProperties(npc) {
-  // Initialize the properties if not already set
-  if (npc.Attack === undefined) npc.Attack = 0;
-  if (npc.Damage === undefined) npc.Damage = 0;
-  if (npc.Armor === undefined) npc.Armor = 0;
-  if (npc.Magic === undefined) npc.Magic = 0;
-
-  // Check if base modifiers have already been applied
-  if (!npc.baseModifiersApplied) {
-      // Define base modifiers for each class
-      const baseClassModifiers = {
-          'Knight of Atinus': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Knight of Atricles': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Wizard': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
-          'Witch': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
-          'Necromancer': { Attack: 0, Damage: 0, Armor: 0, Magic: 2 },
-          'Warlock': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
-          'Sorcerer': { Attack: 0, Damage: 0, Armor: 0, Magic: 3 },
-          'Thief': { Attack: 0, Damage: 0, Armor: 1, Magic: 0 },
-          'Assassin': { Attack: 1, Damage: 0, Armor: 0, Magic: 0 },
-          'Barbarian': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: 0, Magic: 5 },
-          // Add other classes here
-      };
-
-      // Define base modifiers for each race
-      const baseRaceModifiers = {
-          'Human': { Attack: 0, Damage: 0, Armor: 0, Magic: 0 },
-          'Dwarf': { Attack: 0, Damage: 1, Armor: 0, Magic: -1 },
-          'High Elf': { Attack: -1, Damage: -1, Armor: 1, Magic: 2 },
-          'Unseelie Elf': { Attack: -1, Damage:-1, Armor: 1, Magic: 2 },
-          'Half-Elf': { Attack: -1, Damage: 0, Armor: 0, Magic: 1 },
-          'Halfling': { Attack: -1, Damage: -1, Armor: 2, Magic: 0 },
-          'Fey': { Attack: -1, Damage: -2, Armor: 0, Magic: 3 },
-          'Raakshasa': { Attack: -1, Damage: 0, Armor: -1, Magic: 2 },
-          'Gnome': { Attack: -1, Damage: -1, Armor: 0, Magic: 2 },
-          // Add other races here
-      };
-
-      // Apply the base modifiers if the class and race are found
-      const classModifiers = baseClassModifiers[npc.Class];
-      const raceModifiers = baseRaceModifiers[npc.Race];
-
-      if (classModifiers) {
-          npc.Attack += classModifiers.Attack;
-          npc.Damage += classModifiers.Damage;
-          npc.Armor += classModifiers.Armor;
-          npc.Magic += classModifiers.Magic;
-      }
-
-      if (raceModifiers) {
-          npc.Attack += raceModifiers.Attack;
-          npc.Damage += raceModifiers.Damage;
-          npc.Armor += raceModifiers.Armor;
-          npc.Magic += raceModifiers.Magic;
-      }
-
-      // Mark that base modifiers have been applied
-      npc.baseModifiersApplied = true;
-  }
-}
-
-
-// Update HP and level for NPCs
-npcs.forEach(npc => {
-  // Determine the XP threshold for the NPC's class
-  const xpThreshold = xpThresholds[npc.Class] || 15000; // Default to 15000 if class not found
-
-  // Calculate the new level based on XP and the class-specific threshold
-  const newLevel = Math.floor(npc.XP / xpThreshold) + 1;
-
-// Ensure NPC properties exist
-ensureNPCProperties(npc);
-
-  // Define character classes and their respective HP generation
-  const characterClasses = [
-      { name: 'Knight of Atinus', baseHP: 10 },
-      { name: 'Knight of Atricles', baseHP: 12 },
-      { name: 'Wizard', baseHP: 6 },
-      { name: 'Witch', baseHP: 6 }, 
-      { name: 'Necromancer', baseHP: 6 }, 
-      { name: 'Warlock', baseHP: 4 }, 
-      { name: 'Sorcerer', baseHP: 4 }, 
-      { name: 'Thief', baseHP: 8 }, 
-      { name: 'Assassin', baseHP: 8 }, 
-      { name: 'Barbarian', baseHP: 12 },
-      { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 }, 
-      // Add other classes here
-  ];
-
-  // Find the NPC's class
-  const characterClass = characterClasses.find(cls => cls.name === npc.Class);
-
-  // Calculate HP, attack, damage, and armor increases based on the class's HP generation and level difference
-  let hpIncrease = 0;
-  let attackIncrease = 0;
-  let damageIncrease = 0;
-  let armorIncrease = 0;
-
-  if (characterClass) {
-      if (characterClass.name === 'Knight of Atinus') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Knight of Atricles') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 5);
-      } else if (characterClass.name === 'Wizard') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Witch') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Necromancer') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Warlock') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Sorcerer') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Thief') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Barbarian') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 11);
-          attackIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 5);
-          damageIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 7);
-          armorIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 10);
-          magicIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 1/3);
-      } else {
-          // For generic or unknown classes, use a default 1d10 HP increase per level
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 3);
-      }
-  }
-
-  // Check if the level has increased
-  if (newLevel > npc.Level) {
-      npc.Level = newLevel;
-
-      // Calculate AC for NPCs
-      npc.AC = 10 + Math.floor(npc.Level / 10);
-
-      // Update NPC attributes
-      npc.HP += hpIncrease;
-      npc.MaxHP += hpIncrease;
-      npc.Attack += attackIncrease;
-      npc.Damage += damageIncrease;
-      npc.Armor += armorIncrease;
-      npc.Magic += magicIncrease;
-
-      // Debugging log to verify updates
-      console.log(`Updated ${npc.Name} (Class: ${npc.Class}) - Level: ${npc.Level}, HP: ${npc.HP}, MaxHP: ${npc.MaxHP}, Attack: ${npc.Attack}, Damage: ${npc.Damage}, Armor: ${npc.Armor}, Magic: ${npc.Magic}`);
-  }
-});
 
 // Helper function to parse the Equipped string into an object
 function parseEquippedString(equippedStr) {
@@ -1827,6 +1975,7 @@ if (addMonsterToPartyPattern.test(userInput)) {
       console.log('Updated Inventory Properties:', inventoryProperties);
 
       // Now reset the equipped items
+      monsterDetails.AC = 10;
       monsterDetails.Attack = 0;
       monsterDetails.Damage = 0;
       monsterDetails.Armor = 0;
@@ -2164,6 +2313,7 @@ PC: ${charactersString}
 NPCs in Party: ${npcsString}
 Monsters in Room: ${monstersInRoomString}
 Monsters Equipped Properties: ${monstersEquippedPropertiesString}
+Monsters State: ${monstersState}
 Rooms Visited: ${numVisitedRooms}
 Adjacent Rooms: ${adjacentRooms}
 Coordinates of Connected Rooms: ${connectedRoomsString}
@@ -2536,8 +2686,6 @@ const translatedWords = words.map(word => shorthandMap[word] || word);
 return translatedWords.join(' ');
 }*/
 
-// Define an array to store character information
-const characters = [];
 
 let character = {
   Name: '',
@@ -2997,9 +3145,8 @@ return itemA.trim().toLowerCase() === itemB.trim().toLowerCase();
 let characterCreationInput = '';
 let characterCreationStep = 0;
 // Initialize charactersString
-let charactersString = '';
+//let charactersString = '';
 // Initialize an array to store NPCs and Mortacia
-let npcs = [];
 
 // Function to initialize NPCs and Mortacia
 function initializeNPCs() {
@@ -3183,7 +3330,7 @@ const mortacia = {
   Class: 'Assassin-Fighter-Necromancer-Goddess',
   Level: 50,
   AC: 13,
-  XP: 735000,
+  XP: 18816000,
   HP: initialHP,
   MaxHP: initialHP,
   Equipped: equipped,
@@ -3225,7 +3372,7 @@ function createMortaciaCharacter() {
       Race: 'Goddess',
       Class: 'Assassin-Fighter-Necromancer-Goddess',
       Level: 50,
-      XP: 735000,
+      XP: 18816000,
       AC: 13,
       HP: initialHP,
       MaxHP: initialHP, // Set MaxHP to the same value as HP
@@ -3905,6 +4052,27 @@ character = createSuzerainCharacter();
   return;
 
 }
+}
+
+gameConsoleData = null;
+gameConsoleIndex = -1;
+objectsInRoomMatch = [];
+for (let i = promptAndResponses.length - 1; i >= 0; i--) {
+if (promptAndResponses[i].gameConsole) {
+  gameConsoleData = promptAndResponses[i].gameConsole;
+  gameConsoleIndex = i; // Save the index of the game console in promptAndResponses
+  objectsInRoomMatch = gameConsoleData.match(/Objects in Room: ([^\n]+)/) || []; // Ensure objectsInRoomMatch is an array
+  if (objectsInRoomMatch.length > 0) {
+    break; // Found the most recent gameConsole with "Objects in Room"
+  }
+}
+}
+
+
+objectsInRoomString = [];
+if (Array.isArray(objectsInRoomMatch) && objectsInRoomMatch.length > 1) {
+objectsInRoomString = objectsInRoomMatch[1].split(',').map(item => item.trim());
+// Split by comma and trim each item
 }
 
 // If character creation is in progress, continue it
@@ -5094,45 +5262,49 @@ if (personalNarrative) {
   .then(data => console.log(data))
   .catch(error => console.error('Error:', error));
   
-//   var userInput = $('#chatuserinput').val(); // Get user input
-  $.ajax({
-    url: 'http://childrenofthegrave.com/processInput2', // Adjust this URL to your server's endpoint
-    type: 'POST',
-    contentType: 'application/json',
-    data: JSON.stringify({ userInput: userInput }), // Send user input
-    
-    success: function(response) {
-  // Directly access the 'content' part of the response
+$.ajax({
+  url: 'http://childrenofthegrave.com/processInput2', // Adjust this URL to your server's endpoint
+  type: 'POST',
+  contentType: 'application/json',
+  data: JSON.stringify({ userInput: userInput }), // Send user input
+  
+  success: function(response) {
+      // Directly access the 'response' part of the response object
+      let content = response.response; // Access the content directly
+      // Display the image if available
+      let imageUrl = response.imageUrl;
+      // Continue with handling the serverGameConsole and updating the game state
+      let serverGameConsole = response.updatedGameConsole;
+      console.log("serverGameConsole:", serverGameConsole); // Inspect the extracted part
+      
+      // Parse new details from serverGameConsole
+      let newRoomName = serverGameConsole.match(/Room Name: (.+)/)?.[1];
+      let newRoomHistory = serverGameConsole.match(/Room Description: (.+)/)?.[1];
+      let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: (.+)/)?.[1];
+      let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();
+      let newMonstersEquippedPropertiesString = serverGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+      let newMonstersState = serverGameConsole.match(/Monsters State: (.+)/)?.[1];    
+      let currentQuest = serverGameConsole.match(/Current Quest: (.+)/)?.[1];
+      let nextArtifact = serverGameConsole.match(/Next Artifact: (.+)/)?.[1];
+      let adjacentRooms = serverGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
 
-  let serverGameConsole = response.updatedGameConsole;
-  console.log("serverGameConsole:", serverGameConsole); // Inspect the extracted part
-  // Further code...
+      // Update the game console with new room details and exits
+      updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${newRoomName}`);
+      updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
+      updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
+      updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
+      updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${newMonstersEquippedPropertiesString}`);
+      updatedGameConsole = updatedGameConsole.replace(/Monsters State: .*/, `Monsters State: ${newMonstersState}`);
+      updatedGameConsole = updatedGameConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
+      updatedGameConsole = updatedGameConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
+      updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRooms}`);
 
-  // Parse new details from serverGameConsole
-  let newRoomName = serverGameConsole.match(/Room Name: (.+)/)?.[1];
-  let newRoomHistory = serverGameConsole.match(/Room Description: (.+)/)?.[1];
-  let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: (.+)/)?.[1];
-  let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();
-  let newMonstersEquippedPropertiesString = serverGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
-  let currentQuest = serverGameConsole.match(/Current Quest: (.+)/)?.[1];
-  let nextArtifact = serverGameConsole.match(/Next Artifact: (.+)/)?.[1];
-  let adjacentRooms = serverGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+      console.log("Server response:", response); // Debug log to inspect the structure
+      console.log(content); // If you want to check the response as JSON
 
-  // Update the game console with new room details and exits
-  updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${newRoomName}`);
-  updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
-  updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
-  updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
-  updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${newMonstersEquippedPropertiesString}`);
-  updatedGameConsole = updatedGameConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
-  updatedGameConsole = updatedGameConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
-  updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRooms}`);
+      // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
+      addPromptAndResponse(userInput, messages[0].content, messages[1].content, content, personalNarrative, conversationId, updatedGameConsole);
 
-  var content = response.response.content; // Adjust this based on the actual structure
-  console.log("Server response:", response); // Debug log to inspect the structure
-        console.log(content); // If you want to check the response as JSON
-    // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
-    addPromptAndResponse(userInput, messages[0].content, messages[1].content, response.response.content, personalNarrative, conversationId, updatedGameConsole);
     // Update the game console based on user inputs and get the updated game console
 
 updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString, serverGameConsole);
@@ -5156,7 +5328,12 @@ updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversati
   var formattedContent = content.replace(/\n/g, '<br>');
 
   // Update chat log with the formatted content
-  updateChatLog("<br><br><b> > </b>" + userInput + "<br><br><b></b>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
+
+if (imageUrl) {
+  updateChatLog("<br><br><b> > </b>" + userInput + "<br><br><img src='" + imageUrl + "' alt='Generated Image' style='max-width:100%; margin-bottom: 10px;'><br><br>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
+} else { 
+  updateChatLog("<br><br><b> > </b>" + userInput + "<br><br>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
+}
 
   // Clear the user input field
   document.getElementById("chatuserinput").value = "";
