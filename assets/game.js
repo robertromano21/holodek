@@ -124,6 +124,8 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
       // Safely extract room details from serverGameConsole
       const roomName = serverGameConsole.match(/Room Name: (.*?)\s*$/m)?.[1]?.trim();
       let roomHistory = serverGameConsole.match(/Room Description: (.*?)\s*$/m)?.[1]?.trim();
+      let puzzleInRoom = serverGameConsole.match(/Puzzle in Room: (.*?)\s*$/m)?.[1]?.trim();
+      let puzzleSolution = serverGameConsole.match(/Puzzle Solution: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipmentString = serverGameConsole.match(/Objects in Room: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipment = roomEquipmentString ? roomEquipmentString.split(', ').map(item => item.trim()) : [];
       const adjacentRoomsString = serverGameConsole.match(/Adjacent Rooms: (.*?)\s*$/m)?.[1]?.trim();
@@ -169,6 +171,8 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
           objectMetadata,
           roomName,
           roomHistory,
+          puzzleInRoom,
+          puzzleSolution,
           monstersInRoom,
           monstersEquippedProperties,
           adjacentRooms
@@ -272,9 +276,9 @@ const directionMap = {
 'd': 'down',
 };
 
-// Function to find a matching console in the conversation history based on coordinates
+// Function to find a matching console in the conversation history based on coordinates, excluding boss room coordinates
 function findMatchingConsoleByCoordinates(conversationHistory, coordinates) {
-const regex = new RegExp(`Coordinates: X: ${coordinates.x}, Y: ${coordinates.y}, Z: ${coordinates.z}`);
+const regex = new RegExp(`(?<!Boss Room )Coordinates: X: ${coordinates.x}, Y: ${coordinates.y}, Z: ${coordinates.z}`);
 const matches = conversationHistory.match(regex);
 return matches ? matches[0] : null;
 }
@@ -282,6 +286,31 @@ return matches ? matches[0] : null;
 
 // Keep track of visited room coordinates
 const visitedRooms = new Set();
+// Set to keep track of unvisited rooms
+const unvisitedRooms = new Set();
+
+// Function to update the set of unvisited rooms based on roomNameDatabase and visitedRooms
+function updateUnvisitedRoomsSet(currentCoordinates) {
+  // Add all rooms from roomNameDatabase to unvisitedRooms set if not visited
+  for (let coordinatesString of roomNameDatabase.keys()) {
+      if (!Array.from(visitedRooms).some(visitedRoom => coordinatesToString(visitedRoom) === coordinatesString)) {
+          unvisitedRooms.add(coordinatesString);
+      }
+  }
+  // Remove visited rooms and current room from unvisitedRooms set
+  for (let visitedRoom of visitedRooms) {
+      const visitedRoomString = coordinatesToString(visitedRoom);
+      if (unvisitedRooms.has(visitedRoomString)) {
+          unvisitedRooms.delete(visitedRoomString);
+      }
+  }
+  const currentCoordinatesString = coordinatesToString(currentCoordinates);
+  if (unvisitedRooms.has(currentCoordinatesString)) {
+      unvisitedRooms.delete(currentCoordinatesString);
+  }
+  console.log("Updated Unvisited Room Coordinates:", unvisitedRooms);
+}
+
 
 // Data structure to store room connections
 const roomConnections = {};
@@ -289,6 +318,7 @@ const roomConnections = {};
 // Set to keep track of connected and unconnected rooms
 const connectedRooms = new Set();
 const unconnectedRooms = new Set();
+
 
 // Function to generate unique exits for a room based on its coordinates
 function generateUniqueExits(coordinates, updatedGameConsole) {
@@ -446,42 +476,35 @@ console.log("Exits:", exits)
 return Array.from(exits);
 }
 
-
-
 // Function to get the exit direction from one coordinate to another
 function getExitToCoordinate(fromCoordinate, toCoordinate) {
-const offsets = [
-  { offset: { x: 0, y: 1, z: 0 }, direction: "north" },
-  { offset: { x: 0, y: -1, z: 0 }, direction: "south" },
- { offset: { x: 1, y: 0, z: 0 },  direction: "east" },
- { offset: { x: -1, y: 0, z: 0 }, direction: "west" },
- { offset: { x: 1, y: 1, z: 0 },  direction: "northeast" },
- { offset: { x: -1, y: 1, z: 0 }, direction: "northwest" },
- { offset: { x: 1, y: -1, z: 0 }, direction: "southeast" },
- { offset: { x: -1, y: -1, z: 0 }, direction: "southwest" },
- { offset: { x: 0, y: 0, z: 1 },  direction: "up" },
- { offset: { x: 0, y: 0, z: -1 }, direction: "down" },
-  // ... repeat for other directions
-];
+  const offsets = [
+      { offset: { x: 0, y: 1, z: 0 }, direction: "north" },
+      { offset: { x: 0, y: -1, z: 0 }, direction: "south" },
+      { offset: { x: 1, y: 0, z: 0 }, direction: "east" },
+      { offset: { x: -1, y: 0, z: 0 }, direction: "west" },
+      { offset: { x: 0, y: 0, z: 1 }, direction: "up" },
+      { offset: { x: 0, y: 0, z: -1 }, direction: "down" }
+  ];
 
-for (const { offset, direction } of offsets) {
-  const adjacentCoord = {
-    x: fromCoordinate.x + offset.x,
-    y: fromCoordinate.y + offset.y,
-    z: fromCoordinate.z + offset.z,
-  };
+  for (const { offset, direction } of offsets) {
+      const adjacentCoord = {
+          x: fromCoordinate.x + offset.x,
+          y: fromCoordinate.y + offset.y,
+          z: fromCoordinate.z + offset.z
+      };
 
-  if (areCoordinatesEqual(adjacentCoord, toCoordinate)) {
-    return direction;
+      if (areCoordinatesEqual(adjacentCoord, toCoordinate)) {
+          return direction;
+      }
   }
-}
 
-return null; // No exit in this direction
+  return null; // No exit in this direction
 }
 
 // Function to check if two coordinates are equal
 function areCoordinatesEqual(coord1, coord2) {
-return coord1.x === coord2.x && coord1.y === coord2.y && coord1.z === coord2.z;
+  return coord1.x === coord2.x && coord1.y === coord2.y && coord1.z === coord2.z;
 }
 
 // Function to generate new coordinates based on the valid direction
@@ -520,6 +543,353 @@ if (direction === 'north') {
 return { x, y, z };
 }
 
+// Updated function to connect boss room to nearest unvisited room
+function connectBossRoomToNearestUnvisitedRoomWithDetails(bossCoordinates, nextBossRoom) {
+  const bossRoomCoordinatesObj = {
+      x: parseInt(bossCoordinates.match(/X: (-?\d+)/)?.[1], 10),
+      y: parseInt(bossCoordinates.match(/Y: (-?\d+)/)?.[1], 10),
+      z: parseInt(bossCoordinates.match(/Z: (-?\d+)/)?.[1], 10),
+  };
+  const bossRoomCoordinatesString = coordinatesToString(bossRoomCoordinatesObj);
+
+  // Update unconnected rooms for boss room
+  updateBossRoomUnconnectedRooms(bossRoomCoordinatesObj);
+
+  if (!roomNameDatabase.has(bossRoomCoordinatesString)) {
+      roomNameDatabase.set(bossRoomCoordinatesString, nextBossRoom);
+      console.log(`Added Boss Room to roomNameDatabase: ${bossRoomCoordinatesString} -> ${nextBossRoom}`);
+
+      const nearestUnvisitedRoomCoordinates = findNearestUnvisitedRoom(bossRoomCoordinatesObj);
+      if (nearestUnvisitedRoomCoordinates) {
+          const virtualRooms = generatePathToTarget(nearestUnvisitedRoomCoordinates, bossRoomCoordinatesObj);
+          let previousRoom = nearestUnvisitedRoomCoordinates;
+
+          for (let virtualRoom of virtualRooms) {
+              const virtualRoomKey = coordinatesToString(virtualRoom);
+             /* if (!roomNameDatabase.has(virtualRoomKey)) {
+                  roomNameDatabase.set(virtualRoomKey, `Virtual Room (${virtualRoom.x},${virtualRoom.y},${virtualRoom.z})`);
+                  console.log(`Added Virtual Room to roomNameDatabase: ${virtualRoomKey}`);
+              }*/
+
+              generateRoomDetails(virtualRoom);
+              connectRooms(previousRoom, virtualRoom);
+              previousRoom = virtualRoom;
+          }
+
+          connectRooms(previousRoom, bossRoomCoordinatesObj);
+      }
+  }
+
+  updateBossRoomDetails(bossRoomCoordinatesObj, nextBossRoom);
+}
+
+// Function to generate full room details for a given room
+function generateRoomDetails(coordinates) {
+  const coordinatesString = coordinatesToString(coordinates);
+
+  // Create room name and description
+  const roomName = `Virtual Room (${coordinates.x}, ${coordinates.y}, ${coordinates.z})`;
+  const roomDescription = `This is a virtual room located at coordinates (${coordinates.x}, ${coordinates.y}, ${coordinates.z}). It serves as an intermediate connection between important locations.`;
+
+  // Generate random objects in the room
+  const objectsInRoom = Math.random() < 0.5 ? ["Ancient Artifact", "Mysterious Scroll"] : ["Rusty Sword", "Old Shield"];
+  const objectMetadata = objectsInRoom.map(item => ({ name: item, type: "artifact", value: Math.floor(Math.random() * 100) }));
+
+  // Generate random puzzle in the room
+  const puzzleInRoom = Math.random() < 0.3 ? "Solve the riddle of the stones" : null;
+  const puzzleSolution = puzzleInRoom ? "Arrange the stones in ascending order of their markings" : null;
+
+  // Add room details to the room conversation history
+  saveRoomConversationHistory(coordinates, {
+      response: roomDescription,
+      roomEquipment: objectsInRoom,
+      objectMetadata: objectMetadata,
+      puzzleInRoom: puzzleInRoom,
+      puzzleSolution: puzzleSolution
+  }, objectsInRoom, objectMetadata, []);
+
+  // Add room to roomConnections if not already present
+  if (!roomConnections[coordinatesString]) {
+      roomConnections[coordinatesString] = {
+          coordinates: coordinates,
+          exits: [],
+          connectedRooms: [],
+          unconnectedRooms: Array.from(getAdjacentCoordinates(coordinates)).map(coord => ({ x: coord.x, y: coord.y, z: coord.z })) // Initialize as an array of coordinate objects
+      };
+  }
+
+  console.log(`Generated room details for ${coordinatesString}: ${roomDescription}`);
+}
+
+// Function to update unconnected rooms for given coordinates
+function updateUnconnectedRooms(coordinates) {
+  const coordinatesString = coordinatesToString(coordinates);
+
+  if (!roomConnections[coordinatesString]) {
+      roomConnections[coordinatesString] = {
+          coordinates: coordinates,
+          exits: [],
+          connectedRooms: [],
+          unconnectedRooms: Array.from(getAdjacentCoordinates(coordinates)),
+      };
+  }
+}
+
+// Helper function to remove a room from unconnectedRooms array
+function removeFromUnconnectedRooms(room, targetRoomString) {
+  const unconnectedRooms = room.unconnectedRooms;
+  const index = unconnectedRooms.findIndex(coordinateString => coordinateString === targetRoomString);
+  if (index !== -1) {
+      unconnectedRooms.splice(index, 1);
+  }
+}
+
+// Modified connectRooms function
+function connectRooms(room1, room2) {
+  const room1Key = coordinatesToString(room1);
+  const room2Key = coordinatesToString(room2);
+
+  // Ensure roomConnections for both rooms exist
+  updateUnconnectedRooms(room1);
+  updateUnconnectedRooms(room2);
+
+  // Remove room2 from room1's unconnectedRooms
+  removeFromUnconnectedRooms(roomConnections[room1Key], room2Key);
+  // Remove room1 from room2's unconnectedRooms
+  removeFromUnconnectedRooms(roomConnections[room2Key], room1Key);
+
+  if (!roomConnections[room1Key].connectedRooms.includes(room2Key)) {
+      roomConnections[room1Key].connectedRooms.push(room2);
+  }
+
+  if (!roomConnections[room2Key].connectedRooms.includes(room1Key)) {
+      roomConnections[room2Key].connectedRooms.push(room1);
+  }
+
+  console.log(`Connected ${room1Key} to ${room2Key}`);
+}
+
+// Update unconnected rooms for boss room
+function updateBossRoomUnconnectedRooms(bossRoomCoordinates) {
+  const bossRoomKey = coordinatesToString(bossRoomCoordinates);
+
+  if (!roomConnections[bossRoomKey]) {
+      roomConnections[bossRoomKey] = {
+          coordinates: bossRoomCoordinates,
+          exits: [],
+          connectedRooms: [],
+          unconnectedRooms: Array.from(getAdjacentCoordinates(bossRoomCoordinates)),
+      };
+  }
+}
+
+// Function to update adjacent rooms for connected rooms
+function updateAdjacentRooms(room1, room2) {
+  const room1Key = coordinatesToString(room1);
+  const room2Key = coordinatesToString(room2);
+
+  if (!roomConnections[room1Key].adjacentRooms) {
+      roomConnections[room1Key].adjacentRooms = {};
+  }
+  if (!roomConnections[room2Key].adjacentRooms) {
+      roomConnections[room2Key].adjacentRooms = {};
+  }
+
+  const directionToRoom2 = getExitToCoordinate(room1, room2);
+  const directionToRoom1 = getExitToCoordinate(room2, room1);
+
+  if (directionToRoom2) {
+      roomConnections[room1Key].adjacentRooms[directionToRoom2] = roomNameDatabase.get(room2Key);
+  }
+  if (directionToRoom1) {
+      roomConnections[room2Key].adjacentRooms[directionToRoom1] = roomNameDatabase.get(room1Key);
+  }
+
+  console.log(`Updated adjacent rooms for ${room1Key} and ${room2Key}`);
+}
+
+// Updated function to generate a path to the target, excluding visited rooms, with support for navigating around visited rooms
+function generatePathToTarget(startCoordinates, targetCoordinates) {
+  const path = [];
+  let currentCoordinates = { ...startCoordinates };
+
+  const directions = [
+      { x: 1, y: 0, z: 0 },  // east
+      { x: -1, y: 0, z: 0 }, // west
+      { x: 0, y: 1, z: 0 },  // north
+      { x: 0, y: -1, z: 0 }, // south
+      { x: 0, y: 0, z: 1 },  // up
+      { x: 0, y: 0, z: -1 }, // down
+      { x: 1, y: 1, z: 0 },  // northeast
+      { x: -1, y: 1, z: 0 }, // northwest
+      { x: 1, y: -1, z: 0 }, // southeast
+      { x: -1, y: -1, z: 0 } // southwest
+  ];
+
+  while (currentCoordinates.x !== targetCoordinates.x || currentCoordinates.y !== targetCoordinates.y || currentCoordinates.z !== targetCoordinates.z) {
+      let nextCoordinates = { ...currentCoordinates };
+      let foundAlternative = false;
+
+      // Determine the primary step direction
+      if (currentCoordinates.x < targetCoordinates.x) {
+          nextCoordinates.x++;
+      } else if (currentCoordinates.x > targetCoordinates.x) {
+          nextCoordinates.x--;
+      } else if (currentCoordinates.y < targetCoordinates.y) {
+          nextCoordinates.y++;
+      } else if (currentCoordinates.y > targetCoordinates.y) {
+          nextCoordinates.y--;
+      } else if (currentCoordinates.z < targetCoordinates.z) {
+          nextCoordinates.z++;
+      } else if (currentCoordinates.z > targetCoordinates.z) {
+          nextCoordinates.z--;
+      }
+
+      // If the next room is visited, find an alternative path
+      if (visitedRooms.has(coordinatesToString(nextCoordinates))) {
+          for (let direction of directions) {
+              const alternativeCoordinates = {
+                  x: currentCoordinates.x + direction.x,
+                  y: currentCoordinates.y + direction.y,
+                  z: currentCoordinates.z + direction.z
+              };
+
+              // Check if the alternative coordinates are unvisited and not already in the path
+              if (!visitedRooms.has(coordinatesToString(alternativeCoordinates)) && !path.some(coord => coordinatesToString(coord) === coordinatesToString(alternativeCoordinates))) {
+                  nextCoordinates = alternativeCoordinates;
+                  foundAlternative = true;
+                  break;
+              }
+          }
+
+          // If no alternative is found, log a warning and break the loop to avoid infinite looping
+          if (!foundAlternative) {
+              console.warn("Unable to find an alternative path to target without visiting a visited room.");
+              break;
+          }
+      }
+
+      // Ensure the next coordinates are not already in the path to prevent looping
+      if (!path.some(coord => coordinatesToString(coord) === coordinatesToString(nextCoordinates))) {
+          path.push({ ...nextCoordinates });
+          currentCoordinates = nextCoordinates;
+      } else {
+          console.warn("Encountered a loop while generating the path.");
+          break;
+      }
+  }
+
+  return path;
+}
+
+// Updated function to find the nearest unvisited room, excluding visited rooms and current coordinates
+function findNearestUnvisitedRoom(targetCoordinates) {
+  let nearestRoom = null;
+  let minDistance = Infinity;
+
+  // Iterate over all known rooms in the unvisitedRooms set
+  for (let coordinatesString of unvisitedRooms) {
+      // Skip the room if it is the current room or if it is the boss room itself
+      if (coordinatesString === coordinatesToString(targetCoordinates) || coordinatesToString(currentCoordinates) === coordinatesString) {
+          continue;
+      }
+
+      const currentCoordinatesObj = parseCoordinates(coordinatesString);
+      if (!currentCoordinatesObj) {
+          console.error("Failed to parse coordinates:", coordinatesString);
+          continue;
+      }
+
+      // Calculate the distance between the target coordinates and the current coordinates
+      const distance = calculateDistance(targetCoordinates, currentCoordinatesObj);
+
+      // Update the nearest room if the distance is shorter
+      if (distance < minDistance) {
+          minDistance = distance;
+          nearestRoom = currentCoordinatesObj;
+      }
+  }
+
+  if (nearestRoom) {
+      console.log(`Nearest unvisited room found: ${coordinatesToString(nearestRoom)} with distance ${minDistance}`);
+  } else {
+      console.warn("No valid unvisited room found.");
+  }
+
+  return nearestRoom;
+}
+
+// Function to calculate the distance between two coordinates
+function calculateDistance(coord1, coord2) {
+  if (!coord1 || !coord2) {
+      console.error("Invalid coordinates for distance calculation:", coord1, coord2);
+      return Infinity; // Return a very large value to indicate no valid distance
+  }
+
+  // Normal distance calculation if both coordinates are valid
+  const dx = coord2.x - coord1.x;
+  const dy = coord2.y - coord1.y;
+  const dz = coord2.z - coord1.z;
+
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Function to parse a string of coordinates in the format "x,y,z"
+function parseCoordinates(coordinateString) {
+  if (!coordinateString) {
+      console.error("Invalid coordinate string provided:", coordinateString);
+      return null;
+  }
+
+  const match = coordinateString.match(/^(-?\d+),(-?\d+),(-?\d+)$/);
+  if (!match) {
+      console.error("Failed to parse coordinates:", coordinateString);
+      return null;
+  }
+
+  return {
+      x: parseInt(match[1], 10),
+      y: parseInt(match[2], 10),
+      z: parseInt(match[3], 10)
+  };
+}
+
+// Function to update the boss room details after connecting
+function updateBossRoomDetails(bossRoomCoordinates, roomName) {
+  const bossRoomKey = coordinatesToString(bossRoomCoordinates);
+  if (!roomConnections[bossRoomKey]) {
+      roomConnections[bossRoomKey] = {
+          coordinates: bossRoomCoordinates,
+          exits: [],
+          connectedRooms: [],
+          unconnectedRooms: Array.from(getAdjacentCoordinates(bossRoomCoordinates)).map(coord => ({ x: coord.x, y: coord.y, z: coord.z }))
+      };
+  }
+
+  // Ensure the boss room has a name, exits, and connections properly populated
+  roomConnections[bossRoomKey].roomName = roomName;
+
+  const connectedRooms = roomConnections[bossRoomKey].connectedRooms;
+  connectedRooms.forEach((connectedRoom) => {
+      const connectedRoomCoordinates = connectedRoom;
+      const direction = getExitToCoordinate(bossRoomCoordinates, connectedRoomCoordinates);
+      if (direction && !roomConnections[bossRoomKey].exits.includes(direction)) {
+          roomConnections[bossRoomKey].exits.push(direction);
+      }
+
+      // Ensure connected rooms also have corresponding exits
+      const reverseDirection = getExitToCoordinate(connectedRoomCoordinates, bossRoomCoordinates);
+      const connectedRoomKey = coordinatesToString(connectedRoomCoordinates);
+      if (reverseDirection && roomConnections[connectedRoomKey] && !roomConnections[connectedRoomKey].exits.includes(reverseDirection)) {
+          roomConnections[connectedRoomKey].exits.push(reverseDirection);
+      }
+  });
+
+  // Generate exits using generateUniqueExits function to ensure consistency
+ // generateUniqueExits(bossRoomCoordinates, updatedGameConsole);
+
+  console.log(`Updated Boss Room Details: ${bossRoomKey}, Name: ${roomName}, Exits: ${roomConnections[bossRoomKey].exits}`);
+}
 
 const equipmentItems = ["candle", "candles", "torch", "oil flask", "flint & steel", "holy symbol", "holy water", "lock pick", "pouch of lock picks (20)", "key", "rope 50 ft.", "salt", "book", "journal", "diary", "tome", "parchment", "scroll", "spellbook", "paper", "canvas", "miner's pick", "poison (vial)", "pouch", "robes", "shovel", "helmet", "club", "dagger", "dagger +1", "knife", "greatclub", "handaxe", "javelin", "lance", "hammer", "mace", "morning star", "quarterstaff", "sickle", "spear", "crossbow", "darts (20)", "shortbow", "arrows (20)", "darts", "sling", "staff sling", "battleaxe", "flail", "glaive", "greataxe", "greatsword", "halberd", "lance", "longsword", "longsword +1", "longsword +2", "longsword +3", "scimitar", "broad sword", "two-handed sword", "two-handed sword +1", "two-handed sword +2", "two-handed sword +3", "maul", "morningstar", "pike", "rapier", "scimitar", "shortsword", "shortsword +1", "shortsword +2", "trident", "war pick", "warhammer", "whip", "scourge", "blowgun", "longbow", "net", "banded mail", "banded mail +1", "chain mail", "chain mail +1", "chain mail +3", "plate mail", "plate mail +1", "plate mail +2", "plate mail +3", "leather armor", "padded armor", "suit of armor", "armor", "ring mail", "scale mail", "shield", "studded leather armor", "splint mail", "bracers", "adamantine armor", "backpack", "sheath", "sack", "crystal", "vial", "healing potion", "potion of healing", "orb", "rod", "staff", "wand", "totem", "wooden staff", "wand of fireballs", "wand of magic missiles", "wand of ice storm", "wand of lightning", "alchemist's fire flask", "amulet", "locket", "lantern", "chest", "wooden box", "jug", "pot", "flask", "waterskin", "rations", "drum", "flute", "lute", "lyre", "horn", "pan flute", "paint brush", "saddle", "ale", "bread", "meat", "bottle of wine", "goblet", "cup", "chalice", "gold pieces", "silver pieces", "copper pieces", "platinum pieces", "gem", "jewelry", "ring", "amulet of health", "amulet of the planes", "arrow of slaying", "bag of holding", "girdle of giant strength", "berserker axe", "boots of speed", "broom", "satchel", "candle of invocation", "cloak of displacement", "cloak of protection", "crystal ball", "dragon scale mail", "dust of disappearance", "dwarven plate", "elemental gem", "elven chain mail", "feather", "figurine", "flame tongue sword", "gem of brightness", "giant slayer", "hammer of thunderbolts", "ioun stone", "javelin of lightning", "mithral armor", "necklace of missiles", "potion of animal friendship", "potion of giant strength", "potion of invisibility", "potion of resistance", "potion of speed", "ring of protection", "ring of fire", "ring of water", "ring of earth", "ring of air", "ring of invisibility", "ring of resistance", "ring of telekinesis", "robe of the archmagi", "shield +1", "shield +2", "shield +3", "scimitar of speed", "staff of fire", "staff of healing", "staff of the magi", "staff of thunder & lightning", "wand of fear", "wand of paralysis",  /* other equipment items */];
 
@@ -657,6 +1027,9 @@ function parseMonsters(monstersString) {
 let equippedInventory = [];
 let currentQuest = "None";
 let nextArtifact = "None";
+let nextBoss = "None";
+let nextBossRoom = "None";
+let bossCoordinates = "None";
 let globalQuestsAchieved = 0;
 let globalArtifactsFound = 0;
 let score = 0;
@@ -685,6 +1058,9 @@ async function completeQuestIfArtifactFound() {
       // Reset Current Quest and Next Artifact to blank
       currentQuest = "None";
       nextArtifact = "None";
+      nextBoss = "None";
+      nextBossRoom = "None";
+      bossCoordinates = "None";
 
       // Log the updated global variables for debugging
       console.log(`Quests Achieved: ${globalQuestsAchieved}/15`);
@@ -970,6 +1346,8 @@ const coordinatesString = coordinatesToString(currentCoordinates);
 
 console.log('currentCoordinates:', currentCoordinates);
 console.log("Connected Rooms:", roomConnections);
+console.log("Visited Room Coordinates:", visitedRooms);
+console.log("Unvisited Room Coordinates:", unvisitedRooms);
 
 // Parse user input to check for valid directions
 const validDirections = ["north", "n", "south", "s", "east", "e", "west", "w", "northeast", "ne", "northwest", "nw", "southeast", "se", "southwest", "sw", "up", "u", "down", "d"];
@@ -980,6 +1358,8 @@ let userWords = userInput.split(/\s+/).map(word => word.toLowerCase());
 const matchingConsole = findMatchingConsoleByCoordinates(conversationHistory, currentCoordinates);
 let roomName = "";
 let roomHistory = "";
+let puzzleInRoom = "";
+let puzzleSolution = "";
 //  const roomKey = coordinatesToString(currentCoordinates);
 let roomEquipment = [];
 let objectMetadata = [];
@@ -1149,276 +1529,6 @@ npcs.forEach(npc => {
   npc.AC = 10 + Math.floor(npc.Level / 10);
 });
 
-/*// Update HP and level for chars
-characters.forEach(char => {
-  // Determine the XP threshold for the char's class
-  const xpThreshold = xpThresholds[char.Class] || 3500; // Default to 15000 if class not found
-
-  // Calculate the new level based on XP and the class-specific threshold
- // const newLevel = Math.floor(char.XP / xpThreshold) + 1;
-  // Calculate the new level based on XP and the class-specific threshold
-  const newLevel = calculateLevel(char.XP, xpThresholds[char.Class]);
-
-  ensurePCProperties(char);
-
-  // Define character classes and their respective HP generation
-  const characterClasses = [
-      { name: 'Knight of Atinus', baseHP: 10 },
-      { name: 'Knight of Atricles', baseHP: 12 },
-      { name: 'Wizard', baseHP: 6 },
-      { name: 'Witch', baseHP: 6 }, 
-      { name: 'Necromancer', baseHP: 6 }, 
-      { name: 'Warlock', baseHP: 4 }, 
-      { name: 'Sorcerer', baseHP: 4 }, 
-      { name: 'Thief', baseHP: 8 }, 
-      { name: 'Assassin', baseHP: 8 }, 
-      { name: 'Barbarian', baseHP: 12 },
-      { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 }, 
-      // Add other classes here
-  ];
-
-  // Find the char's class
-  const characterClass = characterClasses.find(cls => cls.name === char.Class);
-
-  // Calculate HP, attack, damage, and armor increases based on the class's HP generation and level difference
-  let hpIncrease = 0;
-  let attackIncrease = 0;
-  let damageIncrease = 0;
-  let armorIncrease = 0;
-  let magicIncrease = 0;
-
-  if (characterClass) {
-      if (characterClass.name === 'Knight of Atinus') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Knight of Atricles') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 5);
-      } else if (characterClass.name === 'Wizard') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Witch') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Necromancer') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Warlock') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Sorcerer') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Thief') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 5);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 7);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Barbarian') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
-          hpIncrease = rollTotalHP(char.Level, newLevel, 11);
-          attackIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 5);
-          damageIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 7);
-          armorIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 10);
-          magicIncrease = calculateIncrease(char.Level - 50, newLevel - 50, 1/3);
-      } else {
-          // For generic or unknown classes, use a default 1d10 HP increase per level
-          hpIncrease = rollTotalHP(char.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(char.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(char.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(char.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(char.Level, newLevel, 3);
-      }
-  }
-
-  // Check if the level has increased
-  if (newLevel > char.Level) {
-      char.Level = newLevel;
-
-      // Calculate AC for chars
-      char.AC = 10 + Math.floor(char.Level / 10);
-
-      // Update char attributes
-      char.HP += hpIncrease;
-      char.MaxHP += hpIncrease;
-      char.Attack += attackIncrease;
-      char.Damage += damageIncrease;
-      char.Armor += armorIncrease;
-      char.Magic += magicIncrease;
-
-      // Debugging log to verify updates
-      console.log(`Updated ${char.Name} (Class: ${char.Class}) - Level: ${char.Level}, HP: ${char.HP}, MaxHP: ${char.MaxHP}, Attack: ${char.Attack}, Damage: ${char.Damage}, Armor: ${char.Armor}, Magic: ${char.Magic}`);
-  }
-});
-
-// Update HP and level for NPCs
-npcs.forEach(npc => {
-  // Determine the XP threshold for the NPC's class
-  const xpThreshold = xpThresholds[npc.Class] || 3500; // Default to 15000 if class not found
-
-  // Calculate the new level based on XP and the class-specific threshold
-//   const newLevel = Math.floor(npc.XP / xpThreshold) + 1;
-      // Calculate the new level based on XP and the class-specific threshold
-  const newLevel = calculateLevel(npc.XP, xpThresholds[npc.Class]);
-
-// Ensure NPC properties exist
-ensureNPCProperties(npc);
-
-  // Define character classes and their respective HP generation
-  const characterClasses = [
-      { name: 'Knight of Atinus', baseHP: 10 },
-      { name: 'Knight of Atricles', baseHP: 12 },
-      { name: 'Wizard', baseHP: 6 },
-      { name: 'Witch', baseHP: 6 }, 
-      { name: 'Necromancer', baseHP: 6 }, 
-      { name: 'Warlock', baseHP: 4 }, 
-      { name: 'Sorcerer', baseHP: 4 }, 
-      { name: 'Thief', baseHP: 8 }, 
-      { name: 'Assassin', baseHP: 8 }, 
-      { name: 'Barbarian', baseHP: 12 },
-      { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 }, 
-      // Add other classes here
-  ];
-
-  // Find the NPC's class
-  const characterClass = characterClasses.find(cls => cls.name === npc.Class);
-
-  // Calculate HP, attack, damage, and armor increases based on the class's HP generation and level difference
-  let hpIncrease = 0;
-  let attackIncrease = 0;
-  let damageIncrease = 0;
-  let armorIncrease = 0;
-  let magicIncrease = 0;
-
-  if (characterClass) {
-      if (characterClass.name === 'Knight of Atinus') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Knight of Atricles') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 5);
-      } else if (characterClass.name === 'Wizard') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Witch') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Necromancer') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 6);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
-      } else if (characterClass.name === 'Warlock') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Sorcerer') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 4);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 1/3);
-      } else if (characterClass.name === 'Thief') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 8);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Barbarian') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 12);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = 0;
-      } else if (characterClass.name === 'Assassin-Fighter-Necromancer-Goddess') {
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 11);
-          attackIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 5);
-          damageIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 7);
-          armorIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 10);
-          magicIncrease = calculateIncrease(npc.Level - 50, newLevel - 50, 1/3);
-      } else {
-          // For generic or unknown classes, use a default 1d10 HP increase per level
-          hpIncrease = rollTotalHP(npc.Level, newLevel, 10);
-          attackIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
-          armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-          magicIncrease = calculateIncrease(npc.Level, newLevel, 3);
-      }
-  }
-
-  // Check if the level has increased
-  if (newLevel > npc.Level) {
-      npc.Level = newLevel;
-
-      // Calculate AC for NPCs
-      npc.AC = 10 + Math.floor(npc.Level / 10);
-
-      // Update NPC attributes
-      npc.HP += hpIncrease;
-      npc.MaxHP += hpIncrease;
-      npc.Attack += attackIncrease;
-      npc.Damage += damageIncrease;
-      npc.Armor += armorIncrease;
-      npc.Magic += magicIncrease;
-
-      // Debugging log to verify updates
-      console.log(`Updated ${npc.Name} (Class: ${npc.Class}) - Level: ${npc.Level}, HP: ${npc.HP}, MaxHP: ${npc.MaxHP}, Attack: ${npc.Attack}, Damage: ${npc.Damage}, Armor: ${npc.Armor}, Magic: ${npc.Magic}`);
-  }
-});*/
 }
 
   // Check if serverGameConsole is defined and has the expected content
@@ -1428,6 +1538,12 @@ ensureNPCProperties(npc);
 
       let roomHistoryMatch = serverGameConsole.match(/Room Description: (.+)/);
       if (roomHistoryMatch) roomHistory = roomHistoryMatch[1];
+      
+      let puzzleInRoomMatch = serverGameConsole.match(/Puzzle in Room: (.+)/);
+      if (puzzleInRoomMatch) puzzleInRoom = puzzleInRoomMatch[1];
+  
+      let puzzleSolutionMatch = serverGameConsole.match(/Puzzle Solution: (.+)/);
+      if (puzzleSolutionMatch) puzzleSolution = puzzleSolutionMatch[1];
 
       let currentQuestMatch = serverGameConsole.match(/Current Quest: (.+)/);
       if (currentQuestMatch) currentQuest = currentQuestMatch[1];
@@ -1435,6 +1551,70 @@ ensureNPCProperties(npc);
       let nextArtifactMatch = serverGameConsole.match(/Next Artifact: (.+)/);
       if (nextArtifactMatch) nextArtifact = nextArtifactMatch[1];
       
+      let nextBossMatch = serverGameConsole.match(/Next Boss: (.+)/);
+      if (nextBossMatch) nextBoss = nextBossMatch[1];
+      
+      let nextBossRoomMatch = serverGameConsole.match(/Next Boss Room: (.+)/);
+      if (nextBossRoomMatch) nextBossRoom = nextBossRoomMatch[1];
+      
+      // Parsing the boss room coordinates from serverGameConsole
+      let bossCoordinatesMatch = serverGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+      if (bossCoordinatesMatch) {
+          bossCoordinates = `X: ${bossCoordinatesMatch[1]}, Y: ${bossCoordinatesMatch[2]}, Z: ${bossCoordinatesMatch[3]}`;
+          console.log("Parsed boss room coordinates:", bossCoordinates);
+      } else {
+          console.error("Failed to parse boss room coordinates from serverGameConsole.");
+      }
+      
+      // Add the boss room details to the roomNameDatabase and connect it to the nearest unvisited room
+      if (bossCoordinates && nextBossRoom && bossCoordinates !== "None" && nextBossRoom !== "None") {
+          // Extract coordinates from the bossCoordinates string
+          const bossCoordinatesMatch = bossCoordinates.match(/X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+          if (!bossCoordinatesMatch) {
+              console.error("Failed to parse boss room coordinates from serverGameConsole.");
+          } else {
+              // Create a properly formatted coordinate string
+              const bossCoordinatesString = `${bossCoordinatesMatch[1]},${bossCoordinatesMatch[2]},${bossCoordinatesMatch[3]}`;
+              const bossRoomCoordinatesObj = parseCoordinates(bossCoordinatesString);
+      
+              if (!bossRoomCoordinatesObj) {
+                  console.error("Invalid boss room coordinates, skipping connection logic.");
+              } else {
+                  // Add the boss room to the database if not present
+                  if (!roomNameDatabase.has(bossCoordinatesString)) {
+                      roomNameDatabase.set(bossCoordinatesString, nextBossRoom);
+                      console.log(`Added Boss Room to roomNameDatabase: ${bossCoordinatesString} -> ${nextBossRoom}`);
+                  }
+      
+                  // Find the nearest unvisited room
+                  const nearestUnvisitedRoom = findNearestUnvisitedRoom(bossRoomCoordinatesObj);
+                  if (nearestUnvisitedRoom) {
+                      const virtualRooms = generatePathToTarget(nearestUnvisitedRoom, bossRoomCoordinatesObj);
+                      let previousRoom = nearestUnvisitedRoom;
+      
+                      // Connect rooms along the generated path
+                      for (let virtualRoom of virtualRooms) {
+                          const virtualRoomKey = coordinatesToString(virtualRoom);
+                         /* if (!roomNameDatabase.has(virtualRoomKey)) {
+                              roomNameDatabase.set(virtualRoomKey, "");
+                              console.log(`Added Virtual Room to roomNameDatabase: ${virtualRoomKey}`);
+                          }*/
+      
+                          connectRooms(previousRoom, virtualRoom);
+                          previousRoom = virtualRoom;
+                      }
+      
+                      // Finally, connect the last virtual room to the boss room
+                      connectRooms(previousRoom, bossRoomCoordinatesObj);
+                  } else {
+                      console.warn("No unvisited room available to connect to the boss room.");
+                  }
+              }
+          }
+      } else {
+          console.error("Invalid boss room details, skipping connection logic.");
+      }
+
 // Extract adjacent rooms
 let adjacentRoomsMatch = serverGameConsole.match(/Adjacent Rooms: ([^\n]+)/);
 if (adjacentRoomsMatch) adjacentRooms = adjacentRoomsMatch ? adjacentRoomsMatch[1].split(', ').reduce((acc, room) => {
@@ -1582,6 +1762,8 @@ if (currentCoordinates.x === 0 && currentCoordinates.y === 0 && currentCoordinat
   roomName = "Ruined Temple Entrance"
   roomHistory = "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons..."; // Set preset value for specific coordinates
   exits = generateUniqueExits(currentCoordinates, conversationHistory);
+  // Example usage: update unvisited rooms set whenever roomNameDatabase or visitedRooms changes
+updateUnvisitedRoomsSet(currentCoordinates);
   // Check if there's a chance to add equipment to the room
 // Check if there's a chance to add equipment to the room
 
@@ -1612,14 +1794,19 @@ if (!roomEquipment.some(existingObject => areItemsEqual(existingObject, randomEq
 } else if (!matchingConsole) {
   roomName = roomNameDatabase.get(coordinatesString);
   exits = generateUniqueExits(currentCoordinates, conversationHistory);
-     // Populate adjacent rooms from the database
-let adjacentRoomsObject = populateAdjacentRoomsFromDatabase(currentCoordinates, exits);
-adjacentRooms = Object.entries(adjacentRoomsObject)
-  .map(([direction, name]) => `${direction}: ${name}`)
-  .join(', ');
+  // Example usage: update unvisited rooms set whenever roomNameDatabase or visitedRooms changes
+updateUnvisitedRoomsSet(currentCoordinates);
+  
+  // Populate adjacent rooms from the database
+  let adjacentRoomsObject = populateAdjacentRoomsFromDatabase(currentCoordinates, exits);
+  adjacentRooms = Object.entries(adjacentRoomsObject)
+      .map(([direction, name]) => `${direction}: ${name}`) // This line should use backticks for template literals
+      .join(', ');
+  
   console.log("adjacentRooms:", adjacentRooms);
- // Check if there's a chance to add equipment to the room
-// Check if there's a chance to add equipment to the room
+
+  // Check if there's a chance to add equipment to the room
+  // Check if there's a chance to add equipment to the room
 
 // Inside the code where new items are randomly generated, add XP to PC and NPCs
 if (Math.random() < 1.0) {
@@ -1659,7 +1846,9 @@ const roomHistoryObj = getFirstResponseForRoom(currentCoordinates); // Get the r
 if (roomHistoryObj) {
   // Ensure that roomName and roomHistory are updated based on the first response in the room's conversation history
   roomName = roomHistoryObj.roomName; // Provide a default if undefined
-  roomHistory = roomHistoryObj.roomHistory; 
+  roomHistory = roomHistoryObj.roomHistory;
+  puzzleInRoom = roomHistoryObj.puzzleInRoom ;
+  puzzleSolution = roomHistoryObj.puzzleSolution;
 
   if (roomHistoryObj.adjacentRooms) {
       const adjacentRoomsObject = roomHistoryObj.adjacentRooms;
@@ -2302,9 +2491,14 @@ Objects in Room: ${equipmentString}
 Objects in Room Properties: ${metadataString}
 Exits: ${exitsString}
 Score: ${score}
+Puzzle in Room: ${puzzleInRoom}
+Puzzle Solution: ${puzzleSolution}
 Artifacts Found: ${globalArtifactsFound}/15
 Quests Achieved: ${globalQuestsAchieved}/21
 Next Artifact: ${nextArtifact}
+Next Boss: ${nextBoss}
+Next Boss Room: ${nextBossRoom}
+Boss Room Coordinates: ${bossCoordinates}
 Current Quest: ${currentQuest}
 Inventory: ${inventoryString}
 Inventory Properties: ${inventoryPropertiesString}
@@ -2502,6 +2696,83 @@ return {
   z: coordinates.z + offset.z,
 };
 }
+
+
+
+function generateVirtualRooms(startCoordinates, endCoordinates) {
+  let virtualRooms = [];
+  let currentCoordinates = { ...startCoordinates };
+  
+  while (!areCoordinatesEqual(currentCoordinates, endCoordinates)) {
+      // Move towards the boss room in each axis until we reach it
+      if (currentCoordinates.x !== endCoordinates.x) {
+          currentCoordinates.x += currentCoordinates.x < endCoordinates.x ? 1 : -1;
+      } else if (currentCoordinates.y !== endCoordinates.y) {
+          currentCoordinates.y += currentCoordinates.y < endCoordinates.y ? 1 : -1;
+      } else if (currentCoordinates.z !== endCoordinates.z) {
+          currentCoordinates.z += currentCoordinates.z < endCoordinates.z ? 1 : -1;
+      }
+      
+      virtualRooms.push({ ...currentCoordinates });
+  }
+  
+  return virtualRooms;
+}
+
+function connectBossRoom(bossCoordinates) {
+  const nearestRoom = findNearestUnvisitedRoom(bossCoordinates);
+  if (!nearestRoom) {
+      console.error("No nearest room found to connect the boss room.");
+      return;
+  }
+
+  const virtualRooms = generateVirtualRooms(nearestRoom, bossCoordinates);
+
+  let previousRoom = nearestRoom;
+
+  for (let virtualRoom of virtualRooms) {
+      const virtualRoomKey = coordinatesToString(virtualRoom);
+      if (!roomConnections[virtualRoomKey]) {
+          roomConnections[virtualRoomKey] = {
+              coordinates: virtualRoom,
+              exits: [],
+              connectedRooms: [],
+              unconnectedRooms: [],
+          };
+      }
+
+      // Connect previous room to this virtual room
+      const directionToVirtualRoom = getExitToCoordinate(previousRoom, virtualRoom);
+      roomConnections[coordinatesToString(previousRoom)].connectedRooms.push(virtualRoom);
+      roomConnections[coordinatesToString(previousRoom)].exits.push(directionToVirtualRoom);
+
+      const directionToPreviousRoom = getExitToCoordinate(virtualRoom, previousRoom);
+      roomConnections[virtualRoomKey].connectedRooms.push(previousRoom);
+      roomConnections[virtualRoomKey].exits.push(directionToPreviousRoom);
+
+      previousRoom = virtualRoom;
+  }
+
+  // Finally, connect the last virtual room to the boss room
+  const bossRoomKey = coordinatesToString(bossCoordinates);
+  if (!roomConnections[bossRoomKey]) {
+      roomConnections[bossRoomKey] = {
+          coordinates: bossCoordinates,
+          exits: [],
+          connectedRooms: [],
+          unconnectedRooms: [],
+      };
+  }
+
+  const directionToBossRoom = getExitToCoordinate(previousRoom, bossCoordinates);
+  roomConnections[coordinatesToString(previousRoom)].connectedRooms.push(bossCoordinates);
+  roomConnections[coordinatesToString(previousRoom)].exits.push(directionToBossRoom);
+
+  const directionToPreviousRoom = getExitToCoordinate(bossCoordinates, previousRoom);
+  roomConnections[bossRoomKey].connectedRooms.push(previousRoom);
+  roomConnections[bossRoomKey].exits.push(directionToPreviousRoom);
+}
+
 
 // Function to check if two objects are equal
 function areObjectsEqual(obj1, obj2) {
@@ -4320,8 +4591,22 @@ return character;
 
 if (userWords.length > 1 && userWords[0] === "take") {
   const itemsToTake = userWords.slice(1).join(" ");
+  
+  const roomKey = coordinatesToString(currentCoordinates);
+  let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
+  let monstersState = monstersStateByRoom.get(roomKey) || "";
+  console.log('monstersState:', monstersState);
 
   if (itemsToTake.toLowerCase() === "all") {
+          
+      // Check if Monsters State is Hostile and any monsters have HP > 0
+      if (monstersState === "Hostile" && monstersInRoom.some(monster => monster.HP > 0)) {
+          const message = "The monsters growl and block you from taking any items.";
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+          return;
+      }
+      
       const newAdditionalEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
       const itemsToTakeArray = itemsToTake.split(/, | and /);
 
@@ -4470,6 +4755,15 @@ if (userWords.length > 1 && userWords[0] === "take") {
           }
       }
   } else {
+      
+      // Check if Monsters State is Hostile and any monsters have HP > 0
+      if (monstersState === "Hostile" && monstersInRoom.some(monster => monster.HP > 0)) {
+          const message = "The monsters growl and block you from taking any items.";
+          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+          scrollToBottom();
+          return;
+      }
+      
       const itemsToTakeArray = itemsToTake.split(/, | and /).map(item => item.trim());
 
       const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
@@ -5041,9 +5335,14 @@ let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
 
 // Process adding a monster to the party
 if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length - 2] === "to" && userWords[userWords.length - 1] === "party") {
+  
+  // Extract Monsters State
+  const monstersStateMatch = promptAndResponses[gameConsoleIndex].gameConsole.match(/Monsters State: ([^\n]+)/);
+  let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "";
+      
   let monsterNameInput = userWords.slice(1, userWords.length - 2).join(" "); // Extract the monster name input
 
-  // Capitalize the first letter of npcNameInput
+  // Capitalize the first letter of monsterNameInput
   monsterNameInput = monsterNameInput.charAt(0).toUpperCase() + monsterNameInput.slice(1);
 
   // Find all monsters that match the input name (case-insensitive comparison)
@@ -5069,41 +5368,38 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
   const correctCasedMonsterName = matchingMonsters[0].Name;
   userInput = `add ${correctCasedMonsterName} to party`;
 
+  // Check the state of the monster
+  if (monstersState === "Hostile") {
+      const message = `${correctCasedMonsterName} refuses to join your party. The monster is hostile and not willing to cooperate.`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  } else if (monstersState === "Neutral") {
+      const message = `${correctCasedMonsterName} declines your invitation. The monster seems indifferent and does not trust you enough to join.`;
+      chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+      scrollToBottom();
+      return;
+  }
+
+  // Proceed to add the monster to the party if the state is not Hostile or Neutral
   const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
   let updatedGameConsole = matchingConsoleData;
 
   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   console.log('updatedGameConsole:', updatedGameConsole);
 
-  // Refresh npcsInPartyString and npcsInParty after adding the monster to the party
- /* npcsInPartyString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim() || "";
-
-  if (npcsInPartyString) {
-      try {
-          const npcBlocks = npcsInPartyString.split(/\n(?=\w)/);
-          npcsInParty = npcBlocks.map(npcBlock => {
-              const lines = npcBlock.trim().split('\n').map(line => line.trim());
-              return {
-                  Name: lines[0]
-              };
-          });
-      } catch (error) {
-          console.error("Error parsing npcsInPartyString after adding:", error);
-      }
-  }*/
-
   const message = `You added ${correctCasedMonsterName} to the party.`;
 
   promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
 
-  conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+  conversationHistory = conversationHistory.replace(matchingConsoleData, updatedGameConsole);
 
   itemsInRoom = objectsInRoomString;
 
   const combinedHistory = conversationHistory + "\n" + userInput;
 
   let personalNarrative = await performDynamicSearch(combinedHistory);
-      // Construct the input message, including the previous response if it exists
+  // Construct the input message, including the previous response if it exists
   const messages = [
       { role: "assistant", content: "" },
       { role: "system", content: "" },
@@ -5117,7 +5413,7 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
 
   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-// Call the helper function to update npcsInParty and npcsInPartyString
+  // Call the helper function to update npcsInParty and npcsInPartyString
   updateNpcsInParty(updatedGameConsole);
   console.log("Game Console:", updatedGameConsole);
   console.log('itemsInRoom:', itemsInRoom);
@@ -5253,97 +5549,116 @@ if (personalNarrative) {
   messages[1].content;
 }
 
-  fetch('http://childrenofthegrave.com/updateState2', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ personalNarrative, updatedGameConsole }),
-  })
+const TIMEOUT_DURATION = 180000; // 3 minutes in milliseconds
+
+// Wrap fetch in a promise with timeout
+function fetchWithTimeout(resource, options = {}, timeout = TIMEOUT_DURATION) {
+  return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => reject(new Error('Request timed out')), timeout);
+      fetch(resource, options)
+          .then(response => {
+              clearTimeout(timeoutId);
+              resolve(response);
+          })
+          .catch(err => {
+              clearTimeout(timeoutId);
+              reject(err);
+          });
+  });
+}
+
+fetchWithTimeout('http://childrenofthegrave.com/updateState2', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ personalNarrative, updatedGameConsole }),
+})
   .then(response => response.json())
   .then(data => console.log(data))
   .catch(error => console.error('Error:', error));
-  
+
+// Extend $.ajax with a timeout setting
 $.ajax({
-  url: 'http://childrenofthegrave.com/processInput2', // Adjust this URL to your server's endpoint
+  url: 'http://childrenofthegrave.com/processInput2',
   type: 'POST',
   contentType: 'application/json',
-  data: JSON.stringify({ userInput: userInput }), // Send user input
-  
+  data: JSON.stringify({ userInput: userInput }),
+  timeout: TIMEOUT_DURATION, // Set timeout to 3 minutes
   success: function(response) {
-      // Directly access the 'response' part of the response object
-      let content = response.response; // Access the content directly
-      // Display the image if available
+      let content = response.response;
       let imageUrl = response.imageUrl;
-      // Continue with handling the serverGameConsole and updating the game state
       let serverGameConsole = response.updatedGameConsole;
-      console.log("serverGameConsole:", serverGameConsole); // Inspect the extracted part
-      
+      console.log("serverGameConsole:", serverGameConsole);
+
       // Parse new details from serverGameConsole
       let newRoomName = serverGameConsole.match(/Room Name: (.+)/)?.[1];
       let newRoomHistory = serverGameConsole.match(/Room Description: (.+)/)?.[1];
       let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: (.+)/)?.[1];
+      let newObjectsInRoomPropertiesString = serverGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
       let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();
       let newMonstersEquippedPropertiesString = serverGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
-      let newMonstersState = serverGameConsole.match(/Monsters State: (.+)/)?.[1];    
+      let newMonstersState = serverGameConsole.match(/Monsters State: (.+)/)?.[1];
       let currentQuest = serverGameConsole.match(/Current Quest: (.+)/)?.[1];
       let nextArtifact = serverGameConsole.match(/Next Artifact: (.+)/)?.[1];
+      let nextBoss = serverGameConsole.match(/Next Boss: (.+)/)?.[1];
+      let nextBossRoom = serverGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+      let bossCoordinates = serverGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+      if (bossCoordinates) {
+          bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+          console.log("Parsed boss room coordinates:", bossCoordinates);
+      } else {
+          console.error("Failed to parse boss room coordinates from serverGameConsole.");
+      }
       let adjacentRooms = serverGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+      let puzzleInRoom = serverGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+      let puzzleSolution = serverGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
 
       // Update the game console with new room details and exits
       updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${newRoomName}`);
       updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
+      updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${newObjectsInRoomPropertiesString}`);
       updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
       updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${newMonstersEquippedPropertiesString}`);
       updatedGameConsole = updatedGameConsole.replace(/Monsters State: .*/, `Monsters State: ${newMonstersState}`);
       updatedGameConsole = updatedGameConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
+      updatedGameConsole = updatedGameConsole.replace(/Next Boss: .*/, `Next Boss: ${nextBoss}`);
+      updatedGameConsole = updatedGameConsole.replace(/Next Boss Room: .*/, `Next Boss Room: ${nextBossRoom}`);
+      updatedGameConsole = updatedGameConsole.replace(/Boss Room Coordinates: .*/, `Boss Room Coordinates: ${bossCoordinates}`);
       updatedGameConsole = updatedGameConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
       updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRooms}`);
+      updatedGameConsole = updatedGameConsole.replace(/Puzzle in Room: .*/, `Puzzle in Room: ${puzzleInRoom}`);
+      updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, `Puzzle Solution: ${puzzleSolution}`);
 
-      console.log("Server response:", response); // Debug log to inspect the structure
-      console.log(content); // If you want to check the response as JSON
+      console.log("Server response:", response);
+      console.log(content);
 
-      // Add the user input, assistant prompt, system prompt, AI response, and personal narrative to the IndexedDB
       addPromptAndResponse(userInput, messages[0].content, messages[1].content, content, personalNarrative, conversationId, updatedGameConsole);
 
-    // Update the game console based on user inputs and get the updated game console
+      updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString, serverGameConsole);
+      console.log(updatedGameConsole);
+      conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+      turns++;
 
-updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString, serverGameConsole);
-//gameConsoleData = updatedGameConsole;
+      const formattedUpdatedGameConsole = includeOnlySpecifiedLines(updatedGameConsole);
+      console.log('formattedUpdatedGameConsole:', formattedUpdatedGameConsole);
 
+      const formattedConsoleWithLineBreaks = formattedUpdatedGameConsole.replace(/\n/g, "<br>");
 
-//updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString, serverGameConsole);
+      var formattedContent = content.replace(/\n/g, '<br>');
 
-    console.log(updatedGameConsole);
-    conversationHistory = conversationHistory + "\n" + updatedGameConsole;
-    turns++;
-    
-    // Apply the function to filter the lines you want to include
-    const formattedUpdatedGameConsole = includeOnlySpecifiedLines(updatedGameConsole);
-    console.log('formattedUpdatedGameConsole:', formattedUpdatedGameConsole);
-    
-    // Replace "\n" with "<br>" for line breaks
-    const formattedConsoleWithLineBreaks = formattedUpdatedGameConsole.replace(/\n/g, "<br>");
+      if (imageUrl) {
+          updateChatLog("<br><br><b> > </b>" + userInput + "<br><br><img src='" + imageUrl + "' alt='Generated Image' style='max-width:100%; margin-bottom: 10px;'><br><br>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
+      } else { 
+          updateChatLog("<br><br><b> > </b>" + userInput + "<br><br>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
+      }
 
-  // Replace '\n' with '<br>' for correct HTML display
-  var formattedContent = content.replace(/\n/g, '<br>');
-
-  // Update chat log with the formatted content
-
-if (imageUrl) {
-  updateChatLog("<br><br><b> > </b>" + userInput + "<br><br><img src='" + imageUrl + "' alt='Generated Image' style='max-width:100%; margin-bottom: 10px;'><br><br>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
-} else { 
-  updateChatLog("<br><br><b> > </b>" + userInput + "<br><br>" + formattedContent + "<br><br>" + formattedConsoleWithLineBreaks);
-}
-
-  // Clear the user input field
-  document.getElementById("chatuserinput").value = "";
-},
-    
-    error: function(error) {
+      document.getElementById("chatuserinput").value = "";
+  },
+  error: function(error) {
       console.log('Error:', error);
       updateChatLog("<br><b>Error:</b> Unable to get a response from the server.<br>");
-    }
-  });
+  }
+});
 } 
 
 $(document).ready(function() {
