@@ -5455,6 +5455,11 @@ monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
 
 // Process removing an NPC from the party
 if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.length - 2] === "from" && userWords[userWords.length - 1] === "party") {
+  
+      // Proceed to add the monster to the party if the state is not Hostile or Neutral
+  const matchingConsoleData = promptAndResponses[gameConsoleIndex].gameConsole;
+  let updatedGameConsole = matchingConsoleData;
+  
   let npcNameInput = userWords.slice(1, userWords.length - 2).join(" "); // Extract the NPC name input
 
   // Capitalize the first letter of npcNameInput
@@ -5512,6 +5517,12 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
   const combinedHistory = conversationHistory + "\n" + userInput;
 
   let personalNarrative = await performDynamicSearch(combinedHistory);
+  // Construct the input message, including the previous response if it exists
+  const messages = [
+      { role: "assistant", content: "" },
+      { role: "system", content: "" },
+      { role: "user", content: userInput }
+  ];
 
   chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
   scrollToBottom();
