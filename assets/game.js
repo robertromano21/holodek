@@ -59,7 +59,7 @@ const roomConversationHistories = {};
 let roomEquipment = [];
 
 // Function to save a room's conversation history on a per-coordinate basis
-function saveRoomConversationHistory(coordinates, roomHistory, roomEquipment, objectMetadata, adjacentRooms) {
+function saveRoomConversationHistory(coordinates, roomHistory, roomEquipment, objectMetadata, roomExits, adjacentRooms) {
 const coordinatesString = coordinatesToString(coordinates);
 
 if (!roomConversationHistories[coordinatesString]) {
@@ -95,7 +95,8 @@ roomConversationHistories[coordinatesString].push({
   prompt: prompt,
   response: filteredRoomHistory,
   roomEquipment: filteredRoomEquipment,
-  objectMetadata: objectMetadata,// Store roomEquipment in the history entry
+  objectMetadata: objectMetadata,
+  roomExits: roomExits,// Store roomEquipment in the history entry
 });
 }
 
@@ -128,6 +129,8 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
       let puzzleSolution = serverGameConsole.match(/Puzzle Solution: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipmentString = serverGameConsole.match(/Objects in Room: (.*?)\s*$/m)?.[1]?.trim();
       const roomEquipment = roomEquipmentString ? roomEquipmentString.split(', ').map(item => item.trim()) : [];
+      const roomExitsString = serverGameConsole.match(/Exits: (.*?)\s*$/m)?.[1]?.trim();
+      const roomExits = roomExitsString ? roomExitsString.split(', ').map(exit => exit.trim()) : [];
       const adjacentRoomsString = serverGameConsole.match(/Adjacent Rooms: (.*?)\s*$/m)?.[1]?.trim();
       const adjacentRooms = adjacentRoomsString ? adjacentRoomsString.split(/,\s+/).map(item => item.trim()) : [];
       let objectMetadata = serverGameConsole.match(/Objects in Room Properties: (.*?)\s*$/m)?.[1]?.trim();
@@ -169,6 +172,7 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
           response: "",
           roomEquipment,
           objectMetadata,
+          roomExits,
           roomName,
           roomHistory,
           puzzleInRoom,
@@ -216,6 +220,10 @@ const roomEquipment = gameConsole.match(/Objects in Room: ([^\n]+)/) ? gameConso
 // Extract objectMetadata from gameConsole
 const objectMetadata = gameConsole.match(/Objects in Room Properties: ([^\n]+)/) ? gameConsole.match(/Objects in Room Properties: ([^\n]+)/)[1].split(", ") : [];
 
+// Extract room exits from gameConsole
+const roomExitsString = gameConsole.match(/Exits: (.*?)\s*$/m)?.[1]?.trim();
+const roomExits = roomExitsString ? roomExitsString.split(', ').map(exit => exit.trim()) : [];
+
 // Extract room equipment from gameConsole
 const adjacentRooms = gameConsole.match(/Adjacent Rooms: ([^\n]+)/) ? gameConsole.match(/Adjacent Rooms: ([^\n]+)/)[1].split(/,\s+/).map(item => item.trim()).join(', ') : [];
 
@@ -226,6 +234,7 @@ const roomHistory = {
   response: response,
   roomEquipment: roomEquipment,
   objectMetadata: objectMetadata,
+  roomExits: roomExits,
   adjacentRooms: adjacentRooms,// Include objectMetadata in roomHistory
   prompts: [] // Add an array to store user prompts
 };
@@ -234,7 +243,7 @@ const roomHistory = {
 roomHistory.prompts.push(prompt);
 
 // Save the conversation history in the room's conversation histories
-saveRoomConversationHistory(currentCoordinates, roomHistory, roomEquipment, objectMetadata, adjacentRooms); // Save with objectMetadata
+saveRoomConversationHistory(currentCoordinates, roomHistory, roomEquipment, objectMetadata, roomExits, adjacentRooms); // Save with objectMetadata
 
 
 // If the room's conversation history entry doesn't exist yet, create it
@@ -920,7 +929,7 @@ const monstersEquippedPropertiesByRoom = new Map();
 const monstersStateByRoom = new Map();
 
 function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
-  if (!monstersInVisitedRooms.has(roomCoordinates)) {
+//   if (!monstersInVisitedRooms.has(roomCoordinates)) {
       let monsters = [];
       let monstersEquippedProperties = [];
       let monstersState = "";
@@ -998,7 +1007,7 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
       } else {
           console.log("No monster data found or regex failed to match.");
       }
-  }
+//    }
 }
 
 // Helper function to parse monsters from the string
@@ -1228,7 +1237,7 @@ function ensurePCProperties(char) {
           'Thief': { Attack: 0, Damage: 0, Armor: 1, Magic: 0 },
           'Assassin': { Attack: 1, Damage: 0, Armor: 0, Magic: 0 },
           'Barbarian': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: 0, Magic: 5 },
+          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: -2, Magic: 5 },
           // Add other classes here
       };
 
@@ -1291,7 +1300,7 @@ function ensureNPCProperties(npc) {
           'Thief': { Attack: 0, Damage: 0, Armor: 1, Magic: 0 },
           'Assassin': { Attack: 1, Damage: 0, Armor: 0, Magic: 0 },
           'Barbarian': { Attack: 1, Damage: 1, Armor: 0, Magic: 0 },
-          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: 0, Magic: 5 },
+          'Assassin-Fighter-Necromancer-Goddess': { Attack: 1, Damage: 1, Armor: -2, Magic: 5 },
           // Add other classes here
       };
 
@@ -1330,6 +1339,113 @@ function ensureNPCProperties(npc) {
       // Mark that base modifiers have been applied
       npc.baseModifiersApplied = true;
   }
+}
+
+function getReverseExit(exit) {
+  const reverseDirections = {
+      north: "south",
+      south: "north",
+      east: "west",
+      west: "east",
+      northeast: "southwest",
+      southwest: "northeast",
+      northwest: "southeast",
+      southeast: "northwest",
+      up: "down",
+      down: "up"
+  };
+
+  return reverseDirections[exit] || null; // Return null if the direction is not found
+}
+
+function stringToCoordinates(coordString) {
+  const [x, y, z] = coordString.split(',').map(Number); // Split and convert to numbers
+  return { x, y, z };
+}
+
+function updateRoomConnections(currentCoordinates, exits) {
+  const currentCoordString = coordinatesToString(currentCoordinates);
+
+  // Ensure the current room exists and has properties in the correct order
+  if (!roomConnections[currentCoordString]) {
+      roomConnections[currentCoordString] = {
+          coordinates: currentCoordinates,
+          exits: new Set(), // Ensure exits is always a Set
+          connectedRooms: [],
+          unconnectedRooms: Array.from(getAdjacentCoordinates(currentCoordinates)),
+      };
+  }
+
+  const currentRoom = roomConnections[currentCoordString];
+
+  // Ensure exits is a Set
+  if (!(currentRoom.exits instanceof Set)) {
+      currentRoom.exits = new Set(currentRoom.exits || []);
+  }
+
+  // Iterate through each exit and its corresponding adjacent coordinate
+  exits.forEach(exit => {
+      const adjacentCoord = generateCoordinates(currentCoordinates, exit);
+      const adjacentCoordString = coordinatesToString(adjacentCoord);
+
+      // Ensure the adjacent room exists and has properties in the correct order
+      if (!roomConnections[adjacentCoordString]) {
+          roomConnections[adjacentCoordString] = {
+              coordinates: adjacentCoord,
+              exits: new Set(), // Initialize exits as a Set
+              connectedRooms: [],
+              unconnectedRooms: Array.from(getAdjacentCoordinates(adjacentCoord)),
+          };
+      }
+
+      const adjacentRoom = roomConnections[adjacentCoordString];
+
+      // Ensure exits is a Set
+      if (!(adjacentRoom.exits instanceof Set)) {
+          adjacentRoom.exits = new Set(adjacentRoom.exits || []);
+      }
+
+      // Add the current exit to the current room's exits
+      currentRoom.exits.add(exit);
+
+      // Add the reverse exit to the adjacent room's exits
+      const reverseExit = getReverseExit(exit);
+      adjacentRoom.exits.add(reverseExit);
+
+      // Update connectedRooms with deduplication
+      if (!currentRoom.connectedRooms.some(room => areObjectsEqual(room, adjacentCoord))) {
+          currentRoom.connectedRooms.push(adjacentCoord);
+      }
+      if (!adjacentRoom.connectedRooms.some(room => areObjectsEqual(room, currentCoordinates))) {
+          adjacentRoom.connectedRooms.push(currentCoordinates);
+      }
+
+      // Remove adjacentCoord from unconnectedRooms of currentCoordinates
+      currentRoom.unconnectedRooms = currentRoom.unconnectedRooms.filter(room =>
+          !areObjectsEqual(stringToCoordinates(room), adjacentCoord)
+      );
+
+      // Remove currentCoordinates from unconnectedRooms of adjacentCoord
+      adjacentRoom.unconnectedRooms = adjacentRoom.unconnectedRooms.filter(room =>
+          !areObjectsEqual(stringToCoordinates(room), currentCoordinates)
+      );
+
+      // Ensure unconnectedRooms for the adjacent room are populated correctly
+      const potentialUnconnectedRooms = Array.from(getAdjacentCoordinates(adjacentCoord));
+      adjacentRoom.unconnectedRooms = potentialUnconnectedRooms.filter(room =>
+          !adjacentRoom.connectedRooms.some(connected => areObjectsEqual(connected, room)) &&
+          !areObjectsEqual(room, currentCoordinates)
+      );
+  });
+
+  // Deduplicate connectedRooms list (if needed for existing data)
+  currentRoom.connectedRooms = currentRoom.connectedRooms.filter(
+      (room, index, self) =>
+          index === self.findIndex(other => areObjectsEqual(room, other))
+  );
+  
+   console.log(`Generated exits for coordinates (${currentCoordinates.x}, ${currentCoordinates.y}, ${currentCoordinates.z}): ${Array.from(exits)}`);
+   console.log("Exits:", exits)
 }
 
 // Function to update the game console based on user inputs and get the updated game console
@@ -1627,6 +1743,8 @@ if (adjacentRoomsMatch) adjacentRooms = adjacentRoomsMatch ? adjacentRoomsMatch[
 populateRoomNameDatabase(currentCoordinates, adjacentRooms);
 
 console.log("roomNameDatabase:", roomNameDatabase);
+console.log("roomNameDatabasePlainObject:", roomNameDatabasePlainObject)
+console.log("roomNameDatabaseString:", roomNameDatabaseString);
 
       generateMonstersForRoom(roomKey, serverGameConsole);
       monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
@@ -1847,8 +1965,9 @@ if (roomHistoryObj) {
   // Ensure that roomName and roomHistory are updated based on the first response in the room's conversation history
   roomName = roomHistoryObj.roomName; // Provide a default if undefined
   roomHistory = roomHistoryObj.roomHistory;
-  puzzleInRoom = roomHistoryObj.puzzleInRoom ;
+  puzzleInRoom = roomHistoryObj.puzzleInRoom;
   puzzleSolution = roomHistoryObj.puzzleSolution;
+  exits = roomHistoryObj.roomExits;
 
   if (roomHistoryObj.adjacentRooms) {
       const adjacentRoomsObject = roomHistoryObj.adjacentRooms;
@@ -1860,7 +1979,18 @@ if (roomHistoryObj) {
 
       console.log("adjacentRooms after conversion:", adjacentRooms);
   }
-
+  // Update roomConnections for connected and unconnected rooms
+  updateRoomConnections(currentCoordinates, exits);
+  
+  // Ensure coordinates of connected rooms are updated
+  if (roomConnections[coordinatesToString(currentCoordinates)]) {
+      const connectedRoomsString = roomConnections[coordinatesToString(currentCoordinates)].connectedRooms
+          .map(room => coordinatesToString(room))
+          .join('; ');
+      console.log("Connected Rooms String:", connectedRoomsString);
+  }
+  
+  updateUnvisitedRoomsSet(currentCoordinates);
 //   monstersInRoomString = roomHistoryObj.monstersInRoom[1];// Provide a default if undefined
   console.log("Room History Object:", roomHistoryObj);
 console.log("Full object inspection:", JSON.stringify(roomHistoryObj, null, 2));
@@ -1932,7 +2062,7 @@ const equipmentPattern = new RegExp(`\\b(${equipmentItems.map(item => escapeRegE
 }
 
 // Check if the last user input was "search room" based on userWords
-const isSearchRoom = userWords.length >= 2 && userWords.slice(-2).join(" ").toLowerCase() === "search room";
+/*const isSearchRoom = userWords.length >= 2 && userWords.slice(-2).join(" ").toLowerCase() === "search room";
 console.log('userWords:', userWords);
 console.log('isSearchRoom:', isSearchRoom);
 
@@ -2615,9 +2745,18 @@ for (const offset of validOffsets) {
 return adjacentCoordinates;
 }
 
+function mapToPlainObject(map) {
+  const obj = {};
+  for (const [key, value] of map.entries()) {
+      obj[key] = value;
+  }
+  return obj;
+}
 
 // Initialize the roomNameDatabase as a Map
 const roomNameDatabase = new Map();
+let roomNameDatabasePlainObject = {};
+let roomNameDatabaseString = "";
 
 // Function to convert coordinates object to a string
 function coordinatesToString(coordinates) {
@@ -2626,18 +2765,25 @@ return `${coordinates.x},${coordinates.y},${coordinates.z}`;
 
 // Function to populate roomNameDatabase with room names from Adjacent Rooms
 function populateRoomNameDatabase(coordinates, adjacentRooms) {
-for (const direction in adjacentRooms) {
-  // Prepopulate with the Ruined Temple at coordinates (0, 0, 0)
-  roomNameDatabase.set(coordinatesToString({ x: 0, y: 0, z: 0 }), "Ruined Temple Entrance");  
-  const newCoordinates = getCoordinatesForDirection(coordinates, direction);
-  const newCoordinatesString = coordinatesToString(newCoordinates);
-
-  // Check if the room name is already in the database
-  if (!roomNameDatabase.has(newCoordinatesString)) {
-    const roomName = adjacentRooms[direction];
-    roomNameDatabase.set(newCoordinatesString, roomName);
+  // Add the starting room (if not already added)
+  if (!roomNameDatabase.has(coordinatesToString({ x: 0, y: 0, z: 0 }))) {
+      roomNameDatabase.set(coordinatesToString({ x: 0, y: 0, z: 0 }), "Ruined Temple Entrance");
   }
-}
+
+  for (const direction in adjacentRooms) {
+      const newCoordinates = getCoordinatesForDirection(coordinates, direction);
+      const newCoordinatesString = coordinatesToString(newCoordinates);
+
+      // Add the room name to the database if it's not already present
+      if (!roomNameDatabase.has(newCoordinatesString)) {
+          const roomName = adjacentRooms[direction];
+          roomNameDatabase.set(newCoordinatesString, roomName);
+      }
+  }
+
+  // Update the plain object and string globally
+  roomNameDatabasePlainObject = mapToPlainObject(roomNameDatabase);
+  roomNameDatabaseString = JSON.stringify(roomNameDatabasePlainObject);
 }
 
 // Function to check existing adjacent rooms in the database and populate Adjacent Rooms
@@ -4099,8 +4245,24 @@ const retort = require('retort-js').retort;
 
 const run = require('retort-js').run;
 
+// Function to handle the "Still Loading..." interval
+function startKeepAliveInterval(chatLog) {
+// Clear any existing interval
+if (window.keepAliveInterval) {
+  clearInterval(window.keepAliveInterval);
+}
+
+// Start a new interval
+window.keepAliveInterval = setInterval(() => {
+  if (!chatLog.innerHTML.includes("Loading...")) {
+    chatLog.innerHTML += "Loading...";
+  }
+}, 30000);
+}
+
 async function chatbotprocessinput(textin) {
-let userInput = document.getElementById("chatuserinput").value;
+
+  let userInput = document.getElementById("chatuserinput").value;
 document.getElementById("chatuserinput").value = "";
 
 // Get the existing chat log
@@ -4109,6 +4271,8 @@ const chatHistory = chatLog.innerHTML;
 
 // Update the chat log with the "Loading..." message below the existing content
 chatLog.innerHTML = chatHistory + "<br><br>Loading...";
+
+startKeepAliveInterval(chatLog);
 
 // Generate a conversation ID or retrieve an existing one
 let conversationId = localStorage.getItem("conversationId");
@@ -4126,7 +4290,7 @@ const roomHistory = roomConversationHistories[coordinatesToString(currentCoordin
 let userWords = userInput.split(/\s+/).map(word => word.toLowerCase());  
 // Check if the user input is "search room"
 
-if (userWords.includes("search") && userWords.includes("room")) {  
+/* if (userWords.includes("search") && userWords.includes("room")) {  
   // Filter out any other words except "search" and "room"
   const filteredWords = userWords.filter(word =>
     ["search", "room"].includes(word.toLowerCase())
@@ -4165,7 +4329,7 @@ if (userWords.length >= 2 && userWords.slice(-2).join(" ").toLowerCase() === "se
   scrollToBottom();
   return;
 }
-}
+}*/
 
 // Extract the gameConsole data from the promptAndResponses array
 let gameConsoleData = null;
@@ -5560,7 +5724,7 @@ if (personalNarrative) {
   messages[1].content;
 }
 
-const TIMEOUT_DURATION = 180000; // 3 minutes in milliseconds
+const TIMEOUT_DURATION = 240000; // 3 minutes in milliseconds
 
 // Wrap fetch in a promise with timeout
 function fetchWithTimeout(resource, options = {}, timeout = TIMEOUT_DURATION) {
@@ -5578,7 +5742,7 @@ function fetchWithTimeout(resource, options = {}, timeout = TIMEOUT_DURATION) {
   });
 }
 
-fetchWithTimeout('http://childrenofthegrave.com/updateState2', {
+fetchWithTimeout('http://childrenofthegrave.com/updateState4', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ personalNarrative, updatedGameConsole }),
@@ -5589,12 +5753,13 @@ fetchWithTimeout('http://childrenofthegrave.com/updateState2', {
 
 // Extend $.ajax with a timeout setting
 $.ajax({
-  url: 'http://childrenofthegrave.com/processInput2',
+  url: 'http://childrenofthegrave.com/processInput4',
   type: 'POST',
   contentType: 'application/json',
   data: JSON.stringify({ userInput: userInput }),
-  timeout: TIMEOUT_DURATION, // Set timeout to 3 minutes
+  timeout: 240000, // Set timeout to 3 minutes
   success: function(response) {
+      clearInterval(window.keepAliveInterval);
       let content = response.response;
       let imageUrl = response.imageUrl;
       let serverGameConsole = response.updatedGameConsole;
@@ -5605,6 +5770,7 @@ $.ajax({
       let newRoomHistory = serverGameConsole.match(/Room Description: (.+)/)?.[1];
       let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: (.+)/)?.[1];
       let newObjectsInRoomPropertiesString = serverGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+      let newExitsString = serverGameConsole.match(/Exits: (.+)/)?.[1];
       let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();
       let newMonstersEquippedPropertiesString = serverGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
       let newMonstersState = serverGameConsole.match(/Monsters State: (.+)/)?.[1];
@@ -5628,6 +5794,7 @@ $.ajax({
       updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${newObjectsInRoomPropertiesString}`);
+      updatedGameConsole = updatedGameConsole.replace(/Exits: .*/, `Exits: ${newExitsString}`);
       updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
       updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${newMonstersEquippedPropertiesString}`);
       updatedGameConsole = updatedGameConsole.replace(/Monsters State: .*/, `Monsters State: ${newMonstersState}`);
@@ -5666,6 +5833,7 @@ $.ajax({
       document.getElementById("chatuserinput").value = "";
   },
   error: function(error) {
+      clearInterval(window.keepAliveInterval);
       console.log('Error:', error);
       updateChatLog("<br><b>Error:</b> Unable to get a response from the server.<br>");
   }
