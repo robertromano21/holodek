@@ -7,9 +7,45 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
- <script src="/game.js"></script>
+ <script src="node_modules/phaser/dist/phaser.min.js"></script>
+ <script src="game.js?v=<?=time();?>"></script>
+ <script src="server.js?v=<?=time();?>"></script>
+   <script>document.addEventListener('DOMContentLoaded', () => {
+    const popup = document.getElementById('phaser-popup');
+    const header = document.getElementById('phaser-header');
+    
+    let isDragging = false;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    header.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        offsetX = e.clientX - popup.offsetLeft;
+        offsetY = e.clientY - popup.offsetTop;
+        header.style.cursor = 'grabbing'; // Change cursor
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+
+        const newX = e.clientX - offsetX;
+        const newY = e.clientY - offsetY;
+
+        // Prevent the popup from going out of bounds (optional)
+        const maxX = window.innerWidth - popup.offsetWidth;
+        const maxY = window.innerHeight - popup.offsetHeight;
+
+        popup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
+        popup.style.top = `${Math.min(Math.max(0, newY), maxY)}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+        isDragging = false;
+        header.style.cursor = 'grab'; // Reset cursor
+    });
+});</script>
  <title></title>
- <style>
+  <style>
     ::-webkit-scrollbar {
       display: none;
     }
@@ -66,13 +102,247 @@
       padding: 5px 10px;
     }
     
-    .npc-data {
-  overflow-wrap: break-word;
-}
+    #phaser-popup {
+        display: none; /* Start hidden by default */
+        position: absolute;
+        top: 5px; /* Top-right positioning */
+        right: 5px;
+        width: 200px; /* Set width */
+        height: 300px; /* Set height */
+        background-color: black; /* Match the container */
+        color: white;
+        border: 1px solid white;
+        border-radius: 8px; /* Rounded corners */
+        z-index: 1500; /* Ensure it’s above other elements */
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); /* Subtle shadow */
+        resize: both; /* Allow resizing */
+        overflow: hidden; /* Prevent overflow */
+        padding: 0; /* Remove padding from the parent */
+        margin: 0; /* Remove any margin */
+        box-sizing: border-box; /* Include borders in width/height */
+        pointer-events: auto;
+    }
+    
+    #phaser-header {
+        background-color: #333;
+        color: white;
+        padding: 10px;
+        cursor: grab; /* Indicates draggable behavior */
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        font-weight: bold;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid white; /* Visual separation */
+    }
+
+    
+    #phaser-container {
+        width: 100%; /* Match the popup width */
+        height: calc(100% - 40px); /* Subtract the header height */
+        overflow-y: auto; /* Enable vertical scrolling */
+        padding: 10px; /* Add padding inside the container */
+        font-family: monospace;
+        font-size: 8px;
+        color: white;
+        background-color: black; /* Match popup background */
+        white-space: pre-wrap; /* Preserve line breaks */
+        box-sizing: border-box; /* Include padding in width calculation */
+        z-index: 2000; /* Ensure it's above other elements */
+
+        /* Custom scrollbar */
+        scrollbar-width: 50px; /* Firefox: Thin scrollbar */
+        scrollbar-color: grey black; /* Firefox: Thumb color / Track color */
+    }
+    
+    #phaser-container::-webkit-scrollbar {
+        width: 50px; /* Width of the scrollbar */
+    }
+    
+    #phaser-container::-webkit-scrollbar-track {
+        background: black; /* Track color */
+    }
+    
+    #phaser-container::-webkit-scrollbar-thumb {
+        background-color: grey; /* Scrollbar thumb color */
+        border-radius: 0; /* Remove rounding */
+        border: 2px solid black; /* Space between thumb and track */
+    
+        /* Fixed square size */
+        height: 50px; /* Make the thumb square */
+        min-height: 50px; /* Prevent smaller sizes */
+    }
+    
+    #phaser-container::-webkit-scrollbar-thumb:hover {
+        background-color: lightgrey; /* Lighter grey on hover */
+    }
+    
+    .clickable-object {
+      color: #ffffff; /* Green color to indicate it's interactive */
+      text-decoration: underline; /* Optional: underline for clarity */
+      cursor: pointer; /* Change cursor to pointer on hover */
+    }
+    
+    .clickable-object:hover {
+      color: grey; /* Slightly darker green on hover */
+      text-decoration: none; /* Remove underline on hover */
+    }
+    
+    .clickable-inventory {
+      color: #ffffff; /* Green color to indicate it's interactive */
+      text-decoration: underline; /* Optional: underline for clarity */
+      cursor: pointer; /* Change cursor to pointer on hover */
+    }
+    
+    .clickable-inventory:hover {
+      color: grey; /* Slightly darker green on hover */
+      text-decoration: none; /* Remove underline on hover */
+    }
+
+    .clickable-equipped {
+        color: #ffffff; /* White to indicate it's interactive */
+        text-decoration: underline; /* Optional: underline for clarity */
+        cursor: pointer; /* Change cursor to pointer on hover */
+    }
+    
+    .clickable-equipped:hover {
+        color: grey; /* Slightly darker white on hover */
+        text-decoration: none; /* Remove underline on hover */
+    }
+
+    .clickable-exit {
+        color: #ffffff; /* Bright yellow for visibility */
+        text-decoration: underline; /* Optional: underline for clarity */
+        cursor: pointer; /* Change cursor to pointer on hover */
+    }
+    
+    .clickable-exit:hover {
+        color: grey; /* Slightly darker yellow on hover */
+        text-decoration: none; /* Remove underline on hover */
+    }
+
+    .clickable-npc {
+        color: #ffffff; /* Bright red to indicate interaction */
+        text-decoration: underline; /* Optional: underline for clarity */
+        cursor: pointer; /* Change cursor to pointer on hover */
+    }
+    
+    .clickable-npc:hover {
+        color: grey; /* Slightly darker red on hover */
+        text-decoration: none; /* Remove underline on hover */
+    }
+    
+    .clickable-monster {
+        color: #ffffff; /* Bright green to indicate interaction */
+        text-decoration: underline; /* Optional: underline for clarity */
+        cursor: pointer; /* Change cursor to pointer on hover */
+    }
+    
+    .clickable-monster:hover {
+        color: grey; /* Slightly darker green on hover */
+        text-decoration: none; /* Remove underline on hover */
+    }
+
+    .popup-container {
+        position: absolute;
+        top: 310px;
+        right: 5px;
+        width: 200px;
+        background-color: rgba(0, 0, 0, 0.9); /* Semi-transparent black */
+        border: 1px solid white;
+        border-radius: 8px;
+        padding: 0;
+        box-sizing: border-box;
+        color: white;
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        z-index: 3000; /* Ensure it’s above other elements */
+        text-align: center;
+    }
+
+    /* Popup buttons */
+    .popup-button {
+        background-color: #444;
+        color: white;
+        border: none;
+        padding: 5px 10px;
+        margin: 5px;
+        cursor: pointer;
+        border-radius: 5px;
+    }
+
+    .popup-button:hover {
+        background-color: #666; /* Slightly lighter background on hover */
+    }
+    
+    .popup-container select {
+        background-color: #222;
+        color: white;
+        border: 1px solid white;
+        padding: 5px;
+        border-radius: 5px;
+        font-size: 14px;
+        margin: 10px 0;
+    }
+    
+    .popup-container select:focus {
+        outline: none;
+        box-shadow: 0 0 5px #444;
+    }
+    
+    .popup-container #confirm-equip {
+        background-color: #00ff00;
+        color: black;
+        border: none;
+        padding: 5px 10px;
+        margin: 5px;
+        cursor: pointer;
+        border-radius: 5px;
+    }
+    
+    .popup-container #cancel-equip {
+        background-color: #ff0000;
+        color: black;
+        border: none;
+        padding: 5px 10px;
+        margin: 5px;
+        cursor: pointer;
+        border-radius: 5px;
+    }
+    
+    .npc-block {
+        margin-left: 20px; /* Adjust the value for your desired indentation */
+        white-space: pre-wrap; /* Preserve formatting */
+        font-family: monospace; /* Match game console styling */
+    }
+    
+
+    .pc-block {
+        margin-left: 20px; /* Adjust the value for your desired indentation */
+        white-space: pre-wrap; /* Preserve formatting */
+        font-family: monospace; /* Match game console styling */
+    }
+    
+    .monster-block {
+        margin-left: 20px; /* Adjust the value for your desired indentation */
+        white-space: pre-wrap; /* Preserve formatting */
+        font-family: monospace; /* Match game console styling */
+    }
+
 </style>
 <script>
   // Move the function declarations to the global scope
-
+function togglePopup() {
+    const popup = document.getElementById('phaser-popup');
+    if (popup.style.display === 'block') {
+        popup.style.display = 'none'; // Hide the popup
+    } else {
+        popup.style.display = 'block'; // Show the popup
+        popup.style.top = '5px'; // Reset position to top-right
+        popup.style.right = '5px'; // Reset position to top-right
+    }
+}
   // Function to scroll to the bottom of the chat log
   function scrollToBottom() {
     var chatbotButton = document.getElementById("chatbotbutton");
@@ -90,9 +360,22 @@
 </script>
 </head>
 <body>
+  <!-- Phaser Popup -->
+  <div id="phaser-popup">
+    <div id="phaser-header">
+      Game Console
+      <button onclick="document.getElementById('phaser-popup').style.display = 'none';" style="
+          background: none;
+          color: white;
+          border: none;
+          font-size: 16px;
+          cursor: pointer;">X</button>
+    </div>
+    <div id="phaser-container"></div>
+  </div>
   <div id="divchatbot">
     <div id="chatbotcontainer">
-      <p id="chatlog" align="left"><br><img src="./children-of-the-grave-logo.png" style="width:50%; text-align:center;"><br><img src="./SceneBreak.png" style="width:50%; text-align:center;"><br><br><b>Grave Master:</b> Hello, adventurer! Welcome to Children of the Grave: Version 1.0, a GPT-3 and Open AI powered fantasy roleplaying text adventure game. I am the Grave Master, who administers the game. And you are the player.<br><br>CHILDREN OF THE GRAVE: Version 1.0<br><br>You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...<br><br>The game begins in the Ruined Temple. Good luck, adventurer! Type 'Start. Construct the 1000 rooms. Display start menu.' with nothing else in the sentence and then choose a game mode from the start menu.</p>
+      <p id="chatlog" align="left"><br><img src="./children-of-the-grave-logo.png" style="width:50%; text-align:center;"><br><img src="./SceneBreak.png" style="width:50%; text-align:center;"><br><br><b>Grave Master:</b> Hello, adventurer! Welcome to Children of the Grave: Version 1.0, a GPT-3 and Open AI powered fantasy roleplaying text adventure game. I am the Grave Master, who administers the game. And you are the player.<br><br>CHILDREN OF THE GRAVE: Version 1.0<br><br>You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...<br><br>The game begins in the Ruined Temple. Good luck, adventurer! Type 'Start' with nothing else in the sentence and then choose a game mode from the start menu.</p>
       <div id="game-console">
   <table class="character-table" style="width: 100%; border-collapse: collapse;">
     <tr>
@@ -129,6 +412,18 @@
       </div>
     </div>
   </div>
+  
+<button id="open-popup-button" onclick="togglePopup()" style="
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 1100;
+    background-color: #444;
+    color: white;
+    padding: 5px 10px;
+    border: none;
+    cursor: pointer;
+">Game Console</button>
 
   <div style="display: none;"><b>Your API key (remains hidden to me): </b><input id="userapikey" value=""/></div>
 </body>

@@ -1,3 +1,538 @@
+class MainScene extends Phaser.Scene {
+  constructor() {
+      super({ key: 'MainScene' });
+  }
+
+  preload() {
+      // Preload assets if needed
+  }
+
+  create(data) {
+      
+      this.input.setDefaultCursor('pointer');
+      // Remove previous popup if it exists
+      const existingPopup = document.getElementById('game-popup');
+      if (existingPopup) {
+          existingPopup.remove();
+      }
+
+      // Safely use the passed data or set defaults
+      const roomName = data?.roomName || "Ruined Temple Entrance";
+      const roomDescription = data?.roomDescription || "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...";
+      const coordinates = data?.coordinates || "None";
+      const objects = data?.objects || "None";
+      // Render clickable objects
+      const objectsInRoomProperties = data?.objectsInRoomProperties || "None";
+      const exits = data?.exits || "None";
+      const pc = data?.pc || "No PC data";
+      const npcs = data?.npcs || "None";
+      const inventory = data?.inventory || "Empty";
+      const inventoryProperties = data?.inventoryProperties || "None";
+      const monsters = data?.monsters || "None";
+      const monstersState = data?.monstersState || "None";
+      const puzzle = data?.puzzle || { inRoom: "No puzzle", solution: "No solution" };
+      const currentQuest = data?.currentQuest || "None";
+      const nextArtifact = data?.nextArtifact || "None";
+      const nextBoss = data?.nextBoss || "None";
+      const nextBossRoom = data?.nextBossRoom || "None";
+      const bossCoordinates = data?.bossCoordinates || "None";
+      const adjacentRooms = data?.adjacentRooms || "None";
+      
+      let exitsHtml = exits;
+      if (exits !== "None") {
+          const exitList = exits.split(", ");
+          exitsHtml = exitList.map(exit => `<span class="clickable-exit" data-exit="${exit}">${exit}</span>`).join(", ");
+      }
+      
+      let objectsHtml = objects;
+      if (objects !== "None") {
+          const objectList = objects.split(", ");
+          objectsHtml = objectList.map(object => `<span class="clickable-object" data-object="${object}">${object}</span>`).join(", ");
+      }
+      
+      let inventoryHtml = inventory;
+      if (inventory !== "Empty") {
+          const inventoryList = inventory.split(", ");
+          inventoryHtml = inventoryList.map(item => `<span class="clickable-inventory" data-object="${item}">${item}</span>`).join(", ");
+      }
+      
+      let pcHtml = pc;
+      if (pc !== "No PC data") {
+          const pcName = pc.split("\n")[0]; // Get PC name
+          const pcLines = pc.split("\n").map(line => line.trim()).filter(line => line); // Clean up and split into lines
+          const pcEquippedLine = pc.match(/Equipped: (.+)/)?.[1]; // Extract the Equipped line
+      
+          let updatedPcBlock = pcLines.join("\n"); // Remove extra whitespace and reformat
+      
+          if (pcEquippedLine) {
+              // Replace items in the Equipped line with clickable spans
+              const clickableEquippedLine = pcEquippedLine.split(", ").map(item => {
+                  const [slot, itemName] = item.split(":").map(part => part.trim());
+                  if (itemName !== "None") {
+                      return `${slot}: <span class="clickable-equipped" data-item="${itemName}" data-character="${pcName}">${itemName}</span>`;
+                  }
+                  return `${slot}: None`;
+              }).join(", ");
+      
+              // Replace the Equipped line in the PC block
+              updatedPcBlock = updatedPcBlock.replace(/Equipped: .+/, `Equipped: ${clickableEquippedLine}`);
+          }
+      
+          // Wrap the PC block in a div with a class for indentation
+          pcHtml = `<div class="pc-block">${updatedPcBlock}</div>`;
+      }
+      
+      let npcsHtml = npcs;
+      if (npcs !== "None") {
+          const npcLines = npcs.split("\n").map(line => line.trim()).filter(line => line); // Clean up and split into lines
+          const indentedNpcBlocks = []; // Array to hold NPC blocks with indentation
+      
+          for (let i = 0; i < npcLines.length; i += 14) {
+              const npcBlock = npcLines.slice(i, i + 14).join("\n"); // Get the full block of NPC data
+              const npcName = npcLines[i]; // NPC name is the first line of the block
+              const npcEquippedLine = npcBlock.match(/Equipped: (.+)/)?.[1]; // Extract Equipped line
+      
+              let updatedNpcBlock = npcBlock;
+      
+              // Make the NPC name clickable
+              const clickableNpcName = `<span class="clickable-npc" data-npc="${npcName}">${npcName}</span>`;
+              updatedNpcBlock = updatedNpcBlock.replace(npcName, clickableNpcName);
+      
+              if (npcEquippedLine) {
+                  // Replace items in the Equipped line with clickable spans
+                  const clickableEquippedLine = npcEquippedLine.split(", ").map(item => {
+                      const [slot, itemName] = item.split(":").map(part => part.trim());
+                      if (itemName !== "None") {
+                          return `${slot}: <span class="clickable-equipped" data-item="${itemName}" data-character="${npcName}">${itemName}</span>`;
+                      }
+                      return `${slot}: None`;
+                  }).join(", ");
+      
+                  // Replace the Equipped line in the NPC block
+                  updatedNpcBlock = updatedNpcBlock.replace(/Equipped: .+/, `Equipped: ${clickableEquippedLine}`);
+              }
+      
+              // Wrap the updated NPC block in a div with a class for indentation
+              indentedNpcBlocks.push(`<div class="npc-block">${updatedNpcBlock}</div>`);
+          }
+      
+          // Combine the indented NPC blocks with the NPCs header
+          npcsHtml = `${indentedNpcBlocks.join("\n")}`;
+      }
+
+      let monstersHtml = monsters;
+      if (monsters !== "None") {
+          const monsterLines = monsters.split("\n").map(line => line.trim()).filter(line => line); // Clean up and split into lines
+          const indentedMonsterBlocks = []; // Array to hold monster blocks with indentation
+      
+          for (let i = 0; i < monsterLines.length; i += 14) {
+              const monsterBlock = monsterLines.slice(i, i + 14).join("\n"); // Get the full block of monster data
+              const monsterName = monsterLines[i]; // Monster name is the first line of the block
+      
+              // Make the monster name clickable
+              const clickableMonsterName = `<span class="clickable-monster" data-monster="${monsterName}">${monsterName}</span>`;
+              const updatedMonsterBlock = monsterBlock.replace(monsterName, clickableMonsterName);
+      
+              // Wrap the updated monster block in a div with a class for indentation
+              indentedMonsterBlocks.push(`<div class="monster-block">${updatedMonsterBlock}</div>`);
+          }
+      
+          monstersHtml = indentedMonsterBlocks.join("\n"); // Combine the blocks
+      }
+
+      // Combine all data into a single string for display
+      const fullText = `
+Room: ${roomName}
+
+Room Description: ${roomDescription}
+
+Coordinates: ${coordinates}
+
+Exits: ${exitsHtml}
+
+Objects in Room: ${objectsHtml}
+
+Objects in Room Properties: ${objectsInRoomProperties}
+
+Inventory: ${inventoryHtml}
+
+Inventory Properties: ${inventoryProperties}
+
+PC:
+${pcHtml}
+
+NPCs:
+${npcsHtml}
+
+Monsters in Room:
+${monstersHtml}
+
+Monsters State: ${monstersState}
+
+Puzzle: ${puzzle.inRoom}
+
+Solution: ${puzzle.solution}
+
+Current Quest: ${currentQuest}
+
+Next Artifact: ${nextArtifact}
+
+Next Boss: ${nextBoss}
+
+Next Boss Room: ${nextBossRoom}
+
+Boss Room Coordinates: ${bossCoordinates}
+
+Adjacent Rooms:
+${adjacentRooms}
+      `;
+
+      // Get the popup div
+      const popupDiv = document.getElementById('phaser-popup');
+      const contentDiv = document.getElementById('phaser-container');
+  
+      // Update the content inside the popup
+      contentDiv.innerHTML = fullText;
+  
+      // Add event listener to clickable objects inside contentDiv
+      contentDiv.addEventListener('click', (event) => {
+          const target = event.target;
+          if (target.classList.contains('clickable-object')) {
+              const objectName = target.getAttribute('data-object');
+              console.log(`Clicked on object: ${objectName}`);
+      
+              // Remove any existing popup
+              const existingPopup = document.querySelector('.popup-container');
+              if (existingPopup) {
+                  existingPopup.remove();
+              }
+      
+              // Create the popup container
+              const popup = document.createElement('div');
+              popup.classList.add('popup-container');
+      
+              // Add popup content
+              popup.innerHTML = `
+                  <p>Take ${objectName}?</p>
+                  <button class="popup-button" id="take-button">Take</button>
+                  <button class="popup-button" id="cancel-button">Cancel</button>
+              `;
+      
+              // Append the popup to the body
+              document.body.appendChild(popup);
+      
+              // Add event listeners for buttons
+              document.getElementById('take-button').addEventListener('click', () => {
+                  const chatInput = document.getElementById('chatuserinput');
+                  chatInput.value = `take ${objectName}`;
+                  chatbotprocessinput(); // Process the "take" command
+                  popup.remove(); // Remove the popup
+              });
+      
+              document.getElementById('cancel-button').addEventListener('click', () => {
+                  popup.remove(); // Remove the popup
+              });
+          }
+      });
+      
+              // Add event listener to clickable objects inside contentDiv
+      contentDiv.addEventListener('click', (event) => {
+          const target = event.target;
+          if (target.classList.contains('clickable-inventory')) {
+              const objectName = target.getAttribute('data-object');
+              console.log(`Clicked on object: ${objectName}`);
+      
+              // Remove any existing popup
+              const existingPopup = document.querySelector('.popup-container');
+              if (existingPopup) {
+                  existingPopup.remove();
+              }
+      
+              // Create the popup container
+              const popup = document.createElement('div');
+              popup.classList.add('popup-container');
+      
+              // Add popup content
+              popup.innerHTML = `
+                  <p>Drop or Equip ${objectName}?</p>
+                  <button class="popup-button" id="drop-button">Drop</button>
+                  <button class="popup-button" id="equip-button">Equip</button>
+                  <button class="popup-button" id="cancel-button">Cancel</button>
+              `;
+      
+              // Append the popup to the body
+              document.body.appendChild(popup);
+      
+              // Add event listeners for buttons
+              document.getElementById('drop-button').addEventListener('click', () => {
+                  const chatInput = document.getElementById('chatuserinput');
+                  chatInput.value = `drop ${objectName}`;
+                  chatbotprocessinput(); // Process the "take" command
+                  popup.remove(); // Remove the popup
+              });
+              
+              document.getElementById('equip-button').addEventListener('click', () => {
+                  // Remove the current popup
+                  popup.remove();
+              
+                  // Get PC and NPC names for the dropdown
+                  const characters = [];
+                  let pcName = null;
+                  if (pc !== "No PC data") {
+                      pcName = pc.split("\n")[0]; // Extract PC name
+                      characters.push(pcName);
+                  }
+                  if (npcs !== "None") {
+                      const npcLines = npcs.split("\n").map(line => line.trim()).filter(line => line); // Split into lines and clean up
+                      for (let i = 0; i < npcLines.length; i += 14) {
+                          characters.push(npcLines[i]); // Every 14th line is the name
+                      }
+                  }
+              
+                  // Create a new popup for character selection
+                  const characterPopup = document.createElement('div');
+                  characterPopup.classList.add('popup-container');
+              
+                  // Add dropdown content
+                  const characterOptions = characters.map(name => `<option value="${name}">${name}</option>`).join("");
+                  characterPopup.innerHTML = `
+                      <p>Select a character to equip ${objectName}:</p>
+                      <select id="character-select">${characterOptions}</select>
+                      <button class="popup-button" id="confirm-equip">Equip</button>
+                      <button class="popup-button" id="cancel-equip">Cancel</button>
+                  `;
+              
+                  // Append the new popup to the body
+                  document.body.appendChild(characterPopup);
+              
+                  // Add event listeners for buttons
+                  document.getElementById('confirm-equip').addEventListener('click', () => {
+                      const selectedCharacter = document.getElementById('character-select').value;
+                      const chatInput = document.getElementById('chatuserinput');
+              
+                      // Determine if equipping the PC or an NPC
+                      if (selectedCharacter === pcName) {
+                          chatInput.value = `equip ${objectName}`; // Command for PC
+                      } else {
+                          chatInput.value = `equip ${objectName} to ${selectedCharacter}`; // Command for NPC
+                      }
+              
+                      chatbotprocessinput(); // Process the "equip" command
+                      characterPopup.remove(); // Remove the character selection popup
+                  });
+              
+                  document.getElementById('cancel-equip').addEventListener('click', () => {
+                      characterPopup.remove(); // Remove the character selection popup
+                  });
+              });
+              
+              document.getElementById('cancel-button').addEventListener('click', () => {
+                  popup.remove(); // Remove the popup
+              });
+          }
+      });
+      
+      contentDiv.addEventListener("click", (event) => {
+          const target = event.target;
+          if (target.classList.contains("clickable-equipped")) {
+              const itemName = target.getAttribute("data-item");
+              const characterName = target.getAttribute("data-character");
+              console.log(`Clicked on equipped item: ${itemName} from ${characterName}`);
+      
+              // Remove any existing popup
+              const existingPopup = document.querySelector(".popup-container");
+              if (existingPopup) {
+                  existingPopup.remove();
+              }
+      
+              // Create the popup container
+              const popup = document.createElement("div");
+              popup.classList.add("popup-container");
+              popup.innerHTML = `
+                  <p>Unequip ${itemName}?</p>
+                  <button class="popup-button" id="unequip-button">Unequip</button>
+                  <button class="popup-button" id="cancel-button">Cancel</button>
+              `;
+              document.body.appendChild(popup);
+      
+              // Remove existing event listeners if buttons already exist
+              const unequipButton = document.getElementById("unequip-button");
+              const cancelButton = document.getElementById("cancel-button");
+      
+              if (unequipButton) {
+                  unequipButton.replaceWith(unequipButton.cloneNode(true)); // Replace the button to remove old listeners
+              }
+              if (cancelButton) {
+                  cancelButton.replaceWith(cancelButton.cloneNode(true)); // Replace the button to remove old listeners
+              }
+      
+              // Attach new event listeners to buttons
+              document.getElementById("unequip-button").addEventListener("click", () => {
+                  const chatInput = document.getElementById("chatuserinput");
+                  if (characterName === pc.split("\n")[0]) {
+                      chatInput.value = `unequip ${itemName}`;
+                  } else {
+                      chatInput.value = `unequip ${itemName} from ${characterName}`;
+                  }
+                  chatbotprocessinput(); // Send the unequip command
+                  popup.remove(); // Remove the popup
+              });
+      
+              document.getElementById("cancel-button").addEventListener("click", () => {
+                  popup.remove(); // Remove the popup
+              });
+          }
+      });
+
+      contentDiv.addEventListener("click", (event) => {
+          const target = event.target;
+          if (target.classList.contains("clickable-npc")) {
+              const npcName = target.getAttribute("data-npc");
+              console.log(`Clicked on NPC: ${npcName}`);
+      
+              // Remove any existing popup
+              const existingPopup = document.querySelector(".popup-container");
+              if (existingPopup) {
+                  existingPopup.remove();
+              }
+      
+              // Create the confirmation popup
+              const popup = document.createElement("div");
+              popup.classList.add("popup-container");
+      
+              // Add popup content
+              popup.innerHTML = `
+                  <p>Remove ${npcName} from the party?</p>
+                  <button class="popup-button" id="remove-button">Remove</button>
+                  <button class="popup-button" id="cancel-button">Cancel</button>
+              `;
+      
+              // Append the popup to the body
+              document.body.appendChild(popup);
+      
+              // Add event listeners for buttons
+              document.getElementById("remove-button").addEventListener("click", () => {
+                  const chatInput = document.getElementById("chatuserinput");
+                  chatInput.value = `remove ${npcName} from party`; // Command to remove NPC
+                  chatbotprocessinput(); // Process the command
+                  popup.remove(); // Remove the popup
+              });
+      
+              document.getElementById("cancel-button").addEventListener("click", () => {
+                  popup.remove(); // Remove the popup
+              });
+          }
+      });
+      
+      contentDiv.addEventListener("click", (event) => {
+          const target = event.target;
+          if (target.classList.contains("clickable-monster")) {
+              const monsterName = target.getAttribute("data-monster");
+              console.log(`Clicked on monster: ${monsterName}`);
+      
+              // Remove any existing popup
+              const existingPopup = document.querySelector(".popup-container");
+              if (existingPopup) {
+                  existingPopup.remove();
+              }
+      
+              // Create the confirmation popup
+              const popup = document.createElement("div");
+              popup.classList.add("popup-container");
+      
+              // Add popup content
+              popup.innerHTML = `
+                  <p>Add ${monsterName} to the party?</p>
+                  <button class="popup-button" id="add-button">Add</button>
+                  <button class="popup-button" id="cancel-button">Cancel</button>
+              `;
+      
+              // Append the popup to the body
+              document.body.appendChild(popup);
+      
+              // Add event listeners for buttons
+              document.getElementById("add-button").addEventListener("click", () => {
+                  const chatInput = document.getElementById("chatuserinput");
+                  chatInput.value = `add ${monsterName} to party`; // Command to add monster
+                  chatbotprocessinput(); // Process the command
+                  popup.remove(); // Remove the popup
+              });
+      
+              document.getElementById("cancel-button").addEventListener("click", () => {
+                  popup.remove(); // Remove the popup
+              });
+          }
+      });
+
+      contentDiv.addEventListener("click", (event) => {
+          const target = event.target;
+          if (target.classList.contains("clickable-exit")) {
+              const exitDirection = target.getAttribute("data-exit");
+              console.log(`Clicked on exit: ${exitDirection}`);
+      
+              // Remove any existing popup
+              const existingPopup = document.querySelector(".popup-container");
+              if (existingPopup) {
+                  existingPopup.remove();
+              }
+      
+              // Create the confirmation popup
+              const popup = document.createElement("div");
+              popup.classList.add("popup-container");
+      
+              // Add popup content
+              popup.innerHTML = `
+                  <p>Go ${exitDirection}?</p>
+                  <button class="popup-button" id="go-button">Go</button>
+                  <button class="popup-button" id="cancel-button">Cancel</button>
+              `;
+      
+              // Append the popup to the body
+              document.body.appendChild(popup);
+      
+              // Add event listeners for buttons
+              document.getElementById("go-button").addEventListener("click", () => {
+                  const chatInput = document.getElementById("chatuserinput");
+                  chatInput.value = `${exitDirection}`; // Command to move in the chosen direction
+                  chatbotprocessinput(); // Process the command
+                  popup.remove(); // Remove the popup
+              });
+      
+              document.getElementById("cancel-button").addEventListener("click", () => {
+                  popup.remove(); // Remove the popup
+              });
+          }
+      });
+
+      // Make the popup visible
+   //   popupDiv.style.display = 'block';
+  
+      // Add event listener to the close button
+      const closeButton = document.querySelector('#phaser-header button');
+      closeButton.onclick = () => {
+          popupDiv.style.display = 'none'; // Hide the popup
+      };
+  }    
+
+}
+
+// Game Configuration
+const gameConfig = {
+  type: Phaser.AUTO,
+  width: 800,
+  height: 600,
+  parent: 'phaser-container',
+  scene: MainScene,
+  backgroundColor: '#222222',
+  input: {
+      activePointers: 2, // Allows multitouch if needed
+  },
+};
+
+// Make the game instance globally accessible
+window.game = new Phaser.Game(gameConfig);
+
+
 function clearAllCookies() {
   // Retrieve all cookies and split into individual cookies
   const cookies = document.cookie.split(";");
@@ -4910,6 +5445,71 @@ if (userWords.length > 1 && userWords[0] === "take") {
                       updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, itemsInRoom.join(', '));
                       conversationHistory = conversationHistory + "\n" + updatedGameConsole;
                       updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+                      
+                      let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+                      let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+                      let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+                      let formattedCoordinates = newCoordinates
+                          ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+                          : "None";
+                      let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+                      let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+                      let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+                      let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+                      let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+                      let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+                      let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+                      let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+                      let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+                      let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+                      let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+                      let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+                      let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+                      let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+                      let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+                      if (bossCoordinates) {
+                          bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+                          console.log("Parsed boss room coordinates:", bossCoordinates);
+                      } else {
+                          console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+                      }
+                      let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+                      let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+                      let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+                      
+                              // Construct updated data object
+                      const updatedData = {
+                          roomName: newRoomName,
+                          roomDescription: newRoomHistory,
+                          coordinates: formattedCoordinates,
+                          objects: newObjectsInRoomString || "None",
+                          objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+                          exits: newExitsString || "None",
+                          pc: charactersString || "No PC data",
+                          npcs: npcsString || "None",
+                          inventory: inventoryString || "None",
+                          inventoryProperties: newInventoryPropertiesString || "None",
+                          monsters: newMonstersInRoomString || "None",
+                          puzzle: {
+                              inRoom: puzzleInRoom || "No puzzle",
+                              solution: puzzleSolution || "No solution"
+                          },
+                          currentQuest: currentQuest || "None",
+                          nextArtifact: nextArtifact || "None",
+                          nextBoss: nextBoss || "None",
+                          nextBossRoom: nextBossRoom || "None",
+                          bossCoordinates: bossCoordinates || "None",
+                          adjacentRooms: adjacentRooms || "None"
+                      };
+              
+                      console.log("Updated data for Phaser scene:", updatedData);
+              
+                      // Restart the Phaser scene with updated data
+                      const activeScene = window.game.scene.getScene('MainScene');
+                      if (activeScene) {
+                          activeScene.scene.restart(updatedData);
+                      }                        
+
                       console.log("Game Console:", updatedGameConsole);
                       console.log('itemsInRoom:', itemsInRoom);
                       turns++;
@@ -5053,6 +5653,70 @@ if (userWords.length > 1 && userWords[0] === "take") {
 
                   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
                   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+                  
+                  let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+                  let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+                  let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+                  let formattedCoordinates = newCoordinates
+                      ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+                      : "None";
+                  let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+                  let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+                  let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+                  let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+                  let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+                  let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+                  let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+                  let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+                  let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+                  let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+                  let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+                  let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+                  let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+                  let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+                  let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+                  if (bossCoordinates) {
+                      bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+                      console.log("Parsed boss room coordinates:", bossCoordinates);
+                  } else {
+                      console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+                  }
+                  let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+                  let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+                  let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+                  
+                          // Construct updated data object
+                  const updatedData = {
+                      roomName: newRoomName,
+                      roomDescription: newRoomHistory,
+                      coordinates: formattedCoordinates,
+                      objects: newObjectsInRoomString || "None",
+                      objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+                      exits: newExitsString || "None",
+                      pc: charactersString || "No PC data",
+                      npcs: npcsString || "None",
+                      inventory: inventoryString || "None",
+                      inventoryProperties: newInventoryPropertiesString || "None",
+                      monsters: newMonstersInRoomString || "None",
+                      puzzle: {
+                          inRoom: puzzleInRoom || "No puzzle",
+                          solution: puzzleSolution || "No solution"
+                      },
+                      currentQuest: currentQuest || "None",
+                      nextArtifact: nextArtifact || "None",
+                      nextBoss: nextBoss || "None",
+                      nextBossRoom: nextBossRoom || "None",
+                      bossCoordinates: bossCoordinates || "None",
+                      adjacentRooms: adjacentRooms || "None"
+                  };
+          
+                  console.log("Updated data for Phaser scene:", updatedData);
+          
+                  // Restart the Phaser scene with updated data
+                  const activeScene = window.game.scene.getScene('MainScene');
+                  if (activeScene) {
+                      activeScene.scene.restart(updatedData);
+                  }  
                   console.log("Game Console:", updatedGameConsole);
                   turns++;
                   return;
@@ -5216,6 +5880,71 @@ if (userWords.length > 1 && userWords[0] === "drop") {
       // Update the game console based on user inputs and get the updated game console
       updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
       conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+
+      let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+      let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+      let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+      let formattedCoordinates = newCoordinates
+          ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+          : "None";
+      let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+      let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+      let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+      let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+      let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+      let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+      let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+      let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+      let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+      let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+      let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+      let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+      let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+      let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+      let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+      if (bossCoordinates) {
+          bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+          console.log("Parsed boss room coordinates:", bossCoordinates);
+      } else {
+          console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+      }
+      let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+      let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+      let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+      
+              // Construct updated data object
+      const updatedData = {
+          roomName: newRoomName,
+          roomDescription: newRoomHistory,
+          coordinates: formattedCoordinates,
+          objects: newObjectsInRoomString || "None",
+          objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+          exits: newExitsString || "None",
+          pc: charactersString || "No PC data",
+          npcs: npcsString || "None",
+          inventory: inventoryString || "None",
+          inventoryProperties: newInventoryPropertiesString || "None",
+          monsters: newMonstersInRoomString || "None",
+          puzzle: {
+              inRoom: puzzleInRoom || "No puzzle",
+              solution: puzzleSolution || "No solution"
+          },
+          currentQuest: currentQuest || "None",
+          nextArtifact: nextArtifact || "None",
+          nextBoss: nextBoss || "None",
+          nextBossRoom: nextBossRoom || "None",
+          bossCoordinates: bossCoordinates || "None",
+          adjacentRooms: adjacentRooms || "None"
+      };
+
+      console.log("Updated data for Phaser scene:", updatedData);
+
+      // Restart the Phaser scene with updated data
+      const activeScene = window.game.scene.getScene('MainScene');
+      if (activeScene) {
+          activeScene.scene.restart(updatedData);
+      }          
+
       console.log("Game Console:", updatedGameConsole);
       console.log('itemsInRoom:', itemsInRoom);
       turns++;
@@ -5315,6 +6044,71 @@ if (userWords.length > 1 && userWords[0] === "drop") {
           // Update the game console based on user inputs and get the updated game console
           updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
           conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+          
+          let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+          let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+          let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+          let formattedCoordinates = newCoordinates
+              ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+              : "None";
+          let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+          let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+          let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+          let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+          let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+          let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+          let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+          let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+          let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+          let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+          let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+          let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+          let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+          let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+          let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+          if (bossCoordinates) {
+              bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+              console.log("Parsed boss room coordinates:", bossCoordinates);
+          } else {
+              console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+          }
+          let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+          let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+          let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+          
+                  // Construct updated data object
+          const updatedData = {
+              roomName: newRoomName,
+              roomDescription: newRoomHistory,
+              coordinates: formattedCoordinates,
+              objects: newObjectsInRoomString || "None",
+              objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+              exits: newExitsString || "None",
+              pc: charactersString || "No PC data",
+              npcs: npcsString || "None",
+              inventory: inventoryString || "None",
+              inventoryProperties: newInventoryPropertiesString || "None",
+              monsters: newMonstersInRoomString || "None",
+              puzzle: {
+                  inRoom: puzzleInRoom || "No puzzle",
+                  solution: puzzleSolution || "No solution"
+              },
+              currentQuest: currentQuest || "None",
+              nextArtifact: nextArtifact || "None",
+              nextBoss: nextBoss || "None",
+              nextBossRoom: nextBossRoom || "None",
+              bossCoordinates: bossCoordinates || "None",
+              adjacentRooms: adjacentRooms || "None"
+          };
+  
+          console.log("Updated data for Phaser scene:", updatedData);
+  
+          // Restart the Phaser scene with updated data
+          const activeScene = window.game.scene.getScene('MainScene');
+          if (activeScene) {
+              activeScene.scene.restart(updatedData);
+          }  
+          
           console.log("Game Console:", updatedGameConsole);
           console.log('itemsInRoom:', itemsInRoom);
           turns++;
@@ -5389,6 +6183,69 @@ if (userWords.length > 1 && userWords[0] === "equip") {
   // Update the game console based on user inputs and get the updated game console
   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+  let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+  let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+  let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  let formattedCoordinates = newCoordinates
+      ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+      : "None";
+  let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+  let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+  let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+  let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+  let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+  let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+  let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+  let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+  let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+  let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+  let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+  let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+  let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+  let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+  let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  if (bossCoordinates) {
+      bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+      console.log("Parsed boss room coordinates:", bossCoordinates);
+  } else {
+      console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+  }
+  let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+  let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+  let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+  
+          // Construct updated data object
+  const updatedData = {
+      roomName: newRoomName,
+      roomDescription: newRoomHistory,
+      coordinates: formattedCoordinates,
+      objects: newObjectsInRoomString || "None",
+      objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+      exits: newExitsString || "None",
+      pc: charactersString || "No PC data",
+      npcs: npcsString || "None",
+      inventory: inventoryString || "None",
+      inventoryProperties: newInventoryPropertiesString || "None",
+      monsters: newMonstersInRoomString || "None",
+      puzzle: {
+          inRoom: puzzleInRoom || "No puzzle",
+          solution: puzzleSolution || "No solution"
+      },
+      currentQuest: currentQuest || "None",
+      nextArtifact: nextArtifact || "None",
+      nextBoss: nextBoss || "None",
+      nextBossRoom: nextBossRoom || "None",
+      bossCoordinates: bossCoordinates || "None",
+      adjacentRooms: adjacentRooms || "None"
+  };
+
+  console.log("Updated data for Phaser scene:", updatedData);
+
+  // Restart the Phaser scene with updated data
+  const activeScene = window.game.scene.getScene('MainScene');
+  if (activeScene) {
+      activeScene.scene.restart(updatedData);
+  }  
   console.log("Game Console:", updatedGameConsole);
   turns++;
   return;
@@ -5464,6 +6321,71 @@ if (userWords.length > 1 && userWords[0] === "unequip") {
   // Update the game console based on user inputs and get the updated game console
   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+  
+  let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+  let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+  let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  let formattedCoordinates = newCoordinates
+      ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+      : "None";
+  let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+  let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+  let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+  let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+  let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+  let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+  let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+  let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+  let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+  let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+  let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+  let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+  let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+  let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+  let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  if (bossCoordinates) {
+      bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+      console.log("Parsed boss room coordinates:", bossCoordinates);
+  } else {
+      console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+  }
+  let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+  let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+  let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+  
+          // Construct updated data object
+  const updatedData = {
+      roomName: newRoomName,
+      roomDescription: newRoomHistory,
+      coordinates: formattedCoordinates,
+      objects: newObjectsInRoomString || "None",
+      objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+      exits: newExitsString || "None",
+      pc: charactersString || "No PC data",
+      npcs: npcsString || "None",
+      inventory: inventoryString || "None",
+      inventoryProperties: newInventoryPropertiesString || "None",
+      monsters: newMonstersInRoomString || "None",
+      puzzle: {
+          inRoom: puzzleInRoom || "No puzzle",
+          solution: puzzleSolution || "No solution"
+      },
+      currentQuest: currentQuest || "None",
+      nextArtifact: nextArtifact || "None",
+      nextBoss: nextBoss || "None",
+      nextBossRoom: nextBossRoom || "None",
+      bossCoordinates: bossCoordinates || "None",
+      adjacentRooms: adjacentRooms || "None"
+  };
+
+  console.log("Updated data for Phaser scene:", updatedData);
+
+  // Restart the Phaser scene with updated data
+  const activeScene = window.game.scene.getScene('MainScene');
+  if (activeScene) {
+      activeScene.scene.restart(updatedData);
+  }  
+  
   console.log("Game Console:", updatedGameConsole);
   turns++;
   return;
@@ -5579,6 +6501,71 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
   // Call the helper function to update npcsInParty and npcsInPartyString
   updateNpcsInParty(updatedGameConsole);
+
+  let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+  let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+  let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  let formattedCoordinates = newCoordinates
+      ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+      : "None";
+  let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+  let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+  let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+  let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+  let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+  let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+  let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+  let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+  let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+  let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+  let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+  let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+  let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+  let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+  let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  if (bossCoordinates) {
+      bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+      console.log("Parsed boss room coordinates:", bossCoordinates);
+  } else {
+      console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+  }
+  let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+  let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+  let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+  
+          // Construct updated data object
+  const updatedData = {
+      roomName: newRoomName,
+      roomDescription: newRoomHistory,
+      coordinates: formattedCoordinates,
+      objects: newObjectsInRoomString || "None",
+      objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+      exits: newExitsString || "None",
+      pc: charactersString || "No PC data",
+      npcs: npcsString || "None",
+      inventory: inventoryString || "None",
+      inventoryProperties: newInventoryPropertiesString || "None",
+      monsters: newMonstersInRoomString || "None",
+      puzzle: {
+          inRoom: puzzleInRoom || "No puzzle",
+          solution: puzzleSolution || "No solution"
+      },
+      currentQuest: currentQuest || "None",
+      nextArtifact: nextArtifact || "None",
+      nextBoss: nextBoss || "None",
+      nextBossRoom: nextBossRoom || "None",
+      bossCoordinates: bossCoordinates || "None",
+      adjacentRooms: adjacentRooms || "None"
+  };
+
+  console.log("Updated data for Phaser scene:", updatedData);
+
+  // Restart the Phaser scene with updated data
+  const activeScene = window.game.scene.getScene('MainScene');
+  if (activeScene) {
+      activeScene.scene.restart(updatedData);
+  }  
+  
   console.log("Game Console:", updatedGameConsole);
   console.log('itemsInRoom:', itemsInRoom);
   turns++;
@@ -5695,6 +6682,71 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
 
   updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+  
+  let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+  let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+  let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  let formattedCoordinates = newCoordinates
+      ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+      : "None";
+  let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+  let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+  let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+  let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+  let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+  let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+  let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+  let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+  let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+  let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+  let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+  let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+  let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+  let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+  let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  if (bossCoordinates) {
+      bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+      console.log("Parsed boss room coordinates:", bossCoordinates);
+  } else {
+      console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+  }
+  let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+  let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+  let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+  
+          // Construct updated data object
+  const updatedData = {
+      roomName: newRoomName,
+      roomDescription: newRoomHistory,
+      coordinates: formattedCoordinates,
+      objects: newObjectsInRoomString || "None",
+      objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+      exits: newExitsString || "None",
+      pc: charactersString || "No PC data",
+      npcs: npcsString || "None",
+      inventory: inventoryString || "None",
+      inventoryProperties: newInventoryPropertiesString || "None",
+      monsters: newMonstersInRoomString || "None",
+      puzzle: {
+          inRoom: puzzleInRoom || "No puzzle",
+          solution: puzzleSolution || "No solution"
+      },
+      currentQuest: currentQuest || "None",
+      nextArtifact: nextArtifact || "None",
+      nextBoss: nextBoss || "None",
+      nextBossRoom: nextBossRoom || "None",
+      bossCoordinates: bossCoordinates || "None",
+      adjacentRooms: adjacentRooms || "None"
+  };
+
+  console.log("Updated data for Phaser scene:", updatedData);
+
+  // Restart the Phaser scene with updated data
+  const activeScene = window.game.scene.getScene('MainScene');
+  if (activeScene) {
+      activeScene.scene.restart(updatedData);
+  }  
+  
   console.log("Game Console:", updatedGameConsole);
   console.log('itemsInRoom:', itemsInRoom);
   turns++;
@@ -5742,7 +6794,7 @@ function fetchWithTimeout(resource, options = {}, timeout = TIMEOUT_DURATION) {
   });
 }
 
-fetchWithTimeout('http://childrenofthegrave.com/updateState4', {
+fetchWithTimeout('/updateState', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ personalNarrative, updatedGameConsole }),
@@ -5753,7 +6805,7 @@ fetchWithTimeout('http://childrenofthegrave.com/updateState4', {
 
 // Extend $.ajax with a timeout setting
 $.ajax({
-  url: 'http://childrenofthegrave.com/processInput4',
+  url: '/processInput',
   type: 'POST',
   contentType: 'application/json',
   data: JSON.stringify({ userInput: userInput }),
@@ -5768,10 +6820,18 @@ $.ajax({
       // Parse new details from serverGameConsole
       let newRoomName = serverGameConsole.match(/Room Name: (.+)/)?.[1];
       let newRoomHistory = serverGameConsole.match(/Room Description: (.+)/)?.[1];
+      let newCoordinates = serverGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+      let formattedCoordinates = newCoordinates
+          ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+          : "None";
       let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: (.+)/)?.[1];
       let newObjectsInRoomPropertiesString = serverGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
       let newExitsString = serverGameConsole.match(/Exits: (.+)/)?.[1];
-      let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room: (.*?)\s*$/m)?.[1]?.trim();
+      let charactersString = serverGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+      let npcsString = serverGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+      let inventoryString = serverGameConsole.match(/Inventory: (.+)/)?.[1];
+      let inventoryPropertiesString = serverGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+      let newMonstersInRoomString = serverGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
       let newMonstersEquippedPropertiesString = serverGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
       let newMonstersState = serverGameConsole.match(/Monsters State: (.+)/)?.[1];
       let currentQuest = serverGameConsole.match(/Current Quest: (.+)/)?.[1];
@@ -5806,6 +6866,40 @@ $.ajax({
       updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRooms}`);
       updatedGameConsole = updatedGameConsole.replace(/Puzzle in Room: .*/, `Puzzle in Room: ${puzzleInRoom}`);
       updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, `Puzzle Solution: ${puzzleSolution}`);
+      
+              // Construct updated data object
+      const updatedData = {
+          roomName: newRoomName,
+          roomDescription: newRoomHistory,
+          coordinates: formattedCoordinates,
+          objects: newObjectsInRoomString || "None",
+          objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+          exits: newExitsString || "None",
+          pc: charactersString || "No PC data",
+          npcs: npcsString || "None",
+          inventory: inventoryString || "None",
+          inventoryProperties: inventoryPropertiesString || "None",
+          monsters: newMonstersInRoomString || "None",
+          monstersState: newMonstersState || "None",
+          puzzle: {
+              inRoom: puzzleInRoom || "No puzzle",
+              solution: puzzleSolution || "No solution"
+          },
+          currentQuest: currentQuest || "None",
+          nextArtifact: nextArtifact || "None",
+          nextBoss: nextBoss || "None",
+          nextBossRoom: nextBossRoom || "None",
+          bossCoordinates: bossCoordinates || "None",
+          adjacentRooms: adjacentRooms || "None"
+      };
+
+      console.log("Updated data for Phaser scene:", updatedData);
+
+      // Restart the Phaser scene with updated data
+      const activeScene = window.game.scene.getScene('MainScene');
+      if (activeScene) {
+          activeScene.scene.restart(updatedData);
+      }
 
       console.log("Server response:", response);
       console.log(content);
