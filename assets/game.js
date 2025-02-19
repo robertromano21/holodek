@@ -1,3 +1,5 @@
+//const { ipcRenderer } = require('electron');
+
 class MainScene extends Phaser.Scene {
   constructor() {
       super({ key: 'MainScene' });
@@ -4823,6 +4825,10 @@ const promptAndResponses = await getPromptsAndResponsesForConversation(conversat
 // Check if the current room has been searched already
 const roomHistory = roomConversationHistories[coordinatesToString(currentCoordinates)];
 let userWords = userInput.split(/\s+/).map(word => word.toLowerCase());  
+ 
+// Define updatedUserInput and updatedUserWords
+let updatedUserInput = userInput;
+let updatedUserWords = userWords.slice(); // Copy the userWords array to avoid modifying the original
 // Check if the user input is "search room"
 
 /* if (userWords.includes("search") && userWords.includes("room")) {  
@@ -4991,36 +4997,34 @@ return `
   Magic: `;  
 }).join('\n');
 
-// Define updatedUserInput and updatedUserWords
-let updatedUserInput = userInput;
-let updatedUserWords = userWords.slice(); // Copy the userWords array to avoid modifying the original
-
 let raceIndex = parseInt(character.Race) - 1;
 let selectedRace = characterRaces[raceIndex];
 let classIndex = parseInt(character.Class) - 1;
 let selectedClass = characterClasses[classIndex];
 
-if (!isCharacterCreationInProgress()) {
+if (!isCharacterCreationInProgress() && userWords[0] !== "start") { 
 if (userWords[0] === '1' && charactersString.length <= 0) {
-userInput = document.getElementById("chatuserinput").value;
-document.getElementById("chatuserinput").value = "";
-userWords = "";
-character = createMortaciaCharacter();
+  userInput = document.getElementById("chatuserinput").value;
+  document.getElementById("chatuserinput").value = "";
+  userWords = "";
+  character = createMortaciaCharacter();
 } else if (userWords[0] === '2' && charactersString.length <= 0) {
-userInput = document.getElementById("chatuserinput").value;
-document.getElementById("chatuserinput").value = "";
-userWords = "";
-character = createSuzerainCharacter();
+  userInput = document.getElementById("chatuserinput").value;
+  document.getElementById("chatuserinput").value = "";
+  userWords = "";
+  character = createSuzerainCharacter();
 } else if (userWords[0] === "3" && charactersString.length <= 0) {
-// Check if character creation is already in progress
-
-  // Start character creation by setting characterCreationStep to 1
+  // Start character creation
   characterCreationStep = 1;
-  displayMessage('Step 1: Enter character name'); // Display the first step
+  displayMessage('Step 1: Enter character name'); 
   console.log('charactersString:', charactersString);
   console.log('character:', character);
   return;
-
+} else if (charactersString.length <= 0){
+  // If the input is invalid, notify the user and re-display the start menu
+  displayMessage('Invalid option. Please enter 1, 2, or 3.');
+  displayMessage('Start Menu: \n \n 1) Play as Mortacia, goddess of death. \n 2) Play as Suzerain, knight of Atinus. \n 3) Create character and play as a party of 7 adventurers.');
+  return;
 }
 }
 
@@ -5282,14 +5286,16 @@ userInput = "";
 }
 
 // Once character creation is complete, you can proceed with the game
-displayMessage(`You chose to ${startMenuOption}.`);
+if (startMenuOption) {
+  displayMessage(`You chose to ${startMenuOption}.`);
+}
 
 // Return the created character
 return character;
 }
 
 if (userWords.length > 1 && userWords[0] === "take") {
-  const itemsToTake = userWords.slice(1).join(" ");
+  let itemsToTake = userWords.slice(1).join(" ").replace(/[.,]$/, "").trim();
   
   const roomKey = coordinatesToString(currentCoordinates);
   let monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
@@ -5490,6 +5496,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
                           inventory: inventoryString || "None",
                           inventoryProperties: newInventoryPropertiesString || "None",
                           monsters: newMonstersInRoomString || "None",
+                  monstersState: newMonstersState || "None",
                           puzzle: {
                               inRoom: puzzleInRoom || "No puzzle",
                               solution: puzzleSolution || "No solution"
@@ -5518,7 +5525,206 @@ if (userWords.length > 1 && userWords[0] === "take") {
               }
           }
       }
-  } else {
+  } else if (itemsToTake.includes(',') || itemsToTake.includes(' and ')) {
+  const itemsToTakeArray = itemsToTake
+  .replace(/\s*,\s*and\s+/g, ', ')  // Convert "sword, shield, and lamp" → "sword, shield, lamp"
+  .split(/\s*,\s*|\s* and\s+/)      // Then split properly on ", " and " and "
+  .map(item => item.trim());        // Trim spaces
+
+  let combinedEquipment = updateGameConsole(userInput, currentCoordinates, conversationHistory);
+  let objectsInRoomString = combinedEquipment.match(/Objects in Room: ([^\n]+)/);
+  objectsInRoomString = objectsInRoomString ? objectsInRoomString[1].split(',').map(item => item.trim()) : ["None"];
+
+  let objectsInRoomPropertiesString = combinedEquipment.match(/Objects in Room Properties: ([^\n]+)/);
+  objectsInRoomPropertiesString = objectsInRoomPropertiesString ? objectsInRoomPropertiesString[1].trim() : "None";
+
+  let itemsInRoom = objectsInRoomString.map(item => item.toLowerCase());
+  let itemsTaken = [];
+  let itemsNotFound = [];
+
+  // Check for each requested item
+  itemsToTakeArray.forEach(item => {
+      let lowercaseItem = item.toLowerCase();
+      if (itemsInRoom.includes(lowercaseItem)) {
+          itemsTaken.push(item);
+          inventory.push(item);
+          objectsInRoomString = objectsInRoomString.filter(roomItem => roomItem.toLowerCase() !== lowercaseItem);
+      } else {
+          itemsNotFound.push(item);
+      }
+  });
+
+  if (itemsTaken.length > 0) {
+      inventory = removeNoneFromInventory(inventory);
+  }
+
+  // === Essential Game Console Updates ===
+  if (itemsInRoom.some(item => itemsToTakeArray.includes(item))) {
+      itemsToTakeArray.forEach(item => {
+          itemsInRoom = itemsInRoom.filter(roomItem => !itemsToTakeArray.includes(roomItem));
+          objectsInRoomString = objectsInRoomString.filter(roomItem => !roomItem.includes(item.trim()));
+      });
+
+      if (combinedEquipment.length === 0) {
+          itemsInRoom = ["None"];
+      }
+
+      console.log('itemsInRoom:', itemsInRoom);
+
+      // Move properties to inventoryProperties
+      if (objectsInRoomPropertiesString && objectsInRoomPropertiesString.length > 0) {
+          let roomProperties = objectsInRoomPropertiesString
+              .split(/(?<=\}),\s*(?={)/)
+              .map(str => str.endsWith('}') ? str : str + '}')
+              .filter(prop => prop !== null);
+
+          // Add properties of taken items to inventoryProperties
+          const updatedRoomProperties = roomProperties.filter(property => {
+              const propertyObj = eval('(' + property + ')'); // Convert string to object
+              if (itemsToTakeArray.includes(propertyObj.name)) {
+                  inventoryProperties.push(property);
+                  return false;
+              }
+              return true;
+          });
+
+          objectsInRoomPropertiesString = updatedRoomProperties.length > 0 ? updatedRoomProperties.join(', ') : "None";
+      } else {
+          objectsInRoomPropertiesString = "None";
+      }
+
+      const roomHistory = roomConversationHistories[coordinatesToString(currentCoordinates)];
+      if (roomHistory) {
+          const firstResponseForRoom = getFirstResponseForRoom(currentCoordinates);
+
+          if (firstResponseForRoom) {
+              itemsToTakeArray.forEach(item => {
+                  firstResponseForRoom.response = firstResponseForRoom.response.replace(new RegExp(`\\b${item}\\b`, 'gi'), '');
+              });
+
+              let updatedGameConsole = gameConsoleData.replace(
+                  /Objects in Room: ([^\n]+)/,
+                  `Objects in Room: ${objectsInRoomString.join(', ')}`
+              );
+
+              updatedGameConsole = updatedGameConsole.replace(
+                  /Objects in Room Properties: ([^\n]+)/,
+                  `Objects in Room Properties: ${objectsInRoomPropertiesString}`
+              );
+
+              // Convert inventoryProperties to a string format for display in the game console
+              const inventoryPropertiesString = inventoryProperties.join(', ');
+
+              updatedGameConsole = updatedGameConsole.replace(
+                  /Inventory Properties: ([^\n]+)/,
+                  `Inventory Properties: ${inventoryPropertiesString}`
+              );
+
+              promptAndResponses[gameConsoleIndex].gameConsole = updatedGameConsole;
+              conversationHistory = conversationHistory.replace(gameConsoleData, updatedGameConsole);
+
+              const combinedHistory = conversationHistory + "\n" + userInput;
+
+              let personalNarrative = await performDynamicSearch(combinedHistory);
+
+              const messages = [
+                  { role: "assistant", content: "" },
+                  { role: "system", content: "" },
+                  { role: "user", content: userInput }
+              ];
+              function formatItemList(items) {
+                  if (items.length === 1) return items[0]; // Single item, no need for "and"
+                  if (items.length === 2) return items.join(" and "); // Two items: "sword and shield"
+                  return items.slice(0, -1).join(", ") + ", and " + items[items.length - 1]; // Three or more: "sword, shield, and lamp"
+              }
+              
+              let message = ``;
+              
+              // === Display Messages for Items Taken & Not Found ===
+              if (itemsTaken.length > 0) {
+                  message += `You have taken the ${formatItemList(itemsTaken)}.`;
+              }
+              if (itemsNotFound.length > 0) {
+                  message += `${itemsTaken.length > 0 ? " " : ""}There is no ${itemsNotFound.join(' or ')} here.`; // Add a space only if items were taken
+              }
+              chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+              scrollToBottom();
+              addPromptAndResponse(userInput, messages[0].content, messages[1].content, message, personalNarrative, conversationId, updatedGameConsole);
+
+              updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+              conversationHistory = conversationHistory + "\n" + updatedGameConsole;
+              
+              let newRoomName = updatedGameConsole.match(/Room Name: (.+)/)?.[1];
+              let newRoomHistory = updatedGameConsole.match(/Room Description: (.+)/)?.[1];
+              let newCoordinates = updatedGameConsole.match(/(?<!Boss Room )Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+              let formattedCoordinates = newCoordinates
+                  ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
+                  : "None";
+              let newObjectsInRoomString = updatedGameConsole.match(/Objects in Room: (.+)/)?.[1];
+              let newObjectsInRoomPropertiesString = updatedGameConsole.match(/Objects in Room Properties: (.+)/)?.[1]?.trim();
+              let newExitsString = updatedGameConsole.match(/Exits: (.+)/)?.[1];
+              let charactersString = updatedGameConsole.match(/PC:(.*?)(?=NPCs in Party:|$)/s)?.[1]?.trim();
+              let npcsString = updatedGameConsole.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)?.[1]?.trim();
+              let inventoryString = updatedGameConsole.match(/Inventory: (.+)/)?.[1];
+              let newInventoryPropertiesString = updatedGameConsole.match(/Inventory Properties: (.+)/)?.[1];
+              let newMonstersInRoomString = updatedGameConsole.match(/Monsters in Room:(.*?)(?=Monsters Equipped Properties:|$)/s)?.[1]?.trim();
+              let newMonstersEquippedPropertiesString = updatedGameConsole.match(/Monsters Equipped Properties: (.+)/)?.[1];
+              let newMonstersState = updatedGameConsole.match(/Monsters State: (.+)/)?.[1];
+              let currentQuest = updatedGameConsole.match(/Current Quest: (.+)/)?.[1];
+              let nextArtifact = updatedGameConsole.match(/Next Artifact: (.+)/)?.[1];
+              let nextBoss = updatedGameConsole.match(/Next Boss: (.+)/)?.[1];
+              let nextBossRoom = updatedGameConsole.match(/Next Boss Room: (.+)/)?.[1];
+              let bossCoordinates = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+              if (bossCoordinates) {
+                  bossCoordinates = `X: ${bossCoordinates[1]}, Y: ${bossCoordinates[2]}, Z: ${bossCoordinates[3]}`;
+                  console.log("Parsed boss room coordinates:", bossCoordinates);
+              } else {
+                  console.error("Failed to parse boss room coordinates from updatedGameConsole.");
+              }
+              let adjacentRooms = updatedGameConsole.match(/Adjacent Rooms: (.+)/)?.[1];
+              let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: (.+)/)?.[1];
+              let puzzleSolution = updatedGameConsole.match(/Puzzle Solution: (.+)/)?.[1];
+              
+                      // Construct updated data object
+              const updatedData = {
+                  roomName: newRoomName,
+                  roomDescription: newRoomHistory,
+                  coordinates: formattedCoordinates,
+                  objects: newObjectsInRoomString || "None",
+                  objectsInRoomProperties: newObjectsInRoomPropertiesString || "None",
+                  exits: newExitsString || "None",
+                  pc: charactersString || "No PC data",
+                  npcs: npcsString || "None",
+                  inventory: inventoryString || "None",
+                  inventoryProperties: newInventoryPropertiesString || "None",
+                  monsters: newMonstersInRoomString || "None",
+              monstersState: newMonstersState || "None",
+                  puzzle: {
+                      inRoom: puzzleInRoom || "No puzzle",
+                      solution: puzzleSolution || "No solution"
+                  },
+                  currentQuest: currentQuest || "None",
+                  nextArtifact: nextArtifact || "None",
+                  nextBoss: nextBoss || "None",
+                  nextBossRoom: nextBossRoom || "None",
+                  bossCoordinates: bossCoordinates || "None",
+                  adjacentRooms: adjacentRooms || "None"
+              };
+      
+              console.log("Updated data for Phaser scene:", updatedData);
+      
+              // Restart the Phaser scene with updated data
+              const activeScene = window.game.scene.getScene('MainScene');
+              if (activeScene) {
+                  activeScene.scene.restart(updatedData);
+              }  
+              console.log("Game Console:", updatedGameConsole);
+              turns++;
+              return;
+          }
+      }
+  }
+} else {
       
       // Check if Monsters State is Hostile and any monsters have HP > 0
       if (monstersState === "Hostile" && monstersInRoom.some(monster => monster.HP > 0)) {
@@ -5698,6 +5904,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
                       inventory: inventoryString || "None",
                       inventoryProperties: newInventoryPropertiesString || "None",
                       monsters: newMonstersInRoomString || "None",
+                monstersState: newMonstersState || "None",
                       puzzle: {
                           inRoom: puzzleInRoom || "No puzzle",
                           solution: puzzleSolution || "No solution"
@@ -5750,7 +5957,7 @@ objectsInRoomString = objectsInRoomMatch[1].split(',').map(item => item.trim());
 console.log('objectsInRoomString:', objectsInRoomString);
 
 if (userWords.length > 1 && userWords[0] === "drop") {
-  const itemsToDrop = userWords.slice(1).join(" ");
+  const itemsToDrop = userWords.slice(1).join(" ").replace(/[.,]$/, "").trim();
   const itemsToDropArray = itemsToDrop.split(/, | and /); // Split by comma or "and"
 
   const isEquipped = (character, itemName) => {
@@ -5925,6 +6132,7 @@ if (userWords.length > 1 && userWords[0] === "drop") {
           inventory: inventoryString || "None",
           inventoryProperties: newInventoryPropertiesString || "None",
           monsters: newMonstersInRoomString || "None",
+          monstersState: newMonstersState || "None",
           puzzle: {
               inRoom: puzzleInRoom || "No puzzle",
               solution: puzzleSolution || "No solution"
@@ -6089,6 +6297,7 @@ if (userWords.length > 1 && userWords[0] === "drop") {
               inventory: inventoryString || "None",
               inventoryProperties: newInventoryPropertiesString || "None",
               monsters: newMonstersInRoomString || "None",
+            monstersState: newMonstersState || "None",
               puzzle: {
                   inRoom: puzzleInRoom || "No puzzle",
                   solution: puzzleSolution || "No solution"
@@ -6227,6 +6436,7 @@ if (userWords.length > 1 && userWords[0] === "equip") {
       inventory: inventoryString || "None",
       inventoryProperties: newInventoryPropertiesString || "None",
       monsters: newMonstersInRoomString || "None",
+      monstersState: newMonstersState || "None",
       puzzle: {
           inRoom: puzzleInRoom || "No puzzle",
           solution: puzzleSolution || "No solution"
@@ -6366,6 +6576,7 @@ if (userWords.length > 1 && userWords[0] === "unequip") {
       inventory: inventoryString || "None",
       inventoryProperties: newInventoryPropertiesString || "None",
       monsters: newMonstersInRoomString || "None",
+      monstersState: newMonstersState || "None",
       puzzle: {
           inRoom: puzzleInRoom || "No puzzle",
           solution: puzzleSolution || "No solution"
@@ -6546,6 +6757,7 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
       inventory: inventoryString || "None",
       inventoryProperties: newInventoryPropertiesString || "None",
       monsters: newMonstersInRoomString || "None",
+      monstersState: newMonstersState || "None",
       puzzle: {
           inRoom: puzzleInRoom || "No puzzle",
           solution: puzzleSolution || "No solution"
@@ -6727,6 +6939,7 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
       inventory: inventoryString || "None",
       inventoryProperties: newInventoryPropertiesString || "None",
       monsters: newMonstersInRoomString || "None",
+      monstersState: newMonstersState || "None",
       puzzle: {
           inRoom: puzzleInRoom || "No puzzle",
           solution: puzzleSolution || "No solution"
@@ -6794,7 +7007,7 @@ function fetchWithTimeout(resource, options = {}, timeout = TIMEOUT_DURATION) {
   });
 }
 
-fetchWithTimeout('/updateState', {
+fetchWithTimeout('http://childrenofthegrave.com/updateState', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ personalNarrative, updatedGameConsole }),
@@ -6805,7 +7018,7 @@ fetchWithTimeout('/updateState', {
 
 // Extend $.ajax with a timeout setting
 $.ajax({
-  url: '/processInput',
+  url: 'http://childrenofthegrave.com/processInput',
   type: 'POST',
   contentType: 'application/json',
   data: JSON.stringify({ userInput: userInput }),
