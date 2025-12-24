@@ -816,7 +816,7 @@ function generateSpriteFromStyle(style, tileType, name = 'sprite') {
   const fullpath = path.join(outDir, filename);
   fs.writeFileSync(fullpath, canvas.toBuffer());
 
-  return `sid/sprites/${filename}?cb=${Date.now()}`;
+  return `/sid/sprites/${filename}?cb=${Date.now()}`;
 }
 
 module.exports = { generateSpriteFromStyle };

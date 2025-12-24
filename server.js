@@ -14,6 +14,8 @@ const port = 3000;
 app.use(bodyParser.json());
 app.use(cors());
 app.use(express.json()); // Ensure JSON parsing is enabled
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
+app.use('/node_modules', express.static(path.join(__dirname, 'node_modules')));
 app.use('/sid', express.static(path.join(__dirname, 'sid'), {
   etag: false,
   lastModified: false,
@@ -222,7 +224,7 @@ app.post('/music/commit', async (req, res) => {
 
     // 2) build SID from JSON
     const asmOut  = path.join(sidDir, 'current_room.asm');
-    const sidCore = path.join(__dirname, 'retort', 'renderSid_poke.js');
+    const sidCore = path.join(__dirname, 'assets', 'renderSid_poke.js');
     const a = spawnSync('node', [sidCore, jsonPath, asmOut], { cwd: __dirname, stdio: 'inherit' });
     if (a.status !== 0) return res.status(500).json({ error: 'renderSid_poke.js failed' });
 

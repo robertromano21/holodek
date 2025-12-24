@@ -9162,7 +9162,7 @@ function resolveCustomTileURL(tile, index = 0) {
 
   const tileName = `custom_${tile.type}_${index}`;
   const filename = `${geoKey}_${tileName}.png`;
-  const url = `sid/sprites/${filename}?cb=${Date.now()}`; // Cache-bust
+  const url = `/sid/sprites/${filename}?cb=${Date.now()}`; // Cache-bust
 
   console.log('[Raycast] Resolved custom URL:', url, 'for tile', tileName); // DEBUG
   return url;

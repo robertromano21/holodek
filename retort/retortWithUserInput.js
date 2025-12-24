@@ -17,10 +17,10 @@ const path = require('path');
 
 const { spawnSync } = require('child_process');
 
-const ROOT       = ''; // Adjust as needed
+const ROOT       = path.join(__dirname, '..');
 const RETORT_DIR = path.join(ROOT, 'retort');
 const SID_DIR    = path.join(ROOT, 'sid');
-const RENDER_JS  = path.join(RETORT_DIR, 'renderSid_poke.js');
+const RENDER_JS  = path.join(ROOT, 'assets', 'renderSid_poke.js');
 
 //const client = new OpenAI();
 
@@ -82,7 +82,7 @@ function writeLatestJsonAndRender(musicJson, lengthSec = 60) {
   // *** Important: pass BASENAME (no .wav) ***
   const wavPath = renderRoomMusic(sidOut, path.join(SID_DIR, 'current_room'), lengthSec);
 
-  return { wavUrl: `/test22/sid/current_room.wav?ts=${Date.now()}`, jsonPath, sidOut, wavOut: wavPath };
+  return { wavUrl: `/sid/current_room.wav?ts=${Date.now()}`, jsonPath, sidOut, wavOut: wavPath };
 }
 
 async function generateImage(prompt) {
@@ -9527,7 +9527,7 @@ const isNewGeoRoom =
 
 if (isNewGeoRoom && roomDescription) {
   console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
-  const { generateSpriteFromStyle } = require('./renderSprite_poke.js');
+  const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
   // 🧭 STEP 0 — classify biome & size
   
   let forcedIndoor = null;
