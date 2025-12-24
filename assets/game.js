@@ -9555,6 +9555,7 @@ function renderDungeonView() {
   }
 
   const wallTexCache = {};
+  const RENDER_CUSTOM_AS_WALLS = false;
   function getWallTextureData(texName, texImg) {
     if (!isTextureReady(texImg)) return null;
     let cached = wallTexCache[texName];
@@ -10021,7 +10022,7 @@ if (!hit) continue;
     if (texName.startsWith('custom_')) {
       continue; // Skip this column entirely – sprites will handle it
     }
-    
+
     const texImg = dungeonTextures[texName];
     let u = wallX * WALL_U_SCALE;
     u = (u % 1 + 1) % 1;
@@ -10072,6 +10073,7 @@ if (!hit) continue;
     }
   }
   
+  if (!RENDER_CUSTOM_AS_WALLS) {
 // SPRITE PASS (fixed relative position + vertical flip)
   const sprites = [];
   const VIS_RADIUS = 16;
@@ -10094,15 +10096,16 @@ if (!hit) continue;
       const worldY = wy + 0.5;
 
       // Relative from TRUE player center (keep sprites fixed in world space)
-      const dxp = worldX - playerWorldX;
-      const dyp = worldY - playerWorldY;
+      // Use the same eye position as the wall raycaster for stable placement.
+      const dxp = worldX - posX;
+      const dyp = worldY - posY;
 
       const distSq = dxp * dxp + dyp * dyp;
       if (distSq < 0.04 || distSq > VIS_RADIUS * VIS_RADIUS) continue;
 
       const invDet = 1.0 / (planeX * dirY - dirX * planeY);
-      const transformX = invDet * (dirY * dxp - planeX * dyp);
-      const transformY = invDet * (-dirX * dxp + planeX * dyp);
+      const transformX = invDet * (dirY * dxp - dirX * dyp);
+      const transformY = invDet * (-planeY * dxp + planeX * dyp);
       if (transformY < 0.1) continue;
 
       const spriteScreenX = Math.floor((W / 2) * (1 + transformX / transformY));
@@ -10186,6 +10189,7 @@ if (!hit) continue;
     }
   }
 
+  }
   // Final blit (unchanged)
   const scaledCanvas = scale2x(ctx, W, H);
   displayCtx.imageSmoothingEnabled = false;
