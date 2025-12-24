@@ -1,13 +1,17 @@
 {
   "dependencies": {
+    "axios": "^1.7.7",
+    "canvas": "^3.2.0",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "retort-js": "^0.0.4"
+    "phaser": "^3.87.0",
+    "retort-js": "^0.0.4",
+    "ws": "^8.18.1"
   },
   "scripts": {
     "start": "node server.js"
   },
-  "name": "test16",
+  "name": "test21",
   "version": "1.0.0",
   "main": "server.js",
   "keywords": [],

@@ -8,42 +8,263 @@
   <meta http-equiv="Expires" content="0" />
  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
  <script src="node_modules/phaser/dist/phaser.min.js"></script>
- <script src="game.js?v=<?=time();?>"></script>
+<audio id="room-music" src="/assets/sid/current_room.wav" loop autoplay></audio>
+ <script src="/assets/game.js?v=<?=time();?>"></script>
  <script src="server.js?v=<?=time();?>"></script>
-   <script>document.addEventListener('DOMContentLoaded', () => {
-    const popup = document.getElementById('phaser-popup');
-    const header = document.getElementById('phaser-header');
-    
-    let isDragging = false;
-    let offsetX = 0;
-    let offsetY = 0;
+   <script>
+   
+   // Enhanced playRoomMusic with status feedback
+function playRoomMusic() {
+  const audio = document.getElementById('room-music');
+  const statusElement = document.getElementById('music-status') || document.createElement('div');
+  if (!statusElement.id) {
+    statusElement.id = 'music-status';
+    statusElement.style.position = 'fixed';
+    statusElement.style.top = '100px';
+    statusElement.style.left = '10px';
+    statusElement.style.color = 'white';
+    statusElement.style.zIndex = '1100';
+    document.body.appendChild(statusElement);
+  }
+  statusElement.textContent = 'Loading room music...';
+  audio.load();
+  audio.play()
+    .then(() => {
+      statusElement.textContent = 'Playing room music';
+    })
+    .catch(err => {
+      console.warn('Autoplay blocked or error:', err);
+      statusElement.textContent = 'Click "Play Music" to start audio';
+      const playBtn = document.getElementById('play-music-btn');
+      if (playBtn) playBtn.style.display = 'block';
+    });
+}
 
-    header.addEventListener('mousedown', (e) => {
+// SSE listener for room music updates
+document.addEventListener('DOMContentLoaded', () => {
+  const eventSource = new EventSource('/combat-updates2');
+  eventSource.onmessage = function(event) {
+      
+  if (event.data && event.data.startsWith('ping')) {
+    return;
+  }
+    
+    try {
+      const data = JSON.parse(event.data);
+      if (data.type === 'roomMusicUpdated' && data.isNew) {
+        console.log('New room music detected for coords:', data.coords);
+        playRoomMusic();
+      }
+    } catch (err) {
+      console.error('SSE parse error:', err);
+    }
+  };
+  eventSource.onerror = function() {
+    console.error('SSE connection error');
+    document.getElementById('music-status').textContent = 'Music connection lost';
+  };
+});
+
+// Enhance existing poll-task logic (if you have it)
+function enhancePollTask() {
+  const originalPoll = window.pollTask; // Assuming your poll function is global or in game.js
+  if (originalPoll) {
+    window.pollTask = function(taskId) {
+      originalPoll(taskId).then(data => {
+        if (data.result && data.result.musicArrangement && data.result.isNewRoom) {
+          console.log('Poll detected new room music');
+          playRoomMusic();
+        }
+      });
+    };
+  }
+}
+enhancePollTask();
+
+function toggleCombatMode() {
+  const select = document.getElementById('combat-mode-select');
+  const currentCombatMode = select.value;
+  
+  // Set the global combatMode
+  window.combatMode = currentCombatMode;
+  
+  // Show/hide the combat button and popup based on mode
+  const combatButton = document.getElementById('open-combat-button');
+  if (currentCombatMode === 'No Combat Map') {
+    combatButton.style.display = 'none';
+    document.getElementById('combat-popup').style.display = 'none';
+  } else {
+    combatButton.style.display = 'block';
+  }
+
+  // Send update to /set-combat-mode
+  fetch('/set-combat-mode2', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode: currentCombatMode })
+  })
+  .then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  })
+  .then(data => console.log('Combat mode updated:', data))
+  .catch(error => console.error('Error updating combat mode:', error));
+}
+   
+   document.addEventListener('DOMContentLoaded', () => {
+      // Game console popup dragging
+      const popup = document.getElementById('phaser-popup');
+      const header = document.getElementById('phaser-header');
+      let isDragging = false;
+      let offsetX = 0;
+      let offsetY = 0;
+
+      header.addEventListener('mousedown', (e) => {
         isDragging = true;
         offsetX = e.clientX - popup.offsetLeft;
         offsetY = e.clientY - popup.offsetTop;
-        header.style.cursor = 'grabbing'; // Change cursor
-    });
+        header.style.cursor = 'grabbing';
+      });
 
-    document.addEventListener('mousemove', (e) => {
+      document.addEventListener('mousemove', (e) => {
         if (!isDragging) return;
-
         const newX = e.clientX - offsetX;
         const newY = e.clientY - offsetY;
-
-        // Prevent the popup from going out of bounds (optional)
         const maxX = window.innerWidth - popup.offsetWidth;
         const maxY = window.innerHeight - popup.offsetHeight;
-
         popup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
         popup.style.top = `${Math.min(Math.max(0, newY), maxY)}px`;
+      });
+
+      document.addEventListener('mouseup', () => {
+        isDragging = false;
+        header.style.cursor = 'grab';
+      });
+
+      // Combat popup dragging
+      const combatPopup = document.getElementById('combat-popup');
+      const combatHeader = document.getElementById('combat-header');
+      let combatIsDragging = false;
+      let combatOffsetX = 0;
+      let combatOffsetY = 0;
+
+      combatHeader.addEventListener('mousedown', (e) => {
+        combatIsDragging = true;
+        combatOffsetX = e.clientX - combatPopup.offsetLeft;
+        combatOffsetY = e.clientY - combatPopup.offsetTop;
+        combatHeader.style.cursor = 'grabbing';
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!combatIsDragging) return;
+        const newX = e.clientX - combatOffsetX;
+        const newY = e.clientY - combatOffsetY;
+        const maxX = window.innerWidth - combatPopup.offsetWidth;
+        const maxY = window.innerHeight - combatPopup.offsetHeight;
+        combatPopup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
+        combatPopup.style.top = `${Math.min(Math.max(0, newY), maxY)}px`;
+      });
+
+      document.addEventListener('mouseup', () => {
+        combatIsDragging = false;
+        combatHeader.style.cursor = 'grab';
+      });
+      
+            // Dungeon popup dragging
+      const dungeonPopup = document.getElementById('dungeon-popup');
+      const dungeonHeader = document.getElementById('dungeon-header');
+      let dungeonIsDragging = false;
+      let dungeonOffsetX = 0;
+      let dungeonOffsetY = 0;
+
+      dungeonHeader.addEventListener('mousedown', (e) => {
+        dungeonIsDragging = true;
+        dungeonOffsetX = e.clientX - dungeonPopup.offsetLeft;
+        dungeonOffsetY = e.clientY - dungeonPopup.offsetTop;
+        dungeonHeader.style.cursor = 'grabbing';
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!dungeonIsDragging) return;
+        const newX = e.clientX - dungeonOffsetX;
+        const newY = e.clientY - dungeonOffsetY;
+        const maxX = window.innerWidth - dungeonPopup.offsetWidth;
+        const maxY = window.innerHeight - dungeonPopup.offsetHeight;
+        dungeonPopup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
+        dungeonPopup.style.top  = `${Math.min(Math.max(0, newY), maxY)}px`;
+        dungeonPopup.style.right = 'auto'; // once dragged, we control left
+      });
+
+      document.addEventListener('mouseup', () => {
+        dungeonIsDragging = false;
+        dungeonHeader.style.cursor = 'grab';
+      });
+
     });
 
-    document.addEventListener('mouseup', () => {
-        isDragging = false;
-        header.style.cursor = 'grab'; // Reset cursor
-    });
-});</script>
+    function togglePopup() {
+      const popup = document.getElementById('phaser-popup');
+      popup.style.display = popup.style.display === 'block' ? 'none' : 'block';
+      if (popup.style.display === 'block') {
+        popup.style.top = '5px';
+        popup.style.right = '5px';
+      }
+    }
+
+    function toggleCombatPopup() {
+        const combatPopup = document.getElementById('combat-popup');
+        combatPopup.style.display = combatPopup.style.display === 'block' ? 'none' : 'block';
+        if (combatPopup.style.display === 'block') {
+            combatPopup.style.top = '105px';
+            combatPopup.style.left = '5px';
+
+            // Center the combat map on the PC when opening, using global character data
+            const combatScene = window.combatGame.scene.getScene('CombatScene');
+            if (combatScene) {
+                const pc = window.combatCharacters?.find(c => c.type === 'pc');
+                if (pc) {
+                    combatScene.centerCameraOn(pc.x, pc.y);
+                    console.log(`Centering on PC at (${pc.x}, ${pc.y}) from toggleCombatPopup`);
+                } else {
+                    console.log("No PC found in combatCharacters, centering on grid center");
+                    combatScene.centerCameraOn(Math.floor(10 / 2), Math.floor(10 / 2)); // Center at (15, 15)
+                }
+            } else {
+                console.warn("CombatScene not found!");
+            }
+        }
+    }
+    
+    function toggleDungeonPopup() {
+        const dungeonPopup = document.getElementById('dungeon-popup');
+        if (!dungeonPopup) return;
+
+        dungeonPopup.style.display = dungeonPopup.style.display === 'block' ? 'none' : 'block';
+
+        if (dungeonPopup.style.display === 'block') {
+            dungeonPopup.style.top = '105px';
+            dungeonPopup.style.right = '5px';
+            dungeonPopup.style.left = 'auto';
+
+            // Draw/refresh the view when it opens
+            if (typeof renderDungeonView === 'function') {
+              renderDungeonView();
+            }
+        }
+    }
+
+
+    function scrollToBottom() {
+      var chatbotButton = document.getElementById("chatbotbutton");
+      chatbotButton.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+
+    function updateChatLog(newContent) {
+      var chatLog = document.getElementById("chatlog");
+      chatLog.innerHTML += newContent;
+      scrollToBottom();
+    }
+  </script>
  <title></title>
   <style>
     ::-webkit-scrollbar {
@@ -129,7 +350,7 @@
         padding: 10px;
         cursor: grab; /* Indicates draggable behavior */
         font-family: Arial, sans-serif;
-        font-size: 14px;
+        font-size: 13px;
         font-weight: bold;
         display: flex;
         justify-content: space-between;
@@ -330,34 +551,169 @@
         font-family: monospace; /* Match game console styling */
     }
 
-</style>
-<script>
-  // Move the function declarations to the global scope
-function togglePopup() {
-    const popup = document.getElementById('phaser-popup');
-    if (popup.style.display === 'block') {
-        popup.style.display = 'none'; // Hide the popup
-    } else {
-        popup.style.display = 'block'; // Show the popup
-        popup.style.top = '5px'; // Reset position to top-right
-        popup.style.right = '5px'; // Reset position to top-right
+    #game-container {
+        background-color: #222;
     }
+    .tile {
+        border: 1px solid #444;
+    }
+
+  #combat-popup {
+    display: none;
+    position: absolute;
+    top: 105px;
+    left: 5px;
+    width: 170px;
+    height: 250px;
+    background-color: black;
+    color: white;
+    border: 1px solid white;
+    border-radius: 8px;
+    z-index: 2000;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    resize: both;
+    overflow: hidden;
+    padding: 0;
+    margin: 0;
+    box-sizing: border-box;
+    pointer-events: auto;
+  }
+
+  #combat-header {
+    background-color: #333;
+    color: white;
+    padding: 10px;
+    cursor: grab;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid white;
+  }
+
+  #combat-container {
+    width: 100%; /* Match the popup width */
+    height: calc(100% - 40px); 
+    background-color: #333333;
+    overflow: auto; /* Enable scrolling */
+    position: relative; /* Ensure child positioning works */
+    /* Custom scrollbar styling */
+    scrollbar-width: 50px; /* Firefox: Thin scrollbar */
+    scrollbar-color: grey black; /* Firefox: Thumb color / Track color */
+  }
+  
+    #combat-container canvas {
+      width: 375px !important;
+      height: 375px !important;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+  #combat-container::-webkit-scrollbar {
+    width: 50px; /* Width of the vertical scrollbar */
+    height: 50px; /* Height for horizontal scrollbar */
+  }
+
+  #combat-container::-webkit-scrollbar-track {
+    background: black; /* Track color */
+  }
+
+  #combat-container::-webkit-scrollbar-thumb {
+    background-color: grey; /* Scrollbar thumb color */
+    border-radius: 6px; /* Rounded corners */
+    border: 2px solid black; /* Space between thumb and track */
+  }
+
+  #combat-container::-webkit-scrollbar-thumb:hover {
+    background-color: lightgrey; /* Lighter grey on hover */
+  }
+
+  /* Updated combat mode toggle styling */
+  #combat-mode-toggle {
+    position: fixed;
+    background-color: #444;
+    color: white;
+    border: none;
+    cursor: pointer;
+  }
+
+  #combat-mode-toggle select {
+    background-color: #444;
+    color: white;
+    font-size: 13px;
+    border: none;
+  }
+
+  #combat-mode-toggle select:focus {
+    outline: none;
+  }
+  
+  /* Scrollable list inside popup for inventory choices */
+.popup-list {
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 6px;
+  text-align: left;
 }
-  // Function to scroll to the bottom of the chat log
-  function scrollToBottom() {
-    var chatbotButton = document.getElementById("chatbotbutton");
-    chatbotButton.scrollIntoView({ behavior: 'smooth', block: 'end' });
+
+/* Optional: a bit of spacing for empty-state text */
+.popup-empty {
+  opacity: 0.85;
+  padding: 8px 6px;
+}
+
+/* Dungeon first-person viewport popup */
+#dungeon-popup {
+  display: none;
+  position: absolute;
+  top: 105px;
+  right: 5px;
+
+  /* New larger viewport */
+  width: 640px;
+  height: 520px;
+
+  background-color: black;
+  color: white;
+  border: 1px solid white;
+  border-radius: 8px;
+  box-shadow: 0 0 20px #400;
+  z-index: 1200;
+
+  /* Prevent smoothing if browser tries */
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+  #dungeon-header {
+    background-color: #333;
+    color: white;
+    padding: 8px 10px;
+    cursor: grab;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid white;
   }
 
-  // Function to update the chat log with new content
-  function updateChatLog(newContent) {
-    var chatLog = document.getElementById("chatlog");
-    chatLog.innerHTML += newContent;
-    scrollToBottom();
+  #dungeon-container {
+    width: 100%;
+    height: calc(100% - 40px);
+    background-color: black;
+    overflow: hidden;
   }
+  
+  #dungeon-container canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+</style>
 
-
-</script>
 </head>
 <body>
   <!-- Phaser Popup -->
@@ -373,10 +729,30 @@ function togglePopup() {
     </div>
     <div id="phaser-container"></div>
   </div>
+<div id="combat-popup">
+    <div id="combat-header">
+        <span>Combat Mode</span>
+        <button onclick="document.getElementById('combat-popup').style.display = 'none';" style="background: none; color: white; border: none; font-size: 16px; cursor: pointer;">X</button>
+    </div>
+    <div id="combat-container"></div>
+</div>
+<div id="dungeon-popup">
+  <div id="dungeon-header">
+    <span>Dungeon View</span>
+    <button onclick="document.getElementById('dungeon-popup').style.display = 'none';"
+      style="background:none;color:white;border:none;font-size:16px;cursor:pointer;">
+      X
+    </button>
+  </div>
+  <div id="dungeon-container"></div>
+</div>
   <div id="divchatbot">
     <div id="chatbotcontainer">
-      <p id="chatlog" align="left"><br><img src="./children-of-the-grave-logo.png" style="width:50%; text-align:center;"><br><img src="./SceneBreak.png" style="width:50%; text-align:center;"><br><br><b>Grave Master:</b> Hello, adventurer! Welcome to Children of the Grave: Version 1.0, a GPT-3 and Open AI powered fantasy roleplaying text adventure game. I am the Grave Master, who administers the game. And you are the player.<br><br>CHILDREN OF THE GRAVE: Version 1.0<br><br>You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...<br><br>The game begins in the Ruined Temple. Good luck, adventurer! Type 'Start' with nothing else in the sentence and then choose a game mode from the start menu.</p>
+      <p id="chatlog" align="left"><br><img src="./children-of-the-grave-logo.png" style="width:50%; text-align:center;"><br><img src="./SceneBreak.png" style="width:50%; text-align:center;"><br><br>CHILDREN OF THE GRAVE: Version 1.0<br><br><img src="https://childrenofthegrave.com/test22/Tartarus.png" style="max-width: 100%;"><br><br>You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...<br><br>The game begins in the Ruined Temple. Good luck, adventurer! Type 'Start' with nothing else in the sentence and then choose a game mode from the start menu.</p>
       <div id="game-console">
+</script>
+        
+
   <table class="character-table" style="width: 100%; border-collapse: collapse;">
     <tr>
       <td class="character-column" style="width: 14%; font-size: 8pt; color: white;">
@@ -413,19 +789,24 @@ function togglePopup() {
     </div>
   </div>
   
-<button id="open-popup-button" onclick="togglePopup()" style="
-    position: fixed;
-    top: 10px;
-    left: 10px;
-    z-index: 1100;
-    background-color: #444;
-    color: white;
-    padding: 5px 10px;
-    border: none;
-    cursor: pointer;
-">Game Console</button>
+    <button id="open-popup-button" onclick="togglePopup()" style="position: fixed; top: 10px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Game Console</button>
+    <!-- Physically placed combat mode toggle -->
+    
+    <div id="combat-mode-toggle" style="position: fixed; top: 40px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 4.75px 6px; border: none; cursor: pointer;">
+      <select id="combat-mode-select" onchange="toggleCombatMode()">
+        <option value="Combat Map-Based">Combat Map-Based</option>
+        <option value="Interactive Map-Based">Interactive Map-Based</option>
+        <option value="No Combat Map">No Combat Map</option>
+      </select>
+    </div>
+    <button id="open-combat-button" onclick="toggleCombatPopup()" style="position: fixed; top: 70px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Combat Map</button>
+    <button id="open-dungeon-button" onclick="toggleDungeonPopup()"
+  style="position: fixed; top: 75px; right: 5px; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
+  Dungeon View
+</button>
+    <!-- Music control button (hidden until needed) -->
+<button id="play-music-btn" style="display: none; position: fixed; top: 130px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;" onclick="playRoomMusic()">Play Music</button>
 
   <div style="display: none;"><b>Your API key (remains hidden to me): </b><input id="userapikey" value=""/></div>
 </body>
 </html>
-
