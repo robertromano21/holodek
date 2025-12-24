@@ -6579,7 +6579,7 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
 
           // Push to server (don't call sharedState here; it's server-side)
    /*       try {
-            fetchWithTimeout2('http://childrenofthegrave.com/updateState7', {
+            fetchWithTimeout2('/updateState7', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ roomNameDatabaseString })
@@ -8802,7 +8802,7 @@ function fetchWithTimeout2(resource, options = {}, timeout = TIMEOUT_DURATION2) 
 
 const combatMode = window.combatMode;
 
-fetchWithTimeout('http://childrenofthegrave.com/updateState7', {
+fetchWithTimeout('/updateState7', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode }),
@@ -8813,7 +8813,7 @@ fetchWithTimeout('http://childrenofthegrave.com/updateState7', {
 
 // Extend $.ajax with a timeout setting
 $.ajax({
-  url: 'http://childrenofthegrave.com/processInput7',
+  url: '/processInput7',
   type: 'POST',
   contentType: 'application/json',
   data: JSON.stringify({ userInput: userInput }),
@@ -8825,7 +8825,7 @@ $.ajax({
     // Start polling /poll-task/:taskId every 5 seconds
     const pollInterval = setInterval(function() {
       $.ajax({
-        url: `http://childrenofthegrave.com/poll-task2/${taskId}`,
+        url: `/poll-task2/${taskId}`,
         type: 'GET',
         timeout: 30000, // Short timeout for polls
         // In game.js, within the $.ajax success callback in chatbotprocessinput:
