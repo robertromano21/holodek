@@ -10093,9 +10093,9 @@ if (!hit) continue;
       const worldX = wx + 0.5;
       const worldY = wy + 0.5;
 
-      // Relative from TRUE player center – fixes shifting/movement
-      const dxp = worldX - posX;
-      const dyp = worldY - posY;
+      // Relative from TRUE player center (keep sprites fixed in world space)
+      const dxp = worldX - playerWorldX;
+      const dyp = worldY - playerWorldY;
 
       const distSq = dxp * dxp + dyp * dyp;
       if (distSq < 0.04 || distSq > VIS_RADIUS * VIS_RADIUS) continue;
