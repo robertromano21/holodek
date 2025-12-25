@@ -9534,6 +9534,12 @@ function renderDungeonView() {
 
   const focalLength = H / (2 * Math.tan(FOV / 2));
 
+  const lighting = normalizeLight(currentDungeon && (currentDungeon.lighting || currentDungeon.classification?.lighting));
+  const lightDirX = lighting.dirX;
+  const lightDirY = lighting.dirY;
+  const lightElev = lighting.elevation;
+  const lightIntensity = lighting.intensity;
+
   const depthBuffer = new Float32Array(W * H);
   depthBuffer.fill(Infinity);
 
@@ -9567,14 +9573,81 @@ function renderDungeonView() {
       c.height = h;
       const tctx = c.getContext('2d');
       tctx.drawImage(texImg, 0, 0);
+      const data = tctx.getImageData(0, 0, w, h);
+      let lastOpaqueY = -1;
+      for (let y = h - 1; y >= 0; y--) {
+        const row = y * w * 4;
+        let found = false;
+        for (let x = 0; x < w; x++) {
+          if (data.data[row + x * 4 + 3] > 10) {
+            lastOpaqueY = y;
+            found = true;
+            break;
+          }
+        }
+        if (found) break;
+      }
       cached = wallTexCache[texName] = {
-        data: tctx.getImageData(0, 0, w, h),
+        data,
         w,
-        h
+        h,
+        lastOpaqueY
       };
     }
     return cached;
   }
+
+  function normalizeLight(light) {
+    const fallback = {
+      dirX: -0.7,
+      dirY: -0.7,
+      elevation: 0.6,
+      intensity: 0.6,
+      color: '#FFFFFF'
+    };
+    if (!light) return fallback;
+    let dirX = null;
+    let dirY = null;
+    if (typeof light.dir === 'string') {
+      const d = light.dir.trim().toUpperCase();
+      const map = {
+        N:  [0, -1],
+        NE: [0.7, -0.7],
+        E:  [1, 0],
+        SE: [0.7, 0.7],
+        S:  [0, 1],
+        SW: [-0.7, 0.7],
+        W:  [-1, 0],
+        NW: [-0.7, -0.7]
+      };
+      if (map[d]) {
+        dirX = map[d][0];
+        dirY = map[d][1];
+      }
+    } else if (Number.isFinite(light.dirX) && Number.isFinite(light.dirY)) {
+      dirX = light.dirX;
+      dirY = light.dirY;
+    } else if (Number.isFinite(light.x) && Number.isFinite(light.y)) {
+      dirX = light.x;
+      dirY = light.y;
+    } else if (Number.isFinite(light.angle)) {
+      const a = light.angle * (Math.PI / 180);
+      dirX = Math.cos(a);
+      dirY = Math.sin(a);
+    }
+    if (!Number.isFinite(dirX) || !Number.isFinite(dirY)) {
+      dirX = fallback.dirX;
+      dirY = fallback.dirY;
+    }
+    const len = Math.hypot(dirX, dirY) || 1;
+    dirX /= len;
+    dirY /= len;
+    const elevation = Number.isFinite(light.elevation) ? Math.max(0.05, Math.min(0.95, light.elevation)) : fallback.elevation;
+    const intensity = Number.isFinite(light.intensity) ? Math.max(0, Math.min(1, light.intensity)) : fallback.intensity;
+    const color = /^#[0-9a-fA-F]{6}$/.test(light.color || '') ? String(light.color).toUpperCase() : fallback.color;
+    return { dirX, dirY, elevation, intensity, color };
+  }
+
 
   // Sky (unchanged)
   let skyTop = '#050012';
@@ -10030,6 +10103,11 @@ if (!hit) continue;
     const shade_wall = Math.max(0.2, 1.0 - perpWallDist / 10);
     const sideFactor = (side === 1) ? 0.85 : 1.0;
     const finalShade = shade_wall * sideFactor;
+    const nX = (side === 0) ? stepX : 0;
+    const nY = (side === 1) ? stepY : 0;
+    const dot = nX * lightDirX + nY * lightDirY;
+    const lightFactor = Math.max(0.2, Math.min(1.2, 0.6 + 0.4 * dot));
+    const litShade = finalShade * (1 - lightIntensity + lightIntensity * lightFactor);
 
     const texInfo = texImg ? getWallTextureData(texName, texImg) : null;
 
@@ -10040,9 +10118,9 @@ if (!hit) continue;
         if (perpWallDist >= depthBuffer[idx]) continue;
         depthBuffer[idx] = perpWallDist;
 
-        const rr = Math.floor(180 * finalShade);
-        const gg = Math.floor(30 * finalShade);
-        const bb = Math.floor(30 * finalShade);
+        const rr = Math.floor(180 * litShade);
+        const gg = Math.floor(30 * litShade);
+        const bb = Math.floor(30 * litShade);
         ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
         ctx.fillRect(x, sy, 1, 1);
       }
@@ -10062,9 +10140,9 @@ if (!hit) continue;
 
         depthBuffer[idx] = perpWallDist;
 
-        const r = Math.round(sample.r * finalShade);
-        const g = Math.round(sample.g * finalShade);
-        const b = Math.round(sample.b * finalShade);
+        const r = Math.round(sample.r * litShade);
+        const g = Math.round(sample.g * litShade);
+        const b = Math.round(sample.b * litShade);
         const a = sample.a / 255;
 
         ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
@@ -10090,7 +10168,8 @@ if (!hit) continue;
 
       const texName = cell.tile;
       const texImg = dungeonTextures[texName];
-      if (!isTextureReady(texImg)) continue;
+      const texInfo = getWallTextureData(texName, texImg);
+      if (!texInfo) continue;
 
       const worldX = wx + 0.5;
       const worldY = wy + 0.5;
@@ -10110,14 +10189,29 @@ if (!hit) continue;
 
       const spriteScreenX = Math.floor((W / 2) * (1 + transformX / transformY));
 
-      const { floorHeight: spriteFloorH = 0 } = getCellHeights(wx, wy);
+      const { floorHeight: spriteFloorH = 0, ceilHeight: spriteCeilH = 0 } = getCellHeights(wx, wy);
 
       const bottomScreenY = Math.floor(HORIZON + (eyeZ - spriteFloorH) * focalLength / transformY);
 
-      const spriteScreenHeight = Math.floor(SPRITE_WORLD_HEIGHT * focalLength / transformY);
+      // Match sprite height to the local floor/ceiling span when available.
+      const spriteWorldHeight =
+        Number.isFinite(spriteCeilH) && Number.isFinite(spriteFloorH) && spriteCeilH > spriteFloorH
+          ? Math.max(0.5, spriteCeilH - spriteFloorH)
+          : SPRITE_WORLD_HEIGHT;
+      const spriteScreenHeight = Math.floor(spriteWorldHeight * focalLength / transformY);
 
       let drawStartY = bottomScreenY - spriteScreenHeight;
       let drawEndY = bottomScreenY;
+
+      // If the sprite has transparent padding at the bottom, push it down to rest on the floor.
+      if (typeof texInfo.lastOpaqueY === 'number' && texInfo.lastOpaqueY >= 0) {
+        const padRatio = (texInfo.h - 1 - texInfo.lastOpaqueY) / texInfo.h;
+        const padPx = Math.floor(spriteScreenHeight * padRatio);
+        if (padPx > 0) {
+          drawStartY += padPx;
+          drawEndY += padPx;
+        }
+      }
 
       if (drawEndY < 0 || drawStartY >= H) continue;
       drawStartY = Math.max(0, drawStartY);
@@ -10125,6 +10219,30 @@ if (!hit) continue;
       if (drawStartY >= drawEndY) continue;
 
       const spriteScreenWidth = Math.floor(spriteScreenHeight * SPRITE_WIDTH_RATIO);
+
+      // Directional shadow projected onto the floor from a single light source.
+      let shadow = null;
+      const elevAngle = (15 + lightElev * 60) * (Math.PI / 180);
+      const shadowLen = spriteWorldHeight / Math.max(0.1, Math.tan(elevAngle));
+      const shadowWorldX = worldX + lightDirX * shadowLen;
+      const shadowWorldY = worldY + lightDirY * shadowLen;
+      const sdxp = shadowWorldX - posX;
+      const sdyp = shadowWorldY - posY;
+      const shadowTransformX = invDet * (dirY * sdxp - dirX * sdyp);
+      const shadowTransformY = invDet * (-planeY * sdxp + planeX * sdyp);
+      if (shadowTransformY > 0.1) {
+        const shadowScreenX = Math.floor((W / 2) * (1 + shadowTransformX / shadowTransformY));
+        const shadowBottomY = Math.floor(HORIZON + (eyeZ - spriteFloorH) * focalLength / shadowTransformY);
+        const shadowW = Math.max(2, Math.floor(spriteWorldHeight * focalLength / shadowTransformY * SPRITE_WIDTH_RATIO));
+        const shadowH = Math.max(1, Math.floor(shadowW * 0.2));
+        shadow = {
+          x: shadowScreenX,
+          y: shadowBottomY,
+          w: shadowW,
+          h: shadowH,
+          dist: shadowTransformY
+        };
+      }
 
       sprites.push({
         screenX: spriteScreenX,
@@ -10135,6 +10253,8 @@ if (!hit) continue;
         drawEndY,
         texName,
         texImg,
+        texInfo,
+        shadow,
         transformY
       });
     }
@@ -10142,16 +10262,34 @@ if (!hit) continue;
 
   sprites.sort((a, b) => b.dist - a.dist);
 
-  for (const spr of sprites) {
-    const texInfo = getWallTextureData(spr.texName, spr.texImg);
-    if (!texInfo) continue;
+    for (const spr of sprites) {
+      const texInfo = spr.texInfo;
+      if (!texInfo) continue;
 
-    const texData = texInfo.data;
-    const texW = texInfo.w;
-    const texH = texInfo.h;
+      const texData = texInfo.data;
+      const texW = texInfo.w;
+      const texH = texInfo.h;
 
-    const drawLeft = Math.floor(spr.screenX - spr.width / 2);
-    const drawRight = Math.floor(spr.screenX + spr.width / 2);
+      if (spr.shadow) {
+        const sx = Math.floor(spr.shadow.x);
+        const sy = Math.floor(spr.shadow.y);
+        if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
+          const sIdx = sy * W + sx;
+          if (depthBuffer[sIdx] >= spr.shadow.dist) {
+            const alpha = Math.max(0.08, Math.min(0.45, 0.35 * lightIntensity * (1 - spr.shadow.dist / 18)));
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = '#000000';
+            ctx.beginPath();
+            ctx.ellipse(spr.shadow.x, spr.shadow.y, spr.shadow.w / 2, spr.shadow.h / 2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          }
+        }
+      }
+
+      const drawLeft = Math.floor(spr.screenX - spr.width / 2);
+      const drawRight = Math.floor(spr.screenX + spr.width / 2);
 
     for (let stripe = drawLeft; stripe < drawRight; stripe++) {
       if (stripe < 0 || stripe >= W) continue;

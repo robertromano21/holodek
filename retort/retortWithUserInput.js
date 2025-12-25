@@ -2630,9 +2630,9 @@ Room description:
 ${roomDescription}
 
 
-Respond with ONLY valid JSON, matching this schema (no comments, no extra text):
-
-{
+  Respond with ONLY valid JSON, matching this schema (no comments, no extra text):
+  
+  {
   "palette": {
     "primary": "#RRGGBB",
     "secondary": "#RRGGBB",
@@ -2661,12 +2661,18 @@ Respond with ONLY valid JSON, matching this schema (no comments, no extra text):
     "hasTorch": true,
     "flameColor": "#RRGGBB"
   },
-  "motifs": [
-    "short descriptive phrase",
-    "another phrase"
-  ]
-}
-`;
+    "motifs": [
+      "short descriptive phrase",
+      "another phrase"
+    ],
+    "lighting": {
+      "dir": "N|NE|E|SE|S|SW|W|NW",
+      "elevation": 0.0,
+      "intensity": 0.0,
+      "color": "#RRGGBB"
+    }
+  }
+  `;
 
     // No parameters: just get raw JSON text and parse it ourselves.
     const styleResult = await $.assistant.generation();
@@ -2687,14 +2693,33 @@ Respond with ONLY valid JSON, matching this schema (no comments, no extra text):
     try {
         const parsed = JSON.parse(jsonString);
 
-        const style = {
-            palette: Object.assign({
-                primary:   "#553344",
-                secondary: "#22111a",
-                highlight: "#ff4040",
-                shadow:    "#0a0508"
-            }, parsed.palette || {}),
-            floor: Object.assign({
+          const normalizeLighting = (l) => {
+              const dir = typeof l?.dir === 'string' ? l.dir.trim().toUpperCase() : null;
+              const elevation = Number.isFinite(l?.elevation) ? l.elevation : undefined;
+              const intensity = Number.isFinite(l?.intensity) ? l.intensity : undefined;
+              const color = /^#[0-9a-fA-F]{6}$/.test(l?.color || '') ? String(l.color).toUpperCase() : undefined;
+              return {
+                  dir: dir && ['N','NE','E','SE','S','SW','W','NW'].includes(dir) ? dir : undefined,
+                  elevation: elevation !== undefined ? Math.max(0, Math.min(1, elevation)) : undefined,
+                  intensity: intensity !== undefined ? Math.max(0, Math.min(1, intensity)) : undefined,
+                  color
+              };
+          };
+
+          const style = {
+              palette: Object.assign({
+                  primary:   "#553344",
+                  secondary: "#22111a",
+                  highlight: "#ff4040",
+                  shadow:    "#0a0508"
+              }, parsed.palette || {}),
+              lighting: Object.assign({
+                  dir: "NW",
+                  elevation: 0.6,
+                  intensity: 0.6,
+                  color: "#FFFFFF"
+              }, normalizeLighting(parsed.lighting || {})),
+              floor: Object.assign({
                 material: "stone",
                 pattern: "square_tiles",
                 variation: 0.3,
@@ -9530,10 +9555,10 @@ if (isNewGeoRoom && roomDescription) {
   const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
   // 🧭 STEP 0 — classify biome & size
   
+  const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
   let forcedIndoor = null;
   try {
     const db = JSON.parse(roomNameDatabaseString || "{}");
-    const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
     const entry = db[geoKeyString];
     if (entry && typeof entry.indoor === 'boolean') {
       forcedIndoor = entry.indoor;
@@ -9604,21 +9629,44 @@ const size = Math.max(24, Math.min(requestedSize, 64));
   const startY = size - Math.floor(size / 4);
   
   // 🔴 STEP 1 — Ask the LLM to describe how this room should LOOK, with biome hints
-  const visualStyle = await generateRoomVisualStyle($, roomDescription, geoKey, classification);
-  if (!visualStyle) {
-    console.error("⚠️ Could not generate style JSON. Using fallback.");
-  }
-  const dungeon = {
-    layout: { width: size, height: size },
-    start: { x: startX, y: startY },
-    tiles: {},
-    cells: {},
-    classification,
-    visualStyle,
-    // sky colors only for outdoors; indoors falls back to dark
-    skyTop: classification && classification.indoor === false && classification.skyTop
-              ? classification.skyTop
-              : undefined,
+    const visualStyle = await generateRoomVisualStyle($, roomDescription, geoKey, classification);
+    if (!visualStyle) {
+      console.error("⚠️ Could not generate style JSON. Using fallback.");
+    }
+    let lighting = (visualStyle && visualStyle.lighting) ? visualStyle.lighting : {
+      dir: "NW",
+      elevation: 0.6,
+      intensity: 0.6,
+      color: "#FFFFFF"
+    };
+    try {
+      const db = JSON.parse(roomNameDatabaseString || "{}");
+      const entry = db[geoKeyString] || {};
+      if (entry.lighting) {
+        lighting = entry.lighting;
+      } else {
+        entry.lighting = lighting;
+        db[geoKeyString] = entry;
+        roomNameDatabaseString = JSON.stringify(db, null, 2);
+        if (sharedState.setRoomNameDatabase) {
+          sharedState.setRoomNameDatabase(roomNameDatabaseString);
+        }
+      }
+    } catch (e) {
+      console.error('Failed to persist lighting for', geoKeyString, e);
+    }
+    const dungeon = {
+      layout: { width: size, height: size },
+      start: { x: startX, y: startY },
+      tiles: {},
+      cells: {},
+      classification,
+      visualStyle,
+      lighting,
+      // sky colors only for outdoors; indoors falls back to dark
+      skyTop: classification && classification.indoor === false && classification.skyTop
+                ? classification.skyTop
+                : undefined,
     skyBot: classification && classification.indoor === false && classification.skyBot
               ? classification.skyBot
               : undefined
