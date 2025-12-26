@@ -20,6 +20,43 @@ function normalizePalette(p) {
   };
 }
 
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function randRange(a, b) {
+  return a + Math.random() * (b - a);
+}
+
+function roughRect(ctx, x, y, w, h, jag = 6) {
+  const pts = [
+    { x, y },
+    { x: x + w, y },
+    { x: x + w, y: y + h },
+    { x, y: y + h }
+  ];
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    const jx = randRange(-jag, jag);
+    const jy = randRange(-jag, jag);
+    const px = p.x + jx;
+    const py = p.y + jy;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
+  ctx.fill();
+}
+
+function speckle(ctx, color, count, x0, y0, x1, y1, size = 2) {
+  ctx.fillStyle = color;
+  for (let i = 0; i < count; i++) {
+    const x = randRange(x0, x1);
+    const y = randRange(y0, y1);
+    ctx.fillRect(x, y, size, size);
+  }
+}
+
 // ===== CUSTOM TILE DRAWER (new underworld wasteland tiles) =====
 // Enhanced CUSTOM TILE DRAWER: Interprets LLM procedure JSON as procedural canvas ops
 
@@ -179,6 +216,151 @@ function runSpriteProgram(ctx, palette, program) {
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.fill();
+        break;
+      }
+
+      case 'block': {
+        const wRatio = clamp(step.width || 0.6, 0.2, 0.95);
+        const hRatio = clamp(step.height || 0.5, 0.2, 0.95);
+        const x = s * 0.5 - (s * wRatio) / 2;
+        const y = s * (step.y || (1 - hRatio - 0.08));
+        const w = s * wRatio;
+        const h = s * hRatio;
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        roughRect(ctx, x, y, w, h, s * 0.02);
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fillRect(x, y + h - s * 0.04, w, s * 0.04);
+        break;
+      }
+
+      case 'archway': {
+        const wRatio = clamp(step.width || 0.55, 0.3, 0.9);
+        const hRatio = clamp(step.height || 0.7, 0.4, 0.95);
+        const thickness = clamp(step.thickness || 0.18, 0.08, 0.3);
+        const w = s * wRatio;
+        const h = s * hRatio;
+        const x = s * 0.5 - w / 2;
+        const y = s * (1 - h - 0.05);
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        ctx.fillRect(x, y, w, h);
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath();
+        ctx.arc(s * 0.5, y + h * 0.55, w * 0.35, Math.PI, 0);
+        ctx.lineTo(s * 0.5 + w * 0.35, y + h);
+        ctx.lineTo(s * 0.5 - w * 0.35, y + h);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+        ctx.lineWidth = s * thickness * 0.2;
+        ctx.strokeRect(x, y, w, h);
+        break;
+      }
+
+      case 'spire': {
+        const wRatio = clamp(step.width || 0.25, 0.08, 0.5);
+        const hRatio = clamp(step.height || 0.85, 0.4, 0.98);
+        const w = s * wRatio;
+        const h = s * hRatio;
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.04;
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        ctx.beginPath();
+        ctx.moveTo(x, s);
+        ctx.lineTo(x + w / 2, y);
+        ctx.lineTo(x + w, s);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      }
+
+      case 'ruin_wall': {
+        const wRatio = clamp(step.width || 0.7, 0.3, 0.98);
+        const hRatio = clamp(step.height || 0.5, 0.2, 0.8);
+        const w = s * wRatio;
+        const h = s * hRatio;
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.06;
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        roughRect(ctx, x, y, w, h, s * 0.03);
+        speckle(ctx, 'rgba(0,0,0,0.25)', 60, x, y, x + w, y + h, 2);
+        break;
+      }
+
+      case 'rubble': {
+        const count = clamp(step.count || 6, 2, 16);
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        for (let i = 0; i < count; i++) {
+          const w = s * randRange(0.08, 0.18);
+          const h = s * randRange(0.04, 0.12);
+          const x = randRange(s * 0.1, s * 0.8);
+          const y = randRange(s * 0.65, s * 0.9);
+          roughRect(ctx, x, y, w, h, s * 0.015);
+        }
+        break;
+      }
+
+      case 'stairs': {
+        const steps = clamp(step.steps || 6, 3, 12);
+        const w = s * clamp(step.width || 0.6, 0.3, 0.95);
+        const h = s * clamp(step.height || 0.35, 0.2, 0.6);
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.05;
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        for (let i = 0; i < steps; i++) {
+          const sw = w * (1 - i / (steps * 1.3));
+          const sh = h / steps;
+          ctx.fillRect(x, y + i * sh, sw, sh);
+        }
+        break;
+      }
+
+      case 'crystal_cluster': {
+        const count = clamp(step.count || 4, 2, 10);
+        const baseY = s * 0.75;
+        for (let i = 0; i < count; i++) {
+          const h = s * randRange(0.2, 0.55);
+          const w = h * randRange(0.2, 0.35);
+          const x = s * 0.2 + randRange(0, s * 0.6);
+          const y = baseY - h;
+          ctx.fillStyle = getColor(step.color, palette.highlight);
+          ctx.beginPath();
+          ctx.moveTo(x, baseY);
+          ctx.lineTo(x + w / 2, y);
+          ctx.lineTo(x + w, baseY);
+          ctx.closePath();
+          ctx.fill();
+        }
+        break;
+      }
+
+      case 'ribcage': {
+        const ribs = clamp(step.count || 6, 3, 12);
+        const span = s * clamp(step.span || 0.5, 0.3, 0.9);
+        const baseY = s * 0.7;
+        ctx.strokeStyle = getColor(step.color, palette.highlight);
+        ctx.lineWidth = s * 0.03;
+        for (let i = 0; i < ribs; i++) {
+          const t = i / (ribs - 1);
+          const r = span * (0.6 + 0.4 * (1 - t));
+          const y = baseY - t * s * 0.35;
+          ctx.beginPath();
+          ctx.arc(s * 0.5, y, r * 0.5, Math.PI, 0);
+          ctx.stroke();
+        }
+        break;
+      }
+
+      case 'totem': {
+        const w = s * clamp(step.width || 0.25, 0.12, 0.45);
+        const h = s * clamp(step.height || 0.7, 0.4, 0.9);
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.05;
+        ctx.fillStyle = getColor(step.color, palette.primary);
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = getColor(step.accent, palette.shadow);
+        ctx.fillRect(x, y + h * 0.2, w, s * 0.04);
+        ctx.fillRect(x, y + h * 0.55, w, s * 0.04);
         break;
       }
     }
@@ -342,6 +524,142 @@ function drawCustomTile(ctx, palette, customType, customStyle = {}) {
         break;
       }
 
+      case 'blocks': { // stacked blocks / monoliths
+        const count = params.count || 3 + Math.floor(Math.random() * 4);
+        ctx.fillStyle = localPalette.primary;
+        for (let i = 0; i < count; i++) {
+          const w = s * (params.width || randRange(0.18, 0.35));
+          const h = s * (params.height || randRange(0.25, 0.6));
+          const x = randRange(s * 0.1, s * 0.8);
+          const y = s - h - randRange(s * 0.05, s * 0.2);
+          roughRect(ctx, x, y, w, h, s * 0.02);
+        }
+        break;
+      }
+
+      case 'archway': { // stone arch frame
+        const wRatio = clamp(params.width || 0.5, 0.3, 0.9);
+        const hRatio = clamp(params.height || 0.7, 0.4, 0.95);
+        const w = s * wRatio;
+        const h = s * hRatio;
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.08;
+        ctx.fillStyle = localPalette.primary;
+        ctx.fillRect(x, y, w, h);
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath();
+        ctx.arc(s * 0.5, y + h * 0.55, w * 0.35, Math.PI, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+        break;
+      }
+
+      case 'spire': { // tall spike
+        const w = s * clamp(params.width || 0.22, 0.08, 0.4);
+        const h = s * clamp(params.height || 0.85, 0.4, 0.98);
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.05;
+        ctx.fillStyle = localPalette.primary;
+        ctx.beginPath();
+        ctx.moveTo(x, s);
+        ctx.lineTo(x + w / 2, y);
+        ctx.lineTo(x + w, s);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      }
+
+      case 'ruin_wall': { // broken wall slab
+        const wRatio = clamp(params.width || 0.7, 0.3, 0.98);
+        const hRatio = clamp(params.height || 0.5, 0.2, 0.8);
+        const w = s * wRatio;
+        const h = s * hRatio;
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.06;
+        ctx.fillStyle = localPalette.primary;
+        roughRect(ctx, x, y, w, h, s * 0.03);
+        speckle(ctx, 'rgba(0,0,0,0.25)', 60, x, y, x + w, y + h, 2);
+        break;
+      }
+
+      case 'rubble': { // debris field
+        const count = params.count || 8 + Math.floor(Math.random() * 6);
+        ctx.fillStyle = localPalette.primary;
+        for (let i = 0; i < count; i++) {
+          const w = s * randRange(0.05, 0.15);
+          const h = s * randRange(0.03, 0.1);
+          const x = randRange(s * 0.1, s * 0.85);
+          const y = randRange(s * 0.65, s * 0.92);
+          roughRect(ctx, x, y, w, h, s * 0.012);
+        }
+        break;
+      }
+
+      case 'crystal_cluster': { // tall crystals
+        const count = params.count || 4 + Math.floor(Math.random() * 4);
+        const baseY = s * 0.75;
+        for (let i = 0; i < count; i++) {
+          const h = s * randRange(0.2, 0.55);
+          const w = h * randRange(0.2, 0.35);
+          const x = s * 0.2 + randRange(0, s * 0.6);
+          const y = baseY - h;
+          ctx.fillStyle = localPalette.highlight;
+          ctx.beginPath();
+          ctx.moveTo(x, baseY);
+          ctx.lineTo(x + w / 2, y);
+          ctx.lineTo(x + w, baseY);
+          ctx.closePath();
+          ctx.fill();
+        }
+        break;
+      }
+
+      case 'ribcage': { // bone arcs
+        const ribs = params.count || 6 + Math.floor(Math.random() * 4);
+        const span = s * clamp(params.span || 0.5, 0.3, 0.9);
+        const baseY = s * 0.7;
+        ctx.strokeStyle = localPalette.highlight;
+        ctx.lineWidth = s * 0.03;
+        for (let i = 0; i < ribs; i++) {
+          const t = i / (ribs - 1);
+          const r = span * (0.6 + 0.4 * (1 - t));
+          const y = baseY - t * s * 0.35;
+          ctx.beginPath();
+          ctx.arc(s * 0.5, y, r * 0.5, Math.PI, 0);
+          ctx.stroke();
+        }
+        break;
+      }
+
+      case 'totem': { // stacked totem/obelisk
+        const w = s * clamp(params.width || 0.22, 0.1, 0.4);
+        const h = s * clamp(params.height || 0.8, 0.4, 0.95);
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.05;
+        ctx.fillStyle = localPalette.primary;
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = localPalette.shadow;
+        ctx.fillRect(x, y + h * 0.2, w, s * 0.04);
+        ctx.fillRect(x, y + h * 0.55, w, s * 0.04);
+        break;
+      }
+
+      case 'stairs': { // stepped platform
+        const steps = clamp(params.steps || 6, 3, 12);
+        const w = s * clamp(params.width || 0.6, 0.3, 0.95);
+        const h = s * clamp(params.height || 0.35, 0.2, 0.6);
+        const x = s * 0.5 - w / 2;
+        const y = s - h - s * 0.05;
+        ctx.fillStyle = localPalette.primary;
+        for (let i = 0; i < steps; i++) {
+          const sw = w * (1 - i / (steps * 1.3));
+          const sh = h / steps;
+          ctx.fillRect(x, y + i * sh, sw, sh);
+        }
+        break;
+      }
+
       default:
         console.warn('Unknown primitive:', primitive);
     }
@@ -376,6 +694,19 @@ function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
   ctx.fillRect(0, 0, s, s);
 
   switch (customType) {
+    case 'archway':
+    case 'stone_arch':
+    case 'gate':
+      ctx.fillStyle = localPalette.primary;
+      ctx.fillRect(s * 0.2, s * 0.2, s * 0.6, s * 0.7);
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.arc(s * 0.5, s * 0.55, s * 0.22, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      break;
+
     case 'mountain':
     case 'jagged_peak':
     case 'rock_spire':
@@ -403,6 +734,16 @@ function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
       }
       break;
 
+    case 'spire':
+      ctx.fillStyle = localPalette.primary;
+      ctx.beginPath();
+      ctx.moveTo(s * 0.5 - s * 0.08, s);
+      ctx.lineTo(s * 0.5, s * 0.1);
+      ctx.lineTo(s * 0.5 + s * 0.08, s);
+      ctx.closePath();
+      ctx.fill();
+      break;
+
     case 'dead_tree':
     case 'withered_tree':
       // Twisted dead tree
@@ -425,6 +766,7 @@ function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
       }
       break;
 
+    case 'ruin_wall':
     case 'ruin':
     case 'broken_arch':
     case 'collapsed_wall':
@@ -452,6 +794,18 @@ function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
       }
       break;
 
+    case 'rubble':
+      ctx.fillStyle = localPalette.primary;
+      for (let i = 0; i < 10; i++) {
+        const w = s * randRange(0.05, 0.16);
+        const h = s * randRange(0.03, 0.1);
+        const x = randRange(s * 0.1, s * 0.85);
+        const y = randRange(s * 0.7, s * 0.92);
+        roughRect(ctx, x, y, w, h, s * 0.012);
+      }
+      break;
+
+    case 'crystal_cluster':
     case 'boulder':
     case 'rock':
       // Large cracked boulder
@@ -471,6 +825,27 @@ function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
         ctx.lineTo(s/2 + Math.cos(angle) * len, s/2 + s*0.1 + Math.sin(angle) * len);
         ctx.stroke();
       }
+      break;
+
+    case 'ribcage':
+      ctx.strokeStyle = localPalette.highlight;
+      ctx.lineWidth = s * 0.03;
+      for (let i = 0; i < 7; i++) {
+        const t = i / 6;
+        const r = s * 0.22 + (1 - t) * s * 0.18;
+        const y = s * 0.7 - t * s * 0.35;
+        ctx.beginPath();
+        ctx.arc(s * 0.5, y, r, Math.PI, 0);
+        ctx.stroke();
+      }
+      break;
+
+    case 'totem':
+      ctx.fillStyle = localPalette.primary;
+      ctx.fillRect(s * 0.42, s * 0.15, s * 0.16, s * 0.75);
+      ctx.fillStyle = localPalette.shadow;
+      ctx.fillRect(s * 0.42, s * 0.35, s * 0.16, s * 0.04);
+      ctx.fillRect(s * 0.42, s * 0.6, s * 0.16, s * 0.04);
       break;
 
     case 'ash_pile':

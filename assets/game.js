@@ -54,6 +54,109 @@ async function idbSetDungeon(coordsKey, dungeon) {
   });
 }
 
+let pendingLodPersist = null;
+
+function scheduleLodCachePersist() {
+  if (!currentDungeon || !currentDungeon.geoKey) return;
+  if (pendingLodPersist) return;
+  pendingLodPersist = setTimeout(async () => {
+    try {
+      const key = currentDungeon && currentDungeon.geoKey;
+      if (!key) return;
+      await idbSetDungeon(key, currentDungeon);
+    } catch (err) {
+      console.warn('Failed to persist LOD cache:', err);
+    } finally {
+      pendingLodPersist = null;
+    }
+  }, 1500);
+}
+
+function chooseLodFactor(pixelSize) {
+  if (pixelSize >= 1.2) return 1;
+  if (pixelSize >= 0.6) return 2;
+  if (pixelSize >= 0.3) return 4;
+  if (pixelSize >= 0.15) return 8;
+  return 16;
+}
+
+function chooseRowStep(pixelSize) {
+  const factor = chooseLodFactor(pixelSize);
+  if (factor <= 1) return 1;
+  if (factor <= 2) return 2;
+  if (factor <= 4) return 3;
+  if (factor <= 8) return 5;
+  return 7;
+}
+
+function ensureLodCache(dungeon, factor) {
+  if (!dungeon || !dungeon.layout || factor <= 1) return null;
+  if (!dungeon._lodCache) dungeon._lodCache = {};
+  if (dungeon._lodCache[factor]) return dungeon._lodCache[factor];
+
+  const w = dungeon.layout.width;
+  const h = dungeon.layout.height;
+  const lw = Math.ceil(w / factor);
+  const lh = Math.ceil(h / factor);
+  const heights = new Array(lw * lh);
+  const solids = new Array(lw * lh);
+  const quantStep = factor >= 16 ? 0.5 : factor >= 8 ? 0.25 : 0.1;
+
+  for (let cy = 0; cy < lh; cy++) {
+    for (let cx = 0; cx < lw; cx++) {
+      let sum = 0;
+      let count = 0;
+      let solidCount = 0;
+      const x0 = cx * factor;
+      const y0 = cy * factor;
+      const x1 = Math.min(w, x0 + factor);
+      const y1 = Math.min(h, y0 + factor);
+
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const cell = dungeon.cells[`${x},${y}`];
+          if (!cell) continue;
+          const fh = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+          sum += fh;
+          count++;
+          if (cell.tile === 'wall') solidCount++;
+        }
+      }
+
+      let avg = count > 0 ? (sum / count) : 0;
+      if (quantStep > 0) {
+        avg = Math.round(avg / quantStep) * quantStep;
+      }
+      const idx = cy * lw + cx;
+      heights[idx] = avg;
+      solids[idx] = count > 0 ? (solidCount > count * 0.5) : false;
+    }
+  }
+
+  const cache = {
+    factor,
+    w: lw,
+    h: lh,
+    heights,
+    solids,
+    createdAt: Date.now()
+  };
+
+  dungeon._lodCache[factor] = cache;
+  scheduleLodCachePersist();
+  return cache;
+}
+
+function getLodSample(dungeon, x, y, factor) {
+  const cache = ensureLodCache(dungeon, factor);
+  if (!cache) return null;
+  const cx = Math.floor(x / factor);
+  const cy = Math.floor(y / factor);
+  if (cx < 0 || cy < 0 || cx >= cache.w || cy >= cache.h) return null;
+  const idx = cy * cache.w + cx;
+  return { floorHeight: cache.heights[idx], solid: cache.solids[idx] };
+}
+
 async function switchDungeonForCoordinates(coordString) {
   // coordString is like "X: 0, Y: 0, Z: 0"
   const match = coordString.match(/X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
@@ -9704,13 +9807,31 @@ function renderDungeonView() {
     };
   }
 
+  const layoutW = currentDungeon?.layout?.width || 32;
+  const layoutH = currentDungeon?.layout?.height || 32;
+  const maxDim = Math.max(layoutW, layoutH);
+  const isOutdoor = currentDungeon && currentDungeon.classification && currentDungeon.classification.indoor === false;
   const HORIZON = Math.floor(H / 2);
-  const MAX_FLOOR_DIST = 18.0;
+  if (currentDungeon && !Number.isFinite(currentDungeon._minFloor)) {
+    let minFloor = Infinity;
+    for (const cell of Object.values(currentDungeon.cells || {})) {
+      if (cell && typeof cell.floorHeight === 'number' && cell.floorHeight < minFloor) {
+        minFloor = cell.floorHeight;
+      }
+    }
+    currentDungeon._minFloor = Number.isFinite(minFloor) ? minFloor : 0;
+  }
+  const FAR_BAND_HEIGHT = 0;
+  const FAR_BAND_DIST = 0;
+  const FLOOR_X_STEP = 1;
+  const MAX_FLOOR_DIST = isOutdoor
+    ? 1000000
+    : 18.0;
   // -----------------------------------
   // FLOOR PASS
   // -----------------------------------
   if (hasFloorTexture && floorImageData) {
-    for (let x = 0; x < W; x++) {
+    for (let x = 0; x < W; x += FLOOR_X_STEP) {
       const cameraX = 2 * x / W - 1;
       const rayDirX = dirX + planeX * cameraX;
       const rayDirY = dirY + planeY * cameraX;
@@ -9737,10 +9858,17 @@ function renderDungeonView() {
         sideDistY = (mapY + 1.0 - posY) * deltaDistY;
       }
 
-      for (let sy = H - 1; sy > HORIZON; sy--) {
+      for (let sy = H - 1; sy > HORIZON; ) {
         const relY = sy - HORIZON;
         const tan_v = relY / focalLength;
-        if (tan_v <= 0) continue;
+        if (tan_v <= 0) {
+          sy -= 1;
+          continue;
+        }
+        const approxDist = Math.abs((eyeZ - playerFloor) / tan_v) || 0.001;
+        const approxPixelSize = Math.abs(focalLength / approxDist);
+        const rowStep = isOutdoor ? chooseRowStep(approxPixelSize) : 1;
+        const drawStep = Math.min(rowStep, sy - HORIZON);
 
         // Restart DDA for this row
         let dda_mapX = mapX;
@@ -9755,11 +9883,13 @@ function renderDungeonView() {
         let hitDist = Infinity;
         let hitFracX = 0;
         let hitFracY = 0;
+        let hitCellX = 0;
+        let hitCellY = 0;
         let foundHit = false;
         let surfaceH = 0;
         let currentD = 0.0;
         let loopCount = 0;
-        const maxLoops = 64;
+        const maxLoops = isOutdoor ? 400 : 64;
 
         const isBackStart_floor = (mapX !== playerDungeonX || mapY !== playerDungeonY);
         if (isBackStart_floor) {
@@ -9790,8 +9920,8 @@ function renderDungeonView() {
               if (d_plane >= currentD && d_plane < d_exit) {
                 const wx = posX + rayDirX * d_plane;
                 const wy = posY + rayDirY * d_plane;
-                const hitCellX = Math.floor(wx);
-                const hitCellY = Math.floor(wy);
+                hitCellX = Math.floor(wx);
+                hitCellY = Math.floor(wy);
                 if (hitCellX === dda_mapX && hitCellY === dda_mapY) {
                   hitDist = d_plane;
                   hitFracX = ((wx % 1) + 1) % 1;
@@ -9816,8 +9946,8 @@ function renderDungeonView() {
             if (d_plane_next >= currentD && d_plane_next < d_exit) {
               const wx = posX + rayDirX * d_plane_next;
               const wy = posY + rayDirY * d_plane_next;
-              const hitCellX = Math.floor(wx);
-              const hitCellY = Math.floor(wy);
+              hitCellX = Math.floor(wx);
+              hitCellY = Math.floor(wy);
               if (hitCellX === nextMapX && hitCellY === nextMapY) {
                 hitDist = d_plane_next;
                 surfaceH = nextSurfaceH;
@@ -9845,9 +9975,18 @@ function renderDungeonView() {
         }
 
         if (foundHit && hitDist < Infinity) {
-          const idx = sy * W + x;
-          if (hitDist < depthBuffer[idx]) {
-            depthBuffer[idx] = hitDist;
+          if (isOutdoor) {
+            const cellPixelSize = Math.abs(focalLength / hitDist);
+            const lodFactor = chooseLodFactor(cellPixelSize);
+            if (lodFactor > 1) {
+              const lodSample = getLodSample(currentDungeon, hitCellX, hitCellY, lodFactor);
+              if (lodSample) {
+                surfaceH = lodSample.floorHeight;
+                const fracStep = 1 / lodFactor;
+                hitFracX = Math.min(0.999, Math.max(0, Math.floor(hitFracX / fracStep) * fracStep + fracStep * 0.5));
+                hitFracY = Math.min(0.999, Math.max(0, Math.floor(hitFracY / fracStep) * fracStep + fracStep * 0.5));
+              }
+            }
           }
 
           const horizDist = Math.abs((eyeZ - surfaceH) * focalLength / relY);
@@ -9861,8 +10000,21 @@ function renderDungeonView() {
           );
           const shaded = shadeColor(color, shade);
           ctx.fillStyle = shaded;
-          ctx.fillRect(x, sy, 1, 1);
+
+          for (let by = 0; by < drawStep; by++) {
+            const sy2 = sy - by;
+            for (let ox = 0; ox < FLOOR_X_STEP; ox++) {
+              const sx = x + ox;
+              if (sx >= W) break;
+              const idx = sy2 * W + sx;
+              if (hitDist < depthBuffer[idx]) {
+                depthBuffer[idx] = hitDist;
+                ctx.fillRect(sx, sy2, 1, 1);
+              }
+            }
+          }
         }
+        sy -= rowStep;
       }
     }
   } else {
@@ -9907,7 +10059,7 @@ function renderDungeonView() {
     let hit = false;
     let side = 0;
     let steps = 0;
-    const MAX_STEPS = 64;
+    const MAX_STEPS = isOutdoor ? 400 : 64;
 
     const isBackStart_wall = (mapX !== playerDungeonX || mapY !== playerDungeonY);
 
@@ -9925,9 +10077,9 @@ function renderDungeonView() {
           const nextHeights = getCellHeights(nextMapX, nextMapY);
           if (!isOccludingWall(mapX, mapY) && !isOccludingWall(nextMapX, nextMapY)) {
             const dh = nextHeights.floorHeight - currHeights.floorHeight;
-            if (dh > 0) {
-              const bottomZ = currHeights.floorHeight;
-              const topZ = nextHeights.floorHeight;
+            if (dh !== 0) {
+              const bottomZ = Math.min(currHeights.floorHeight, nextHeights.floorHeight);
+              const topZ = Math.max(currHeights.floorHeight, nextHeights.floorHeight);
               const heightDiff = topZ - bottomZ;
               const perpDist = nextDist;
               if (perpDist > 0.001) {
@@ -9991,9 +10143,9 @@ function renderDungeonView() {
           const nextHeights = getCellHeights(nextMapX, nextMapY);
           if (!isOccludingWall(mapX, mapY) && !isOccludingWall(nextMapX, nextMapY)) {
             const dh = nextHeights.floorHeight - currHeights.floorHeight;
-            if (dh > 0) {
-              const bottomZ = currHeights.floorHeight;
-              const topZ = nextHeights.floorHeight;
+            if (dh !== 0) {
+              const bottomZ = Math.min(currHeights.floorHeight, nextHeights.floorHeight);
+              const topZ = Math.max(currHeights.floorHeight, nextHeights.floorHeight);
               const heightDiff = topZ - bottomZ;
               const perpDist = nextDist;
               if (perpDist > 0.001) {
@@ -10069,7 +10221,8 @@ if (!hit) continue;
     const floorH = (typeof hitCell.floorHeight === 'number') ? hitCell.floorHeight : 0;
     const ceilH = (typeof hitCell.ceilHeight === 'number') ? hitCell.ceilHeight : 2;
 
-    const floorScreenY = Math.floor(HORIZON - ((floorH - eyeZ) / perpWallDist) * focalLength);
+    const wallBase = floorH;
+    const floorScreenY = Math.floor(HORIZON - ((wallBase - eyeZ) / perpWallDist) * focalLength);
     const ceilScreenY = Math.floor(HORIZON - ((ceilH - eyeZ) / perpWallDist) * focalLength);
 
     const lineTop = ceilScreenY;
@@ -10111,6 +10264,26 @@ if (!hit) continue;
 
     const texInfo = texImg ? getWallTextureData(texName, texImg) : null;
 
+    const baseFloor = (currentDungeon && currentDungeon.blueprint && currentDungeon.blueprint.base &&
+      Number.isFinite(currentDungeon.blueprint.base.floor))
+      ? currentDungeon.blueprint.base.floor
+      : 0;
+    const minFloor = Number.isFinite(currentDungeon?._minFloor) ? currentDungeon._minFloor : baseFloor;
+    const extendToZ = Math.min(floorH, minFloor);
+    const needExtendWall = extendToZ < floorH;
+    let extraBottomY = null;
+    let extraTop = null;
+    let extraBottom = null;
+    let extraHeight = 0;
+    let totalHeight = lineHeight;
+    if (needExtendWall) {
+      extraBottomY = Math.floor(HORIZON - ((extendToZ - eyeZ) / perpWallDist) * focalLength);
+      extraTop = Math.max(drawEnd, drawStart);
+      extraBottom = Math.min(H, extraBottomY);
+      extraHeight = Math.max(0, extraBottom - extraTop);
+      totalHeight = lineHeight + extraHeight;
+    }
+
     if (!texInfo) {
       // Flat wall
       for (let sy = drawStart; sy < drawEnd; sy++) {
@@ -10118,11 +10291,27 @@ if (!hit) continue;
         if (perpWallDist >= depthBuffer[idx]) continue;
         depthBuffer[idx] = perpWallDist;
 
-        const rr = Math.floor(180 * litShade);
-        const gg = Math.floor(30 * litShade);
-        const bb = Math.floor(30 * litShade);
+        const grad = Math.max(0.35, 1 - 0.18 * ((sy - drawStart) / totalHeight));
+        const rowShade = litShade * grad;
+        const rr = Math.floor(180 * rowShade);
+        const gg = Math.floor(30 * rowShade);
+        const bb = Math.floor(30 * rowShade);
         ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
         ctx.fillRect(x, sy, 1, 1);
+      }
+      if (needExtendWall && extraHeight > 0) {
+        for (let sy = extraTop; sy < extraBottom; sy++) {
+          const idx = sy * W + x;
+          if (perpWallDist >= depthBuffer[idx]) continue;
+          depthBuffer[idx] = perpWallDist;
+          const grad = Math.max(0.35, 1 - 0.18 * ((sy - drawStart) / totalHeight));
+          const rowShade = litShade * grad;
+          const rr = Math.floor(180 * rowShade);
+          const gg = Math.floor(30 * rowShade);
+          const bb = Math.floor(30 * rowShade);
+          ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
+          ctx.fillRect(x, sy, 1, 1);
+        }
       }
     } else {
       const texData = texInfo.data;
@@ -10133,28 +10322,57 @@ if (!hit) continue;
         const idx = sy * W + x;
         if (perpWallDist >= depthBuffer[idx]) continue;
 
-        const v = (sy - drawStart) / lineHeight;
+        const wallHeight = Math.max(0.001, ceilH - floorH);
+        const worldZ = eyeZ + (HORIZON - sy) * (perpWallDist / focalLength);
+        const v = Math.max(0, Math.min(1, (ceilH - worldZ) / wallHeight));
 
         const sample = sampleTextureRGBA(texData, texW, texH, u, v);
         if (sample.a <= 5) continue;
 
         depthBuffer[idx] = perpWallDist;
 
-        const r = Math.round(sample.r * litShade);
-        const g = Math.round(sample.g * litShade);
-        const b = Math.round(sample.b * litShade);
+        const grad = Math.max(0.35, 1 - 0.18 * ((sy - drawStart) / totalHeight));
+        const rowShade = litShade * grad;
+        const r = Math.round(sample.r * rowShade);
+        const g = Math.round(sample.g * rowShade);
+        const b = Math.round(sample.b * rowShade);
         const a = sample.a / 255;
 
         ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
         ctx.fillRect(x, sy, 1, 1);
       }
+      if (needExtendWall && extraHeight > 0) {
+          for (let sy = extraTop; sy < extraBottom; sy++) {
+            const idx = sy * W + x;
+            if (perpWallDist >= depthBuffer[idx]) continue;
+
+            const wallHeight = Math.max(0.001, ceilH - floorH);
+            const worldZ = eyeZ + (HORIZON - sy) * (perpWallDist / focalLength);
+            let v = (ceilH - worldZ) / wallHeight;
+            v = (v % 1 + 1) % 1;
+            const sample = sampleTextureRGBA(texData, texW, texH, u, v);
+            if (sample.a <= 5) continue;
+
+            depthBuffer[idx] = perpWallDist;
+
+            const grad = Math.max(0.35, 1 - 0.18 * ((sy - drawStart) / totalHeight));
+            const rowShade = litShade * grad;
+            const r = Math.round(sample.r * rowShade);
+            const g = Math.round(sample.g * rowShade);
+            const b = Math.round(sample.b * rowShade);
+            const a = sample.a / 255;
+
+            ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+            ctx.fillRect(x, sy, 1, 1);
+          }
+      }
     }
   }
   
   if (!RENDER_CUSTOM_AS_WALLS) {
-// SPRITE PASS (fixed relative position + vertical flip)
-  const sprites = [];
-  const VIS_RADIUS = 16;
+  // SPRITE PASS (fixed relative position + vertical flip)
+    const sprites = [];
+    const VIS_RADIUS = Math.max(10, Math.min(18, Math.floor(maxDim / 10)));
   const SPRITE_WORLD_HEIGHT = 1.8;
   const SPRITE_WIDTH_RATIO = 0.7;
 
