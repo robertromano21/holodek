@@ -887,6 +887,7 @@ function drawWallFromStyle(ctx, palette, wallStyle) {
   const brickSize  = wallStyle.brickSize  || "medium";
   const mortarCol  = wallStyle.mortarColor || palette.shadow;
   const accentCol  = wallStyle.accentColor || palette.highlight;
+  const bakedLighting = wallStyle.bakedLighting === true;
 
   let rows, cols;
   if (brickSize === "small") {
@@ -912,13 +913,18 @@ function drawWallFromStyle(ctx, palette, wallStyle) {
       ctx.fillStyle = palette.primary;
       ctx.fillRect(x + 2, y + 2, brickW - 4, brickH - 4);
 
-      ctx.fillStyle = palette.shadow;
-      ctx.fillRect(x + 2, y + brickH - 6, brickW - 4, 4);
+      if (bakedLighting) {
+        ctx.fillStyle = palette.shadow;
+        ctx.fillRect(x + 2, y + brickH - 6, brickW - 4, 4);
+      }
     }
   }
 
   // occasional accent bricks
-  for (let i = 0; i < 5; i++) {
+  const accentCount = Number.isFinite(wallStyle.accentCount)
+    ? Math.max(0, Math.floor(wallStyle.accentCount))
+    : (bakedLighting ? 5 : 0);
+  for (let i = 0; i < accentCount; i++) {
     const row = Math.floor(Math.random() * rows);
     const col = Math.floor(Math.random() * cols);
     const offset = (row % 2) * (brickW / 2);
@@ -928,12 +934,7 @@ function drawWallFromStyle(ctx, palette, wallStyle) {
     ctx.fillRect(x + 3, y + 3, brickW - 6, brickH - 6);
   }
 
-  // vertical vignette
-  const grad = ctx.createLinearGradient(0, 0, 0, s);
-  grad.addColorStop(0, 'rgba(0,0,0,0.45)');
-  grad.addColorStop(1, 'rgba(0,0,0,0.1)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, s, s);
+  // No vertical vignette here; it breaks seamless tiling for extended walls.
 }
 
 function drawFloorFromStyle(ctx, palette, floorStyle) {
@@ -1070,30 +1071,37 @@ function drawDoorFromStyle(ctx, palette, doorStyle) {
   ctx.fill();
 }
 
-function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle) {
-  // Base wall
-  drawWallFromStyle(ctx, palette, wallStyle);
-  // Always draw a torch on torch tiles
+function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, includeWall = true) {
   const s = BASE_SIZE * UPSCALE;
+  if (includeWall) {
+    // Base wall
+    drawWallFromStyle(ctx, palette, wallStyle);
+  } else {
+    // Transparent background for torch sprite
+    ctx.clearRect(0, 0, s, s);
+  }
+  // Always draw a torch on torch tiles
   const cx = s / 2;
   const cy = s * 0.35;
   const flameColor = (torchStyle && torchStyle.flameColor) || "#ffdd77";
-  // Strong glow
-  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, s * 0.45);
+  // Strong glow (avoid darkening walls when used as a sprite)
+  const glowRadius = includeWall ? s * 0.45 : s * 0.32;
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius);
   glow.addColorStop(0, flameColor);
-  glow.addColorStop(0.5, "rgba(0,0,0,0)");
-  glow.addColorStop(1, "rgba(0,0,0,0.6)");
+  glow.addColorStop(0.4, flameColor);
+  glow.addColorStop(1, "rgba(255,200,120,0)");
   ctx.fillStyle = glow;
   ctx.fillRect(0, 0, s, s);
   // Bracket / holder
-  ctx.fillStyle = "#222222";
-  ctx.fillRect(cx - s * 0.02, cy, s * 0.04, s * 0.25);
+  ctx.fillStyle = "#2a2218";
+  ctx.fillRect(cx - s * 0.03, cy, s * 0.06, s * 0.28);
+  ctx.fillRect(cx - s * 0.08, cy + s * 0.08, s * 0.16, s * 0.04);
   // Flame
   ctx.fillStyle = flameColor;
   ctx.beginPath();
-  ctx.moveTo(cx, cy - s * 0.10);
-  ctx.lineTo(cx - s * 0.06, cy + s * 0.02);
-  ctx.lineTo(cx + s * 0.06, cy + s * 0.02);
+  ctx.moveTo(cx, cy - s * 0.14);
+  ctx.lineTo(cx - s * 0.08, cy + s * 0.04);
+  ctx.lineTo(cx + s * 0.08, cy + s * 0.04);
   ctx.closePath();
   ctx.fill();
   // Hot core
@@ -1175,7 +1183,7 @@ function generateSpriteFromStyle(style, tileType, name = 'sprite') {
         drawDoorFromStyle(ctx, palette, doorStyle);
         break;
       case 'torch':
-        drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle);
+        drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, false);
         break;
       case 'pillar':
         drawPillar(ctx, palette);
