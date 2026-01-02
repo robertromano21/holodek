@@ -6,6 +6,7 @@ let updatedGameConsole = "";
 let roomNameDatabaseString = "";
 let combatCharactersString = "";
 let combatMode = 'Combat Map-Based';
+let dungeonTestingMode = false;
 let currentQuest = "";
 let currentTasks = [];
 let currentTaskIndex = 0;
@@ -34,6 +35,11 @@ module.exports = {
   setCombatMode: (mode) => {
     console.log('Setting combatMode to:', mode);
     combatMode = mode;
+  },
+  getDungeonTestingMode: () => dungeonTestingMode,
+  setDungeonTestingMode: (enabled) => {
+    dungeonTestingMode = !!enabled;
+    console.log('Setting dungeonTestingMode to:', dungeonTestingMode);
   },
   getCurrentQuest: () => currentQuest,
   setCurrentQuest: (quest) => {

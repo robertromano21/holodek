@@ -593,10 +593,20 @@ function mapToPlainObject(map) {
 // This function encapsulates your Retort-JS logic, now accepting dynamic input
 async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode()) {
   console.log('Received combatMode in retortWithUserInput:', combatMode);
-  let personalNarrative = await getDelayedPersonalNarrative();
+  const dungeonTestingMode = sharedState.getDungeonTestingMode && sharedState.getDungeonTestingMode();
+  let personalNarrative = '';
+  if (!dungeonTestingMode) {
+    personalNarrative = await getDelayedPersonalNarrative();
+  }
     // Use the function to delay fetching the updatedGameConsole
   let updatedGameConsole = await getDelayedUpdatedGameConsole();
   let roomNameDatabaseString = await getDelayedRoomNameDatabase();
+
+  if (dungeonTestingMode) {
+    console.log('Dungeon testing mode enabled; running dungeon-only pipeline.');
+    return run(retort(async ($) => runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast)));
+  }
+
   let dialogueParts = personalNarrative.split('\n');
   let narrative = ``;
   
@@ -3372,6 +3382,337 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
     buildIndoorFromPlan(blueprint?.indoorPlan || null);
     return;
   }
+}
+
+async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast) {
+  const roomDescription = updatedGameConsole.match(/Room Description: ([^\n]+)/)?.[1]?.trim() || 'A forgotten chamber in Tartarus';
+  const puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: ([^\n]+)/)?.[1]?.trim() || 'None';
+
+  let currentX = 0;
+  let currentY = 0;
+  let currentZ = 0;
+  const coordMatch = updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+  if (coordMatch) {
+    currentX = parseInt(coordMatch[1], 10);
+    currentY = parseInt(coordMatch[2], 10);
+    currentZ = parseInt(coordMatch[3], 10);
+  }
+
+  const geoCoords = { x: currentX, y: currentY, z: currentZ };
+  const geoKey = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
+
+  const turnsMatch = updatedGameConsole.match(/Turns:\s*(\d+)/);
+  const turns = turnsMatch ? parseInt(turnsMatch[1], 10) : null;
+  const isFirstTurn = turns === 0;
+
+  const lastCoords = sharedState.getLastCoords && sharedState.getLastCoords();
+  const lastGeoKey =
+    lastCoords &&
+    typeof lastCoords.x === "number" &&
+    typeof lastCoords.y === "number" &&
+    typeof lastCoords.z === "number"
+      ? `${lastCoords.x},${lastCoords.y},${lastCoords.z}`
+      : null;
+
+  const isNewGeoRoom =
+    isFirstTurn ||
+    !lastGeoKey ||
+    geoKey !== lastGeoKey;
+
+  let dungeon = null;
+  let roomNameDbString = roomNameDatabaseString;
+
+  try {
+    const roomNameDatabasePlain = JSON.parse(roomNameDbString || "{}");
+    const startKey = "0,0,0";
+    const startRoom = roomNameDatabasePlain[startKey];
+    let outsideKey = null;
+
+    if (startRoom && startRoom.exits && typeof startRoom.exits === "object") {
+      const exitDirs = Object.keys(startRoom.exits);
+      if (exitDirs.length > 0) {
+        const firstDir = exitDirs[0];
+        const exitInfo = startRoom.exits[firstDir];
+        if (exitInfo && exitInfo.targetCoordinates) {
+          outsideKey = exitInfo.targetCoordinates;
+        }
+      }
+    }
+
+    if (!outsideKey) {
+      const exitsLine = updatedGameConsole.match(/Exits:\s*([^\n]+)/)?.[1] || "";
+      const roomExitsArray = exitsLine.split(",").map(s => s.trim()).filter(Boolean);
+      if (roomExitsArray.length > 0 && currentX === 0 && currentY === 0 && currentZ === 0) {
+        const directionMap = {
+          north: { x: 0, y: 1, z: 0 },
+          south: { x: 0, y: -1, z: 0 },
+          east: { x: 1, y: 0, z: 0 },
+          west: { x: -1, y: 0, z: 0 },
+          northeast: { x: 1, y: 1, z: 0 },
+          southeast: { x: 1, y: -1, z: 0 },
+          northwest: { x: -1, y: 1, z: 0 },
+          southwest: { x: -1, y: -1, z: 0 },
+          up: { x: 0, y: 0, z: 1 },
+          down: { x: 0, y: 0, z: -1 }
+        };
+        const firstDir = roomExitsArray[0];
+        const offset = directionMap[firstDir] || { x: 0, y: 0, z: 0 };
+        outsideKey = coordinatesToString({
+          x: currentX + offset.x,
+          y: currentY + offset.y,
+          z: currentZ + offset.z
+        });
+      }
+    }
+
+    if (outsideKey) {
+      const outsideRoom = roomNameDatabasePlain[outsideKey] || {};
+      outsideRoom.indoor = false;
+      outsideRoom.isIndoor = false;
+      outsideRoom.isOutdoor = true;
+      if (!outsideRoom.classification || typeof outsideRoom.classification !== "object") {
+        outsideRoom.classification = {};
+      }
+      outsideRoom.classification.indoor = false;
+      roomNameDatabasePlain[outsideKey] = outsideRoom;
+      roomNameDbString = JSON.stringify(roomNameDatabasePlain, null, 2);
+      if (sharedState.setRoomNameDatabase) {
+        sharedState.setRoomNameDatabase(roomNameDbString);
+      }
+    }
+  } catch (e) {
+    console.error('Failed to enforce first-exit outdoor rule in dungeon test mode:', e);
+  }
+
+  if (isNewGeoRoom && roomDescription) {
+    console.log('Dungeon testing mode: building dungeon for', geoKey);
+    const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
+
+    const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
+    let forcedIndoor = null;
+    try {
+      const db = JSON.parse(roomNameDbString || "{}");
+      const entry = db[geoKeyString];
+      if (entry && typeof entry.indoor === 'boolean') {
+        forcedIndoor = entry.indoor;
+      }
+    } catch (e) {
+      console.error('Failed to read indoor flag from roomNameDatabase:', e);
+    }
+
+    let classification = await classifyDungeon(roomDescription);
+    console.log('Dungeon classification (raw):', classification);
+
+    if (forcedIndoor !== null) {
+      classification = classification || {};
+      classification.indoor = forcedIndoor;
+      console.log('Dungeon classification (after indoor override):', classification.indoor);
+    }
+
+    try {
+      let db = JSON.parse(roomNameDbString || "{}");
+      const cachedClassification = db[geoKeyString]?.classification;
+      if (!cachedClassification || cachedClassification.indoor === null || cachedClassification.biome === null) {
+        classification = await classifyDungeon(roomDescription);
+        console.log('Re-classified incomplete room:', geoKeyString);
+      } else {
+        classification = cachedClassification;
+        console.log('Using cached classification for re-visited room:', geoKeyString);
+      }
+
+      if (forcedIndoor !== null) {
+        classification = classification || {};
+        classification.indoor = forcedIndoor;
+        console.log('Classification after indoor override:', classification.indoor);
+      }
+
+      db[geoKeyString] = db[geoKeyString] || {};
+      db[geoKeyString].classification = {
+        ...(db[geoKeyString].classification || {}),
+        ...classification
+      };
+      db[geoKeyString].indoor = classification.indoor;
+
+      roomNameDbString = JSON.stringify(db, null, 2);
+      if (sharedState.setRoomNameDatabase) {
+        sharedState.setRoomNameDatabase(roomNameDbString);
+      }
+      console.log('Persisted classification for', geoKeyString, ':', JSON.stringify(db[geoKeyString].classification, null, 2));
+    } catch (persistErr) {
+      console.error('Failed to persist classification for', geoKeyString, ':', persistErr);
+    }
+
+    const isOutdoor = classification && classification.indoor === false;
+    const requestedSize = (classification && typeof classification.size === 'number')
+      ? classification.size
+      : 32;
+    const minSize = isOutdoor ? 96 : 24;
+    const maxBaseSize = isOutdoor ? 192 : 64;
+    const baseSize = Math.max(minSize, Math.min(requestedSize, maxBaseSize));
+    const outdoorScale = 10;
+    const maxOutdoorSize = 512;
+    const size = isOutdoor
+      ? Math.min(baseSize * outdoorScale, maxOutdoorSize)
+      : baseSize;
+
+    const startX = Math.floor(size / 2);
+    const startY = size - Math.floor(size / 4);
+
+    const visualStyle = await generateRoomVisualStyle($, roomDescription, geoKey, classification);
+    if (!visualStyle) {
+      console.error("Could not generate style JSON. Using fallback.");
+    }
+
+    let customTiles = [];
+    if (classification && classification.indoor === false) {
+      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, true);
+      console.log('[Custom Tiles] Generated:', customTiles);
+    }
+
+    const blueprint = await generateDungeonBlueprint(
+      $,
+      roomDescription,
+      puzzleInRoom,
+      classification,
+      size,
+      customTiles
+    );
+
+    let lighting = (visualStyle && visualStyle.lighting) ? visualStyle.lighting : {
+      dir: "NW",
+      elevation: 0.6,
+      intensity: 0.6,
+      color: "#FFFFFF"
+    };
+    try {
+      const db = JSON.parse(roomNameDbString || "{}");
+      const entry = db[geoKeyString] || {};
+      if (entry.lighting) {
+        lighting = entry.lighting;
+      } else {
+        entry.lighting = lighting;
+      }
+      if (blueprint) {
+        entry.blueprint = blueprint;
+      }
+      db[geoKeyString] = entry;
+      roomNameDbString = JSON.stringify(db, null, 2);
+      if (sharedState.setRoomNameDatabase) {
+        sharedState.setRoomNameDatabase(roomNameDbString);
+      }
+    } catch (e) {
+      console.error('Failed to persist lighting for', geoKeyString, e);
+    }
+
+    dungeon = {
+      layout: { width: size, height: size },
+      start: { x: startX, y: startY },
+      tiles: {},
+      cells: {},
+      classification,
+      visualStyle,
+      blueprint,
+      lighting,
+      skyTop: classification && classification.indoor === false && classification.skyTop
+        ? classification.skyTop
+        : undefined,
+      skyBot: classification && classification.indoor === false && classification.skyBot
+        ? classification.skyBot
+        : undefined
+    };
+
+    dungeon.tiles.floor = {
+      url: generateSpriteFromStyle(visualStyle, "floor", `${geoKey}_floor`)
+    };
+    dungeon.tiles.wall = {
+      url: generateSpriteFromStyle(visualStyle, "wall", `${geoKey}_wall`)
+    };
+    dungeon.tiles.torch = {
+      url: generateSpriteFromStyle(visualStyle, "torch", `${geoKey}_torch`)
+    };
+    dungeon.tiles.door = {
+      url: generateSpriteFromStyle(visualStyle, "door", `${geoKey}_door`)
+    };
+    dungeon.tiles.pillar = {
+      url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`)
+    };
+
+    customTiles.forEach((tile, i) => {
+      if (!tile || !tile.type) return;
+      const tileName = `custom_${tile.type}_${i}`;
+      tile.name = tileName;
+      const style = {
+        palette: visualStyle && visualStyle.palette ? visualStyle.palette : undefined,
+        procedure: tile.procedure || {}
+      };
+      dungeon.tiles[tileName] = {
+        url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`)
+      };
+    });
+
+    if (blueprint) {
+      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles);
+    } else if (classification && classification.indoor === false) {
+      buildOutdoorLayout(dungeon, classification, customTiles);
+    } else {
+      buildIndoorLayout(dungeon, classification);
+    }
+
+    for (let y = 1; y < dungeon.layout.height - 1; y++) {
+      for (let x = 1; x < dungeon.layout.width - 1; x++) {
+        const key = `${x},${y}`;
+        const cell = dungeon.cells[key];
+        if (!cell || cell.tile !== "wall") continue;
+        const N = dungeon.cells[`${x},${y-1}`];
+        const S = dungeon.cells[`${x},${y+1}`];
+        const E = dungeon.cells[`${x+1},${y}`];
+        const W = dungeon.cells[`${x-1},${y}`];
+        if (N?.tile === "floor" && S?.tile === "floor" && Math.random() < 0.07) {
+          cell.tile = "door";
+          cell.door = { isDoor: true, isOpen: false };
+        }
+        if (E?.tile === "floor" && W?.tile === "floor" && Math.random() < 0.07) {
+          cell.tile = "door";
+          cell.door = { isDoor: true, isOpen: false };
+        }
+      }
+    }
+
+    for (let y = 1; y < dungeon.layout.height - 1; y++) {
+      for (let x = 1; x < dungeon.layout.width - 1; x++) {
+        const key = `${x},${y}`;
+        const cell = dungeon.cells[key];
+        if (!cell || cell.tile !== "wall") continue;
+        const N = dungeon.cells[`${x},${y-1}`];
+        const S = dungeon.cells[`${x},${y+1}`];
+        const E = dungeon.cells[`${x+1},${y}`];
+        const W = dungeon.cells[`${x-1},${y}`];
+        const floorNeighbors = [N, S, E, W].filter(n => n && n.tile === "floor").length;
+        if (floorNeighbors === 0) continue;
+        if (Math.random() < 0.10) {
+          cell.tile = "torch";
+          cell.feature = "torch";
+        }
+      }
+    }
+
+    dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
+
+    sharedState.setRoomDungeon(geoCoords, dungeon, customTiles);
+    sharedState.setLastCoords(geoCoords);
+    broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
+  }
+
+  const content = dungeon
+    ? `Dungeon testing mode: loaded ${geoKey}`
+    : 'Dungeon testing mode: no new room';
+
+  return {
+    content,
+    updatedGameConsole,
+    roomNameDatabaseString: roomNameDbString,
+    dungeon
+  };
 }
 
 function buildIndoorLayout(dungeon, classification) {

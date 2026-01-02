@@ -1080,35 +1080,18 @@ function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, includeWall
     // Transparent background for torch sprite
     ctx.clearRect(0, 0, s, s);
   }
-  // Always draw a torch on torch tiles
+  // Torch sprite: draw only the wall sconce (no baked flame/halo).
   const cx = s / 2;
   const cy = s * 0.35;
-  const flameColor = (torchStyle && torchStyle.flameColor) || "#ffdd77";
-  // Strong glow (avoid darkening walls when used as a sprite)
-  const glowRadius = includeWall ? s * 0.45 : s * 0.32;
-  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowRadius);
-  glow.addColorStop(0, flameColor);
-  glow.addColorStop(0.4, flameColor);
-  glow.addColorStop(1, "rgba(255,200,120,0)");
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, s, s);
+  const metal = (torchStyle && torchStyle.metalColor) || "#2a2218";
+  const metalAccent = (torchStyle && torchStyle.metalAccent) || "#3b3024";
   // Bracket / holder
-  ctx.fillStyle = "#2a2218";
+  ctx.fillStyle = metal;
   ctx.fillRect(cx - s * 0.03, cy, s * 0.06, s * 0.28);
   ctx.fillRect(cx - s * 0.08, cy + s * 0.08, s * 0.16, s * 0.04);
-  // Flame
-  ctx.fillStyle = flameColor;
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - s * 0.14);
-  ctx.lineTo(cx - s * 0.08, cy + s * 0.04);
-  ctx.lineTo(cx + s * 0.08, cy + s * 0.04);
-  ctx.closePath();
-  ctx.fill();
-  // Hot core
-  ctx.fillStyle = "#ffffcc";
-  ctx.beginPath();
-  ctx.arc(cx, cy - s * 0.06, s * 0.02, 0, Math.PI * 2);
-  ctx.fill();
+  // Subtle accent for depth
+  ctx.fillStyle = metalAccent;
+  ctx.fillRect(cx - s * 0.03, cy + s * 0.02, s * 0.06, s * 0.02);
 }
 
 function drawPillar(ctx, palette) {

@@ -82,6 +82,20 @@ app.post('/set-combat-mode2', (req, res) => {
     }
 });
 
+// Get dungeon testing mode
+app.get('/get-dungeon-testing-mode', (req, res) => {
+    const enabled = sharedState.getDungeonTestingMode();
+    res.json({ enabled });
+});
+
+// Set dungeon testing mode
+app.post('/set-dungeon-testing-mode', (req, res) => {
+    const { enabled } = req.body;
+    sharedState.setDungeonTestingMode(!!enabled);
+    console.log(`Dungeon testing mode set to ${!!enabled} via /set-dungeon-testing-mode`);
+    res.json({ status: 'success', enabled: !!enabled });
+});
+
 app.post('/submit-target2', (req, res) => {
     const { combatant, target } = req.body;
     console.log(`Received target selection: ${combatant} targets ${target}`);
@@ -158,7 +172,7 @@ app.get('/poll-task2/:taskId', (req, res) => {
 });
 
 app.post('/updateState7', async (req, res) => {
-    const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, currentQuest } = req.body; // New: currentQuest
+    const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest } = req.body; // New: currentQuest
 
     if (personalNarrative !== undefined) sharedState.setPersonalNarrative(personalNarrative);
     if (updatedGameConsole !== undefined) sharedState.setUpdatedGameConsole(updatedGameConsole);
@@ -170,6 +184,10 @@ app.post('/updateState7', async (req, res) => {
     if (combatMode !== undefined) {
         sharedState.setCombatMode(combatMode); // Update combatMode
         console.log("Updated combatMode:", combatMode); // Debug log
+    }
+    if (dungeonTestingMode !== undefined) {
+        sharedState.setDungeonTestingMode(dungeonTestingMode);
+        console.log("Updated dungeonTestingMode:", dungeonTestingMode);
     }
     if (currentQuest !== undefined) {
         sharedState.setCurrentQuest(currentQuest); // New: Update currentQuest

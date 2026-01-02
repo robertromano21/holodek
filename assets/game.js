@@ -3,6 +3,9 @@
 // Add this at the top of game (8).js
 window.roomImages = {};
 
+// Temporary: force the original canvas renderer while debugging sync issues.
+window.forceCanvasDungeon = false;
+
 window.currentCoordinates = "X: 0, Y: 0, Z: 0";
 
 // --- IndexedDB for room music ---
@@ -187,6 +190,7 @@ async function switchDungeonForCoordinates(coordString) {
   preloadDungeonTextures();
   updatePlayerHeightFromCell();
   renderDungeonView();
+  logDungeonCombatSync('move');
 
   if (window.combatGame) {
     const scene = window.combatGame.scene.getScene('CombatScene');
@@ -382,6 +386,41 @@ window.playerAngle = playerAngle;
 let dungeonTextures = {};
 const PLAYER_EYE_HEIGHT = 0.65;  // eye above local floor
 let playerZ = PLAYER_EYE_HEIGHT;
+let _syncDebugLastKey = '';
+let _syncDebugLastTs = 0;
+
+function logDungeonCombatSync(reason) {
+  const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
+  const pc = combatScene && combatScene.pcName && combatScene.characters
+    ? combatScene.characters[combatScene.pcName]
+    : null;
+  const cam = combatScene && combatScene.cameras && combatScene.cameras.main
+    ? combatScene.cameras.main
+    : null;
+
+  const state = {
+    reason,
+    dungeon: {
+      x: playerDungeonX,
+      y: playerDungeonY,
+      z: playerZ
+    },
+    combat: {
+      pcX: pc ? pc.x : null,
+      pcY: pc ? pc.y : null,
+      camX: cam ? Math.round(cam.scrollX) : null,
+      camY: cam ? Math.round(cam.scrollY) : null
+    },
+    geoKey: currentDungeon ? currentDungeon.geoKey : null
+  };
+
+  const key = JSON.stringify(state);
+  const now = Date.now();
+  if (key === _syncDebugLastKey && now - _syncDebugLastTs < 500) return;
+  _syncDebugLastKey = key;
+  _syncDebugLastTs = now;
+  console.log('[Sync]', state);
+}
 
 // SSE handler
 const eventSource = new EventSource('/combat-updates2');
@@ -729,6 +768,7 @@ function movePlayerByDelta(dx, dy) {
 
   // 4) Redraw both views — dungeon shifts, combat overlay shifts, player stays put
   renderDungeonView();
+  logDungeonCombatSync('sse');
   if (combatScene.drawDungeonOverlay) {
     combatScene.drawDungeonOverlay();
   }
@@ -1576,7 +1616,7 @@ window.updateCombatScene = function(characters) {
         const gx = (dx + half) * cs;
         const gy = (dy + half) * cs;
 
-        if (cell.tile === 'wall' || cell.tile === 'door' || cell.tile === 'pillar') {
+          if (cell.tile === 'wall' || cell.tile === 'door' || cell.tile === 'pillar' || cell.tile === 'torch') {
           gfx.fillStyle(wallColor, 1);
           gfx.fillRect(gx, gy, cs, cs);
         } else {
@@ -1590,71 +1630,89 @@ window.updateCombatScene = function(characters) {
 
     drawDungeonOverlay() {
         if (!currentDungeon) return;
-    
+
         const gridSize = 15;
         const cellSize = 25;
-    
+
         const GRID_PIXEL_SCALE = 2;  // grid line lattice
         const WALL_PIXEL_SCALE = 4;  // wall blockiness
-    
+
         const half = Math.floor(gridSize / 2);
-    
+
         if (!this.dungeonGraphics) {
             this.dungeonGraphics = this.add.graphics();
             this.dungeonGraphics.setDepth(1);
         }
         this.dungeonGraphics.clear();
-    
+
         const wallColor  = 0x550000;
         const floorColor = 0x222222;
-    
+        const torchColor = 0xffaa44;  // optional: distinct for torches
+        const customColor = 0xaa44aa; // optional: for custom obstacles
+
         const centerX = playerDungeonX;
         const centerY = playerDungeonY;
-    
+
         for (let dy = -half; dy <= half; dy++) {
             for (let dx = -half; dx <= half; dx++) {
-    
+
                 const key = `${centerX + dx},${centerY + dy}`;
                 const cell = currentDungeon.cells[key];
                 if (!cell) continue;
-    
+
                 const gridX = dx + half;
                 const gridY = dy + half;
-    
+
                 // Logical cell origin
                 const rawX = gridX * cellSize;
                 const rawY = gridY * cellSize;
-    
-                // 🔑 SNAP TO GRID LINES (authoritative reference)
+
+                // SNAP TO GRID LINES (authoritative reference)
                 const gx = Math.round(rawX / GRID_PIXEL_SCALE) * GRID_PIXEL_SCALE;
                 const gy = Math.round(rawY / GRID_PIXEL_SCALE) * GRID_PIXEL_SCALE;
-    
+
                 // Wall size snapped to WALL lattice
                 const size = Math.floor(cellSize / WALL_PIXEL_SCALE) * WALL_PIXEL_SCALE;
-    
-                if (cell.tile === 'wall' || cell.tile === 'door' || cell.tile === 'pillar') {
+
+                const tile = cell.tile || 'floor';
+
+                // Base floor for all open cells
+                this.dungeonGraphics.fillStyle(floorColor, 0.35);
+                this.dungeonGraphics.fillRect(gx, gy, size, size);
+
+                // Solid walls/doors only (remove torch/pillar if they are walkable)
+                if (tile === 'wall' || tile === 'door') {  // add back 'pillar' if pillars block
                     this.dungeonGraphics.fillStyle(wallColor, 0.65);
-    
-                    // draw inward from grid lines
                     this.dungeonGraphics.fillRect(
                         gx,
                         gy,
                         size + WALL_PIXEL_SCALE,
                         size + WALL_PIXEL_SCALE
                     );
-                } else {
-                    this.dungeonGraphics.fillStyle(floorColor, 0.35);
+                }
+
+                // Optional: distinct markers for non-solid objects (better match 3D sprites)
+                if (tile === 'torch') {
+                    // Small orange dot or icon in center
+                    const centerGx = gx + cellSize / 2;
+                    const centerGy = gy + cellSize / 2;
+                    this.dungeonGraphics.fillStyle(torchColor, 0.8);
+                    this.dungeonGraphics.fillCircle(centerGx, centerGy, cellSize * 0.2);
+                } else if (tile.startsWith('custom_')) {
+                    // Purple marker or load actual small texture if you want
+                    const centerGx = gx + cellSize / 2;
+                    const centerGy = gy + cellSize / 2;
+                    this.dungeonGraphics.fillStyle(customColor, 0.7);
                     this.dungeonGraphics.fillRect(
-                        gx,
-                        gy,
-                        size,
-                        size
+                        centerGx - cellSize * 0.2,
+                        centerGy - cellSize * 0.2,
+                        cellSize * 0.4,
+                        cellSize * 0.4
                     );
                 }
             }
         }
     }
-
     syncCameraWithScroll() {
         if (!this.domContainer) return;
         const scrollX = this.domContainer.scrollLeft;
@@ -3838,7 +3896,8 @@ if (Math.random() < 1.0) {
     console.log('Visited Rooms:', Array.from(visitedRooms));
     console.log('Room History:', roomConversationHistories);
   } else if (!matchingConsole) {
-    roomName = roomNameDatabase.get(coordinatesString).name;
+    const roomEntry = roomNameDatabase.get(coordinatesString);
+    roomName = roomEntry ? roomEntry.name : `Room ${coordinatesString}`;
     exits = generateUniqueExits(currentCoordinates, conversationHistory);
     // Example usage: update unvisited rooms set whenever roomNameDatabase or visitedRooms changes
 updateUnvisitedRoomsSet(currentCoordinates);
@@ -4903,6 +4962,27 @@ function populateRoomNameDatabase(coordinates, adjacentRooms) {
         key: null,
       };
       roomNameDatabase.set(currKey, currentRoom);
+    }
+  }
+
+  if (window.dungeonTestingMode && currKey === startKey) {
+    const firstDirection = Object.keys(adjacentRooms)[0];
+    if (firstDirection) {
+      const firstCoords = getCoordinatesForDirection(coordinates, firstDirection);
+      const firstKey = coordinatesToString(firstCoords);
+      const firstRoom = ensureFullSchema(firstKey, adjacentRooms[firstDirection]);
+      if (typeof firstRoom.indoor !== "boolean") {
+        firstRoom.indoor = false;
+        firstRoom.isIndoor = false;
+        firstRoom.isOutdoor = true;
+        if (!firstRoom.classification || typeof firstRoom.classification !== "object") {
+          firstRoom.classification = {};
+        }
+        if (typeof firstRoom.classification.indoor !== "boolean") {
+          firstRoom.classification.indoor = false;
+        }
+        roomNameDatabase.set(firstKey, firstRoom);
+      }
     }
   }
 
@@ -6731,43 +6811,47 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
 }
 
   if (validDirection) {
-  if (!recentExits.includes(validDirection)) {
-    // Respond with "You can't go that way." if direction is not in recentExits
-    const message = "You can't go that way.";
-    chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
-    scrollToBottom();
-    return; // Prevent further execution
-  }
-  // Calculate target coordinates
-  const directionMap = {
-    north: { x: 0, y: 1, z: 0 },
-    south: { x: 0, y: -1, z: 0 },
-    east: { x: 1, y: 0, z: 0 },
-    west: { x: -1, y: 0, z: 0 },
-    up: { x: 0, y: 0, z: 1 },
-    down: { x: 0, y: 0, z: -1 },
-    northeast: { x: 1, y: 1, z: 0 },
-    northwest: { x: -1, y: 1, z: 0 },
-    southeast: { x: 1, y: -1, z: 0 },
-    southwest: { x: -1, y: -1, z: 0 }
-  };
-  const offset = directionMap[validDirection] || { x: 0, y: 0, z: 0 };
-  const targetCoordinates = {
-    x: currentCoordinates.x + offset.x,
-    y: currentCoordinates.y + offset.y,
-    z: currentCoordinates.z + offset.z
-  };
-  const room = roomNameDatabase.get(coordinatesToString(currentCoordinates));
-  if (room && room.exits && room.exits[validDirection]) {
-    const { traversable, message } = isExitTraversable(currentCoordinates, validDirection);
-    if (!traversable) {
-      updateChatLog(`<br><b>Error:</b> ${message}<br>`);
+  if (window.dungeonTestingMode) {
+    currentCoordinates = generateCoordinates(currentCoordinates, validDirection, gameConsoleData);
+  } else {
+    if (!recentExits.includes(validDirection)) {
+      // Respond with "You can't go that way." if direction is not in recentExits
+      const message = "You can't go that way.";
       chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
       scrollToBottom();
-      return; // Prevent movement if not traversable
+      return; // Prevent further execution
     }
-    if (traversable) {
-      currentCoordinates = generateCoordinates(currentCoordinates, validDirection, gameConsoleData);
+    // Calculate target coordinates
+    const directionMap = {
+      north: { x: 0, y: 1, z: 0 },
+      south: { x: 0, y: -1, z: 0 },
+      east: { x: 1, y: 0, z: 0 },
+      west: { x: -1, y: 0, z: 0 },
+      up: { x: 0, y: 0, z: 1 },
+      down: { x: 0, y: 0, z: -1 },
+      northeast: { x: 1, y: 1, z: 0 },
+      northwest: { x: -1, y: 1, z: 0 },
+      southeast: { x: 1, y: -1, z: 0 },
+      southwest: { x: -1, y: -1, z: 0 }
+    };
+    const offset = directionMap[validDirection] || { x: 0, y: 0, z: 0 };
+    const targetCoordinates = {
+      x: currentCoordinates.x + offset.x,
+      y: currentCoordinates.y + offset.y,
+      z: currentCoordinates.z + offset.z
+    };
+    const room = roomNameDatabase.get(coordinatesToString(currentCoordinates));
+    if (room && room.exits && room.exits[validDirection]) {
+      const { traversable, message } = isExitTraversable(currentCoordinates, validDirection);
+      if (!traversable) {
+        updateChatLog(`<br><b>Error:</b> ${message}<br>`);
+        chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
+        scrollToBottom();
+        return; // Prevent movement if not traversable
+      }
+      if (traversable) {
+        currentCoordinates = generateCoordinates(currentCoordinates, validDirection, gameConsoleData);
+      }
     }
   }
 }  
@@ -9052,6 +9136,17 @@ $.ajax({
               let formattedCoordinates = newCoordinates
                 ? `X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`
                 : "None";
+              if (newCoordinates) {
+                const coordsLine = `Coordinates: X: ${newCoordinates[1]}, Y: ${newCoordinates[2]}, Z: ${newCoordinates[3]}`;
+                if (updatedGameConsole.match(/(^|\n)Coordinates: X: -?\d+, Y: -?\d+, Z: -?\d+/)) {
+                  updatedGameConsole = updatedGameConsole.replace(
+                    /(^|\n)Coordinates: X: -?\d+, Y: -?\d+, Z: -?\d+/,
+                    `$1${coordsLine}`
+                  );
+                } else {
+                  updatedGameConsole = `${coordsLine}\n${updatedGameConsole}`;
+                }
+              }
               let newObjectsInRoomString = serverGameConsole.match(/Objects in Room: ([^\n]+)/)?.[1];
               let newObjectsInRoomPropertiesString = serverGameConsole.match(/Objects in Room Properties: ([^\n]+)/)?.[1]?.trim();
               let newExitsString = serverGameConsole.match(/Exits: ([^\n]+)/)?.[1];
@@ -9493,6 +9588,90 @@ function sampleTextureRGBA(imageData, texW, texH, fracX, fracY) {
   };
 }
 
+function sampleTextureMask(maskData, texW, texH, fracX, fracY) {
+  if (!maskData || texW <= 1 || texH <= 1) {
+    return 0;
+  }
+
+  const u = Math.min(Math.max(fracX, 0), 0.999999);
+  const v = Math.min(Math.max(fracY, 0), 0.999999);
+
+  const tx = u * (texW - 1);
+  const ty = v * (texH - 1);
+
+  const x0 = Math.floor(tx);
+  const y0 = Math.floor(ty);
+  const x1 = Math.min(x0 + 1, texW - 1);
+  const y1 = Math.min(y0 + 1, texH - 1);
+
+  const fx = tx - x0;
+  const fy = ty - y0;
+
+  const idx00 = y0 * texW + x0;
+  const idx10 = y0 * texW + x1;
+  const idx01 = y1 * texW + x0;
+  const idx11 = y1 * texW + x1;
+
+  const v00 = maskData[idx00];
+  const v10 = maskData[idx10];
+  const v01 = maskData[idx01];
+  const v11 = maskData[idx11];
+
+  const vx0 = v00 * (1 - fx) + v10 * fx;
+  const vx1 = v01 * (1 - fx) + v11 * fx;
+  const vxy = vx0 * (1 - fy) + vx1 * fy;
+
+  return vxy;
+}
+
+function sampleTextureNormal(normalData, texW, texH, fracX, fracY) {
+  if (!normalData || texW <= 1 || texH <= 1) {
+    return { x: 0, y: 0, z: 1 };
+  }
+
+  const u = Math.min(Math.max(fracX, 0), 0.999999);
+  const v = Math.min(Math.max(fracY, 0), 0.999999);
+
+  const tx = u * (texW - 1);
+  const ty = v * (texH - 1);
+
+  const x0 = Math.floor(tx);
+  const y0 = Math.floor(ty);
+  const x1 = Math.min(x0 + 1, texW - 1);
+  const y1 = Math.min(y0 + 1, texH - 1);
+
+  const fx = tx - x0;
+  const fy = ty - y0;
+
+  function getNormal(x, y) {
+    const idx = (y * texW + x) * 3;
+    return {
+      x: normalData[idx],
+      y: normalData[idx + 1],
+      z: normalData[idx + 2]
+    };
+  }
+
+  const n00 = getNormal(x0, y0);
+  const n10 = getNormal(x1, y0);
+  const n01 = getNormal(x0, y1);
+  const n11 = getNormal(x1, y1);
+
+  const nx0 = n00.x * (1 - fx) + n10.x * fx;
+  const ny0 = n00.y * (1 - fx) + n10.y * fx;
+  const nz0 = n00.z * (1 - fx) + n10.z * fx;
+
+  const nx1 = n01.x * (1 - fx) + n11.x * fx;
+  const ny1 = n01.y * (1 - fx) + n11.y * fx;
+  const nz1 = n01.z * (1 - fx) + n11.z * fx;
+
+  const nx = nx0 * (1 - fy) + nx1 * fy;
+  const ny = ny0 * (1 - fy) + ny1 * fy;
+  const nz = nz0 * (1 - fy) + nz1 * fy;
+
+  return { x: nx, y: ny, z: nz };
+}
+
 
   // --- Scale2x-style upscaler: doubles resolution without blur ---
   function scale2x(srcCtx, w, h) {
@@ -9579,8 +9758,24 @@ function sampleTextureRGBA(imageData, texW, texH, fracX, fracY) {
     return outCanvas;
   }
 
+var renderPerfStats = {
+  lastLog: 0,
+  frames: 0,
+  totalMs: 0,
+  floorMs: 0,
+  wallMs: 0,
+  spriteMs: 0,
+  postMs: 0,
+  floorRows: 0,
+  floorPixels: 0,
+  wallCols: 0,
+  wallPixels: 0,
+  spriteCount: 0,
+  spritePixels: 0
+};
+
 // Replace the entire renderDungeonView function with this final fixed version
-function renderDungeonView() {
+function renderDungeonViewCanvas(renderToOffscreen = false) {
   if (!currentDungeon) {
     console.warn('renderDungeonView called with no currentDungeon');
     return;
@@ -9595,9 +9790,27 @@ function renderDungeonView() {
     popup.style.display = 'block';
   }
 
-  container.innerHTML = '<canvas width="640" height="480"></canvas>';
-  const displayCanvas = container.querySelector('canvas');
-  const displayCtx = displayCanvas.getContext('2d');
+  let displayCanvas = null;
+  let displayCtx = null;
+  if (renderToOffscreen) {
+    if (!window._dungeonOffscreenCanvas) {
+      window._dungeonOffscreenCanvas = document.createElement('canvas');
+      window._dungeonOffscreenCanvas.width = 640;
+      window._dungeonOffscreenCanvas.height = 480;
+    }
+    displayCanvas = window._dungeonOffscreenCanvas;
+    displayCtx = displayCanvas.getContext('2d');
+  } else {
+    displayCanvas = container.querySelector('canvas');
+    if (!displayCanvas) {
+      displayCanvas = document.createElement('canvas');
+      displayCanvas.width = 640;
+      displayCanvas.height = 480;
+      container.innerHTML = '';
+      container.appendChild(displayCanvas);
+    }
+    displayCtx = displayCanvas.getContext('2d');
+  }
 
   const PIXEL_SCALE = 4;
   const canvas = document.createElement('canvas');
@@ -9605,11 +9818,43 @@ function renderDungeonView() {
   canvas.height = Math.floor(displayCanvas.height / PIXEL_SCALE);
 
   const ctx = canvas.getContext('2d');
+  const webglCanvas = window.webglDungeonRenderer && window.webglDungeonRenderer.canvas;
+  if (window.DEBUG_DUNGEON_CANVAS || !ctx || !displayCtx) {
+    console.log('[Raycast] canvas debug', {
+      renderToOffscreen,
+      displayCanvasTag: displayCanvas ? displayCanvas.tagName : null,
+      displayCtx: !!displayCtx,
+      ctx: !!ctx,
+      canvasIsWebGL: displayCanvas === webglCanvas,
+      webglCanvas: !!webglCanvas,
+      webglContext: !!(window.webglDungeonRenderer && window.webglDungeonRenderer.gl)
+    });
+  }
   ctx.imageSmoothingEnabled = false;
   displayCtx.imageSmoothingEnabled = false;
 
   const W = canvas.width;
   const H = canvas.height;
+
+  if (!renderPerfStats) {
+    renderPerfStats = {
+      lastLog: 0,
+      frames: 0,
+      totalMs: 0,
+      floorMs: 0,
+      wallMs: 0,
+      spriteMs: 0,
+      postMs: 0,
+      floorRows: 0,
+      floorPixels: 0,
+      wallCols: 0,
+      wallPixels: 0,
+      spriteCount: 0,
+      spritePixels: 0
+    };
+  }
+
+  const frameStart = performance.now();
 
   const FOV = Math.PI / 3;
   const WALL_U_SCALE = 0.25;
@@ -9639,7 +9884,7 @@ function renderDungeonView() {
 
   const lighting = normalizeLight(currentDungeon && (currentDungeon.lighting || currentDungeon.classification?.lighting));
   const TORCH_MOUNT_HEIGHT = 1.1;
-  const TORCH_WALL_OFFSET = 0.32;
+  const TORCH_WALL_OFFSET = 0.49;
   const TORCH_MOUNT_RATIO = 0.55;
   const lightDirX = lighting.dirX;
   const lightDirY = lighting.dirY;
@@ -9700,11 +9945,74 @@ function renderDungeonView() {
         }
         if (found) break;
       }
+      let minL = 255;
+      let maxL = 0;
+      const len = w * h;
+      for (let i = 0; i < len; i++) {
+        const a = data.data[i * 4 + 3];
+        if (a <= 10) continue;
+        const r = data.data[i * 4];
+        const g = data.data[i * 4 + 1];
+        const b = data.data[i * 4 + 2];
+        const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (l < minL) minL = l;
+        if (l > maxL) maxL = l;
+      }
+      let mortarMask = null;
+      let normalMap = null;
+      if (maxL - minL > 6) {
+        const threshold = minL + (maxL - minL) * 0.35;
+        mortarMask = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          const a = data.data[i * 4 + 3];
+          if (a <= 10) {
+            mortarMask[i] = 0;
+            continue;
+          }
+          const r = data.data[i * 4];
+          const g = data.data[i * 4 + 1];
+          const b = data.data[i * 4 + 2];
+          const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          mortarMask[i] = l <= threshold ? 255 : 0;
+        }
+        normalMap = new Float32Array(len * 3);
+        const heightScale = 0.6;
+        const idx = (x, y) => ((y * w + x) | 0);
+        const heightAt = (x, y) => {
+          const mx = Math.max(0, Math.min(w - 1, x));
+          const my = Math.max(0, Math.min(h - 1, y));
+          const v = mortarMask[idx(mx, my)] / 255;
+          return 1 - v;
+        };
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const hL = heightAt(x - 1, y);
+            const hR = heightAt(x + 1, y);
+            const hU = heightAt(x, y - 1);
+            const hD = heightAt(x, y + 1);
+            const dx = (hR - hL) * 0.5;
+            const dy = (hD - hU) * 0.5;
+            let nx = -dx * heightScale;
+            let ny = -dy * heightScale;
+            let nz = 1;
+            const nLen = Math.hypot(nx, ny, nz) || 1;
+            nx /= nLen;
+            ny /= nLen;
+            nz /= nLen;
+            const o = (y * w + x) * 3;
+            normalMap[o] = nx;
+            normalMap[o + 1] = ny;
+            normalMap[o + 2] = nz;
+          }
+        }
+      }
       cached = wallTexCache[texName] = {
         data,
         w,
         h,
-        lastOpaqueY
+        lastOpaqueY,
+        mortarMask,
+        normalMap
       };
     }
     return cached;
@@ -9838,6 +10146,33 @@ function renderDungeonView() {
     ? 1000000
     : 18.0;
 
+  function torchFlicker(seed, timeMs) {
+    const t = timeMs * 0.001;
+    const speedMod = 0.65
+      + 0.25 * Math.sin(t * (0.35 + seed * 0.12) + seed * 5.1)
+      + 0.1 * Math.sin(t * (0.07 + seed * 0.03) + seed * 17.3);
+    const tt = t * speedMod;
+    const base = 0.72 + 0.08 * Math.sin(tt * (1.1 + seed * 0.4) + seed * 9.7);
+    const pulse = Math.pow(Math.max(0, Math.sin(tt * (3.6 + seed * 1.4) + seed * 13.3)), 2) * 0.22;
+    const crackle = Math.pow(Math.max(0, Math.sin(tt * (9.5 + seed * 3.1) + seed * 27.1)), 3) * 0.12;
+    const jitter = Math.sin(tt * (17.0 + seed * 5.7) + seed * 41.0) * 0.04;
+    return base + pulse + crackle + jitter;
+  }
+
+  function getTorchFacing(wx, wy, cell) {
+    if (cell && cell.torchFacing) return cell.torchFacing;
+    const checks = [
+      { dir: 'N', x: wx, y: wy - 1 },
+      { dir: 'S', x: wx, y: wy + 1 },
+      { dir: 'W', x: wx - 1, y: wy },
+      { dir: 'E', x: wx + 1, y: wy },
+    ];
+    for (const c of checks) {
+      if (!isWall(c.x, c.y)) return c.dir;
+    }
+    return null;
+  }
+
   function collectTorchLights() {
     const lights = [];
     const radius = Math.max(10, Math.min(18, Math.floor(maxDim / 10)));
@@ -9848,9 +10183,7 @@ function renderDungeonView() {
         const cell = currentDungeon.cells[`${wx},${wy}`];
         if (!cell || cell.tile !== 'torch') continue;
         const seed = ((wx * 928371 + wy * 1237) % 1000) / 1000;
-        const flicker = 0.7
-          + 0.25 * Math.sin(now * 0.006 + seed * Math.PI * 2)
-          + 0.05 * Math.sin(now * 0.019 + seed * 4.1);
+        const flicker = torchFlicker(seed, now);
         const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
         const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + TORCH_MOUNT_HEIGHT;
         const wallH = Math.max(0.5, ceilH - floorH);
@@ -9858,14 +10191,16 @@ function renderDungeonView() {
           x: wx + 0.5,
           y: wy + 0.5,
           z: floorH + wallH * TORCH_MOUNT_RATIO,
-          intensity: Math.max(0.35, Math.min(1.0, flicker))
+          intensity: Math.max(0.25, Math.min(1.15, flicker)),
+          seed,
+          flicker
         });
       }
     }
     return lights;
   }
 
-  function applyTorchLight(sample, shade, wx, wy, wz) {
+  function applyTorchLight(sample, shade, wx, wy, wz, normal) {
     if (!torchLights.length) {
       return {
         r: Math.round(sample.r * shade),
@@ -9892,9 +10227,10 @@ function renderDungeonView() {
     }
     const lit = Math.max(0, Math.min(1, total));
     const base = shade + lit * 0.5;
+    const warmShift = 0.75 + 0.45 * lit;
     const r = Math.min(255, sample.r * base + TORCH_LIGHT_COLOR.r * lit * 0.35);
-    const g = Math.min(255, sample.g * base + TORCH_LIGHT_COLOR.g * lit * 0.25);
-    const b = Math.min(255, sample.b * base + TORCH_LIGHT_COLOR.b * lit * 0.2);
+    const g = Math.min(255, sample.g * base + TORCH_LIGHT_COLOR.g * lit * 0.25 * warmShift);
+    const b = Math.min(255, sample.b * base + TORCH_LIGHT_COLOR.b * lit * 0.2 * warmShift);
     return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
   }
 
@@ -9902,6 +10238,7 @@ function renderDungeonView() {
   // -----------------------------------
   // FLOOR PASS
   // -----------------------------------
+  const floorStart = performance.now();
   if (hasFloorTexture && floorImageData) {
     for (let x = 0; x < W; x += FLOOR_X_STEP) {
       const cameraX = 2 * x / W - 1;
@@ -9941,6 +10278,7 @@ function renderDungeonView() {
         const approxPixelSize = Math.abs(focalLength / approxDist);
         const rowStep = isOutdoor ? chooseRowStep(approxPixelSize) : 1;
         const drawStep = Math.min(rowStep, sy - HORIZON);
+        renderPerfStats.floorRows += 1;
 
         // Restart DDA for this row
         let dda_mapX = mapX;
@@ -10075,7 +10413,8 @@ function renderDungeonView() {
             const sample = m
               ? { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) }
               : { r: 0, g: 0, b: 0 };
-            const lit = applyTorchLight(sample, shade, hitCellX + hitFracX, hitCellY + hitFracY, surfaceH);
+            const floorNormal = { x: 0, y: 0, z: 1 };
+            const lit = applyTorchLight(sample, shade, hitCellX + hitFracX, hitCellY + hitFracY, surfaceH, floorNormal);
             ctx.fillStyle = `rgb(${lit.r},${lit.g},${lit.b})`;
           } else {
             const shaded = shadeColor(color, shade);
@@ -10091,6 +10430,7 @@ function renderDungeonView() {
               if (hitDist < depthBuffer[idx]) {
                 depthBuffer[idx] = hitDist;
                 ctx.fillRect(sx, sy2, 1, 1);
+                renderPerfStats.floorPixels += 1;
               }
             }
           }
@@ -10103,11 +10443,14 @@ function renderDungeonView() {
     ctx.fillStyle = '#220000';
     ctx.fillRect(0, HORIZON, W, H - HORIZON);
   }
+  const floorEnd = performance.now();
 
   // -----------------------------------
   // WALL RAYCAST + FLOOR SIDE FACES
   // -----------------------------------
+  const wallStart = performance.now();
   for (let x = 0; x < W; x++) {
+    renderPerfStats.wallCols += 1;
     const cameraX = 2 * x / W - 1;
     const rayDirX = dirX + planeX * cameraX;
     const rayDirY = dirY + planeY * cameraX;
@@ -10324,6 +10667,7 @@ if (!hit) continue;
 
     let texName = hitCell.tile || 'wall';
     if (texName === 'floor') texName = 'wall';
+    if (texName === 'torch') texName = 'wall';
     const isTorchWall = texName === 'torch';
     if (isTorchWall) texName = 'wall';
     
@@ -10389,6 +10733,7 @@ if (!hit) continue;
         const bb = Math.floor(30 * rowShade);
         ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
         ctx.fillRect(x, sy, 1, 1);
+        renderPerfStats.wallPixels += 1;
       }
       if (needExtendWall && extraHeight > 0) {
         for (let sy = extraTop; sy < extraBottom; sy++) {
@@ -10402,6 +10747,7 @@ if (!hit) continue;
           const bb = Math.floor(30 * rowShade);
           ctx.fillStyle = `rgb(${rr},${gg},${bb})`;
           ctx.fillRect(x, sy, 1, 1);
+          renderPerfStats.wallPixels += 1;
         }
       }
     } else {
@@ -10429,15 +10775,34 @@ if (!hit) continue;
 
           const grad = wallVerticalGradient(sy);
           const rowShade = litShade * grad;
-          const hitWX = posX + rayDirX * perpWallDist;
-          const hitWY = posY + rayDirY * perpWallDist;
-          const lit = applyTorchLight(sample, rowShade, hitWX, hitWY, worldZ);
+          const mortarStrength = texInfo.mortarMask
+            ? sampleTextureMask(texInfo.mortarMask, texW, texH, u, v) / 255
+            : 0;
+          const shaded = rowShade * (1 - mortarStrength) + rowShade * 0.72 * mortarStrength;
+            const hitWX = posX + rayDirX * perpWallDist;
+            const hitWY = posY + rayDirY * perpWallDist;
+            const normalTex = texInfo.normalMap ? sampleTextureNormal(texInfo.normalMap, texW, texH, u, v) : { x: 0, y: 0, z: 1 };
+            const tX = -nY;
+            const tY = nX;
+            const nWorld = {
+              x: tX * normalTex.x + nX * normalTex.z,
+              y: tY * normalTex.x + nY * normalTex.z,
+              z: normalTex.y
+            };
+            const dirLen = Math.hypot(lightDirX, lightDirY, lightElev) || 1;
+            const ldx = lightDirX / dirLen;
+            const ldy = lightDirY / dirLen;
+            const ldz = lightElev / dirLen;
+            const ndotl = Math.max(0, nWorld.x * ldx + nWorld.y * ldy + nWorld.z * ldz);
+            const normalShade = 0.6 + 0.4 * ndotl;
+            const lit = applyTorchLight(sample, shaded * normalShade, hitWX, hitWY, worldZ, nWorld);
           const r = lit.r;
           const g = lit.g;
           const b = lit.b;
 
           ctx.fillStyle = `rgba(${r},${g},${b},${sample.a / 255})`;
           ctx.fillRect(x, sy, 1, 1);
+          renderPerfStats.wallPixels += 1;
 
         }
       }
@@ -10451,20 +10816,150 @@ if (!hit) continue;
       }
     }
   }
+  const wallEnd = performance.now();
   
+  const spriteStart = performance.now();
+  let spriteEnd = spriteStart;
   if (!RENDER_CUSTOM_AS_WALLS) {
   // SPRITE PASS (fixed relative position + vertical flip)
     const sprites = [];
     const VIS_RADIUS = Math.max(10, Math.min(18, Math.floor(maxDim / 10)));
+    const TORCH_VIS_RADIUS = Math.max(VIS_RADIUS, 64);
   const SPRITE_WORLD_HEIGHT = 1.8;
   const SPRITE_WIDTH_RATIO = 0.7;
   const TORCH_WORLD_HEIGHT = 1.3;
   const TORCH_WIDTH_RATIO = 0.6;
   const TORCH_MOUNT_HEIGHT = 1.1;
   const TORCH_DEPTH_BIAS = 0.6;
+  const TORCH_FLAME_RATIO = 0.4;
+  const TORCH_HALO_SLOP = 0.03;
+  const TORCH_ANCHOR_RATIO = 0.78;
+  const TORCH_HEIGHT_OFFSET = 0.0;
 
-  for (let dx = -VIS_RADIUS; dx <= VIS_RADIUS; dx++) {
-    for (let dy = -VIS_RADIUS; dy <= VIS_RADIUS; dy++) {
+  function drawTorchGlowAndFlame(spr, timeMs, hasSconce = true) {
+    const seed = spr.flickerSeed / (Math.PI * 2);
+    const flicker = torchFlicker(seed, timeMs);
+    const rawHeight = Math.max(1, spr.rawDrawEndY - spr.rawDrawStartY);
+    const gx = Math.floor(spr.screenX);
+    const gy = Math.floor(spr.rawDrawStartY + rawHeight * TORCH_FLAME_RATIO);
+    const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
+    const flickerShift = Math.round((flicker - 0.8) * 2);
+    const flameH = Math.max(3, Math.floor(rawHeight * (0.22 + 0.1 * flicker)));
+    const flameW = Math.max(2, Math.floor(flameH * 0.55));
+    const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
+    const torchDist = spr.dist - TORCH_DEPTH_BIAS;
+    const depthEps = 0.02;
+    const isVisibleSample = (x, y) => {
+      if (x < 0 || x >= W || y < 0 || y >= H) return false;
+      const idx = y * W + x;
+      return !Number.isFinite(depthBuffer[idx]) || depthBuffer[idx] >= torchDist - depthEps;
+    };
+    const torchWallIdx = gy * W + gx;
+    const torchWallDist = Number.isFinite(depthBuffer[torchWallIdx])
+      ? depthBuffer[torchWallIdx]
+      : torchDist;
+    const haloOccluded = (x, y) => {
+      if (x < 0 || x >= W || y < 0 || y >= H) return true;
+      const idx = y * W + x;
+      if (!Number.isFinite(depthBuffer[idx])) return false;
+      return depthBuffer[idx] < torchWallDist - TORCH_HALO_SLOP;
+    };
+    const torchVisible =
+      isVisibleSample(gx, gy) ||
+      isVisibleSample(gx, gy - 2) ||
+      isVisibleSample(gx - 1, gy) ||
+      isVisibleSample(gx + 1, gy);
+    if (!torchVisible) return;
+
+    if (!hasSconce) {
+      const postH = Math.max(3, Math.floor(rawHeight * 0.16));
+      const postW = Math.max(2, Math.floor(postH * 0.35));
+      for (let y = gy - Math.floor(postH * 0.15); y < gy - Math.floor(postH * 0.15) + postH; y++) {
+        if (y < 0 || y >= H) continue;
+        for (let x = gx - Math.floor(postW / 2); x < gx - Math.floor(postW / 2) + postW; x++) {
+          if (x < 0 || x >= W) continue;
+          const idx = y * W + x;
+          ctx.fillStyle = "rgba(20,16,12,0.9)";
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+      const barW = Math.floor(postW * 2.8);
+      const barH = Math.max(1, Math.floor(postH * 0.25));
+      const barX = gx - Math.floor(postW * 1.4);
+      const barY = gy - Math.floor(postH * 0.1);
+      for (let y = barY; y < barY + barH; y++) {
+        if (y < 0 || y >= H) continue;
+        for (let x = barX; x < barX + barW; x++) {
+          if (x < 0 || x >= W) continue;
+          const idx = y * W + x;
+          ctx.fillStyle = "rgba(20,16,12,0.9)";
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+
+    // Halo/glow with per-pixel depth test
+    const gxc = gx;
+    const gyc = gy + flickerShift;
+    const radiusSq = glowRadius * glowRadius;
+    for (let y = gyc - glowRadius; y <= gyc + glowRadius; y++) {
+      if (y < 0 || y >= H) continue;
+      const dy = y - gyc;
+      for (let x = gxc - glowRadius; x <= gxc + glowRadius; x++) {
+        if (x < 0 || x >= W) continue;
+        const dx = x - gxc;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > radiusSq) continue;
+        if (haloOccluded(x, y)) continue;
+        const idx = y * W + x;
+        const t = Math.sqrt(distSq) / glowRadius;
+        let a;
+        if (t <= 0.45) {
+          const tNorm = t / 0.45;
+          a = (0.45 * glowAlpha) + (glowAlpha - 0.45 * glowAlpha) * tNorm;
+        } else {
+          const tNorm = (t - 0.45) / 0.55;
+          a = glowAlpha * (1 - tNorm);
+        }
+        if (a <= 0) continue;
+        const r = t <= 0.4 ? 255 : 255;
+        const g = t <= 0.4 ? 210 : 180;
+        const b = t <= 0.4 ? 130 : 90;
+        ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+
+    // Flame (pixelated rows)
+    for (let row = 0; row < flameH; row++) {
+      const t = row / Math.max(1, flameH - 1);
+      const rowW = Math.max(1, Math.round(flameW * (1 - t * 0.7)));
+      const y = gy - flameH + row + flickerShift;
+      if (y < 0 || y >= H) continue;
+      const x0 = gx - Math.floor(rowW / 2);
+      const r = 255;
+      const g = Math.round(140 + (1 - t) * 80);
+      const b = Math.round(40 + (1 - t) * 30);
+      for (let x = x0; x < x0 + rowW; x++) {
+        if (x < 0 || x >= W) continue;
+        const idx = y * W + x;
+        ctx.fillStyle = `rgba(${r},${g},${b},0.85)`;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+
+    // Hot core
+    const coreY = gy - Math.floor(flameH * 0.6) + flickerShift;
+    for (let y = coreY; y < coreY + 2; y++) {
+      if (y < 0 || y >= H) continue;
+      const idx = y * W + gx;
+      ctx.fillStyle = "rgba(255,245,220,0.9)";
+      ctx.fillRect(gx, y, 1, 1);
+    }
+  }
+
+  for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
+    for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
       const wx = playerDungeonX + dx;
       const wy = playerDungeonY + dy;
       const key = `${wx},${wy}`;
@@ -10472,25 +10967,30 @@ if (!hit) continue;
       const tileName = cell?.tile;
       const isCustom = !!tileName && tileName.startsWith('custom_');
       const isTorch = tileName === 'torch';
+      const inSpriteRadius = Math.abs(dx) <= VIS_RADIUS && Math.abs(dy) <= VIS_RADIUS;
+      if (!inSpriteRadius && !isTorch) continue;
       if (!isCustom && !isTorch) continue;
 
       const texName = tileName;
       const texImg = dungeonTextures[texName];
       const texInfo = getWallTextureData(texName, texImg);
-      if (!texInfo) continue;
+      if (!texInfo && !isTorch) continue;
 
       let worldX = wx + 0.5;
       let worldY = wy + 0.5;
-      const facing = cell?.torchFacing;
-      if (facing === 'N') worldY -= TORCH_WALL_OFFSET;
-      if (facing === 'S') worldY += TORCH_WALL_OFFSET;
-      if (facing === 'W') worldX -= TORCH_WALL_OFFSET;
-      if (facing === 'E') worldX += TORCH_WALL_OFFSET;
+      if (isTorch) {
+        const facing = getTorchFacing(wx, wy, cell);
+        if (facing === 'N') worldY -= TORCH_WALL_OFFSET;
+        if (facing === 'S') worldY += TORCH_WALL_OFFSET;
+        if (facing === 'W') worldX -= TORCH_WALL_OFFSET;
+        if (facing === 'E') worldX += TORCH_WALL_OFFSET;
+      }
 
-      // Relative from TRUE player center (keep sprites fixed in world space)
-      // Use the same eye position as the wall raycaster for stable placement.
-      const dxp = worldX - posX;
-      const dyp = worldY - posY;
+      // Keep torches anchored to the true player camera to avoid drift from eye-back offset.
+      const spriteCamX = isTorch ? playerWorldX : posX;
+      const spriteCamY = isTorch ? playerWorldY : posY;
+      const dxp = worldX - spriteCamX;
+      const dyp = worldY - spriteCamY;
 
       const distSq = dxp * dxp + dyp * dyp;
       if (!isTorch && (distSq < 0.04 || distSq > VIS_RADIUS * VIS_RADIUS)) continue;
@@ -10498,10 +10998,10 @@ if (!hit) continue;
       const invDet = 1.0 / (planeX * dirY - dirX * planeY);
       const transformX = invDet * (dirY * dxp - dirX * dyp);
       const transformY = invDet * (-planeY * dxp + planeX * dyp);
-      if (transformY < 0.1) continue;
+      if (transformY <= 0.001) continue;
+      const safeTransformY = Math.max(0.001, transformY);
 
-      const spriteScreenX = Math.floor((W / 2) * (1 + transformX / transformY));
-
+      const spriteScreenX = Math.floor((W / 2) * (1 + transformX / safeTransformY));
       const { floorHeight: spriteFloorH = 0, ceilHeight: spriteCeilH = 0 } = getCellHeights(wx, wy);
 
       let spriteWorldHeight = SPRITE_WORLD_HEIGHT;
@@ -10515,9 +11015,9 @@ if (!hit) continue;
         spriteWorldHeight = TORCH_WORLD_HEIGHT;
         spriteWidthRatio = TORCH_WIDTH_RATIO;
         if (Number.isFinite(spriteCeilH) && Number.isFinite(spriteFloorH) && spriteCeilH > spriteFloorH) {
-          spriteBaseZ = spriteFloorH + (spriteCeilH - spriteFloorH) * TORCH_MOUNT_RATIO;
+          spriteBaseZ = spriteFloorH + (spriteCeilH - spriteFloorH) * TORCH_MOUNT_RATIO + TORCH_HEIGHT_OFFSET;
         } else {
-          spriteBaseZ = spriteFloorH + TORCH_MOUNT_HEIGHT;
+          spriteBaseZ = spriteFloorH + TORCH_MOUNT_HEIGHT + TORCH_HEIGHT_OFFSET;
         }
         allowPad = false;
         allowShadow = false;
@@ -10528,16 +11028,24 @@ if (!hit) continue;
         spriteWorldHeight = Math.max(0.5, spriteCeilH - spriteFloorH);
       }
 
-      const bottomScreenY = Math.floor(HORIZON + (eyeZ - spriteBaseZ) * focalLength / transformY);
-      const spriteScreenHeight = Math.floor(spriteWorldHeight * focalLength / transformY);
+      const bottomScreenY = Math.floor(HORIZON + (eyeZ - spriteBaseZ) * focalLength / safeTransformY);
+      let spriteScreenHeight = Math.floor(spriteWorldHeight * focalLength / safeTransformY);
+      if (isTorch && spriteScreenHeight < 2) spriteScreenHeight = 2;
 
-      let drawStartY = bottomScreenY - spriteScreenHeight;
-      let drawEndY = bottomScreenY;
+      let drawStartY;
+      let drawEndY;
+      if (isTorch) {
+        drawStartY = Math.floor(bottomScreenY - spriteScreenHeight * TORCH_ANCHOR_RATIO);
+        drawEndY = drawStartY + spriteScreenHeight;
+      } else {
+        drawStartY = bottomScreenY - spriteScreenHeight;
+        drawEndY = bottomScreenY;
+      }
       const rawDrawStartY = drawStartY;
       const rawDrawEndY = drawEndY;
 
       // If the sprite has transparent padding at the bottom, push it down to rest on the floor.
-      if (allowPad && typeof texInfo.lastOpaqueY === 'number' && texInfo.lastOpaqueY >= 0) {
+      if (allowPad && typeof texInfo?.lastOpaqueY === 'number' && texInfo.lastOpaqueY >= 0) {
         const padRatio = (texInfo.h - 1 - texInfo.lastOpaqueY) / texInfo.h;
         const padPx = Math.floor(spriteScreenHeight * padRatio);
         if (padPx > 0) {
@@ -10551,7 +11059,8 @@ if (!hit) continue;
       drawEndY = Math.min(H, drawEndY);
       if (drawStartY >= drawEndY) continue;
 
-      const spriteScreenWidth = Math.floor(spriteScreenHeight * spriteWidthRatio);
+      let spriteScreenWidth = Math.floor(spriteScreenHeight * spriteWidthRatio);
+      if (isTorch && spriteScreenWidth < 1) spriteScreenWidth = 1;
 
       // Directional shadow projected onto the floor from a single light source.
       let shadow = null;
@@ -10582,7 +11091,7 @@ if (!hit) continue;
       sprites.push({
         type: isTorch ? 'torch' : 'custom',
         screenX: spriteScreenX,
-        dist: transformY,
+        dist: safeTransformY,
         width: spriteScreenWidth,
         height: spriteScreenHeight,
         drawStartY,
@@ -10593,106 +11102,160 @@ if (!hit) continue;
         texImg,
         texInfo,
         shadow,
-        transformY,
+        transformY: safeTransformY,
         flickerSeed
       });
+      renderPerfStats.spriteCount += 1;
     }
   }
 
   sprites.sort((a, b) => b.dist - a.dist);
 
-    const now = performance.now();
     for (const spr of sprites) {
       const texInfo = spr.texInfo;
-      if (!texInfo) continue;
+      if (!texInfo && spr.type !== 'torch') continue;
 
-      const texData = texInfo.data;
-      const texW = texInfo.w;
-      const texH = texInfo.h;
+      if (texInfo) {
+        const texData = texInfo.data;
+        const texW = texInfo.w;
+        const texH = texInfo.h;
 
-      if (spr.shadow) {
-        const sx = Math.floor(spr.shadow.x);
-        const sy = Math.floor(spr.shadow.y);
-        if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
-          const sIdx = sy * W + sx;
-          if (depthBuffer[sIdx] >= spr.shadow.dist) {
-            const alpha = Math.max(0.08, Math.min(0.45, 0.35 * lightIntensity * (1 - spr.shadow.dist / 18)));
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            ctx.fillStyle = '#000000';
-            ctx.beginPath();
-            ctx.ellipse(spr.shadow.x, spr.shadow.y, spr.shadow.w / 2, spr.shadow.h / 2, 0, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
+        if (spr.shadow) {
+          const sx = Math.floor(spr.shadow.x);
+          const sy = Math.floor(spr.shadow.y);
+          if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
+            const sIdx = sy * W + sx;
+            if (depthBuffer[sIdx] >= spr.shadow.dist) {
+              const alpha = Math.max(0.08, Math.min(0.45, 0.35 * lightIntensity * (1 - spr.shadow.dist / 18)));
+              ctx.save();
+              ctx.globalAlpha = alpha;
+              ctx.fillStyle = '#000000';
+              ctx.beginPath();
+              ctx.ellipse(spr.shadow.x, spr.shadow.y, spr.shadow.w / 2, spr.shadow.h / 2, 0, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.restore();
+            }
           }
         }
-      }
 
-      const drawLeft = Math.floor(spr.screenX - spr.width / 2);
-      const drawRight = Math.floor(spr.screenX + spr.width / 2);
+        const drawLeft = Math.floor(spr.screenX - spr.width / 2);
+        const drawRight = Math.floor(spr.screenX + spr.width / 2);
 
-    for (let stripe = drawLeft; stripe < drawRight; stripe++) {
-      if (stripe < 0 || stripe >= W) continue;
+        let drewAny = false;
+        for (let stripe = drawLeft; stripe < drawRight; stripe++) {
+          if (stripe < 0 || stripe >= W) continue;
 
-      const texX = Math.floor(((stripe - drawLeft) * 256 * texW) / spr.width / 256);
-      if (texX < 0 || texX >= texW) continue;
+          const texX = Math.floor(((stripe - drawLeft) * 256 * texW) / spr.width / 256);
+          if (texX < 0 || texX >= texW) continue;
 
-      for (let y = spr.drawStartY; y < spr.drawEndY; y++) {
-        if (y < 0 || y >= H) continue;
+          for (let y = spr.drawStartY; y < spr.drawEndY; y++) {
+            if (y < 0 || y >= H) continue;
 
-        // Base of texture aligns with floor (flip Y)
-        const texY = spr.type === 'torch'
-          ? Math.floor(((y - spr.rawDrawStartY) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)))
-          : Math.floor(((spr.drawEndY - y - 1) * texH) / spr.height);
-        if (texY < 0 || texY >= texH) continue;
+            // Base of texture aligns with floor (flip Y)
+            const texY = spr.type === 'torch'
+              ? Math.floor(((y - spr.rawDrawStartY) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)))
+              : Math.floor(((spr.drawEndY - y - 1) * texH) / spr.height);
+            if (texY < 0 || texY >= texH) continue;
 
-        const idx = y * W + stripe;
+            const idx = y * W + stripe;
 
-        const lateralOffset = stripe - spr.screenX;
-        const spriteDist = spr.dist / Math.cos(Math.atan2(lateralOffset, focalLength));
-        const depthBias = spr.type === 'torch' ? TORCH_DEPTH_BIAS : 0;
-        const testDist = spriteDist - depthBias;
-        if (testDist >= depthBuffer[idx]) continue;
+            const lateralOffset = stripe - spr.screenX;
+            const spriteDist = spr.dist / Math.cos(Math.atan2(lateralOffset, focalLength));
+            const depthBias = spr.type === 'torch' ? TORCH_DEPTH_BIAS : 0;
+            const testDist = spriteDist - depthBias;
+            if (testDist >= depthBuffer[idx]) continue;
 
-        const sample = sampleTextureRGBA(texData, texW, texH, texX / texW, texY / texH);
-        if (sample.a <= 10) continue;
+            const sample = sampleTextureRGBA(texData, texW, texH, texX / texW, texY / texH);
+            if (sample.a <= 10) continue;
 
-        let shade = Math.max(0.25, 1.0 - spriteDist / 12);
-        if (spr.type === 'torch') {
-          const flicker = 0.85
-            + 0.15 * Math.sin(now * 0.008 + spr.flickerSeed)
-            + 0.05 * Math.sin(now * 0.021 + spr.flickerSeed * 1.7);
-          shade = Math.max(0.85, shade * flicker);
+            let shade = Math.max(0.25, 1.0 - spriteDist / 12);
+            if (spr.type === 'torch') {
+              const flicker = torchFlicker(spr.flickerSeed / (Math.PI * 2), now);
+              shade = Math.max(0.75, shade * flicker);
+            }
+            const boost = spr.type === 'torch' ? 1.15 : 1.0;
+            const r = Math.round(Math.min(255, sample.r * shade * boost));
+            const g = Math.round(Math.min(255, sample.g * shade * boost));
+            const b = Math.round(Math.min(255, sample.b * shade * boost));
+
+            ctx.fillStyle = `rgba(${r},${g},${b},${sample.a / 255})`;
+            ctx.fillRect(stripe, y, 1, 1);
+            renderPerfStats.spritePixels += 1;
+
+            depthBuffer[idx] = testDist;
+            drewAny = true;
+          }
         }
-        const boost = spr.type === 'torch' ? 1.15 : 1.0;
-        const r = Math.round(Math.min(255, sample.r * shade * boost));
-        const g = Math.round(Math.min(255, sample.g * shade * boost));
-        const b = Math.round(Math.min(255, sample.b * shade * boost));
 
-        ctx.fillStyle = `rgba(${r},${g},${b},${sample.a / 255})`;
-        ctx.fillRect(stripe, y, 1, 1);
-
-        depthBuffer[idx] = testDist;
+        if (spr.type === 'torch') {
+          drawTorchGlowAndFlame(spr, now, drewAny);
+        }
+      } else if (spr.type === 'torch') {
+        drawTorchGlowAndFlame(spr, now, false);
       }
-    }
   }
 
   }
+  spriteEnd = performance.now();
   // Final blit (unchanged)
+  const postStart = performance.now();
   const scaledCanvas = scale2x(ctx, W, H);
   displayCtx.imageSmoothingEnabled = false;
   displayCtx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
   displayCtx.drawImage(scaledCanvas, 0, 0, scaledCanvas.width, scaledCanvas.height, 0, 0, displayCanvas.width, displayCanvas.height);
+  const postEnd = performance.now();
+
+  renderPerfStats.frames += 1;
+  renderPerfStats.floorMs += floorEnd - floorStart;
+  renderPerfStats.wallMs += wallEnd - wallStart;
+  renderPerfStats.spriteMs += spriteEnd - spriteStart;
+  renderPerfStats.postMs += postEnd - postStart;
+  renderPerfStats.totalMs += postEnd - frameStart;
+
+  const nowMs = postEnd;
+  if (!renderPerfStats.lastLog) renderPerfStats.lastLog = nowMs;
+  const elapsed = nowMs - renderPerfStats.lastLog;
+  if (elapsed >= 1000) {
+    const fps = Math.round((renderPerfStats.frames * 1000) / elapsed);
+    const avgTotal = renderPerfStats.totalMs / renderPerfStats.frames;
+    const avgFloor = renderPerfStats.floorMs / renderPerfStats.frames;
+    const avgWall = renderPerfStats.wallMs / renderPerfStats.frames;
+    const avgSprite = renderPerfStats.spriteMs / renderPerfStats.frames;
+    const avgPost = renderPerfStats.postMs / renderPerfStats.frames;
+    console.log(
+      `[FPS] ${fps} | total ${avgTotal.toFixed(1)}ms ` +
+      `floor ${avgFloor.toFixed(1)} wall ${avgWall.toFixed(1)} ` +
+      `sprites ${avgSprite.toFixed(1)} post ${avgPost.toFixed(1)} ` +
+      `rows ${renderPerfStats.floorRows} ` +
+      `fpx ${renderPerfStats.floorPixels} ` +
+      `wcols ${renderPerfStats.wallCols} ` +
+      `wpx ${renderPerfStats.wallPixels} ` +
+      `spr ${renderPerfStats.spriteCount} ` +
+      `spx ${renderPerfStats.spritePixels}`
+    );
+    renderPerfStats.lastLog = nowMs;
+    renderPerfStats.frames = 0;
+    renderPerfStats.totalMs = 0;
+    renderPerfStats.floorMs = 0;
+    renderPerfStats.wallMs = 0;
+    renderPerfStats.spriteMs = 0;
+    renderPerfStats.postMs = 0;
+    renderPerfStats.floorRows = 0;
+    renderPerfStats.floorPixels = 0;
+    renderPerfStats.wallCols = 0;
+    renderPerfStats.wallPixels = 0;
+    renderPerfStats.spriteCount = 0;
+    renderPerfStats.spritePixels = 0;
+  }
 
   if ((needsAnimation || torchLights.length) && popup.style.display === 'block') {
     if (!window._dungeonAnimPending) {
       window._dungeonAnimPending = true;
-      window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
         window._dungeonAnimPending = false;
-        if (popup.style.display === 'block') {
-          renderDungeonView();
-        }
-      }, 90);
+        if (popup.style.display !== 'block') return;
+        renderDungeonView();
+      });
     }
   }
 
@@ -10739,4 +11302,43 @@ if (!hit) continue;
       scene.drawDungeonOverlay();
     }
   }
+  return displayCanvas;
 }
+
+function renderDungeonView() {
+  window.currentDungeon = currentDungeon;
+  window.dungeonTextures = dungeonTextures;
+  window.playerDungeonX = playerDungeonX;
+  window.playerDungeonY = playerDungeonY;
+  window.playerAngle = playerAngle;
+  window.playerZ = playerZ;
+  window.PLAYER_EYE_HEIGHT = PLAYER_EYE_HEIGHT;
+  const container = document.getElementById('dungeon-container');
+  if (!window.forceCanvasDungeon && window.useWebGLRenderer && window.webglDungeonRenderer && container) {
+    if (!window.webglDungeonRenderer.gl) {
+      window.webglDungeonRenderer.init(container);
+    }
+  }
+  const hasWebGLRenderer = !!(window.webglDungeonRenderer && window.webglDungeonRenderer.gl);
+  if (!window.forceCanvasDungeon && hasWebGLRenderer) {
+      if (typeof window.webglDungeonRenderer.renderScene === 'function') {
+        window.webglDungeonRenderer.renderScene();
+        if (window.combatGame) {
+          const scene = window.combatGame.scene.getScene('CombatScene');
+          if (scene && scene.drawDungeonOverlay) {
+            scene.drawDungeonOverlay();
+          }
+        }
+        logDungeonCombatSync('render-webgl');
+        return;
+      }
+    const rasterCanvas = renderDungeonViewCanvas(true);
+    if (typeof window.webglDungeonRenderer.render === 'function') {
+      window.webglDungeonRenderer.render(rasterCanvas);
+      return;
+    }
+    }
+    renderDungeonViewCanvas(false);
+    logDungeonCombatSync('render-canvas');
+  }
+

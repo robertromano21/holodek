@@ -10,6 +10,7 @@
  <script src="/node_modules/phaser/dist/phaser.min.js"></script>
 <audio id="room-music" src="/sid/current_room.wav" loop autoplay></audio>
  <script src="/assets/game.js"></script>
+ <script src="/assets/rendererWebGL.js"></script>
    <script>
    
    // Enhanced playRoomMusic with status feedback
@@ -199,6 +200,8 @@ function toggleCombatMode() {
         dungeonHeader.style.cursor = 'grab';
       });
 
+      initDungeonTestingMode();
+
     });
 
     function togglePopup() {
@@ -250,6 +253,39 @@ function toggleCombatMode() {
               renderDungeonView();
             }
         }
+    }
+
+    function updateDungeonTestingButton(enabled) {
+      const btn = document.getElementById('dungeon-test-button');
+      if (!btn) return;
+      btn.textContent = enabled ? 'Dungeon Test: ON' : 'Dungeon Test: OFF';
+    }
+
+    function setDungeonTestingMode(enabled) {
+      window.dungeonTestingMode = !!enabled;
+      localStorage.setItem('dungeonTestingMode', enabled ? 'true' : 'false');
+      updateDungeonTestingButton(enabled);
+      fetch('/set-dungeon-testing-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !!enabled })
+      }).catch(err => console.error('Failed to set dungeon testing mode:', err));
+    }
+
+    function toggleDungeonTestingMode() {
+      setDungeonTestingMode(!window.dungeonTestingMode);
+    }
+
+    function initDungeonTestingMode() {
+      const stored = localStorage.getItem('dungeonTestingMode');
+      const enabled = stored === 'true';
+      window.dungeonTestingMode = enabled;
+      updateDungeonTestingButton(enabled);
+      fetch('/set-dungeon-testing-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      }).catch(err => console.error('Failed to sync dungeon testing mode:', err));
     }
 
 
@@ -802,6 +838,10 @@ function toggleCombatMode() {
     <button id="open-dungeon-button" onclick="toggleDungeonPopup()"
   style="position: fixed; top: 75px; right: 5px; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
   Dungeon View
+</button>
+    <button id="dungeon-test-button" onclick="toggleDungeonTestingMode()"
+  style="position: fixed; top: 105px; right: 5px; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
+  Dungeon Test: OFF
 </button>
     <!-- Music control button (hidden until needed) -->
 <button id="play-music-btn" style="display: none; position: fixed; top: 130px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;" onclick="playRoomMusic()">Play Music</button>
