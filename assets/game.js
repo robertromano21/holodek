@@ -186,6 +186,7 @@ async function switchDungeonForCoordinates(coordString) {
   currentDungeon.start = safeStart;
   playerDungeonX = safeStart.x;
   playerDungeonY = safeStart.y;
+  playerZInitialized = false;
   playerPosX = playerDungeonX + 0.5;
   playerPosY = playerDungeonY + 0.5;
 
@@ -392,6 +393,8 @@ window.playerPosY = playerPosY;
 let dungeonTextures = {};
 const PLAYER_EYE_HEIGHT = 0.65;  // eye above local floor
 let playerZ = PLAYER_EYE_HEIGHT;
+let playerZTarget = PLAYER_EYE_HEIGHT;
+let playerZInitialized = false;
 let _syncDebugLastKey = '';
 let _syncDebugLastTs = 0;
 
@@ -483,6 +486,7 @@ eventSource.onmessage = function(event) {
         currentDungeon.start = safeStart;
         playerDungeonX = safeStart.x;
         playerDungeonY = safeStart.y;
+        playerZInitialized = false;
         playerPosX = playerDungeonX + 0.5;
         playerPosY = playerDungeonY + 0.5;
     
@@ -796,7 +800,10 @@ const DUNGEON_MOVE = {
     forward: false,
     backward: false,
     left: false,
-    right: false
+    right: false,
+    strafeLeft: false,
+    strafeRight: false,
+    run: false
   }
 };
 
@@ -807,6 +814,9 @@ const TURN_SPEED = 2.6;
 const SNAP_SPEED = 6.0;
 const STOP_EPS = 0.01;
 const MAX_STEP = 0.75;
+const PLAYER_RADIUS = 0.2;
+const Z_SMOOTH = 8.0;
+const RUN_MULT = 1.6;
 
 function isBlockedDungeonCell(cell) {
   if (!cell) return true;
@@ -829,9 +839,22 @@ function canEnterTile(fromX, fromY, toX, toY) {
 function canOccupyPos(nextX, nextY) {
   const fromX = Math.floor(playerPosX);
   const fromY = Math.floor(playerPosY);
-  const toX = Math.floor(nextX);
-  const toY = Math.floor(nextY);
-  return canEnterTile(fromX, fromY, toX, toY);
+  const samples = [
+    [nextX + PLAYER_RADIUS, nextY + PLAYER_RADIUS],
+    [nextX - PLAYER_RADIUS, nextY + PLAYER_RADIUS],
+    [nextX + PLAYER_RADIUS, nextY - PLAYER_RADIUS],
+    [nextX - PLAYER_RADIUS, nextY - PLAYER_RADIUS],
+    [nextX + PLAYER_RADIUS, nextY],
+    [nextX - PLAYER_RADIUS, nextY],
+    [nextX, nextY + PLAYER_RADIUS],
+    [nextX, nextY - PLAYER_RADIUS]
+  ];
+  for (const [sx, sy] of samples) {
+    const toX = Math.floor(sx);
+    const toY = Math.floor(sy);
+    if (!canEnterTile(fromX, fromY, toX, toY)) return false;
+  }
+  return true;
 }
 
 function syncCombatPlayerCenter() {
@@ -858,6 +881,21 @@ function syncCombatPlayerCenter() {
   if (pcGlobal) {
     pcGlobal.x = CENTER_X;
     pcGlobal.y = CENTER_Y;
+  }
+
+  if (combatScene.domContainer) {
+    const gridSize = combatScene.gridSize || 15;
+    const gridPx = gridSize * cellSize;
+    const viewW = combatScene.domContainer.clientWidth;
+    const viewH = combatScene.domContainer.clientHeight;
+    const targetX = CENTER_X * cellSize + cellSize / 2;
+    const targetY = CENTER_Y * cellSize + cellSize / 2;
+    const maxScrollX = Math.max(0, gridPx - viewW);
+    const maxScrollY = Math.max(0, gridPx - viewH);
+    const scrollLeft = Math.max(0, Math.min(maxScrollX, targetX - viewW / 2));
+    const scrollTop = Math.max(0, Math.min(maxScrollY, targetY - viewH / 2));
+    combatScene.domContainer.scrollLeft = scrollLeft;
+    combatScene.domContainer.scrollTop = scrollTop;
   }
 }
 
@@ -891,18 +929,25 @@ function updateDungeonMovement(now) {
   const dt = Math.min(0.05, (now - DUNGEON_MOVE.lastTime) / 1000);
   DUNGEON_MOVE.lastTime = now;
 
-  const turnInput = (DUNGEON_MOVE.keys.right ? 1 : 0) - (DUNGEON_MOVE.keys.left ? 1 : 0);
+  const leftRight = (DUNGEON_MOVE.keys.right ? 1 : 0) - (DUNGEON_MOVE.keys.left ? 1 : 0);
+  const turnInput = leftRight;
   if (turnInput !== 0) {
     playerAngle += turnInput * TURN_SPEED * dt;
   }
 
   const moveInput = (DUNGEON_MOVE.keys.forward ? 1 : 0) - (DUNGEON_MOVE.keys.backward ? 1 : 0);
+  const strafeInput = (DUNGEON_MOVE.keys.strafeRight ? 1 : 0) - (DUNGEON_MOVE.keys.strafeLeft ? 1 : 0);
+  const runMult = DUNGEON_MOVE.keys.run ? RUN_MULT : 1.0;
   const dirX = Math.cos(playerAngle);
   const dirY = Math.sin(playerAngle);
+  const strafeX = -dirY;
+  const strafeY = dirX;
 
-  if (moveInput !== 0) {
-    DUNGEON_MOVE.velX += dirX * MOVE_ACCEL * moveInput * dt;
-    DUNGEON_MOVE.velY += dirY * MOVE_ACCEL * moveInput * dt;
+  if (moveInput !== 0 || strafeInput !== 0) {
+    const ax = (dirX * moveInput + strafeX * strafeInput) * MOVE_ACCEL * runMult;
+    const ay = (dirY * moveInput + strafeY * strafeInput) * MOVE_ACCEL * runMult;
+    DUNGEON_MOVE.velX += ax * dt;
+    DUNGEON_MOVE.velY += ay * dt;
   } else {
     const speed = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
     if (speed > 0) {
@@ -915,8 +960,9 @@ function updateDungeonMovement(now) {
   }
 
   const speed = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
-  if (speed > MOVE_MAX_SPEED) {
-    const scale = MOVE_MAX_SPEED / speed;
+  const maxSpeed = MOVE_MAX_SPEED * runMult;
+  if (speed > maxSpeed) {
+    const scale = maxSpeed / speed;
     DUNGEON_MOVE.velX *= scale;
     DUNGEON_MOVE.velY *= scale;
   }
@@ -944,6 +990,12 @@ function updateDungeonMovement(now) {
   playerPosY = nextY;
 
   const speedAfter = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
+  if (Number.isFinite(playerZTarget)) {
+    if (!Number.isFinite(playerZ)) playerZ = playerZTarget;
+    const zSmooth = Number.isFinite(window.WEBGL_Z_SMOOTH) ? window.WEBGL_Z_SMOOTH : Z_SMOOTH;
+    const zLerp = 1 - Math.exp(-zSmooth * dt);
+    playerZ += (playerZTarget - playerZ) * zLerp;
+  }
   /*if (moveInput === 0 && speedAfter < 0.05) {
     const centerX = Math.floor(playerPosX) + 0.5;
     const centerY = Math.floor(playerPosY) + 0.5;
@@ -964,6 +1016,7 @@ function updateDungeonMovement(now) {
   window.playerAngle = playerAngle;
   window.playerPosX = playerPosX;
   window.playerPosY = playerPosY;
+  window.playerZ = playerZ;
   renderDungeonView();
   if (window.combatGame) {
     const scene = window.combatGame.scene.getScene('CombatScene');
@@ -981,12 +1034,15 @@ function updateDungeonMovement(now) {
 
   const centerDx = (Math.floor(playerPosX) + 0.5) - playerPosX;
   const centerDy = (Math.floor(playerPosY) + 0.5) - playerPosY;
-  const stillSnapping = moveInput === 0 && speedAfter < 0.05 && Math.hypot(centerDx, centerDy) > 0.001;
+  const stillSnapping = moveInput === 0 && strafeInput === 0 && speedAfter < 0.05 && Math.hypot(centerDx, centerDy) > 0.001;
+  const zDelta = Number.isFinite(playerZTarget) ? Math.abs(playerZTarget - playerZ) : 0;
   return (
     moveInput !== 0 ||
+    strafeInput !== 0 ||
     speedAfter > STOP_EPS ||
     turnInput !== 0 ||
-    stillSnapping
+    stillSnapping ||
+    zDelta > 0.001
   );
 }
 
@@ -1783,28 +1839,47 @@ window.updateCombatScene = function(characters) {
       return tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable;
     };
 
-    const setMoveKey = (key, isDown) => {
-      if (key === 'ArrowUp') DUNGEON_MOVE.keys.forward = isDown;
-      if (key === 'ArrowDown') DUNGEON_MOVE.keys.backward = isDown;
-      if (key === 'ArrowLeft') DUNGEON_MOVE.keys.left = isDown;
-      if (key === 'ArrowRight') DUNGEON_MOVE.keys.right = isDown;
+    const setMoveKey = (event, isDown) => {
+      const key = event.key;
+      if (key === 'Shift') {
+        DUNGEON_MOVE.keys.run = isDown;
+        return;
+      }
+      if (key === 'ArrowUp' || key === 'w' || key === 'W') {
+        DUNGEON_MOVE.keys.forward = isDown;
+      }
+      if (key === 'ArrowDown' || key === 's' || key === 'S') {
+        DUNGEON_MOVE.keys.backward = isDown;
+      }
+      if (key === 'q' || key === 'Q') {
+        DUNGEON_MOVE.keys.strafeLeft = isDown;
+      }
+      if (key === 'e' || key === 'E') {
+        DUNGEON_MOVE.keys.strafeRight = isDown;
+      }
+      if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
+        DUNGEON_MOVE.keys.left = isDown;
+      }
+      if (key === 'ArrowRight' || key === 'd' || key === 'D') {
+        DUNGEON_MOVE.keys.right = isDown;
+      }
     };
 
     this.input.keyboard.on('keydown', (event) => {
-      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'q', 'e', 'W', 'A', 'S', 'D', 'Q', 'E', 'Shift'].includes(event.key)) return;
       if (isTypingTarget(event)) return;
       if (event.preventDefault) event.preventDefault();
       if (event.stopPropagation) event.stopPropagation();
-      setMoveKey(event.key, true);
+      setMoveKey(event, true);
       startDungeonMovementLoop();
     });
 
     this.input.keyboard.on('keyup', (event) => {
-      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'q', 'e', 'W', 'A', 'S', 'D', 'Q', 'E', 'Shift'].includes(event.key)) return;
       if (isTypingTarget(event)) return;
       if (event.preventDefault) event.preventDefault();
       if (event.stopPropagation) event.stopPropagation();
-      setMoveKey(event.key, false);
+      setMoveKey(event, false);
       startDungeonMovementLoop();
     });
 
@@ -9660,7 +9735,11 @@ function updatePlayerHeightFromCell() {
   const cell = currentDungeon.cells[key];
   const floorHeight =
     cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
-  playerZ = floorHeight + PLAYER_EYE_HEIGHT;
+  playerZTarget = floorHeight + PLAYER_EYE_HEIGHT;
+  if (!playerZInitialized || !Number.isFinite(playerZ)) {
+    playerZ = playerZTarget;
+    playerZInitialized = true;
+  }
 }
 
 function isTextureReady(img) {
@@ -10116,14 +10195,14 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const playerWorldY = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
 
   // Offset eye position – used ONLY for wall/floor raycasting (to see more floor)
-  const EYE_BACK_OFFSET = 1.2;
+  const EYE_BACK_OFFSET = Number.isFinite(window.WEBGL_EYE_BACK) ? window.WEBGL_EYE_BACK : 0.0;
   let posX = playerWorldX - dirX * EYE_BACK_OFFSET;
   let posY = playerWorldY - dirY * EYE_BACK_OFFSET;
 
   const playerKey = `${playerDungeonX},${playerDungeonY}`;
   const playerCell = currentDungeon.cells[playerKey] || {};
   const playerFloor = (typeof playerCell.floorHeight === 'number') ? playerCell.floorHeight : 0;
-  const eyeZ = playerFloor + PLAYER_EYE_HEIGHT;
+  const eyeZ = Number.isFinite(playerZ) ? playerZ : playerFloor + PLAYER_EYE_HEIGHT;
 
   const planeScale = Math.tan(FOV / 2);
   const planeX = -dirY * planeScale;

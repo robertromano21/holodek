@@ -1034,7 +1034,7 @@ void main() {
       const dirY = Math.sin(playerAngle);
       const playerWorldX = Number.isFinite(window.playerPosX) ? window.playerPosX : playerX + 0.5;
       const playerWorldY = Number.isFinite(window.playerPosY) ? window.playerPosY : playerY + 0.5;
-      const eyeBack = Number.isFinite(window.WEBGL_EYE_BACK) ? window.WEBGL_EYE_BACK : 1.2;
+      const eyeBack = Number.isFinite(window.WEBGL_EYE_BACK) ? window.WEBGL_EYE_BACK : 0.0;
       let camX = playerWorldX - dirX * eyeBack;
       let camY = playerWorldY - dirY * eyeBack;
       //const camCell = dungeon.cells?.[`${Math.floor(camX)},${Math.floor(camY)}`];
@@ -1051,7 +1051,9 @@ void main() {
       }*/
       const playerCell = dungeon.cells?.[`${playerX},${playerY}`] || {};
       const playerFloor = typeof playerCell.floorHeight === 'number' ? playerCell.floorHeight : 0;
-      const eyeZ = playerFloor + (window.PLAYER_EYE_HEIGHT || 0.5);
+      const eyeZ = Number.isFinite(window.playerZ)
+        ? window.playerZ
+        : playerFloor + (window.PLAYER_EYE_HEIGHT || 0.5);
       // Optional: store globally for consistency
       window.playerZ = eyeZ;
 
