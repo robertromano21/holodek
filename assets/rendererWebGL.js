@@ -285,6 +285,7 @@ uniform int u_atlasRows;
 uniform vec3 u_skyTop;
 uniform vec3 u_skyBot;
 uniform float u_depthFar;
+uniform float u_depthFarDepth;
 uniform int u_torchCount;
 uniform vec3 u_torchPos[32];
 uniform vec3 u_torchColor[32];
@@ -565,7 +566,7 @@ void main() {
 
     vec3 col = tex.rgb * base + torchAdd;
     outColor = vec4(col, 1.0);
-    gl_FragDepth = floorDist / u_depthFar;
+    gl_FragDepth = floorDist / u_depthFarDepth;
     return;
   }
   if (frag.y < horizon && !wallHit && !sideHit) {
@@ -577,12 +578,12 @@ void main() {
   float nearestDist = wallHit ? wallDist : u_depthFar;
   if (sideHit && sideDist < nearestDist) {
     outColor = vec4(sideCol, 1.0);
-    gl_FragDepth = sideDist / u_depthFar;
+    gl_FragDepth = sideDist / u_depthFarDepth;
     return;
   }
   if (wallHit) {
     outColor = wallCol;
-    gl_FragDepth = wallDist / u_depthFar;
+    gl_FragDepth = wallDist / u_depthFarDepth;
     return;
   }
   outColor = vec4(0.0, 0.0, 0.0, 1.0);
@@ -619,6 +620,7 @@ void main() {
         skyTop: gl.getUniformLocation(this.program, 'u_skyTop'),
         skyBot: gl.getUniformLocation(this.program, 'u_skyBot'),
         depthFar: gl.getUniformLocation(this.program, 'u_depthFar'),
+        depthFarDepth: gl.getUniformLocation(this.program, 'u_depthFarDepth'),
         torchCount: gl.getUniformLocation(this.program, 'u_torchCount'),
         torchPos: gl.getUniformLocation(this.program, 'u_torchPos[0]'),
         torchColor: gl.getUniformLocation(this.program, 'u_torchColor[0]'),
@@ -1030,8 +1032,8 @@ void main() {
       const playerAngle = window.playerAngle ?? 0;
       const dirX = Math.cos(playerAngle);
       const dirY = Math.sin(playerAngle);
-      const playerWorldX = playerX + 0.5;
-      const playerWorldY = playerY + 0.5;
+      const playerWorldX = Number.isFinite(window.playerPosX) ? window.playerPosX : playerX + 0.5;
+      const playerWorldY = Number.isFinite(window.playerPosY) ? window.playerPosY : playerY + 0.5;
       const eyeBack = Number.isFinite(window.WEBGL_EYE_BACK) ? window.WEBGL_EYE_BACK : 1.2;
       let camX = playerWorldX - dirX * eyeBack;
       let camY = playerWorldY - dirY * eyeBack;
@@ -1258,12 +1260,27 @@ void main() {
       gl.uniform1f(this.uniformLocations.wallUScale, 0.25);
       gl.uniform2f(this.uniformLocations.lightDir, lighting.dirX, lighting.dirY);
       gl.uniform1f(this.uniformLocations.lightIntensity, lighting.intensity);
-      gl.uniform1i(this.uniformLocations.maxSteps, isOutdoor ? 400 : 64);
+      const outdoorDepthFar = 1000000.0;
+      const outdoorDepthFarDepth = 300.0;
+      const depthFar = isOutdoor ? outdoorDepthFar : 60.0;
+      const depthFarDepth = isOutdoor ? outdoorDepthFarDepth : 60.0;
+      const maxRayDist = Math.max(
+        camX,
+        this.gridW - camX,
+        camY,
+        this.gridH - camY
+      );
+      const outdoorMaxSteps = Math.max(
+        8,
+        Math.min(Math.ceil(maxRayDist) + 2, Math.ceil(outdoorDepthFar))
+      );
+      gl.uniform1i(this.uniformLocations.maxSteps, isOutdoor ? outdoorMaxSteps : 64);
       gl.uniform1i(this.uniformLocations.atlasCols, this.atlasInfo?.cols || 1);
       gl.uniform1i(this.uniformLocations.atlasRows, this.atlasInfo?.rows || 1);
       gl.uniform3f(this.uniformLocations.skyTop, skyTopRgb.r, skyTopRgb.g, skyTopRgb.b);
       gl.uniform3f(this.uniformLocations.skyBot, skyBotRgb.r, skyBotRgb.g, skyBotRgb.b);
-      gl.uniform1f(this.uniformLocations.depthFar, isOutdoor ? 1000000.0 : 60.0);
+      gl.uniform1f(this.uniformLocations.depthFar, depthFar);
+      gl.uniform1f(this.uniformLocations.depthFarDepth, depthFarDepth);
       if (this.uniformLocations.torchCount) {
         torchLights.sort((a, b) => a.dist2 - b.dist2);
         const count = Math.min(torchLights.length, MAX_TORCH_LIGHTS);
@@ -1440,7 +1457,7 @@ void main() {
             screenHeight: spriteScreenHeight,
             screenWidth: spriteScreenWidth,
             mountScreenY,
-            depth: Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / 60.0)),
+            depth: Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / depthFarDepth)),
             flickerSeed
           });
         }

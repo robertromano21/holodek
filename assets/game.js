@@ -186,6 +186,8 @@ async function switchDungeonForCoordinates(coordString) {
   currentDungeon.start = safeStart;
   playerDungeonX = safeStart.x;
   playerDungeonY = safeStart.y;
+  playerPosX = playerDungeonX + 0.5;
+  playerPosY = playerDungeonY + 0.5;
 
   preloadDungeonTextures();
   updatePlayerHeightFromCell();
@@ -376,11 +378,15 @@ function attachMusicSSE() {
 
 let currentDungeon = null;
 let playerDungeonX = 7, playerDungeonY = 13;
+let playerPosX = playerDungeonX + 0.5;
+let playerPosY = playerDungeonY + 0.5;
 // Facing angle for the 3D view (radians).
 // -Math.PI/2 = looking "up" (negative Y) to match your usual north/up.
 let playerAngle = -Math.PI / 2;
 
 window.playerAngle = playerAngle;
+window.playerPosX = playerPosX;
+window.playerPosY = playerPosY;
 
 // 3D dungeon extras
 let dungeonTextures = {};
@@ -477,6 +483,8 @@ eventSource.onmessage = function(event) {
         currentDungeon.start = safeStart;
         playerDungeonX = safeStart.x;
         playerDungeonY = safeStart.y;
+        playerPosX = playerDungeonX + 0.5;
+        playerPosY = playerDungeonY + 0.5;
     
         preloadDungeonTextures();
         updatePlayerHeightFromCell();
@@ -703,6 +711,8 @@ function movePlayerByDelta(dx, dy) {
   // Movement is ok
   playerDungeonX = proposedDungeonX;
   playerDungeonY = proposedDungeonY;
+  playerPosX = playerDungeonX + 0.5;
+  playerPosY = playerDungeonY + 0.5;
   updatePlayerHeightFromCell();
 
 
@@ -774,6 +784,242 @@ function movePlayerByDelta(dx, dy) {
   }
 
   console.log('Player moved in dungeon. Combat player pinned to center. Views updated.');
+}
+
+const DUNGEON_MOVE = {
+  velX: 0,
+  velY: 0,
+  lastTime: 0,
+  active: false,
+  raf: 0,
+  keys: {
+    forward: false,
+    backward: false,
+    left: false,
+    right: false
+  }
+};
+
+const MOVE_ACCEL = 6.0;
+const MOVE_MAX_SPEED = 3.2;
+const MOVE_FRICTION = 10.0;
+const TURN_SPEED = 2.6;
+const SNAP_SPEED = 6.0;
+const STOP_EPS = 0.01;
+const MAX_STEP = 0.75;
+
+function isBlockedDungeonCell(cell) {
+  if (!cell) return true;
+  if (cell.tile === 'wall' || cell.tile === 'torch' || cell.tile === 'pillar') return true;
+  if (cell.tile === 'door' && !cell.door?.isOpen) return true;
+  return false;
+}
+
+function canEnterTile(fromX, fromY, toX, toY) {
+  if (!currentDungeon || !currentDungeon.cells) return false;
+  if (fromX === toX && fromY === toY) return true;
+  const targetCell = currentDungeon.cells[`${toX},${toY}`];
+  if (!targetCell || isBlockedDungeonCell(targetCell)) return false;
+  const currentCell = currentDungeon.cells[`${fromX},${fromY}`] || {};
+  const currentFloor = typeof currentCell.floorHeight === 'number' ? currentCell.floorHeight : 0;
+  const targetFloor = typeof targetCell.floorHeight === 'number' ? targetCell.floorHeight : 0;
+  return Math.abs(targetFloor - currentFloor) <= MAX_STEP;
+}
+
+function canOccupyPos(nextX, nextY) {
+  const fromX = Math.floor(playerPosX);
+  const fromY = Math.floor(playerPosY);
+  const toX = Math.floor(nextX);
+  const toY = Math.floor(nextY);
+  return canEnterTile(fromX, fromY, toX, toY);
+}
+
+function syncCombatPlayerCenter() {
+  const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
+  if (!combatScene || !combatScene.pcName || !combatScene.characters[combatScene.pcName]) return;
+  const pcData = combatScene.characters[combatScene.pcName];
+  const cellSize = 25;
+  const CENTER_X = 7;
+  const CENTER_Y = 7;
+
+  pcData.x = CENTER_X;
+  pcData.y = CENTER_Y;
+  pcData.sprite.setPosition(
+    CENTER_X * cellSize + cellSize / 2,
+    CENTER_Y * cellSize + cellSize / 2
+  );
+  pcData.label.setPosition(
+    CENTER_X * cellSize + cellSize / 2,
+    CENTER_Y * cellSize + cellSize / 2 + 20
+  );
+  combatScene.centerCameraOn(CENTER_X, CENTER_Y);
+
+  const pcGlobal = window.combatCharacters && window.combatCharacters.find(c => c.type === 'pc');
+  if (pcGlobal) {
+    pcGlobal.x = CENTER_X;
+    pcGlobal.y = CENTER_Y;
+  }
+}
+
+function syncPlayerTileFromPos() {
+  const nextTileX = Math.floor(playerPosX);
+  const nextTileY = Math.floor(playerPosY);
+  if (nextTileX === playerDungeonX && nextTileY === playerDungeonY) return false;
+  playerDungeonX = nextTileX;
+  playerDungeonY = nextTileY;
+  updatePlayerHeightFromCell();
+  syncCombatPlayerCenter();
+  logDungeonCombatSync('move');
+  if (window.combatGame) {
+    const scene = window.combatGame.scene.getScene('CombatScene');
+    if (scene && scene.drawDungeonOverlay) {
+      scene.drawDungeonOverlay();
+    }
+  }
+  return true;
+}
+
+function getPlayerPosForMap() {
+  const px = Number.isFinite(playerPosX) ? playerPosX : playerDungeonX + 0.5;
+  const py = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
+  return { x: px, y: py };
+}
+
+function updateDungeonMovement(now) {
+  if (!currentDungeon) return false;
+  if (!DUNGEON_MOVE.lastTime) DUNGEON_MOVE.lastTime = now;
+  const dt = Math.min(0.05, (now - DUNGEON_MOVE.lastTime) / 1000);
+  DUNGEON_MOVE.lastTime = now;
+
+  const turnInput = (DUNGEON_MOVE.keys.right ? 1 : 0) - (DUNGEON_MOVE.keys.left ? 1 : 0);
+  if (turnInput !== 0) {
+    playerAngle += turnInput * TURN_SPEED * dt;
+  }
+
+  const moveInput = (DUNGEON_MOVE.keys.forward ? 1 : 0) - (DUNGEON_MOVE.keys.backward ? 1 : 0);
+  const dirX = Math.cos(playerAngle);
+  const dirY = Math.sin(playerAngle);
+
+  if (moveInput !== 0) {
+    DUNGEON_MOVE.velX += dirX * MOVE_ACCEL * moveInput * dt;
+    DUNGEON_MOVE.velY += dirY * MOVE_ACCEL * moveInput * dt;
+  } else {
+    const speed = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
+    if (speed > 0) {
+      const drop = MOVE_FRICTION * dt;
+      const newSpeed = Math.max(0, speed - drop);
+      const scale = newSpeed / speed;
+      DUNGEON_MOVE.velX *= scale;
+      DUNGEON_MOVE.velY *= scale;
+    }
+  }
+
+  const speed = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
+  if (speed > MOVE_MAX_SPEED) {
+    const scale = MOVE_MAX_SPEED / speed;
+    DUNGEON_MOVE.velX *= scale;
+    DUNGEON_MOVE.velY *= scale;
+  }
+
+  let nextX = playerPosX;
+  let nextY = playerPosY;
+  if (Math.abs(DUNGEON_MOVE.velX) > 0) {
+    const candX = playerPosX + DUNGEON_MOVE.velX * dt;
+    if (canOccupyPos(candX, playerPosY)) {
+      nextX = candX;
+    } else {
+      DUNGEON_MOVE.velX = 0;
+    }
+  }
+  if (Math.abs(DUNGEON_MOVE.velY) > 0) {
+    const candY = playerPosY + DUNGEON_MOVE.velY * dt;
+    if (canOccupyPos(nextX, candY)) {
+      nextY = candY;
+    } else {
+      DUNGEON_MOVE.velY = 0;
+    }
+  }
+
+  playerPosX = nextX;
+  playerPosY = nextY;
+
+  const speedAfter = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
+  /*if (moveInput === 0 && speedAfter < 0.05) {
+    const centerX = Math.floor(playerPosX) + 0.5;
+    const centerY = Math.floor(playerPosY) + 0.5;
+    const dx = centerX - playerPosX;
+    const dy = centerY - playerPosY;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 0.001) {
+      const step = Math.min(dist, SNAP_SPEED * dt);
+      playerPosX += (dx / dist) * step;
+      playerPosY += (dy / dist) * step;
+    } else {
+      playerPosX = centerX;
+      playerPosY = centerY;
+    }
+  }*/
+
+  syncPlayerTileFromPos();
+  window.playerAngle = playerAngle;
+  window.playerPosX = playerPosX;
+  window.playerPosY = playerPosY;
+  renderDungeonView();
+  if (window.combatGame) {
+    const scene = window.combatGame.scene.getScene('CombatScene');
+    if (scene && scene.sys && scene.sys.game && scene.sys.game.loop) {
+      scene.sys.game.loop.wake();
+      if (scene.drawDungeonOverlay) {
+        scene.drawDungeonOverlay();
+      }
+      if (scene._movementSleepTimer) {
+        scene._movementSleepTimer.remove(false);
+        scene._movementSleepTimer = null;
+      }
+    }
+  }
+
+  const centerDx = (Math.floor(playerPosX) + 0.5) - playerPosX;
+  const centerDy = (Math.floor(playerPosY) + 0.5) - playerPosY;
+  const stillSnapping = moveInput === 0 && speedAfter < 0.05 && Math.hypot(centerDx, centerDy) > 0.001;
+  return (
+    moveInput !== 0 ||
+    speedAfter > STOP_EPS ||
+    turnInput !== 0 ||
+    stillSnapping
+  );
+}
+
+function startDungeonMovementLoop() {
+  if (DUNGEON_MOVE.active) return;
+  DUNGEON_MOVE.active = true;
+  DUNGEON_MOVE.lastTime = performance.now();
+  if (window.combatGame) {
+    const scene = window.combatGame.scene.getScene('CombatScene');
+    if (scene && scene.sys && scene.sys.game && scene.sys.game.loop) {
+      scene.sys.game.loop.wake();
+    }
+  }
+  const step = (now) => {
+    if (!DUNGEON_MOVE.active) return;
+    const keepGoing = updateDungeonMovement(now);
+    if (keepGoing) {
+      DUNGEON_MOVE.raf = requestAnimationFrame(step);
+    } else {
+      DUNGEON_MOVE.active = false;
+      DUNGEON_MOVE.raf = 0;
+      if (window.combatGame) {
+        const scene = window.combatGame.scene.getScene('CombatScene');
+        if (scene && scene.time && scene.sys && scene.sys.game && scene.sys.game.loop) {
+          scene._movementSleepTimer = scene.time.delayedCall(80, () => {
+            scene.sys.game.loop.sleep();
+            scene._movementSleepTimer = null;
+          });
+        }
+      }
+    }
+  };
+  DUNGEON_MOVE.raf = requestAnimationFrame(step);
 }
 
 class MainScene extends Phaser.Scene {
@@ -1530,39 +1776,36 @@ window.updateCombatScene = function(characters) {
             }
         });*/
         
+    const isTypingTarget = (event) => {
+      const t = event.target;
+      if (!t) return false;
+      const tag = t.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable;
+    };
+
+    const setMoveKey = (key, isDown) => {
+      if (key === 'ArrowUp') DUNGEON_MOVE.keys.forward = isDown;
+      if (key === 'ArrowDown') DUNGEON_MOVE.keys.backward = isDown;
+      if (key === 'ArrowLeft') DUNGEON_MOVE.keys.left = isDown;
+      if (key === 'ArrowRight') DUNGEON_MOVE.keys.right = isDown;
+    };
+
     this.input.keyboard.on('keydown', (event) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-    
-      // prevent page scroll / duplicate handlers
+      if (isTypingTarget(event)) return;
       if (event.preventDefault) event.preventDefault();
       if (event.stopPropagation) event.stopPropagation();
-    
-      const TURN_STEP = Math.PI / 2; // 90-degree turns like Wolf3D
-    
-      // LEFT / RIGHT: rotate view, do NOT move
-      if (event.key === 'ArrowLeft') {
-        playerAngle -= TURN_STEP;
-        renderDungeonView(); // redraw 3D view with new facing
-        return;
-      }
-    
-      if (event.key === 'ArrowRight') {
-        playerAngle += TURN_STEP;
-        renderDungeonView(); // redraw 3D view with new facing
-        return;
-      }
-    
-      // UP / DOWN: move forward/backward along current facing
-      const stepX = Math.round(Math.cos(playerAngle));
-      const stepY = Math.round(Math.sin(playerAngle));
-    
-      if (event.key === 'ArrowUp') {
-        // Forward
-        movePlayerByDelta(stepX, stepY);
-      } else if (event.key === 'ArrowDown') {
-        // Backward
-        movePlayerByDelta(-stepX, -stepY);
-      }
+      setMoveKey(event.key, true);
+      startDungeonMovementLoop();
+    });
+
+    this.input.keyboard.on('keyup', (event) => {
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      if (isTypingTarget(event)) return;
+      if (event.preventDefault) event.preventDefault();
+      if (event.stopPropagation) event.stopPropagation();
+      setMoveKey(event.key, false);
+      startDungeonMovementLoop();
     });
 
     }
@@ -1604,8 +1847,11 @@ window.updateCombatScene = function(characters) {
     const wallColor  = 0x550000;
     const floorColor = 0x222222;
 
-    const cx = playerDungeonX;
-    const cy = playerDungeonY;
+    const pos = getPlayerPosForMap();
+    const cx = Math.floor(pos.x);
+    const cy = Math.floor(pos.y);
+    const offsetX = (pos.x - (cx + 0.5)) * cs;
+    const offsetY = (pos.y - (cy + 0.5)) * cs;
 
     for (let dy = -half; dy <= half; dy++) {
       for (let dx = -half; dx <= half; dx++) {
@@ -1613,8 +1859,8 @@ window.updateCombatScene = function(characters) {
         const cell = currentDungeon.cells[k];
         if (!cell) continue;
 
-        const gx = (dx + half) * cs;
-        const gy = (dy + half) * cs;
+        const gx = (dx + half) * cs - offsetX;
+        const gy = (dy + half) * cs - offsetY;
 
           if (cell.tile === 'wall' || cell.tile === 'door' || cell.tile === 'pillar' || cell.tile === 'torch') {
           gfx.fillStyle(wallColor, 1);
@@ -1650,8 +1896,11 @@ window.updateCombatScene = function(characters) {
         const torchColor = 0xffaa44;  // optional: distinct for torches
         const customColor = 0xaa44aa; // optional: for custom obstacles
 
-        const centerX = playerDungeonX;
-        const centerY = playerDungeonY;
+        const pos = getPlayerPosForMap();
+        const centerX = Math.floor(pos.x);
+        const centerY = Math.floor(pos.y);
+        const offsetX = (pos.x - (centerX + 0.5)) * cellSize;
+        const offsetY = (pos.y - (centerY + 0.5)) * cellSize;
 
         for (let dy = -half; dy <= half; dy++) {
             for (let dx = -half; dx <= half; dx++) {
@@ -1664,8 +1913,8 @@ window.updateCombatScene = function(characters) {
                 const gridY = dy + half;
 
                 // Logical cell origin
-                const rawX = gridX * cellSize;
-                const rawY = gridY * cellSize;
+                const rawX = gridX * cellSize - offsetX;
+                const rawY = gridY * cellSize - offsetY;
 
                 // SNAP TO GRID LINES (authoritative reference)
                 const gx = Math.round(rawX / GRID_PIXEL_SCALE) * GRID_PIXEL_SCALE;
@@ -9863,8 +10112,8 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const dirY = Math.sin(playerAngle);
 
   // True player world position (tile center) – used for sprite relative positions (fixed world coords)
-  const playerWorldX = playerDungeonX + 0.5;
-  const playerWorldY = playerDungeonY + 0.5;
+  const playerWorldX = Number.isFinite(playerPosX) ? playerPosX : playerDungeonX + 0.5;
+  const playerWorldY = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
 
   // Offset eye position – used ONLY for wall/floor raycasting (to see more floor)
   const EYE_BACK_OFFSET = 1.2;
@@ -11310,6 +11559,8 @@ function renderDungeonView() {
   window.dungeonTextures = dungeonTextures;
   window.playerDungeonX = playerDungeonX;
   window.playerDungeonY = playerDungeonY;
+  window.playerPosX = playerPosX;
+  window.playerPosY = playerPosY;
   window.playerAngle = playerAngle;
   window.playerZ = playerZ;
   window.PLAYER_EYE_HEIGHT = PLAYER_EYE_HEIGHT;
