@@ -1087,11 +1087,11 @@ function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, includeWall
   const metalAccent = (torchStyle && torchStyle.metalAccent) || "#3b3024";
   // Bracket / holder
   ctx.fillStyle = metal;
-  ctx.fillRect(cx - s * 0.03, cy, s * 0.06, s * 0.28);
-  ctx.fillRect(cx - s * 0.08, cy + s * 0.08, s * 0.16, s * 0.04);
+  ctx.fillRect(cx - s * 0.04, cy, s * 0.08, s * 0.34);
+  ctx.fillRect(cx - s * 0.11, cy + s * 0.1, s * 0.22, s * 0.05);
   // Subtle accent for depth
   ctx.fillStyle = metalAccent;
-  ctx.fillRect(cx - s * 0.03, cy + s * 0.02, s * 0.06, s * 0.02);
+  ctx.fillRect(cx - s * 0.04, cy + s * 0.02, s * 0.08, s * 0.02);
 }
 
 function drawPillar(ctx, palette) {
@@ -1186,3 +1186,5 @@ function generateSpriteFromStyle(style, tileType, name = 'sprite') {
 }
 
 module.exports = { generateSpriteFromStyle };
+
+

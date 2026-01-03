@@ -428,7 +428,7 @@ function logDungeonCombatSync(reason) {
   if (key === _syncDebugLastKey && now - _syncDebugLastTs < 500) return;
   _syncDebugLastKey = key;
   _syncDebugLastTs = now;
-  console.log('[Sync]', state);
+  //console.log('[Sync]', state);
 }
 
 // SSE handler
@@ -11481,7 +11481,7 @@ if (!hit) continue;
 
             // Base of texture aligns with floor (flip Y)
             const texY = spr.type === 'torch'
-              ? Math.floor(((y - spr.rawDrawStartY) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)))
+              ? Math.floor(((spr.rawDrawEndY - y - 1) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)))
               : Math.floor(((spr.drawEndY - y - 1) * texH) / spr.height);
             if (texY < 0 || texY >= texH) continue;
 

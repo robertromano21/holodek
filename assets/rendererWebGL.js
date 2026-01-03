@@ -257,8 +257,10 @@
       const fsSource = `#version 300 es
 precision highp float;
 precision highp int;
+
 in vec2 v_uv;
 out vec4 outColor;
+
 uniform vec2 u_resolution;
 uniform vec2 u_camPos;
 uniform vec2 u_camDir;
@@ -288,13 +290,14 @@ uniform float u_depthFar;
 uniform float u_depthFarDepth;
 uniform int u_torchCount;
 uniform vec3 u_torchPos[32];
-uniform vec3 u_torchColor[32];
 uniform float u_torchRadius[32];
 uniform float u_torchIntensity[32];
+
 const int MAX_STEPS = 400;
 const int MAX_TORCH = 32;
 const float TORCH_FALLOFF = 0.6;
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
+
 vec4 fetchCell(int x, int y) {
   int yy = u_flipY == 1 ? (u_gridSize.y - 1 - y) : y;
   if (x < 0 || yy < 0 || x >= u_gridSize.x || yy >= u_gridSize.y) {
@@ -302,30 +305,42 @@ vec4 fetchCell(int x, int y) {
   }
   return texelFetch(u_cells, ivec2(x, yy), 0);
 }
+
 bool inBounds(int x, int y) {
   return x >= 0 && y >= 0 && x < u_gridSize.x && y < u_gridSize.y;
 }
-float accumulateTorch(vec3 worldPos) {
+
+// Normal-aware torch lighting (half-Lambert for better wall self-illumination)
+float accumulateTorchLit(vec3 worldPos, vec3 normal) {
   float total = 0.0;
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
-    vec3 toL = worldPos - u_torchPos[i];
+    vec3 toL = u_torchPos[i] - worldPos;
     float dist = length(toL);
     if (dist >= u_torchRadius[i]) continue;
+    vec3 L = normalize(toL);
+    float ndotl_raw = dot(L, normal);
+    float ndotl = ndotl_raw * 0.5 + 0.5;  // half-Lambert
+    ndotl = max(0.0, ndotl);             // prevent lighting if far behind
     float falloff = 1.0 - dist / u_torchRadius[i];
-    float intensity = u_torchIntensity[i] * falloff * falloff * TORCH_FALLOFF;
-    total += intensity;
+    total += ndotl * falloff * falloff * u_torchIntensity[i] * TORCH_FALLOFF;
   }
   return total;
 }
+
 void main() {
   vec2 frag = vec2(v_uv.x, 1.0 - v_uv.y) * u_resolution;
   float cameraX = 2.0 * frag.x / u_resolution.x - 1.0;
   vec2 rayDir = u_camDir + u_plane * cameraX;
+
   if (abs(rayDir.x) < 1e-5 && abs(rayDir.y) < 1e-5) {
     outColor = vec4(0.0);
     return;
   }
+
+  float horizon = u_resolution.y * 0.5;
+
+  // Ray setup
   int mapX = int(floor(u_camPos.x));
   int mapY = int(floor(u_camPos.y));
   float deltaDistX = abs(1.0 / rayDir.x);
@@ -334,9 +349,8 @@ void main() {
   int stepY = rayDir.y < 0.0 ? -1 : 1;
   float sideDistX = (stepX == -1 ? (u_camPos.x - float(mapX)) : (float(mapX + 1) - u_camPos.x)) * deltaDistX;
   float sideDistY = (stepY == -1 ? (u_camPos.y - float(mapY)) : (float(mapY + 1) - u_camPos.y)) * deltaDistY;
-  bool hit = false;
-  int side = 0;
-  vec4 cell = vec4(0.0);
+  int side = 0; // 0 = x-side hit, 1 = y-side hit
+
   if (u_skipBackCell == 1 && (mapX != u_playerTile.x || mapY != u_playerTile.y)) {
     if (sideDistX < sideDistY) {
       sideDistX += deltaDistX;
@@ -348,52 +362,83 @@ void main() {
       side = 1;
     }
   }
-  float horizon = u_resolution.y * 0.5;
+
+  // Track surfaces
+  float wallDist = u_depthFar;
+  vec4 wallCol = vec4(0.0);
+  bool wallHit = false;
+  float lineTop = horizon;
+  float lineBottom = horizon;
+  float extendedBottom = horizon;
+
+  float sideDistClosest = u_depthFar;
+  vec3 sideColClosest = vec3(0.0);
   bool sideHit = false;
-  float sideDist = u_depthFar;
-  vec3 sideCol = vec3(0.0);
+
+  float floorDist = u_depthFar;
+  float floorH = u_playerFloor;
+  bool floorHit = false;
+
+  // Main DDA for walls and side faces
   for (int i = 0; i < MAX_STEPS; i++) {
     if (i >= u_maxSteps) break;
+
     float nextDist = min(sideDistX, sideDistY);
     int nextMapX = mapX + (sideDistX < sideDistY ? stepX : 0);
     int nextMapY = mapY + (sideDistX < sideDistY ? 0 : stepY);
-    if (!inBounds(mapX, mapY) || !inBounds(nextMapX, nextMapY)) {
-      hit = false;
-      break;
-    }
+
+    if (!inBounds(mapX, mapY) || !inBounds(nextMapX, nextMapY)) break;
+
     vec4 currCell = fetchCell(mapX, mapY);
     vec4 nextCell = fetchCell(nextMapX, nextMapY);
+
+    // Side face rendering
     if (currCell.a < 0.5 && nextCell.a < 0.5) {
       float currH = u_heightMin + currCell.g * 255.0 * (u_heightRange / 255.0);
       float nextH = u_heightMin + nextCell.g * 255.0 * (u_heightRange / 255.0);
       float dh = nextH - currH;
+
       if (abs(dh) > 0.001) {
         float bottomZ = min(currH, nextH);
         float topZ = max(currH, nextH);
+
         float lineTopR = horizon - (topZ - u_eyeZ) * u_focalLength / nextDist;
         float lineBottomR = horizon - (bottomZ - u_eyeZ) * u_focalLength / nextDist;
+
         if (frag.y >= min(lineTopR, lineBottomR) && frag.y <= max(lineTopR, lineBottomR)) {
           float v_frac = (frag.y - lineTopR) / max(1.0, lineBottomR - lineTopR);
           float world_v = v_frac * abs(dh);
           float fracV = fract(bottomZ + world_v);
           float wallX = sideDistX < sideDistY ? (u_camPos.y + nextDist * rayDir.y) : (u_camPos.x + nextDist * rayDir.x);
           float fracU = fract(wallX);
+
           vec4 tex = texture(u_floorTex, vec2(fracU, fracV));
-          float shade = max(0.2, 1.0 - nextDist / 10.0);
-          float lit = clamp(accumulateTorch(vec3(u_camPos + rayDir * nextDist, bottomZ + world_v)), 0.0, 1.0);
-          float base = shade + lit * 0.5;
+
+          vec3 normal = sideDistX < sideDistY
+            ? vec3(-float(stepX), 0.0, 0.0)
+            : vec3(0.0, -float(stepY), 0.0);
+
+          vec3 worldPos = vec3(u_camPos + rayDir * nextDist, bottomZ + world_v);
+          float lit = clamp(accumulateTorchLit(worldPos, normal), 0.0, 1.0);
+
+          float shade = max(0.3, 1.0 - nextDist / 10.0);
+          float base = shade + lit * 0.6;
           float warmShift = 0.75 + 0.45 * lit;
           vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
           vec3 col = tex.rgb * base + torchAdd;
-          if (!sideHit || nextDist < sideDist) {
+
+          if (nextDist < sideDistClosest) {
+            sideDistClosest = nextDist;
+            sideColClosest = col;
             sideHit = true;
-            sideDist = nextDist;
-            sideCol = col;
           }
         }
       }
     }
-    if (sideDistX < sideDistY) {
+
+    // Advance DDA
+    bool steppedX = (sideDistX < sideDistY);
+    if (steppedX) {
       sideDistX += deltaDistX;
       mapX += stepX;
       side = 0;
@@ -402,183 +447,171 @@ void main() {
       mapY += stepY;
       side = 1;
     }
-    if (!inBounds(mapX, mapY)) {
-      hit = false;
-      break;
-    }
-    cell = fetchCell(mapX, mapY);
+
+    if (!inBounds(mapX, mapY)) break;
+
+    vec4 cell = fetchCell(mapX, mapY);
     if (cell.a > 0.5) {
-      hit = true;
+      // Wall hit
+      float perpDist = (side == 0)
+        ? (float(mapX) - u_camPos.x + float(1 - stepX) * 0.5) / rayDir.x
+        : (float(mapY) - u_camPos.y + float(1 - stepY) * 0.5) / rayDir.y;
+      if (perpDist < 0.001) perpDist = 0.001;
+
+      float floorH = u_heightMin + cell.g * 255.0 * (u_heightRange / 255.0);
+      float ceilH = u_heightMin + cell.b * 255.0 * (u_heightRange / 255.0);
+
+      lineTop = horizon - (ceilH - u_eyeZ) * u_focalLength / perpDist;
+      lineBottom = horizon - (floorH - u_eyeZ) * u_focalLength / perpDist;
+      extendedBottom = horizon - ((u_minFloor - u_eyeZ) * u_focalLength / perpDist);
+      extendedBottom = max(lineBottom, extendedBottom);
+
+      float wallX = (side == 0)
+        ? (u_camPos.y + perpDist * rayDir.y)
+        : (u_camPos.x + perpDist * rayDir.x);
+      wallX = fract(wallX);
+      float u = fract(wallX * u_wallUScale);
+
+      float globalV = (frag.y - lineTop) / max(1.0, extendedBottom - lineTop);
+
+      float worldZ = u_eyeZ + (horizon - frag.y) * (perpDist / u_focalLength);
+
+      int tileId = int(cell.r * 255.0 + 0.5);
+      vec2 atlasUV = (vec2(float(tileId % u_atlasCols), float(tileId / u_atlasCols)) + vec2(u, globalV)) /
+                     vec2(float(u_atlasCols), float(u_atlasRows));
+
+      vec4 tex = texture(u_wallAtlas, atlasUV);
+      if (tex.a > 0.04 && frag.y >= lineTop && frag.y <= extendedBottom) {
+        float shade = max(0.3, 1.0 - perpDist / 10.0);
+        float sideFactor = (side == 0) ? 1.0 : 0.85;
+        vec2 normal2D = (side == 0) ? vec2(float(stepX), 0.0) : vec2(0.0, float(stepY));
+        float dotLight = dot(normal2D, u_lightDir);
+        float lightFactor = 0.6 + 0.4 * dotLight;
+        float litShade = shade * sideFactor * (1.0 - u_lightIntensity + u_lightIntensity * lightFactor);
+        float grad = max(0.35, 1.0 - 0.18 * globalV);
+        float rowShade = litShade * grad;
+
+        vec3 wallNormalTorch = vec3(-normal2D, 0.0);
+
+        float planeCoord;
+        float t;
+        if (side == 0) {
+          planeCoord = float(mapX) + (stepX > 0 ? 0.0 : 1.0);
+          t = (planeCoord - u_camPos.x) / rayDir.x;
+        } else {
+          planeCoord = float(mapY) + (stepY > 0 ? 0.0 : 1.0);
+          t = (planeCoord - u_camPos.y) / rayDir.y;
+        }
+        vec2 hitXY = u_camPos + rayDir * t;
+        vec3 exactWorldPos = vec3(hitXY, worldZ);
+
+        // Use exact position directly (no offset needed anymore)
+        float lit = clamp(accumulateTorchLit(exactWorldPos, wallNormalTorch), 0.0, 1.0);
+
+        // rest unchanged
+        float base = rowShade + lit * 0.6;
+        float warmShift = 0.75 + 0.45 * lit;
+        vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
+
+        vec3 finalCol = tex.rgb * base + torchAdd;
+
+        wallCol = vec4(finalCol, tex.a);
+        wallDist = perpDist;
+        wallHit = true;
+      }
       break;
     }
   }
-  float perpDist = u_depthFar;
-  float floorH = u_playerFloor;
-  float ceilH = u_playerFloor + 2.0;
-  float lineHeight = 0.0;
-  float lineTop = -1e6;
-  float lineBottom = -1e6;
-  if (hit) {
-    perpDist = (side == 0)
-      ? (float(mapX) - u_camPos.x + float(1 - stepX) * 0.5) / rayDir.x
-      : (float(mapY) - u_camPos.y + float(1 - stepY) * 0.5) / rayDir.y;
-    if (perpDist < 0.001) perpDist = 0.001;
-    floorH = u_heightMin + (cell.g * 255.0) * (u_heightRange / 255.0);
-    ceilH = u_heightMin + (cell.b * 255.0) * (u_heightRange / 255.0);
-    lineHeight = (ceilH - floorH) * u_focalLength / perpDist;
-    lineTop = horizon - (ceilH - u_eyeZ) * u_focalLength / perpDist;
-    lineBottom = horizon - (floorH - u_eyeZ) * u_focalLength / perpDist;
-  }
-  float depth = clamp(perpDist / u_depthFar, 0.0, 1.0);
-  float wallDistRay = u_depthFar;
-  bool wallHit = false;
-  float wallDist = u_depthFar;
-  vec4 wallCol = vec4(0.0);
-  if (hit) {
-    wallDistRay = (side == 0) ? (sideDistX - deltaDistX) : (sideDistY - deltaDistY);
-    if (wallDistRay < 0.001) wallDistRay = 0.001;
-  }
-  float extendBottom = horizon - ((u_minFloor - u_eyeZ) * u_focalLength / perpDist);
-  float extendedBottom = max(lineBottom, extendBottom);
-  if (hit && frag.y >= lineTop && frag.y <= extendedBottom) {
-    float wallX = (side == 0) ? (u_camPos.y + perpDist * rayDir.y) : (u_camPos.x + perpDist * rayDir.x);
-    wallX = fract(wallX);
-    float u = fract(wallX * u_wallUScale);
-    float globalV = (frag.y - lineTop) / max(1.0, extendedBottom - lineTop);
-    float wallHeight = max(0.001, ceilH - floorH);
-    float worldZ = u_eyeZ + (horizon - frag.y) * (perpDist / u_focalLength);
-    float vRaw = (ceilH - worldZ) / wallHeight;
-    float v = mod(vRaw, 2.0);
-    if (v < 0.0) v += 2.0;
-    if (v > 1.0) v = 2.0 - v;
-    v = clamp(v, 0.0, 0.9999);
-    if (frag.y > lineBottom) {
-      v = clamp(globalV, 0.0, 0.9999);
-    }
-    int tileId = int(cell.r * 255.0 + 0.5);
-    int col = tileId % u_atlasCols;
-    int row = tileId / u_atlasCols;
-    vec2 atlasUV = (vec2(float(col), float(row)) + vec2(u, v)) / vec2(float(u_atlasCols), float(u_atlasRows));
-    vec4 tex = texture(u_wallAtlas, atlasUV);
-    if (tex.a > 0.04) {
-    float shade = max(0.2, 1.0 - perpDist / 10.0);
-    float sideFactor = (side == 1) ? 0.85 : 1.0;
-    vec2 normal = (side == 0) ? vec2(float(stepX), 0.0) : vec2(0.0, float(stepY));
-    float dotLight = clamp(dot(normal, u_lightDir), -1.0, 1.0);
-    float lightFactor = clamp(0.6 + 0.4 * dotLight, 0.2, 1.2);
-    float litShade = shade * sideFactor * (1.0 - u_lightIntensity + u_lightIntensity * lightFactor);
-    float grad = max(0.35, 1.0 - 0.18 * globalV);
-    float rowShade = litShade * grad;
-    vec2 hitPos = u_camPos + rayDir * perpDist;
-    float lit = clamp(accumulateTorch(vec3(hitPos, worldZ)), 0.0, 1.0);
-    float base = rowShade + lit * 0.5;
-    float warmShift = 0.75 + 0.45 * lit;
-    vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
-    vec3 finalCol = tex.rgb * base + torchAdd;
-      wallHit = true;
-      wallDist = perpDist;
-      wallCol = vec4(finalCol, tex.a);
-    }
-  }
-  // Horizontal floor casting (raymarch across cells for correct steps)
-  float floorDist = u_depthFar;
-  float hitFloorH = u_playerFloor;
-  bool floorHit = false;
 
-  if (frag.y > horizon) {
-    float tanV = (frag.y - horizon) / u_focalLength;
-    if (tanV > 0.0) {
-      int fMapX = int(floor(u_camPos.x));
-      int fMapY = int(floor(u_camPos.y));
-      float fSideDistX = (rayDir.x < 0.0 ? (u_camPos.x - float(fMapX)) : (float(fMapX + 1) - u_camPos.x)) * deltaDistX;
-      float fSideDistY = (rayDir.y < 0.0 ? (u_camPos.y - float(fMapY)) : (float(fMapY + 1) - u_camPos.y)) * deltaDistY;
-      float fCurrDist = 0.0;
+  // Horizontal floor casting
+  float tanV = (frag.y - horizon) / u_focalLength;
+  if (tanV > 0.0) {
+    int fMapX = int(floor(u_camPos.x));
+    int fMapY = int(floor(u_camPos.y));
+    float fSideDistX = (rayDir.x < 0.0 ? (u_camPos.x - float(fMapX)) : (float(fMapX + 1) - u_camPos.x)) * deltaDistX;
+    float fSideDistY = (rayDir.y < 0.0 ? (u_camPos.y - float(fMapY)) : (float(fMapY + 1) - u_camPos.y)) * deltaDistY;
+    float fCurrDist = 0.0;
 
-      if (u_skipBackCell == 1 && (fMapX != u_playerTile.x || fMapY != u_playerTile.y)) {
-        float firstNextDist = min(fSideDistX, fSideDistY);
-        fCurrDist = firstNextDist;
-        if (fSideDistX < fSideDistY) {
-          fSideDistX += deltaDistX;
-          fMapX += stepX;
-        } else {
-          fSideDistY += deltaDistY;
-          fMapY += stepY;
-        }
+    if (u_skipBackCell == 1 && (fMapX != u_playerTile.x || fMapY != u_playerTile.y)) {
+      float firstNext = min(fSideDistX, fSideDistY);
+      fCurrDist = firstNext;
+      if (fSideDistX < fSideDistY) {
+        fSideDistX += deltaDistX;
+        fMapX += stepX;
+      } else {
+        fSideDistY += deltaDistY;
+        fMapY += stepY;
       }
+    }
 
-      for (int i = 0; i < MAX_STEPS; i++) {
-        if (i >= u_maxSteps) break;
-        float fNextDist = min(fSideDistX, fSideDistY);
-        if (!inBounds(fMapX, fMapY)) break;
+    for (int i = 0; i < MAX_STEPS; i++) {
+      if (i >= u_maxSteps) break;
+      float fNextDist = min(fSideDistX, fSideDistY);
 
+      if (inBounds(fMapX, fMapY)) {
         vec4 fCell = fetchCell(fMapX, fMapY);
         if (fCell.a < 0.5) {
           float h = u_heightMin + fCell.g * 255.0 * (u_heightRange / 255.0);
           if (h < u_eyeZ) {
             float dPlane = (u_eyeZ - h) / tanV;
-            if (dPlane >= fCurrDist && dPlane < fNextDist && dPlane < u_depthFar) {
-              vec2 hitPos = u_camPos + rayDir * dPlane;
-              int hitX = int(floor(hitPos.x));
-              int hitY = int(floor(hitPos.y));
-              if (hitX == fMapX && hitY == fMapY) {
-                floorDist = dPlane;
-                hitFloorH = h;
-                floorHit = true;
-                break;
-              }
+            if (dPlane >= fCurrDist && dPlane < fNextDist && dPlane < wallDist && (!sideHit || dPlane < sideDistClosest)) {
+              floorDist = dPlane;
+              floorH = h;
+              floorHit = true;
+              break;
             }
           }
         }
-
-        fCurrDist = fNextDist;
-        if (fSideDistX < fSideDistY) {
-          fSideDistX += deltaDistX;
-          fMapX += stepX;
-        } else {
-          fSideDistY += deltaDistY;
-          fMapY += stepY;
-        }
-
-        if (!inBounds(fMapX, fMapY)) break;
-        vec4 stopCell = fetchCell(fMapX, fMapY);
-        if (stopCell.a >= 0.5) break;
       }
+
+      fCurrDist = fNextDist;
+      if (fSideDistX < fSideDistY) {
+        fSideDistX += deltaDistX;
+        fMapX += stepX;
+      } else {
+        fSideDistY += deltaDistY;
+        fMapY += stepY;
+      }
+
+      if (!inBounds(fMapX, fMapY) || fetchCell(fMapX, fMapY).a >= 0.5) break;
     }
   }
 
-  // Render horizontal floor if it's the closest visible surface for this pixel
+  // Render in correct priority with proper occlusion
   bool wallOccludes = wallHit && frag.y >= lineTop && frag.y <= extendedBottom;
   bool sideOccludes = sideHit;
   if (floorHit &&
-      (!sideOccludes || floorDist < sideDist) &&
+      (!sideOccludes || floorDist < sideDistClosest) &&
       (!wallOccludes || floorDist < wallDist)) {
-    vec3 hitPos = vec3(u_camPos + rayDir * floorDist, hitFloorH);
-    float fracU = fract(hitPos.x);
-    float fracV = fract(hitPos.y);
-    vec4 tex = texture(u_floorTex, vec2(fracU, fracV));
+    vec3 hitPos = vec3(u_camPos + rayDir * floorDist, floorH);
+    vec2 frac = fract(hitPos.xy);
+    vec4 tex = texture(u_floorTex, frac);
 
-    float shade = max(0.2, 1.0 - floorDist / 10.0);
-    float lit = clamp(accumulateTorch(hitPos), 0.0, 1.0);
+    vec3 normal = vec3(0.0, 0.0, 1.0);
+    float lit = clamp(accumulateTorchLit(hitPos, normal), 0.0, 1.0);
 
-    float base = shade + lit * 0.5;
+    float shade = max(0.3, 1.0 - floorDist / 10.0);
+    float base = shade + lit * 0.6;
     float warmShift = 0.75 + 0.45 * lit;
     vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
 
-    vec3 col = tex.rgb * base + torchAdd;
-    outColor = vec4(col, 1.0);
+    outColor = vec4(tex.rgb * base + torchAdd, 1.0);
     gl_FragDepth = floorDist / u_depthFarDepth;
     return;
   }
+
+  // Sky only when no surface occupies this pixel.
   if (frag.y < horizon && !wallHit && !sideHit) {
     float skyT = clamp((1.0 - v_uv.y) * 2.0, 0.0, 1.0);
     outColor = vec4(mix(u_skyTop, u_skyBot, skyT), 1.0);
     gl_FragDepth = 1.0;
     return;
   }
+
   float nearestDist = wallHit ? wallDist : u_depthFar;
-  if (sideHit && sideDist < nearestDist) {
-    outColor = vec4(sideCol, 1.0);
-    gl_FragDepth = sideDist / u_depthFarDepth;
+  if (sideHit && sideDistClosest < nearestDist) {
+    outColor = vec4(sideColClosest, 1.0);
+    gl_FragDepth = sideDistClosest / u_depthFarDepth;
     return;
   }
   if (wallHit) {
@@ -586,6 +619,7 @@ void main() {
     gl_FragDepth = wallDist / u_depthFarDepth;
     return;
   }
+
   outColor = vec4(0.0, 0.0, 0.0, 1.0);
   gl_FragDepth = 1.0;
 }`;
@@ -791,22 +825,38 @@ void main() {
       } else {
         this.atlasInfo = { canvas: null, cols: 1, rows: 1, map: {} };
       }
-
       const wallDefault = this.atlasInfo.map.wall ?? 0;
       const data = new Uint8Array(layoutW * layoutH * 4);
+
       for (let y = 0; y < layoutH; y++) {
         for (let x = 0; x < layoutW; x++) {
           const idx = (y * layoutW + x) * 4;
           const cell = cells[`${x},${y}`] || {};
           const tile = cell.tile || 'floor';
-          const isSolid = tile === 'wall' || tile === 'door' || tile === 'torch' || tile === 'pillar';
-          const tileName = tile === 'torch' ? 'wall' : tile;
-          const tileId = isSolid ? (this.atlasInfo.map[tileName] ?? wallDefault) : wallDefault;
-          const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
-          const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + 2;
+
+          // Only solid doors should block rays. If door metadata is missing, treat as OPEN.
+          const isDoorClosed = (tile === 'door') && (cell?.door?.isOpen === false);
+
+          const isSolid =
+            tile === 'wall' ||
+            tile === 'torch' ||
+            tile === 'pillar' ||
+            isDoorClosed;
+
+          // Torch uses wall art. Doors can also fall back to wall art if you don't have a door atlas entry.
+          const tileName = (tile === 'torch' || tile === 'door') ? 'wall' : tile;
+
+          const tileId = isSolid
+            ? (this.atlasInfo.map[tileName] ?? wallDefault)
+            : wallDefault;
+
+          const floorH = (typeof cell.floorHeight === 'number') ? cell.floorHeight : 0;
+          const ceilH  = (typeof cell.ceilHeight  === 'number') ? cell.ceilHeight  : floorH + 2;
+
           const fh = Math.max(0, Math.min(255, Math.round(((floorH - minH) / range) * 255)));
-          const ch = Math.max(0, Math.min(255, Math.round(((ceilH - minH) / range) * 255)));
-          data[idx] = tileId;
+          const ch = Math.max(0, Math.min(255, Math.round(((ceilH  - minH) / range) * 255)));
+
+          data[idx]     = tileId;
           data[idx + 1] = fh;
           data[idx + 2] = ch;
           data[idx + 3] = isSolid ? 255 : 0;
@@ -1492,10 +1542,24 @@ void main() {
         if (tex) {
           // Avoid the "squashed" look when the sprite is clipped by the top of the screen:
           // preserve the *raw* projected bounds and crop UVs to match the visible slice.
+
           const rawH = Math.max(1, spr.rawDrawEndY - spr.rawDrawStartY);
-          const vAtY = (y) => 1 - (y - spr.rawDrawStartY) / rawH; // canvas-style: top=1, bottom=0
-          const topV = Math.max(0, Math.min(1, vAtY(spr.drawStartY)));
-          const bottomV = Math.max(0, Math.min(1, vAtY(spr.drawEndY)));
+
+          // Because getSpriteTexture() uploads with UNPACK_FLIP_Y_WEBGL = true,
+          // V=0 is the *top* of the original image and V=1 is the bottom.
+          const vAtY = (y) => (y - spr.rawDrawStartY) / rawH; // top=0, bottom=1
+
+          let topV = Math.max(0, Math.min(1, vAtY(spr.drawStartY)));
+          let bottomV = Math.max(0, Math.min(1, vAtY(spr.drawEndY)));
+          if (spr.type === 'torch') {
+            topV = 1 - topV;
+            bottomV = 1 - bottomV;
+          }
+
+          //const rawH = Math.max(1, spr.rawDrawEndY - spr.rawDrawStartY);
+          //const vAtY = (y) => 1 - (y - spr.rawDrawStartY) / rawH; // canvas-style: top=1, bottom=0
+          //const topV = Math.max(0, Math.min(1, vAtY(spr.drawStartY)));
+          //const bottomV = Math.max(0, Math.min(1, vAtY(spr.drawEndY)));
           const verts = new Float32Array([
             (spr.drawLeft / width) * 2 - 1, 1 - (spr.drawEndY / height) * 2, 0, bottomV, spr.depth,
             (spr.drawRight / width) * 2 - 1, 1 - (spr.drawEndY / height) * 2, 1, bottomV, spr.depth,
