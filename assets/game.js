@@ -10222,6 +10222,10 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const TORCH_LIGHT_RADIUS = 6.0;
   const TORCH_LIGHT_FALLOFF = 0.6;
   const TORCH_LIGHT_COLOR = { r: 255, g: 190, b: 130 };
+  // Per-surface torch tuning knobs (1.0 = default).
+  const TORCH_WALL_BOOST = 1.0;
+  const TORCH_SIDE_BOOST = 1.0;
+  const TORCH_FLOOR_BOOST = 1.0;
   const torchLights = [];
   const now = performance.now();
   let needsAnimation = false;
@@ -10474,8 +10478,10 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     ? 1000000
     : 18.0;
 
+  const TORCH_FLICKER_SPEED = 0.6;
+
   function torchFlicker(seed, timeMs) {
-    const t = timeMs * 0.001;
+    const t = timeMs * 0.001 * TORCH_FLICKER_SPEED;
     const speedMod = 0.65
       + 0.25 * Math.sin(t * (0.35 + seed * 0.12) + seed * 5.1)
       + 0.1 * Math.sin(t * (0.07 + seed * 0.03) + seed * 17.3);
@@ -10528,7 +10534,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     return lights;
   }
 
-  function applyTorchLight(sample, shade, wx, wy, wz, normal) {
+  function applyTorchLight(sample, shade, wx, wy, wz, normal, boost = 1.0) {
     if (!torchLights.length) {
       return {
         r: Math.round(sample.r * shade),
@@ -10554,11 +10560,12 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
       };
     }
     const lit = Math.max(0, Math.min(1, total));
-    const base = shade + lit * 0.5;
-    const warmShift = 0.75 + 0.45 * lit;
-    const r = Math.min(255, sample.r * base + TORCH_LIGHT_COLOR.r * lit * 0.35);
-    const g = Math.min(255, sample.g * base + TORCH_LIGHT_COLOR.g * lit * 0.25 * warmShift);
-    const b = Math.min(255, sample.b * base + TORCH_LIGHT_COLOR.b * lit * 0.2 * warmShift);
+    const litScaled = Math.max(0, Math.min(1.5, lit * boost));
+    const base = shade + litScaled * 0.5;
+    const warmShift = 0.75 + 0.45 * litScaled;
+    const r = Math.min(255, sample.r * base + TORCH_LIGHT_COLOR.r * litScaled * 0.35);
+    const g = Math.min(255, sample.g * base + TORCH_LIGHT_COLOR.g * litScaled * 0.25 * warmShift);
+    const b = Math.min(255, sample.b * base + TORCH_LIGHT_COLOR.b * litScaled * 0.2 * warmShift);
     return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
   }
 
@@ -10742,7 +10749,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
               ? { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]) }
               : { r: 0, g: 0, b: 0 };
             const floorNormal = { x: 0, y: 0, z: 1 };
-            const lit = applyTorchLight(sample, shade, hitCellX + hitFracX, hitCellY + hitFracY, surfaceH, floorNormal);
+            const lit = applyTorchLight(sample, shade, hitCellX + hitFracX, hitCellY + hitFracY, surfaceH, floorNormal, TORCH_FLOOR_BOOST);
             ctx.fillStyle = `rgb(${lit.r},${lit.g},${lit.b})`;
           } else {
             const shaded = shadeColor(color, shade);
@@ -11123,7 +11130,7 @@ if (!hit) continue;
             const ldz = lightElev / dirLen;
             const ndotl = Math.max(0, nWorld.x * ldx + nWorld.y * ldy + nWorld.z * ldz);
             const normalShade = 0.6 + 0.4 * ndotl;
-            const lit = applyTorchLight(sample, shaded * normalShade, hitWX, hitWY, worldZ, nWorld);
+            const lit = applyTorchLight(sample, shaded * normalShade, hitWX, hitWY, worldZ, nWorld, TORCH_WALL_BOOST);
           const r = lit.r;
           const g = lit.g;
           const b = lit.b;

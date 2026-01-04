@@ -1082,7 +1082,7 @@ function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, includeWall
   }
   // Torch sprite: draw only the wall sconce (no baked flame/halo).
   const cx = s / 2;
-  const cy = s * 0.35;
+  const cy = s * 0.32;
   const metal = (torchStyle && torchStyle.metalColor) || "#2a2218";
   const metalAccent = (torchStyle && torchStyle.metalAccent) || "#3b3024";
   // Bracket / holder

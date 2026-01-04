@@ -98,8 +98,10 @@
     return !!(img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0);
   }
 
+  const TORCH_FLICKER_SPEED = 0.6;
+
   function torchFlicker(seed, timeMs) {
-    const t = timeMs * 0.001;
+    const t = timeMs * 0.001 * TORCH_FLICKER_SPEED;
     const speedMod = 0.65
       + 0.25 * Math.sin(t * (0.35 + seed * 0.12) + seed * 5.1)
       + 0.1 * Math.sin(t * (0.07 + seed * 0.03) + seed * 17.3);
@@ -297,6 +299,10 @@ const int MAX_STEPS = 400;
 const int MAX_TORCH = 32;
 const float TORCH_FALLOFF = 0.6;
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
+// Per-surface torch tuning knobs (1.0 = default).
+const float TORCH_WALL_BOOST = 1.0;
+const float TORCH_SIDE_BOOST = 1.0;
+const float TORCH_FLOOR_BOOST = 1.0;
 
 vec4 fetchCell(int x, int y) {
   int yy = u_flipY == 1 ? (u_gridSize.y - 1 - y) : y;
@@ -420,11 +426,12 @@ void main() {
 
           vec3 worldPos = vec3(u_camPos + rayDir * nextDist, bottomZ + world_v);
           float lit = clamp(accumulateTorchLit(worldPos, normal), 0.0, 1.0);
+          float litSide = clamp(lit * TORCH_SIDE_BOOST, 0.0, 1.5);
 
           float shade = max(0.3, 1.0 - nextDist / 10.0);
-          float base = shade + lit * 0.6;
-          float warmShift = 0.75 + 0.45 * lit;
-          vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
+          float base = shade + litSide * 0.6;
+          float warmShift = 0.75 + 0.45 * litSide;
+          vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * litSide;
           vec3 col = tex.rgb * base + torchAdd;
 
           if (nextDist < sideDistClosest) {
@@ -507,11 +514,12 @@ void main() {
 
         // Use exact position directly (no offset needed anymore)
         float lit = clamp(accumulateTorchLit(exactWorldPos, wallNormalTorch), 0.0, 1.0);
+        float litWall = clamp(lit * TORCH_WALL_BOOST, 0.0, 1.5);
 
         // rest unchanged
-        float base = rowShade + lit * 0.6;
-        float warmShift = 0.75 + 0.45 * lit;
-        vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
+        float base = rowShade + litWall * 0.6;
+        float warmShift = 0.75 + 0.45 * litWall;
+        vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * litWall;
 
         vec3 finalCol = tex.rgb * base + torchAdd;
 
@@ -589,11 +597,12 @@ void main() {
 
     vec3 normal = vec3(0.0, 0.0, 1.0);
     float lit = clamp(accumulateTorchLit(hitPos, normal), 0.0, 1.0);
+    float litFloor = clamp(lit * TORCH_FLOOR_BOOST, 0.0, 1.5);
 
     float shade = max(0.3, 1.0 - floorDist / 10.0);
-    float base = shade + lit * 0.6;
-    float warmShift = 0.75 + 0.45 * lit;
-    vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * lit;
+    float base = shade + litFloor * 0.6;
+    float warmShift = 0.75 + 0.45 * litFloor;
+    vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * litFloor;
 
     outColor = vec4(tex.rgb * base + torchAdd, 1.0);
     gl_FragDepth = floorDist / u_depthFarDepth;
