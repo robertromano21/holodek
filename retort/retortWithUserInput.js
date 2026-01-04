@@ -2782,6 +2782,7 @@ You are designing a dungeon blueprint for a grid-based raycast renderer.
 Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
   Grid size: ${size}x${size}. Indoor: ${classification && classification.indoor === true}.
   Biome: ${classification && classification.biome ? classification.biome : "unknown"}.
+  Features: ${Array.isArray(classification?.features) && classification.features.length ? classification.features.join(", ") : "none"}.
   Available custom tile ids: ${customList.length ? customList.join(", ") : "none"}.
   Puzzle description: ${puzzleDesc || "none"}.
 
@@ -2812,6 +2813,7 @@ Rules:
   - Indoor: use 2-4 distinct heightLevels and connect rooms with corridors (style L/H/V).
   - Indoor: paths between rooms should use "ramp": true where heights differ.
 - Outdoor: use heightfield + mountains/spires/ruin walls; fewer rooms.
+  - If Features include pillars/arches/statues/altars/broken_columns, express them via prefabs/volumes/props.
   - Keep values within 0..1. Avoid overlaps near the start (center-bottom).
   - If a puzzle is present, express it as volumes/prefabs/props.
 JSON only.`;
@@ -3183,9 +3185,9 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
       cells[rightKey].ceilHeight = baseFloor + baseCeil;
     }
 
-    // Raise walls adjacent to floors
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
+  // Raise walls adjacent to floors
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
         const key = `${x},${y}`;
         const cell = cells[key];
         if (cell.tile !== 'wall') continue;
@@ -3213,29 +3215,6 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
     }
   }
 
-  if (Array.isArray(blueprint?.rooms)) {
-    blueprint.rooms.forEach((r, idx) => {
-      let roomFloor = Number.isFinite(r.floor) ? r.floor : baseFloor;
-      if (indoor && !Number.isFinite(r.floor)) {
-        const levels = [-1.0, -0.5, 0, 0.5, 1.0];
-        roomFloor = baseFloor + levels[(seed + idx) % levels.length];
-      }
-      const roomCeil = Number.isFinite(r.ceil) ? r.ceil : roomFloor + baseCeil;
-      carveRect(r, 'floor', roomFloor, roomCeil);
-    });
-  }
-
-  if (Array.isArray(blueprint?.paths)) {
-    blueprint.paths.forEach(carvePath);
-  }
-
-  if (Array.isArray(blueprint?.volumes)) {
-    blueprint.volumes.forEach(v => {
-      const tile = typeof v.tile === 'string' ? v.tile : 'wall';
-      carveRect(v, tile, Number.isFinite(v.floor) ? v.floor : baseFloor, Number.isFinite(v.ceil) ? v.ceil : baseFloor + baseCeil);
-    });
-  }
-
   function addPillar(x, y, height) {
     const key = `${x},${y}`;
     const cell = cells[key];
@@ -3261,81 +3240,165 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
     }
   }
 
-  if (Array.isArray(blueprint?.prefabs)) {
-    blueprint.prefabs.forEach(p => {
-      const px = toGridX(p.x || 0.5);
-      const py = toGridY(p.y || 0.5);
-      const pw = Math.max(1, Math.floor(clamp01(p.w || 0.1) * w));
-      const ph = Math.max(1, Math.floor(clamp01(p.h || 0.1) * h));
-      const height = Number.isFinite(p.height) ? p.height : baseCeil;
-      switch (String(p.type || '').toLowerCase()) {
-        case 'pillar_cluster': {
-          const count = Math.max(2, Math.min(6, Math.floor(p.count || 3)));
-          for (let i = 0; i < count; i++) {
-            const ox = px + Math.floor((Math.random() - 0.5) * pw);
-            const oy = py + Math.floor((Math.random() - 0.5) * ph);
-            addPillar(ox, oy, height);
-          }
-          break;
+  function applyRoomsAndPaths() {
+    if (Array.isArray(blueprint?.rooms)) {
+      blueprint.rooms.forEach((r, idx) => {
+        let roomFloor = Number.isFinite(r.floor) ? r.floor : baseFloor;
+        if (indoor && !Number.isFinite(r.floor)) {
+          const levels = [-1.0, -0.5, 0, 0.5, 1.0];
+          roomFloor = baseFloor + levels[(seed + idx) % levels.length];
         }
-        case 'arch': {
-          addPillar(px - Math.floor(pw / 3), py, height);
-          addPillar(px + Math.floor(pw / 3), py, height);
-          break;
-        }
-        case 'platform': {
-          carveRect({ x: p.x, y: p.y, w: p.w, h: p.h }, 'floor', baseFloor + Math.max(0.2, height * 0.2), baseFloor + height);
-          break;
-        }
-        case 'ramp': {
-          carvePath({
-            from: [p.x || 0.4, p.y || 0.6],
-            to: [p.x || 0.6, p.y || 0.4],
-            width: 0.05,
-            flatten: false
-          });
-          break;
-        }
-        case 'spire': {
-          carveRect({ x: p.x, y: p.y, w: p.w || 0.05, h: p.h || 0.05 }, 'wall', baseFloor, baseFloor + height * 1.6);
-          break;
-        }
-        case 'ruin_wall': {
-          carveRect({ x: p.x, y: p.y, w: p.w || 0.2, h: p.h || 0.05 }, 'wall', baseFloor, baseFloor + height);
-          break;
-        }
-        case 'mountain': {
-          addMountain(px, py, Math.max(2, Math.floor(pw / 2)), Math.max(0.5, height));
-          break;
-        }
-      }
-    });
+        const roomCeil = Number.isFinite(r.ceil) ? r.ceil : roomFloor + baseCeil;
+        carveRect(r, 'floor', roomFloor, roomCeil);
+      });
+    }
+
+    if (Array.isArray(blueprint?.paths)) {
+      blueprint.paths.forEach(carvePath);
+    }
   }
 
-  // Props: map to custom tile names if available
-  const customMap = {};
-  if (Array.isArray(customTiles)) {
-    customTiles.forEach(t => {
-      if (!t) return;
-      if (t.type) customMap[t.type] = t.name || `custom_${t.type}`;
-      if (t.name) customMap[t.name] = t.name;
-    });
+  function applyBlueprintFeatures() {
+    if (Array.isArray(blueprint?.volumes)) {
+      blueprint.volumes.forEach(v => {
+        const tile = typeof v.tile === 'string' ? v.tile : 'wall';
+        carveRect(v, tile, Number.isFinite(v.floor) ? v.floor : baseFloor, Number.isFinite(v.ceil) ? v.ceil : baseFloor + baseCeil);
+      });
+    }
+
+    if (Array.isArray(blueprint?.prefabs)) {
+      blueprint.prefabs.forEach(p => {
+        const px = toGridX(p.x || 0.5);
+        const py = toGridY(p.y || 0.5);
+        const pw = Math.max(1, Math.floor(clamp01(p.w || 0.1) * w));
+        const ph = Math.max(1, Math.floor(clamp01(p.h || 0.1) * h));
+        const height = Number.isFinite(p.height) ? p.height : baseCeil;
+        switch (String(p.type || '').toLowerCase()) {
+          case 'pillar_cluster': {
+            const count = Math.max(2, Math.min(6, Math.floor(p.count || 3)));
+            for (let i = 0; i < count; i++) {
+              const ox = px + Math.floor((Math.random() - 0.5) * pw);
+              const oy = py + Math.floor((Math.random() - 0.5) * ph);
+              addPillar(ox, oy, height);
+            }
+            break;
+          }
+          case 'arch': {
+            addPillar(px - Math.floor(pw / 3), py, height);
+            addPillar(px + Math.floor(pw / 3), py, height);
+            break;
+          }
+          case 'platform': {
+            carveRect({ x: p.x, y: p.y, w: p.w, h: p.h }, 'floor', baseFloor + Math.max(0.2, height * 0.2), baseFloor + height);
+            break;
+          }
+          case 'ramp': {
+            carvePath({
+              from: [p.x || 0.4, p.y || 0.6],
+              to: [p.x || 0.6, p.y || 0.4],
+              width: 0.05,
+              flatten: false
+            });
+            break;
+          }
+          case 'spire': {
+            carveRect({ x: p.x, y: p.y, w: p.w || 0.05, h: p.h || 0.05 }, 'wall', baseFloor, baseFloor + height * 1.6);
+            break;
+          }
+          case 'ruin_wall': {
+            carveRect({ x: p.x, y: p.y, w: p.w || 0.2, h: p.h || 0.05 }, 'wall', baseFloor, baseFloor + height);
+            break;
+          }
+          case 'mountain': {
+            addMountain(px, py, Math.max(2, Math.floor(pw / 2)), Math.max(0.5, height));
+            break;
+          }
+        }
+      });
+    }
+
+    // Props: map to custom tile names if available
+    const customMap = {};
+    if (Array.isArray(customTiles)) {
+      customTiles.forEach(t => {
+        if (!t) return;
+        if (t.type) customMap[t.type] = t.name || `custom_${t.type}`;
+        if (t.name) customMap[t.name] = t.name;
+      });
+    }
+    if (Array.isArray(blueprint?.props)) {
+      blueprint.props.forEach(p => {
+        const type = p.type;
+        if (!type) return;
+        const tileName = customMap[type] || customMap[String(type).replace(/^custom_/, '')];
+        if (!tileName) return;
+        const x = toGridX(p.x || 0.5);
+        const y = toGridY(p.y || 0.5);
+        const key = `${x},${y}`;
+        const cell = cells[key];
+        if (!cell || cell.tile !== 'floor') return;
+        cell.tile = tileName;
+        cell.feature = tileName;
+      });
+    }
+
+    const featureList = Array.isArray(classification?.features)
+      ? classification.features
+      : (Array.isArray(blueprint?.features) ? blueprint.features : []);
+    const wantsPillars = featureList.some(f => String(f).toLowerCase() === 'pillars');
+    const hasPillars = Object.values(cells).some(cell => cell && cell.tile === 'pillar');
+    if (indoor && wantsPillars && !hasPillars) {
+      const sx = Number.isFinite(dungeon.start?.x) ? dungeon.start.x : Math.floor(w / 2);
+      const sy = Number.isFinite(dungeon.start?.y) ? dungeon.start.y : Math.floor(h / 2);
+      const candidates = [];
+      for (let y = 1; y < h - 1; y++) {
+        for (let x = 1; x < w - 1; x++) {
+          const key = `${x},${y}`;
+          const cell = cells[key];
+          if (!cell || cell.tile !== 'floor') continue;
+          if (Math.abs(x - sx) <= 1 && Math.abs(y - sy) <= 1) continue;
+          const north = cells[`${x},${y - 1}`];
+          const south = cells[`${x},${y + 1}`];
+          const west = cells[`${x - 1},${y}`];
+          const east = cells[`${x + 1},${y}`];
+          if (!north || !south || !west || !east) continue;
+          if (north.tile !== 'floor' || south.tile !== 'floor' || west.tile !== 'floor' || east.tile !== 'floor') continue;
+          candidates.push({ x, y, score: hash2(x, y) });
+        }
+      }
+      candidates.sort((a, b) => b.score - a.score);
+      const targetCount = Math.max(2, Math.min(6, Math.floor((w * h) / 200)));
+      for (let i = 0; i < Math.min(targetCount, candidates.length); i++) {
+        const c = candidates[i];
+        addPillar(c.x, c.y, baseCeil);
+      }
+    }
   }
-  if (Array.isArray(blueprint?.props)) {
-    blueprint.props.forEach(p => {
-      const type = p.type;
-      if (!type) return;
-      const tileName = customMap[type] || customMap[String(type).replace(/^custom_/, '')];
-      if (!tileName) return;
-      const x = toGridX(p.x || 0.5);
-      const y = toGridY(p.y || 0.5);
-      const key = `${x},${y}`;
-      const cell = cells[key];
-      if (!cell || cell.tile !== 'floor') return;
-      cell.tile = tileName;
-      cell.feature = tileName;
-    });
+
+  function applySafeSpawnZone() {
+    const sx = dungeon.start.x;
+    const sy = dungeon.start.y;
+    for (let y = Math.max(0, sy - 1); y <= Math.min(h - 1, sy + 1); y++) {
+      for (let x = Math.max(0, sx - 1); x <= Math.min(w - 1, sx + 1); x++) {
+        const key = `${x},${y}`;
+        const cell = cells[key];
+        if (!cell) continue;
+        cell.tile = 'floor';
+        if (!Number.isFinite(cell.floorHeight)) cell.floorHeight = baseFloor;
+        cell.ceilHeight = (Number.isFinite(cell.floorHeight) ? cell.floorHeight : baseFloor) + baseCeil;
+      }
+    }
   }
+
+  if (indoor && blueprint?.indoorPlan) {
+    buildIndoorFromPlan(blueprint.indoorPlan);
+    applyBlueprintFeatures();
+    applySafeSpawnZone();
+    return;
+  }
+
+  applyRoomsAndPaths();
+  applyBlueprintFeatures();
 
   // Convert steep slopes into walls for outdoor cliffs
   if (!indoor) {
@@ -3365,23 +3428,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   // Guaranteed safe spawn zone (prevents starting inside walls)
-  const sx = dungeon.start.x;
-  const sy = dungeon.start.y;
-  for (let y = Math.max(0, sy - 1); y <= Math.min(h - 1, sy + 1); y++) {
-    for (let x = Math.max(0, sx - 1); x <= Math.min(w - 1, sx + 1); x++) {
-      const key = `${x},${y}`;
-      const cell = cells[key];
-      if (!cell) continue;
-      cell.tile = 'floor';
-      if (!Number.isFinite(cell.floorHeight)) cell.floorHeight = baseFloor;
-      cell.ceilHeight = (Number.isFinite(cell.floorHeight) ? cell.floorHeight : baseFloor) + baseCeil;
-    }
-  }
-
-  if (indoor) {
-    buildIndoorFromPlan(blueprint?.indoorPlan || null);
-    return;
-  }
+  applySafeSpawnZone();
 }
 
 async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast) {
@@ -3656,6 +3703,38 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       buildOutdoorLayout(dungeon, classification, customTiles);
     } else {
       buildIndoorLayout(dungeon, classification);
+    }
+
+    try {
+      const cellsArray = [];
+      for (const [key, cell] of Object.entries(dungeon.cells || {})) {
+        const comma = key.indexOf(',');
+        if (comma <= 0) continue;
+        const x = Number(key.slice(0, comma));
+        const y = Number(key.slice(comma + 1));
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        cellsArray.push({ x, y, ...cell });
+      }
+      const tileCounts = cellsArray.reduce((acc, cell) => {
+        const t = cell.tile || 'floor';
+        acc[t] = (acc[t] || 0) + 1;
+        return acc;
+      }, {});
+      const specialTiles = cellsArray.filter((cell) => {
+        const t = cell.tile || '';
+        return t === 'pillar' || (t.startsWith && t.startsWith('custom_'));
+      });
+      const volumeTiles = cellsArray.filter((cell) => {
+        const t = cell.tile || '';
+        return t === 'pillar' || t === 'altar' || t === 'statue' || t === 'broken_columns';
+      });
+      console.log('[DungeonTest] blueprint volumes:', JSON.stringify(blueprint?.volumes || []));
+      console.log('[DungeonTest] blueprint prefabs:', JSON.stringify(blueprint?.prefabs || []));
+      console.log('[DungeonTest] tile counts:', JSON.stringify(tileCounts));
+      console.log('[DungeonTest] pillar/custom tiles:', JSON.stringify(specialTiles));
+      console.log('[DungeonTest] pillar/altar/statue/broken_columns tiles:', JSON.stringify(volumeTiles));
+    } catch (err) {
+      console.warn('[DungeonTest] Failed to log dungeon cells:', err);
     }
 
     for (let y = 1; y < dungeon.layout.height - 1; y++) {
@@ -3952,6 +4031,38 @@ function buildIndoorLayout(dungeon, classification) {
         cell.floorHeight = maxNeighborFloor;
         cell.ceilHeight  = maxNeighborFloor + 3.0; // slightly taller than rooms
       }
+    }
+  }
+
+  const featureList = Array.isArray(classification?.features) ? classification.features : [];
+  const wantsPillars = featureList.some(f => String(f).toLowerCase() === 'pillars');
+  const hasPillars = Object.values(cells).some(cell => cell && cell.tile === 'pillar');
+  if (wantsPillars && !hasPillars) {
+    const sx = Number.isFinite(dungeon.start?.x) ? dungeon.start.x : Math.floor(w / 2);
+    const sy = Number.isFinite(dungeon.start?.y) ? dungeon.start.y : Math.floor(h / 2);
+    const candidates = [];
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const key = `${x},${y}`;
+        const cell = cells[key];
+        if (!cell || cell.tile !== 'floor') continue;
+        if (Math.abs(x - sx) <= 1 && Math.abs(y - sy) <= 1) continue;
+        const north = cells[`${x},${y - 1}`];
+        const south = cells[`${x},${y + 1}`];
+        const west = cells[`${x - 1},${y}`];
+        const east = cells[`${x + 1},${y}`];
+        if (!north || !south || !west || !east) continue;
+        if (north.tile !== 'floor' || south.tile !== 'floor' || west.tile !== 'floor' || east.tile !== 'floor') continue;
+        candidates.push({ x, y });
+      }
+    }
+    candidates.sort(() => Math.random() - 0.5);
+    const targetCount = Math.max(2, Math.min(6, Math.floor((w * h) / 200)));
+    for (let i = 0; i < Math.min(targetCount, candidates.length); i++) {
+      const c = candidates[i];
+      const key = `${c.x},${c.y}`;
+      cells[key].tile = 'pillar';
+      cells[key].ceilHeight = (Number.isFinite(cells[key].floorHeight) ? cells[key].floorHeight : BASE_WALL_FLOOR) + 2.5;
     }
   }
 

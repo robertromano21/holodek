@@ -14,6 +14,7 @@ const MUSIC_STORE   = 'rooms';
 // --- IndexedDB for dungeon layouts ---
 const DUNGEON_DB_NAME = 'cotg-dungeons';
 const DUNGEON_STORE   = 'rooms';
+const DUNGEON_CACHE_VERSION = 2;
 let dungeonDBPromise = null;
 let lastDungeonGeoKey = null;
 
@@ -174,6 +175,11 @@ async function switchDungeonForCoordinates(coordString) {
     console.log('No cached dungeon yet for', geoKey);
     return; // server will generate it
   }
+  const cachedVersion = cached?._meta?.version || 0;
+  if (cachedVersion < DUNGEON_CACHE_VERSION) {
+    console.log('Discarding outdated dungeon cache on switch:', geoKey, 'version', cachedVersion);
+    return; // allow server to generate a fresh dungeon
+  }
 
   console.log('Switching dungeon due to coordinate change:', geoKey);
 
@@ -223,6 +229,22 @@ function logDungeonLayout(dungeon) {
 
   // One expandable object: tileMap["20,3"] → full tile object
   console.log('Tiles (keyed by "x,y"):', tileMap);
+
+  // Full cell dump (array of { x, y, ...cell }) for inspecting exact data.
+  try {
+    const cellsArray = [];
+    for (const [key, cell] of Object.entries(dungeon.cells)) {
+      const comma = key.indexOf(',');
+      if (comma <= 0) continue;
+      const x = Number(key.slice(0, comma));
+      const y = Number(key.slice(comma + 1));
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      cellsArray.push({ x, y, ...cell });
+    }
+    console.log('Dungeon cells array:', cellsArray);
+  } catch (err) {
+    console.warn('Failed to log dungeon cells array:', err);
+  }
 
   console.groupEnd();
 }
@@ -455,16 +477,20 @@ eventSource.onmessage = function(event) {
         } else {
           // 1️⃣ Check IndexedDB first
           const cached = await idbGetDungeon(geoKey);
+          const cachedVersion = cached?._meta?.version || 0;
     
-          if (cached) {
+          if (cached && cachedVersion >= DUNGEON_CACHE_VERSION) {
             console.log('Loaded dungeon from IndexedDB:', geoKey);
             currentDungeon = cached;
           } else {
+            if (cached) {
+              console.log('Discarding outdated dungeon cache:', geoKey, 'version', cachedVersion);
+            }
             console.log('Caching newly generated dungeon:', geoKey);
     
             dungeon.geoKey = geoKey;   // 🔑 attach before caching
             dungeon._meta = {
-              version: 1,
+              version: DUNGEON_CACHE_VERSION,
               cachedAt: Date.now()
             };
     
@@ -836,25 +862,87 @@ function canEnterTile(fromX, fromY, toX, toY) {
   return Math.abs(targetFloor - currentFloor) <= MAX_STEP;
 }
 
+function findNearestUnblockedTile(dungeon, start, maxRadius = 25) {
+  if (!dungeon || !dungeon.cells) return start || { x: 0, y: 0 };
+  const sx = (start && Number.isFinite(start.x)) ? start.x : 0;
+  const sy = (start && Number.isFinite(start.y)) ? start.y : 0;
+  const key = (x, y) => `${x},${y}`;
+  const visited = new Set([key(sx, sy)]);
+  const queue = [{ x: sx, y: sy, dist: 0 }];
+  let nearest = null;
+
+  while (queue.length) {
+    const { x, y, dist } = queue.shift();
+    const cell = dungeon.cells[key(x, y)];
+    if (cell && !isBlockedDungeonCell(cell)) {
+      nearest = { x, y };
+      break;
+    }
+    if (dist >= maxRadius) continue;
+    queue.push({ x: x + 1, y, dist: dist + 1 });
+    queue.push({ x: x - 1, y, dist: dist + 1 });
+    queue.push({ x, y: y + 1, dist: dist + 1 });
+    queue.push({ x, y: y - 1, dist: dist + 1 });
+  }
+
+  if (nearest) return nearest;
+  if (dungeon.start && Number.isFinite(dungeon.start.x) && Number.isFinite(dungeon.start.y)) {
+    return { x: dungeon.start.x, y: dungeon.start.y };
+  }
+  return { x: sx, y: sy };
+}
+
 function canOccupyPos(nextX, nextY) {
-  const fromX = Math.floor(playerPosX);
-  const fromY = Math.floor(playerPosY);
-  const samples = [
-    [nextX + PLAYER_RADIUS, nextY + PLAYER_RADIUS],
-    [nextX - PLAYER_RADIUS, nextY + PLAYER_RADIUS],
-    [nextX + PLAYER_RADIUS, nextY - PLAYER_RADIUS],
-    [nextX - PLAYER_RADIUS, nextY - PLAYER_RADIUS],
-    [nextX + PLAYER_RADIUS, nextY],
-    [nextX - PLAYER_RADIUS, nextY],
-    [nextX, nextY + PLAYER_RADIUS],
-    [nextX, nextY - PLAYER_RADIUS]
+  const currX = playerPosX;
+  const currY = playerPosY;
+  const offsets = [
+    [PLAYER_RADIUS, PLAYER_RADIUS],
+    [-PLAYER_RADIUS, PLAYER_RADIUS],
+    [PLAYER_RADIUS, -PLAYER_RADIUS],
+    [-PLAYER_RADIUS, -PLAYER_RADIUS],
+    [PLAYER_RADIUS, 0],
+    [-PLAYER_RADIUS, 0],
+    [0, PLAYER_RADIUS],
+    [0, -PLAYER_RADIUS]
   ];
-  for (const [sx, sy] of samples) {
-    const toX = Math.floor(sx);
-    const toY = Math.floor(sy);
+  for (const [ox, oy] of offsets) {
+    const fromX = Math.floor(currX + ox);
+    const fromY = Math.floor(currY + oy);
+    const toX = Math.floor(nextX + ox);
+    const toY = Math.floor(nextY + oy);
     if (!canEnterTile(fromX, fromY, toX, toY)) return false;
   }
   return true;
+}
+
+function ensurePlayerOnValidTile() {
+  if (!currentDungeon || !currentDungeon.cells) return false;
+  let adjusted = false;
+
+  if (!Number.isFinite(playerPosX) || !Number.isFinite(playerPosY)) {
+    playerPosX = playerDungeonX + 0.5;
+    playerPosY = playerDungeonY + 0.5;
+    adjusted = true;
+  }
+
+  const tileX = Math.floor(playerPosX);
+  const tileY = Math.floor(playerPosY);
+  const cell = currentDungeon.cells[`${tileX},${tileY}`];
+
+  if (!cell || isBlockedDungeonCell(cell)) {
+    const safe = findNearestUnblockedTile(currentDungeon, { x: tileX, y: tileY });
+    playerDungeonX = safe.x;
+    playerDungeonY = safe.y;
+    playerPosX = safe.x + 0.5;
+    playerPosY = safe.y + 0.5;
+    DUNGEON_MOVE.velX = 0;
+    DUNGEON_MOVE.velY = 0;
+    updatePlayerHeightFromCell();
+    syncCombatPlayerCenter();
+    return true;
+  }
+
+  return adjusted;
 }
 
 function syncCombatPlayerCenter() {
@@ -925,6 +1013,9 @@ function getPlayerPosForMap() {
 
 function updateDungeonMovement(now) {
   if (!currentDungeon) return false;
+  if (ensurePlayerOnValidTile()) {
+    renderDungeonView();
+  }
   if (!DUNGEON_MOVE.lastTime) DUNGEON_MOVE.lastTime = now;
   const dt = Math.min(0.05, (now - DUNGEON_MOVE.lastTime) / 1000);
   DUNGEON_MOVE.lastTime = now;
@@ -2005,7 +2096,7 @@ window.updateCombatScene = function(characters) {
                 this.dungeonGraphics.fillRect(gx, gy, size, size);
 
                 // Solid walls/doors only (remove torch/pillar if they are walkable)
-                if (tile === 'wall' || tile === 'door') {  // add back 'pillar' if pillars block
+                if (tile === 'wall' || tile === 'door' || tile === 'pillar') {
                     this.dungeonGraphics.fillStyle(wallColor, 0.65);
                     this.dungeonGraphics.fillRect(
                         gx,
@@ -9759,17 +9850,131 @@ function findNearestWalkableStart(dungeon, start, maxRadius = 25) {
   const sx = (start && typeof start.x === 'number') ? start.x : 0;
   const sy = (start && typeof start.y === 'number') ? start.y : 0;
 
+  const cells = dungeon.cells;
   const key = (x, y) => `${x},${y}`;
+  const isWalkable = (cell) => cell && cell.tile && cell.tile !== 'wall';
+
+  const indoorRooms = Array.isArray(dungeon.indoorRooms) ? dungeon.indoorRooms : null;
+  const isIndoor = dungeon.classification && dungeon.classification.indoor !== false;
+
+  const isInRoom = (x, y) => {
+    if (!isIndoor || !indoorRooms) return false;
+    for (const room of indoorRooms) {
+      if (
+        x >= room.x &&
+        x < room.x + room.w &&
+        y >= room.y &&
+        y < room.y + room.h
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const floorNeighborCount = (x, y) => {
+    const neighbors = [
+      cells[`${x + 1},${y}`],
+      cells[`${x - 1},${y}`],
+      cells[`${x},${y + 1}`],
+      cells[`${x},${y - 1}`]
+    ];
+    return neighbors.filter(n => n && n.tile === 'floor').length;
+  };
+
+  const floorDensity3x3 = (x, y) => {
+    let count = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const c = cells[`${x + dx},${y + dy}`];
+        if (c && c.tile === 'floor') count++;
+      }
+    }
+    return count;
+  };
+
+  const isCorridor = (x, y, cell) => {
+    if (!isIndoor) return false;
+    if (!cell || cell.tile !== 'floor') return false;
+    if (indoorRooms) return !isInRoom(x, y);
+    const neighbors = floorNeighborCount(x, y);
+    if (neighbors < 2) return false;
+    const density = floorDensity3x3(x, y);
+    return density <= 5;
+  };
+
+  // Build the largest walkable connected component for traversal safety.
+  const visitedAll = new Set();
+  let largestComponent = null;
+  let largestSize = 0;
+
+  for (const cellKey of Object.keys(cells)) {
+    if (visitedAll.has(cellKey)) continue;
+    const cell = cells[cellKey];
+    if (!isWalkable(cell)) {
+      visitedAll.add(cellKey);
+      continue;
+    }
+
+    const queue = [cellKey];
+    const comp = [];
+    visitedAll.add(cellKey);
+
+    while (queue.length) {
+      const k = queue.shift();
+      comp.push(k);
+      const [xStr, yStr] = k.split(',');
+      const x = parseInt(xStr, 10);
+      const y = parseInt(yStr, 10);
+      const neighborKeys = [
+        key(x + 1, y),
+        key(x - 1, y),
+        key(x, y + 1),
+        key(x, y - 1)
+      ];
+      for (const nk of neighborKeys) {
+        if (visitedAll.has(nk)) continue;
+        const nCell = cells[nk];
+        if (!isWalkable(nCell)) {
+          visitedAll.add(nk);
+          continue;
+        }
+        visitedAll.add(nk);
+        queue.push(nk);
+      }
+    }
+
+    if (comp.length > largestSize) {
+      largestSize = comp.length;
+      largestComponent = new Set(comp);
+    }
+  }
+
+  const inLargest = (x, y) => !largestComponent || largestComponent.has(key(x, y));
+  const pickFirstFromLargest = () => {
+    if (!largestComponent) return null;
+    for (const k of largestComponent) {
+      const [xStr, yStr] = k.split(',');
+      return { x: parseInt(xStr, 10), y: parseInt(yStr, 10) };
+    }
+    return null;
+  };
+
   const visited = new Set([key(sx, sy)]);
   const queue = [{ x: sx, y: sy, dist: 0 }];
+  let nearestWalkable = null;
 
   while (queue.length) {
     const { x, y, dist } = queue.shift();
-    const cell = dungeon.cells[key(x, y)];
+    const cell = cells[key(x, y)];
 
-    // Treat anything that's not an explicit wall as walkable
-    if (cell && cell.tile && cell.tile !== 'wall') {
-      return { x, y };
+    if (isWalkable(cell) && inLargest(x, y)) {
+      if (!nearestWalkable) {
+        nearestWalkable = { x, y };
+      }
+      if (!isIndoor || isCorridor(x, y, cell)) {
+        return { x, y };
+      }
     }
 
     if (dist >= maxRadius) continue;
@@ -9778,7 +9983,7 @@ function findNearestWalkableStart(dungeon, start, maxRadius = 25) {
       { x: x + 1, y },
       { x: x - 1, y },
       { x, y: y + 1 },
-      { x, y: y - 1 },
+      { x, y: y - 1 }
     ];
 
     for (const n of neighbors) {
@@ -9790,8 +9995,19 @@ function findNearestWalkableStart(dungeon, start, maxRadius = 25) {
     }
   }
 
-  // If somehow nothing is found, fall back to the original start
-  return { x: sx, y: sy };
+  if (largestComponent && isIndoor) {
+    for (const k of largestComponent) {
+      const [xStr, yStr] = k.split(',');
+      const x = parseInt(xStr, 10);
+      const y = parseInt(yStr, 10);
+      const cell = cells[k];
+      if (isCorridor(x, y, cell)) {
+        return { x, y };
+      }
+    }
+  }
+
+  return nearestWalkable || pickFirstFromLargest() || { x: sx, y: sy };
 }
 
 // Add this helper function if not already present
@@ -10223,9 +10439,9 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const TORCH_LIGHT_FALLOFF = 0.6;
   const TORCH_LIGHT_COLOR = { r: 255, g: 190, b: 130 };
   // Per-surface torch tuning knobs (1.0 = default).
-  const TORCH_WALL_BOOST = 1.0;
-  const TORCH_SIDE_BOOST = 1.0;
-  const TORCH_FLOOR_BOOST = 1.0;
+  const TORCH_WALL_BOOST = 1.3;
+  const TORCH_SIDE_BOOST = 1.1;
+  const TORCH_FLOOR_BOOST = 1.4;
   const torchLights = [];
   const now = performance.now();
   let needsAnimation = false;
@@ -10429,8 +10645,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     return (
       t === 'wall' ||
       t === 'door' ||
-      t === 'torch' ||
-      t === 'pillar'
+      t === 'torch'
     );
   }
 
@@ -10442,8 +10657,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     return (
       t === 'wall' ||
       t === 'door' ||
-      t === 'torch' ||
-      t === 'pillar'
+      t === 'torch'
     );
   }
 
@@ -11007,7 +11221,7 @@ if (!hit) continue;
     if (isTorchWall) texName = 'wall';
     
     // Completely skip any drawing for custom tiles in wall pass
-    if (texName.startsWith('custom_')) {
+    if (texName.startsWith('custom_') || texName === 'pillar') {
       continue; // Skip this column entirely – sprites will handle it
     }
 
@@ -11300,7 +11514,7 @@ if (!hit) continue;
       const key = `${wx},${wy}`;
       const cell = currentDungeon.cells[key];
       const tileName = cell?.tile;
-      const isCustom = !!tileName && tileName.startsWith('custom_');
+      const isCustom = tileName === 'pillar' || (!!tileName && tileName.startsWith('custom_'));
       const isTorch = tileName === 'torch';
       const inSpriteRadius = Math.abs(dx) <= VIS_RADIUS && Math.abs(dy) <= VIS_RADIUS;
       if (!inSpriteRadius && !isTorch) continue;
@@ -11487,9 +11701,13 @@ if (!hit) continue;
             if (y < 0 || y >= H) continue;
 
             // Base of texture aligns with floor (flip Y)
+            const torchTexY = Math.floor(((spr.rawDrawEndY - y - 1) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)));
+            const baseTexY = Math.floor(((spr.drawEndY - y - 1) * texH) / spr.height);
             const texY = spr.type === 'torch'
-              ? Math.floor(((spr.rawDrawEndY - y - 1) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)))
-              : Math.floor(((spr.drawEndY - y - 1) * texH) / spr.height);
+              ? torchTexY
+              : (spr.texName === 'pillar'
+                ? (texH - 1 - baseTexY)
+                : baseTexY);
             if (texY < 0 || texY >= texH) continue;
 
             const idx = y * W + stripe;
@@ -11678,4 +11896,5 @@ function renderDungeonView() {
     renderDungeonViewCanvas(false);
     logDungeonCombatSync('render-canvas');
   }
+
 

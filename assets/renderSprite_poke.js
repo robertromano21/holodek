@@ -1097,17 +1097,24 @@ function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, includeWall
 function drawPillar(ctx, palette) {
   const s = BASE_SIZE * UPSCALE;
 
-  // Base shadow + top
+  ctx.clearRect(0, 0, s, s);
+
+  const baseY = Math.floor(s * 0.78);
+  const baseH = Math.max(2, Math.floor(s * 0.22));
+  const baseTopY = baseY + Math.max(1, Math.floor(s * 0.02));
+  const baseTopH = Math.max(1, baseH - Math.max(2, Math.floor(s * 0.04)));
+
+  // Base shadow + top (extend to bottom to avoid padding)
   ctx.fillStyle = palette.shadow;
-  ctx.fillRect(s * 0.3, s * 0.75, s * 0.4, s * 0.15);
+  ctx.fillRect(s * 0.3, baseY, s * 0.4, baseH);
   ctx.fillStyle = palette.primary;
-  ctx.fillRect(s * 0.32, s * 0.73, s * 0.36, s * 0.13);
+  ctx.fillRect(s * 0.32, baseTopY, s * 0.36, baseTopH);
 
   // Shaft
-  const shaftH = s * 0.45;
   const shaftW = s * 0.35;
   const shaftX = (s - shaftW) / 2;
-  const shaftY = s * 0.25;
+  const shaftY = s * 0.2;
+  const shaftH = Math.max(2, baseY - shaftY - Math.floor(s * 0.03));
   ctx.fillStyle = palette.secondary;
   ctx.fillRect(shaftX - 1, shaftY, shaftW + 2, shaftH);
   ctx.fillStyle = palette.primary;
@@ -1128,13 +1135,6 @@ function drawPillar(ctx, palette) {
   ctx.fillRect(shaftX - s * 0.08, shaftY - s * 0.08, shaftW + s * 0.16, s * 0.1);
   ctx.fillStyle = palette.primary;
   ctx.fillRect(shaftX - s * 0.05, shaftY - s * 0.05, shaftW + s * 0.1, s * 0.06);
-
-  // Vignette
-  const grad = ctx.createLinearGradient(0, 0, 0, s);
-  grad.addColorStop(0, "rgba(0,0,0,0.3)");
-  grad.addColorStop(1, "rgba(0,0,0,0.1)");
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, s, s);
 }
 
 // ===== Main entry point (modified to support custom tiles) =====

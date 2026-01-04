@@ -118,6 +118,7 @@
       if (name === 'floor') return false;
       if (name.startsWith('custom_')) return false;
       if (name === 'torch') return false;
+      if (name === 'pillar') return false;
       const img = textures[name];
       return img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0;
     });
@@ -300,9 +301,9 @@ const int MAX_TORCH = 32;
 const float TORCH_FALLOFF = 0.6;
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
 // Per-surface torch tuning knobs (1.0 = default).
-const float TORCH_WALL_BOOST = 1.0;
-const float TORCH_SIDE_BOOST = 1.0;
-const float TORCH_FLOOR_BOOST = 1.0;
+const float TORCH_WALL_BOOST = 1.3;
+const float TORCH_SIDE_BOOST = 1.1;
+const float TORCH_FLOOR_BOOST = 1.4;
 
 vec4 fetchCell(int x, int y) {
   int yy = u_flipY == 1 ? (u_gridSize.y - 1 - y) : y;
@@ -849,7 +850,6 @@ void main() {
           const isSolid =
             tile === 'wall' ||
             tile === 'torch' ||
-            tile === 'pillar' ||
             isDoorClosed;
 
           // Torch uses wall art. Doors can also fall back to wall art if you don't have a door atlas entry.
@@ -1240,7 +1240,7 @@ void main() {
       const torchLights = [];
       const now = performance.now();
 
-      const isWallTile = (tile) => ['wall', 'door', 'pillar', 'torch'].includes(tile);
+      const isWallTile = (tile) => ['wall', 'door', 'torch'].includes(tile);
       const getTorchFacing = (wx, wy, cell) => {
         let facing = (cell?.torchFacing || '').trim().toUpperCase();
         if (['N', 'S', 'E', 'W'].includes(facing)) return facing;
@@ -1399,7 +1399,7 @@ void main() {
           const cell = dungeon.cells?.[`${wx},${wy}`];
           if (!cell || !cell.tile) continue;
           const isTorch = cell.tile === 'torch';
-          const isCustom = cell.tile.startsWith && cell.tile.startsWith('custom_');
+          const isCustom = cell.tile === 'pillar' || (cell.tile.startsWith && cell.tile.startsWith('custom_'));
           if (!isTorch && !isCustom) continue;
 
           const tileName = cell.tile;
@@ -1505,6 +1505,7 @@ void main() {
 
           sprites.push({
             type: isTorch ? 'torch' : 'custom',
+            texName: tileName,
             texImg,
             lightX,
             lightY,
@@ -1561,6 +1562,9 @@ void main() {
           let topV = Math.max(0, Math.min(1, vAtY(spr.drawStartY)));
           let bottomV = Math.max(0, Math.min(1, vAtY(spr.drawEndY)));
           if (spr.type === 'torch') {
+            topV = 1 - topV;
+            bottomV = 1 - bottomV;
+          } else if (spr.texName === 'pillar') {
             topV = 1 - topV;
             bottomV = 1 - bottomV;
           }
