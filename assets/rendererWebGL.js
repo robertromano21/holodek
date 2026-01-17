@@ -514,29 +514,6 @@
         index += 4;
       };
 
-      const isColumnLike =
-        opts.isColumnLike ||
-        opts.tileName === 'pillar' ||
-        String(opts.tileName || '').includes('column') ||
-        String(opts.tileName || '').includes('columns');
-
-      const q = (v, step) => Math.floor(v / step) * step + step * 0.5;
-
-      // For columns, sample color at a bigger “patch” size to avoid checkerboarding.
-      // Try 2 first; if you still see tiling, bump to 3 or 4.
-      const PATCH_XY = isColumnLike ? 2 : 1;
-      const PATCH_Z  = isColumnLike ? 3 : 1;
-
-      const sampleColor = (sx, sy, sz, n) => {
-        if (!isColumnLike) return colorFn(sx, sy, sz, n);
-
-        // Quantize sampling coordinates so many adjacent voxel faces share the same color.
-        const cx = q(sx, PATCH_XY);
-        const cy = q(sy, PATCH_XY);
-        const cz = q(sz, PATCH_Z);
-        return colorFn(cx, cy, cz, n);
-      };
-
       for (let z = 0; z < size; z++) {
         for (let y = 0; y < size; y++) {
           for (let x = 0; x < size; x++) {
@@ -545,39 +522,39 @@
             // +X
             if (!get(x + 1, y, z)) {
               const n = [1, 0, 0];
-              const c = sampleColor(x + 1, y + 0.5, z + 0.5, n);
+              const c = colorFn(x + 1, y + 0.5, z + 0.5, n);
               pushQuad([x + 1, y, z], [x + 1, y + 1, z], [x + 1, y + 1, z + 1], [x + 1, y, z + 1], n, c);
             }
             // -X
             if (!get(x - 1, y, z)) {
               const n = [-1, 0, 0];
-              const c = sampleColor(x, y + 0.5, z + 0.5, n);
+              const c = colorFn(x, y + 0.5, z + 0.5, n);
               pushQuad([x, y, z + 1], [x, y + 1, z + 1], [x, y + 1, z], [x, y, z], n, c);
             }
 
             // +Y
             if (!get(x, y + 1, z)) {
               const n = [0, 1, 0];
-              const c = sampleColor(x + 0.5, y + 1, z + 0.5, n);
+              const c = colorFn(x + 0.5, y + 1, z + 0.5, n);
               pushQuad([x, y + 1, z], [x + 1, y + 1, z], [x + 1, y + 1, z + 1], [x, y + 1, z + 1], n, c);
             }
             // -Y
             if (!get(x, y - 1, z)) {
               const n = [0, -1, 0];
-              const c = sampleColor(x + 0.5, y, z + 0.5, n);
+              const c = colorFn(x + 0.5, y, z + 0.5, n);
               pushQuad([x, y, z + 1], [x + 1, y, z + 1], [x + 1, y, z], [x, y, z], n, c);
             }
 
             // +Z (top)
             if (!get(x, y, z + 1)) {
               const n = [0, 0, 1];
-              const c = sampleColor(x + 0.5, y + 0.5, z + 1, n);
+              const c = colorFn(x + 0.5, y + 0.5, z + 1, n);
               pushQuad([x, y, z + 1], [x + 1, y, z + 1], [x + 1, y + 1, z + 1], [x, y + 1, z + 1], n, c);
             }
             // -Z (bottom)
             if (!get(x, y, z - 1)) {
               const n = [0, 0, -1];
-              const c = sampleColor(x + 0.5, y + 0.5, z, n);
+              const c = colorFn(x + 0.5, y + 0.5, z, n);
               pushQuad([x, y + 1, z], [x + 1, y + 1, z], [x + 1, y, z], [x, y, z], n, c);
             }
           }
@@ -979,40 +956,62 @@
         String(tileName).includes('column') ||
         String(tileName).includes('columns');
 
-      const useSimpleMesher = isColumnLike; // you can extend this to other props later
-
-      const mesh = useSimpleMesher
-        ? this.meshVoxelsSimple(voxels, 16, colorFn, { seamPad: 0.08 })
-        : this.greedyMesh(voxels, 16, colorFn, { seamPad });
-
-      // Critical fix: smooth normals on cylindrical shapes so voxel steps don't read as "see-through slits".
-      if (tileName === 'pillar' || String(tileName).includes('column')) {
-        this.applyCylindricalNormals(mesh, { strength: 0.92 });
-      }
-
       const gl = this.gl;
-      const vbo = gl.createBuffer();
-      const ibo = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(mesh.vertices), gl.STATIC_DRAW);
-      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
-      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(mesh.indices), gl.STATIC_DRAW);
-
-      const record = {
-        vbo,
-        ibo,
-        count: mesh.indices.length,
-        toneShadow: shadow,
-        toneMid: primary,
-        toneHighlight: highlight,
-
-        // Per-mesh rendering hints
-        unlit: debugSolid ? 1 : 0,
-        toonSteps: (tileName === 'pillar' || String(tileName).includes('column')) ? 8 : 3,
-
-        // Cache key
-        _debugKey: debugKey
+      const createGpuMesh = (mesh, hints) => {
+        const vbo = gl.createBuffer();
+        const ibo = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(mesh.vertices), gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(mesh.indices), gl.STATIC_DRAW);
+        return {
+          vbo,
+          ibo,
+          count: mesh.indices.length,
+          toneShadow: shadow,
+          toneMid: primary,
+          toneHighlight: highlight,
+          unlit: hints && Number.isFinite(hints.unlit) ? hints.unlit : 0,
+          toonSteps: hints && Number.isFinite(hints.toonSteps) ? hints.toonSteps : 3,
+          depthOnly: !!(hints && hints.depthOnly),
+          depthTestOnly: !!(hints && hints.depthTestOnly),
+          depthBias: hints && Number.isFinite(hints.depthBias) ? hints.depthBias : 0.0
+        };
       };
+
+      let record;
+      if (isColumnLike) {
+        const solidColor = mix(primary, secondary, 0.25);
+        const solidColorFn = () => solidColor;
+        const solidMesh = this.meshVoxelsSimple(voxels, 16, solidColorFn, { seamPad: 0.08 });
+        const detailMesh = this.greedyMesh(voxels, 16, colorFn, { seamPad });
+
+        // Critical fix: smooth normals on cylindrical shapes so voxel steps don't read as "see-through slits".
+        this.applyCylindricalNormals(solidMesh, { strength: 0.92 });
+        this.applyCylindricalNormals(detailMesh, { strength: 0.92 });
+
+        record = {
+          passes: [
+            // Pass 1: depth-only seal for occlusion and solidity.
+            createGpuMesh(solidMesh, { unlit: 1, toonSteps: 3, depthOnly: true }),
+            // Pass 2: base color fill (no depth writes).
+            createGpuMesh(solidMesh, { unlit: 1, toonSteps: 3, depthTestOnly: true }),
+            // Pass 3: detail lighting on top (no depth writes).
+            createGpuMesh(detailMesh, { unlit: debugSolid ? 1 : 0, toonSteps: 3, depthTestOnly: true })
+          ],
+          _debugKey: debugKey
+        };
+      } else {
+        const mesh = this.greedyMesh(voxels, 16, colorFn, { seamPad });
+        const gpu = createGpuMesh(mesh, {
+          unlit: debugSolid ? 1 : 0,
+          toonSteps: 3
+        });
+        record = {
+          ...gpu,
+          _debugKey: debugKey
+        };
+      }
 
       this.voxelMeshes[tileName] = record;
       return record;
@@ -1725,6 +1724,11 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal) {
 }
 
 void main() {
+  // Depth from world position (raycast depth buffer compatibility)
+  float forward = dot(v_worldPos.xy - u_camPos, u_camDir);
+  float depth = saturate((forward + u_depthBias) / max(u_depthFarDepth, 1e-3));
+  gl_FragDepth = depth;
+
   // Debug: prove the "slits" are lighting (normal discontinuities) not holes.
   if (u_unlit > 0.5) {
     outColor = vec4(v_color, 1.0);
@@ -1770,11 +1774,6 @@ void main() {
   col = mix(col, col * TORCH_COLOR, saturate(torch * 0.25));
 
   outColor = vec4(col, 1.0);
-
-  // Depth from world position (raycast depth buffer compatibility)
-  float forward = dot(v_worldPos.xy - u_camPos, u_camDir);
-  float depth = saturate((forward + u_depthBias) / max(u_depthFarDepth, 1e-3));
-  gl_FragDepth = depth;
 }`;
 
 this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
@@ -2674,11 +2673,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (this.voxelUniforms.depthShadeScale) {
           gl.uniform1f(this.voxelUniforms.depthShadeScale, depthShadeScale);
         }
+        let baseVoxelDepthBias = 0.0;
         if (this.voxelUniforms.depthBias) {
-          const bias = Number.isFinite(window.VOXEL_DEPTH_BIAS)
+          baseVoxelDepthBias = Number.isFinite(window.VOXEL_DEPTH_BIAS)
             ? window.VOXEL_DEPTH_BIAS
-            : 0.01;
-          gl.uniform1f(this.voxelUniforms.depthBias, bias);
+            : 0.0;
+          gl.uniform1f(this.voxelUniforms.depthBias, baseVoxelDepthBias);
         }
         gl.uniform2f(this.voxelUniforms.lightDir, lighting.dirX, lighting.dirY);
         gl.uniform1f(this.voxelUniforms.lightElev, lighting.elevation);
@@ -2714,28 +2714,50 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
         const stride = 9 * 4;
         for (const inst of voxelInstances) {
-          gl.bindBuffer(gl.ARRAY_BUFFER, inst.mesh.vbo);
-          gl.vertexAttribPointer(this.voxelAttribs.pos, 3, gl.FLOAT, false, stride, 0);
-          gl.vertexAttribPointer(this.voxelAttribs.norm, 3, gl.FLOAT, false, stride, 12);
-          gl.vertexAttribPointer(this.voxelAttribs.color, 3, gl.FLOAT, false, stride, 24);
-          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, inst.mesh.ibo);
-          if (this.voxelUniforms.toneShadow) {
-            const shadow = inst.mesh.toneShadow || [0.2, 0.2, 0.2];
-            const mid = inst.mesh.toneMid || [0.5, 0.5, 0.5];
-            const high = inst.mesh.toneHighlight || [0.9, 0.9, 0.9];
-            gl.uniform3f(this.voxelUniforms.toneShadow, shadow[0], shadow[1], shadow[2]);
-            gl.uniform3f(this.voxelUniforms.toneMid, mid[0], mid[1], mid[2]);
-            gl.uniform3f(this.voxelUniforms.toneHighlight, high[0], high[1], high[2]);
+          const passes = inst.mesh.passes || [inst.mesh];
+          for (const pass of passes) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, pass.vbo);
+            gl.vertexAttribPointer(this.voxelAttribs.pos, 3, gl.FLOAT, false, stride, 0);
+            gl.vertexAttribPointer(this.voxelAttribs.norm, 3, gl.FLOAT, false, stride, 12);
+            gl.vertexAttribPointer(this.voxelAttribs.color, 3, gl.FLOAT, false, stride, 24);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, pass.ibo);
+            if (pass.depthOnly) {
+              gl.colorMask(false, false, false, false);
+              gl.depthMask(true);
+            } else if (pass.depthTestOnly) {
+              gl.colorMask(true, true, true, true);
+              gl.depthMask(false);
+            } else {
+              gl.colorMask(true, true, true, true);
+              gl.depthMask(true);
+            }
+            gl.depthFunc(gl.LEQUAL);
+            if (this.voxelUniforms.toneShadow) {
+              const shadow = pass.toneShadow || [0.2, 0.2, 0.2];
+              const mid = pass.toneMid || [0.5, 0.5, 0.5];
+              const high = pass.toneHighlight || [0.9, 0.9, 0.9];
+              gl.uniform3f(this.voxelUniforms.toneShadow, shadow[0], shadow[1], shadow[2]);
+              gl.uniform3f(this.voxelUniforms.toneMid, mid[0], mid[1], mid[2]);
+              gl.uniform3f(this.voxelUniforms.toneHighlight, high[0], high[1], high[2]);
+            }
+            if (this.voxelUniforms.unlit) {
+              gl.uniform1f(this.voxelUniforms.unlit, pass.unlit ? 1.0 : 0.0);
+            }
+            if (this.voxelUniforms.toonSteps) {
+              gl.uniform1f(this.voxelUniforms.toonSteps, Number.isFinite(pass.toonSteps) ? pass.toonSteps : 3.0);
+            }
+            if (this.voxelUniforms.depthBias) {
+              const bias = baseVoxelDepthBias + (Number.isFinite(pass.depthBias) ? pass.depthBias : 0.0);
+              gl.uniform1f(this.voxelUniforms.depthBias, bias);
+            }
+            gl.uniform3f(this.voxelUniforms.modelPos, inst.modelPos.x, inst.modelPos.y, inst.modelPos.z);
+            gl.uniform3f(this.voxelUniforms.modelScale, inst.modelScale.x, inst.modelScale.y, inst.modelScale.z);
+            gl.drawElements(gl.TRIANGLES, pass.count, gl.UNSIGNED_SHORT, 0);
+            if (pass.depthOnly || pass.depthTestOnly) {
+              gl.colorMask(true, true, true, true);
+              gl.depthMask(true);
+            }
           }
-          if (this.voxelUniforms.unlit) {
-            gl.uniform1f(this.voxelUniforms.unlit, inst.mesh.unlit ? 1.0 : 0.0);
-          }
-          if (this.voxelUniforms.toonSteps) {
-            gl.uniform1f(this.voxelUniforms.toonSteps, Number.isFinite(inst.mesh.toonSteps) ? inst.mesh.toonSteps : 3.0);
-          }
-          gl.uniform3f(this.voxelUniforms.modelPos, inst.modelPos.x, inst.modelPos.y, inst.modelPos.z);
-          gl.uniform3f(this.voxelUniforms.modelScale, inst.modelScale.x, inst.modelScale.y, inst.modelScale.z);
-          gl.drawElements(gl.TRIANGLES, inst.mesh.count, gl.UNSIGNED_SHORT, 0);
         }
 
         if (wasCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
