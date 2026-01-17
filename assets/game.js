@@ -413,6 +413,7 @@ window.playerPosY = playerPosY;
 
 // 3D dungeon extras
 let dungeonTextures = {};
+let dungeonTexturesMeta = {};
 const PLAYER_EYE_HEIGHT = 0.65;  // eye above local floor
 let playerZ = PLAYER_EYE_HEIGHT;
 let playerZTarget = PLAYER_EYE_HEIGHT;
@@ -9784,6 +9785,7 @@ function resolveCustomTileURL(tile, index = 0) {
 // FIXED: Updated preload to use the helper (keeps original structure)
 function preloadDungeonTextures() {
   dungeonTextures = {};
+  dungeonTexturesMeta = {};
   if (!currentDungeon) return;
   // 1. Load regular dungeon tiles (legacy system)
   if (currentDungeon.tiles) {
@@ -9791,6 +9793,9 @@ function preloadDungeonTextures() {
       if (!cfg || !cfg.url) {
         console.warn('No URL for dungeon tile', name, cfg);
         continue;
+      }
+      if (cfg.spriteSpec) {
+        dungeonTexturesMeta[name] = cfg.spriteSpec;
       }
       const img = new Image();
       img.onload = () => console.log('Loaded dungeon texture:', name, cfg.url);
@@ -10707,6 +10712,36 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     return base + pulse + crackle + jitter;
   }
 
+  const lightVecLen = Math.hypot(lightDirX, lightDirY, lightElev) || 1;
+  const lightVec = {
+    x: lightDirX / lightVecLen,
+    y: lightDirY / lightVecLen,
+    z: lightElev / lightVecLen
+  };
+
+  function computeSpriteLight(u, profile, depth) {
+    if (!profile || depth <= 0) return 1.0;
+    let nx = 0;
+    let ny = 0;
+    let nz = 1;
+    if (profile === 'cylinder') {
+      nx = (u - 0.5) * 2;
+      const nzRaw = 1 - nx * nx;
+      nz = nzRaw > 0 ? Math.sqrt(nzRaw) : 0;
+    } else if (profile === 'slab') {
+      nx = (u - 0.5) * 1.2;
+      const nzRaw = 1 - nx * nx;
+      nz = nzRaw > 0 ? Math.sqrt(nzRaw) : 0;
+    }
+    const nLen = Math.hypot(nx, ny, nz) || 1;
+    nx /= nLen;
+    ny /= nLen;
+    nz /= nLen;
+    const ndotl = Math.max(0, nx * lightVec.x + ny * lightVec.y + nz * lightVec.z);
+    const dirShade = 0.6 + 0.4 * ndotl;
+    return 1.0 - depth + depth * dirShade;
+  }
+
   function getTorchFacing(wx, wy, cell) {
     if (cell && cell.torchFacing) return cell.torchFacing;
     const checks = [
@@ -11559,6 +11594,10 @@ if (!hit) continue;
       let allowPad = true;
       let allowShadow = true;
       let flickerSeed = 0;
+      const spriteMeta = dungeonTexturesMeta[texName] || {};
+      const spriteProfile = spriteMeta.profile || (texName === 'pillar' ? 'cylinder' : 'flat');
+      const heightRatio = typeof spriteMeta.heightRatio === 'number' ? spriteMeta.heightRatio : 1.0;
+      const baseWidth = typeof spriteMeta.baseWidth === 'number' ? spriteMeta.baseWidth : spriteWidthRatio;
 
       if (isTorch) {
         spriteWorldHeight = TORCH_WORLD_HEIGHT;
@@ -11574,7 +11613,8 @@ if (!hit) continue;
         flickerSeed = seed * Math.PI * 2;
         needsAnimation = true;
       } else if (Number.isFinite(spriteCeilH) && Number.isFinite(spriteFloorH) && spriteCeilH > spriteFloorH) {
-        spriteWorldHeight = Math.max(0.5, spriteCeilH - spriteFloorH);
+        spriteWorldHeight = Math.max(0.5, (spriteCeilH - spriteFloorH) * heightRatio);
+        spriteWidthRatio = baseWidth;
       }
 
       const bottomScreenY = Math.floor(HORIZON + (eyeZ - spriteBaseZ) * focalLength / safeTransformY);
@@ -11652,7 +11692,12 @@ if (!hit) continue;
         texInfo,
         shadow,
         transformY: safeTransformY,
-        flickerSeed
+        flickerSeed,
+        worldX,
+        worldY,
+        baseZ: spriteBaseZ,
+        worldHeight: spriteWorldHeight,
+        profile: spriteProfile
       });
       renderPerfStats.spriteCount += 1;
     }
@@ -11687,8 +11732,8 @@ if (!hit) continue;
           }
         }
 
-        const drawLeft = Math.floor(spr.screenX - spr.width / 2);
-        const drawRight = Math.floor(spr.screenX + spr.width / 2);
+        const drawLeft = Math.floor(spr.screenX - spr.width / 2 - 0.5);
+        const drawRight = Math.ceil(spr.screenX + spr.width / 2 + 0.5);
 
         let drewAny = false;
         for (let stripe = drawLeft; stripe < drawRight; stripe++) {
@@ -11703,11 +11748,10 @@ if (!hit) continue;
             // Base of texture aligns with floor (flip Y)
             const torchTexY = Math.floor(((spr.rawDrawEndY - y - 1) * texH) / Math.max(1, (spr.rawDrawEndY - spr.rawDrawStartY)));
             const baseTexY = Math.floor(((spr.drawEndY - y - 1) * texH) / spr.height);
+            const customTexY = Math.floor(((y - spr.drawStartY) * texH) / Math.max(1, spr.height));
             const texY = spr.type === 'torch'
               ? torchTexY
-              : (spr.texName === 'pillar'
-                ? (texH - 1 - baseTexY)
-                : baseTexY);
+              : (spr.type === 'custom' ? customTexY : baseTexY);
             if (texY < 0 || texY >= texH) continue;
 
             const idx = y * W + stripe;
@@ -11726,10 +11770,40 @@ if (!hit) continue;
               const flicker = torchFlicker(spr.flickerSeed / (Math.PI * 2), now);
               shade = Math.max(0.75, shade * flicker);
             }
+            if (spr.type !== 'torch') {
+              const spec = dungeonTexturesMeta[spr.texName] || {};
+              const profile = spec.profile || (spr.texName === 'pillar' ? 'cylinder' : 'flat');
+              const depth = typeof spec.depth === 'number' ? spec.depth : 0.65;
+              const dirShade = computeSpriteLight(texX / texW, profile, depth);
+              shade *= (1 - lightIntensity) + lightIntensity * dirShade;
+            }
             const boost = spr.type === 'torch' ? 1.15 : 1.0;
-            const r = Math.round(Math.min(255, sample.r * shade * boost));
-            const g = Math.round(Math.min(255, sample.g * shade * boost));
-            const b = Math.round(Math.min(255, sample.b * shade * boost));
+            let r = Math.round(Math.min(255, sample.r * shade * boost));
+            let g = Math.round(Math.min(255, sample.g * shade * boost));
+            let b = Math.round(Math.min(255, sample.b * shade * boost));
+
+            if (spr.type !== 'torch') {
+              const v = Math.max(0, Math.min(1, (spr.drawEndY - y) / spr.height));
+              const worldZ = spr.baseZ + spr.worldHeight * v;
+              let nx = 0;
+              let ny = 0;
+              let nz = 1;
+              if (spr.profile === 'cylinder') {
+                nx = (texX / texW - 0.5) * 2;
+                const nzRaw = 1 - nx * nx;
+                nz = nzRaw > 0 ? Math.sqrt(nzRaw) : 0;
+              } else if (spr.profile === 'slab') {
+                nx = (texX / texW - 0.5) * 1.2;
+                const nzRaw = 1 - nx * nx;
+                nz = nzRaw > 0 ? Math.sqrt(nzRaw) : 0;
+              }
+              const nLen = Math.hypot(nx, ny, nz) || 1;
+              const normal = { x: nx / nLen, y: ny / nLen, z: nz / nLen };
+              const lit = applyTorchLight(sample, shade, spr.worldX, spr.worldY, worldZ, normal, 1.0);
+              r = lit.r;
+              g = lit.g;
+              b = lit.b;
+            }
 
             ctx.fillStyle = `rgba(${r},${g},${b},${sample.a / 255})`;
             ctx.fillRect(stripe, y, 1, 1);
@@ -11859,8 +11933,10 @@ if (!hit) continue;
 }
 
 function renderDungeonView() {
+  window.DEBUG_VOXEL_SOLID = true;
   window.currentDungeon = currentDungeon;
   window.dungeonTextures = dungeonTextures;
+  window.dungeonTexturesMeta = dungeonTexturesMeta;
   window.playerDungeonX = playerDungeonX;
   window.playerDungeonY = playerDungeonY;
   window.playerPosX = playerPosX;
@@ -11868,6 +11944,28 @@ function renderDungeonView() {
   window.playerAngle = playerAngle;
   window.playerZ = playerZ;
   window.PLAYER_EYE_HEIGHT = PLAYER_EYE_HEIGHT;
+  if (!window.debugVoxel) {
+    window.debugVoxel = function debugVoxel(tileName, voxels, size) {
+      if (!voxels || !size) return;
+      const mid = Math.floor(size / 2);
+      let hollowSlices = 0;
+      for (let z = 0; z < size; z++) {
+        let filled = 0;
+        for (let i = 0; i < size * size; i++) {
+          if (voxels[z * size * size + i]) filled++;
+        }
+        if (filled && filled < size * size * 0.4) hollowSlices++;
+      }
+      const idx = mid + mid * size + mid * size * size;
+      const centerFilled = !!voxels[idx];
+      console.log('[VoxelDebug]', {
+        tileName,
+        size,
+        centerFilled,
+        hollowSlices
+      });
+    };
+  }
   const container = document.getElementById('dungeon-container');
   if (!window.forceCanvasDungeon && window.useWebGLRenderer && window.webglDungeonRenderer && container) {
     if (!window.webglDungeonRenderer.gl) {

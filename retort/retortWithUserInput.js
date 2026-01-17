@@ -2303,14 +2303,13 @@ async function generateObjectModifiers($, object) {
 }
 
 // Generate room-specific custom obstacle tiles using a higher-level drawing "program"
-async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
-  if (!isOutdoor) return []; // Skip for indoors
+async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredTypes = []) {
 
   $.model = "gpt-4.1-mini";
   $.temperature = 0.8;
 
   await $.user`
-      For this Tartarus wasteland room: "${roomDesc}".
+      For this Tartarus ${isOutdoor ? 'wasteland' : 'indoor'} room: "${roomDesc}".
       Puzzle context (if any): "${puzzleDesc || 'none'}".
     
     Design 2–4 distinct **obstacle feature tiles** that visually fit this specific room
@@ -2321,9 +2320,36 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
       "shattered_obelisk", "bone_pillar", etc.
       *This label should be lowercase, snake_case, and 1–3 nouns max.*
     - a PROCEDURE describing how to draw it using higher-level drawing steps.
+    - a SPRITE SPEC describing how it should read in 3D:
+      {
+        "profile": "flat|cylinder|slab|arch|block",
+        "depth": 0.0..1.0,
+        "heightRatio": 0.4..1.2,
+        "baseWidth": 0.2..1.0,
+        "gridWidth": 0.2..1.0,
+        "detail": {
+          "bandCount": 0..8,
+          "grooveCount": 0..12,
+          "grooveDepth": 0..1,
+          "taper": 0..0.3,
+          "baseHeight": 0..0.3,
+          "capHeight": 0..0.3,
+          "baseFlare": 0..0.3,
+          "capFlare": 0..0.3,
+          "wear": 0..1,
+          "chips": 0..1,
+          "cracks": 0..1,
+          "noise": 0..1,
+          "skin": "none|mosaic|zigzag|circuit|marble|plaid|grid|banded|tiles",
+          "skinStrength": 0..1,
+          "carving": "none|chevrons|spiral|runes|glyphs|vines",
+          "accentColor": "#RRGGBB",
+          "accentStrength": 0..1
+        }
+      }
 
       Each PROCEDURE includes:
-      - "material": one of "obsidian","ash","bone","rust","crystal"
+      - "material": one of "stone","obsidian","ash","bone","rust","crystal","marble","metal","wood"
       - optional "primitives": "triangles,lines,rects,ellipse,arcs,blocks,archway,spire,ruin_wall,rubble,stairs,crystal_cluster,ribcage,totem"
         (low-level shapes, comma-separated)
     - a "program": an ordered array of drawing steps, e.g.
@@ -2339,7 +2365,7 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
 
     - "background": { "style": "flat"|"dark_radial"|"horizon_glow", "color"?: "#hex"|"primary"|"secondary" }
     - "tile_grid": { "size": "small"|"medium"|"large", "jitter": 0..1, "color"?: "#hex"|"primary"|"secondary" }
-      - "column": { "width": 0.2..0.6, "height": 0.5..0.9, "top_cap"?: true|false }
+      - "column": { "width": 0.2..0.9, "height": 0.5..0.9, "top_cap"?: true|false, "xOffset"?: -0.5..0.5, "solidBase"?: true|false }
       - "block": { "width": 0.2..0.95, "height": 0.2..0.95, "y"?: 0..1, "color"?: "#hex"|"primary"|"secondary" }
       - "archway": { "width": 0.3..0.9, "height": 0.4..0.95, "thickness"?: 0.08..0.3 }
       - "spire": { "width": 0.08..0.5, "height": 0.4..0.98 }
@@ -2364,6 +2390,32 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
       "tiles": {
         "tile1": {
           "type": "crystal_spire",
+          "spriteSpec": {
+            "profile": "cylinder",
+            "depth": 0.7,
+            "heightRatio": 0.9,
+            "baseWidth": 0.4,
+            "gridWidth": 0.4,
+              "detail": {
+                "bandCount": 3,
+                "grooveCount": 6,
+                "grooveDepth": 0.3,
+                "taper": 0.06,
+                "baseHeight": 0.18,
+                "capHeight": 0.12,
+                "baseFlare": 0.12,
+                "capFlare": 0.1,
+                "wear": 0.3,
+                "chips": 0.2,
+                "cracks": 0.2,
+                "noise": 0.3,
+                "skin": "mosaic",
+                "skinStrength": 0.35,
+                "carving": "runes",
+                "accentColor": "#C9B27A",
+                "accentStrength": 0.35
+              }
+            },
           "procedure": {
             "material": "crystal",
             "primitives": "triangles,arcs",
@@ -2381,11 +2433,14 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
     }
 
     Rules:
+    - You MUST include tiles for these exact types if present: ${requiredTypes.length ? requiredTypes.join(', ') : 'none'}.
     - "type" is NOT chosen from a list; invent labels that match this room's description.
     - Prefer using "program" to describe how to draw the sprite.
     - "primitives" can be omitted; it is only a low-level hint.
     - "material" controls the color feel: "obsidian"=very dark, "ash"=dusty,
-      "bone"=pale, "rust"=orange-brown, "crystal"=cool glowing.
+      "bone"=pale, "rust"=orange-brown, "crystal"=cool glowing, "stone"=neutral,
+      "marble"=clean, "metal"=cold reflective, "wood"=warm.
+    - For columns/pillars, start with a wide solid "column" (solidBase true) so there are no transparent gaps.
     - Choose types and programs that a player would reasonably expect to SEE
       when walking through this place, based on the description.
     
@@ -2401,12 +2456,44 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
             type: Object,
             properties: {
               type: { type: String }, // free-form slug
+              spriteSpec: {
+                type: Object,
+                properties: {
+                  profile: { type: String },
+                  depth: { type: Number },
+                  heightRatio: { type: Number },
+                  baseWidth: { type: Number },
+                  gridWidth: { type: Number },
+                  detail: {
+                    type: Object,
+                    properties: {
+                      bandCount: { type: Number },
+                      grooveCount: { type: Number },
+                      grooveDepth: { type: Number },
+                      taper: { type: Number },
+                      baseHeight: { type: Number },
+                      capHeight: { type: Number },
+                      baseFlare: { type: Number },
+                      capFlare: { type: Number },
+                      wear: { type: Number },
+                      chips: { type: Number },
+                      cracks: { type: Number },
+                      noise: { type: Number },
+                      skin: { type: String },
+                      skinStrength: { type: Number },
+                      carving: { type: String },
+                      accentColor: { type: String },
+                      accentStrength: { type: Number }
+                    }
+                  }
+                }
+              },
               procedure: {
                 type: Object,
                 properties: {
                   material: {
                     type: String,
-                    enum: ['obsidian', 'ash', 'bone', 'rust', 'crystal']
+                    enum: ['stone', 'obsidian', 'ash', 'bone', 'rust', 'crystal', 'marble', 'metal', 'wood']
                   },
                   primitives: { type: String }, // comma-separated
                   params: { type: Object, additionalProperties: true },
@@ -2437,6 +2524,53 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
     const tileObj = parsed.tiles || {};
     const rawTiles = Object.values(tileObj).filter(Boolean);
 
+    const clamp = (value, min, max, fallback) => {
+      const v = Number.isFinite(value) ? value : fallback;
+      return Math.max(min, Math.min(max, v));
+    };
+
+    const normalizeSpriteSpec = (spec, typeHint) => {
+      const rawType = String(typeHint || '').toLowerCase();
+      const fallbackProfile = rawType.includes('pillar') || rawType.includes('column')
+        ? 'cylinder'
+        : (rawType.includes('arch') ? 'arch' : 'slab');
+      const raw = spec || {};
+      const profile = String(raw.profile || fallbackProfile);
+      const baseWidth = clamp(raw.baseWidth, 0.2, 1.0, 0.6);
+      const gridWidth = clamp(raw.gridWidth, 0.2, 1.0, baseWidth);
+      const detail = raw.detail || {};
+      const accentColor = /^#[0-9a-fA-F]{6}$/.test(detail.accentColor || '')
+        ? String(detail.accentColor).toUpperCase()
+        : null;
+      const accentStrength = clamp(detail.accentStrength, 0, 1, accentColor ? 0.3 : 0);
+      return {
+        profile,
+        depth: clamp(raw.depth, 0, 1, 0.7),
+        heightRatio: clamp(raw.heightRatio, 0.4, 1.2, 0.9),
+        baseWidth,
+        gridWidth,
+        detail: {
+          bandCount: clamp(detail.bandCount, 0, 8, profile === 'cylinder' ? 3 : 0),
+          grooveCount: clamp(detail.grooveCount, 0, 12, profile === 'cylinder' ? 6 : 0),
+          grooveDepth: clamp(detail.grooveDepth, 0, 1, profile === 'cylinder' ? 0.25 : 0.1),
+          taper: clamp(detail.taper, 0, 0.3, profile === 'cylinder' ? 0.06 : 0),
+          baseHeight: clamp(detail.baseHeight, 0, 0.3, profile === 'cylinder' ? 0.18 : 0.1),
+          capHeight: clamp(detail.capHeight, 0, 0.3, profile === 'cylinder' ? 0.12 : 0.08),
+          baseFlare: clamp(detail.baseFlare, 0, 0.3, profile === 'cylinder' ? 0.12 : 0.05),
+          capFlare: clamp(detail.capFlare, 0, 0.3, profile === 'cylinder' ? 0.1 : 0.05),
+          wear: clamp(detail.wear, 0, 1, 0.25),
+          chips: clamp(detail.chips, 0, 1, 0.2),
+          cracks: clamp(detail.cracks, 0, 1, 0.2),
+          noise: clamp(detail.noise, 0, 1, 0.3),
+          skin: typeof detail.skin === 'string' ? detail.skin : '',
+          skinStrength: clamp(detail.skinStrength, 0, 1, detail.skin ? 0.35 : 0),
+          carving: typeof detail.carving === 'string' ? detail.carving : '',
+          accentColor,
+          accentStrength
+        }
+      };
+    };
+
     const processed = rawTiles.map(tile => {
       const proc = tile.procedure || {};
       const primStr = proc.primitives || '';
@@ -2455,6 +2589,7 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
       return {
         type: safeType,          // used in keys/filenames: custom_<type>_<i>
         label: rawType,          // original human-readable text
+        spriteSpec: normalizeSpriteSpec(tile.spriteSpec, rawType),
         procedure: {
           material: proc.material || 'obsidian',
           primitives,
@@ -2464,8 +2599,43 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor) {
       };
     }).filter(t => t.type && t.procedure && (t.procedure.program.length || t.procedure.primitives.length));
 
-    console.log('[Custom Tiles] Parsed & normalized:', processed);
-    return processed;
+    const fallbackProcedureForType = (typeName) => {
+      const clean = String(typeName || '').toLowerCase();
+      if (clean.includes('arch')) {
+        return { material: 'stone', primitives: ['archway'], params: {}, program: [{ op: 'archway', width: 0.7, height: 0.8, thickness: 0.15 }, { op: 'cracks', density: 0.3 }] };
+      }
+      if (clean.includes('altar')) {
+        return { material: 'stone', primitives: ['blocks'], params: {}, program: [{ op: 'block', width: 0.7, height: 0.25, y: 0.65 }, { op: 'block', width: 0.5, height: 0.2, y: 0.45 }, { op: 'cracks', density: 0.2 }] };
+      }
+      if (clean.includes('statue')) {
+        return { material: 'stone', primitives: ['block'], params: {}, program: [{ op: 'block', width: 0.35, height: 0.7, y: 0.2 }, { op: 'rim_light', side: 'left' }] };
+      }
+      if (clean.includes('broken_column')) {
+        return { material: 'stone', primitives: ['column'], params: {}, program: [{ op: 'column', width: 0.35, height: 0.45, top_cap: true }, { op: 'cracks', density: 0.4 }] };
+      }
+      return { material: 'stone', primitives: ['block'], params: {}, program: [{ op: 'block', width: 0.6, height: 0.6, y: 0.3 }] };
+    };
+
+    const requiredSet = new Set(requiredTypes.map(t => String(t).toLowerCase()));
+    const existingSet = new Set(processed.map(t => String(t.type || '').toLowerCase()));
+    for (const req of requiredSet) {
+      if (!req || existingSet.has(req)) continue;
+      processed.push({
+        type: req,
+        label: req,
+        spriteSpec: normalizeSpriteSpec({
+          profile: req.includes('column') || req.includes('pillar') ? 'cylinder' : 'slab',
+          depth: 0.7,
+          heightRatio: 0.8,
+          baseWidth: 0.5,
+          gridWidth: 0.5
+        }, req),
+        procedure: fallbackProcedureForType(req)
+      });
+    }
+
+        console.log('[Custom Tiles] Parsed & normalized:', processed);
+        return processed;
   } catch (e) {
     console.error('Custom tiles parse fail:', e, 'from', responseString);
     return [];
@@ -3259,9 +3429,28 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   function applyBlueprintFeatures() {
+    const customMap = {};
+    if (Array.isArray(customTiles)) {
+      customTiles.forEach(t => {
+        if (!t) return;
+        if (t.type) customMap[t.type] = t.name || `custom_${t.type}`;
+        if (t.name) customMap[t.name] = t.name;
+      });
+    }
+
+    const resolveTileName = (tile) => {
+      if (!tile) return 'wall';
+      const raw = String(tile);
+      const key = raw.toLowerCase();
+      if (customMap[key]) return customMap[key];
+      const singular = key.endsWith('s') ? key.slice(0, -1) : key;
+      if (customMap[singular]) return customMap[singular];
+      return raw;
+    };
+
     if (Array.isArray(blueprint?.volumes)) {
       blueprint.volumes.forEach(v => {
-        const tile = typeof v.tile === 'string' ? v.tile : 'wall';
+        const tile = resolveTileName(typeof v.tile === 'string' ? v.tile : 'wall');
         carveRect(v, tile, Number.isFinite(v.floor) ? v.floor : baseFloor, Number.isFinite(v.ceil) ? v.ceil : baseFloor + baseCeil);
       });
     }
@@ -3317,15 +3506,6 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
       });
     }
 
-    // Props: map to custom tile names if available
-    const customMap = {};
-    if (Array.isArray(customTiles)) {
-      customTiles.forEach(t => {
-        if (!t) return;
-        if (t.type) customMap[t.type] = t.name || `custom_${t.type}`;
-        if (t.name) customMap[t.name] = t.name;
-      });
-    }
     if (Array.isArray(blueprint?.props)) {
       blueprint.props.forEach(p => {
         const type = p.type;
@@ -3610,11 +3790,15 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       console.error("Could not generate style JSON. Using fallback.");
     }
 
+    const requiredCustomTypes = Array.isArray(classification?.features)
+      ? classification.features
+          .map(f => String(f).toLowerCase())
+          .map(f => (f === 'altars' ? 'altar' : f === 'statues' ? 'statue' : f === 'arches' ? 'arch' : f))
+          .filter(f => !['pillars', 'mountains'].includes(f))
+      : [];
     let customTiles = [];
-    if (classification && classification.indoor === false) {
-      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, true);
-      console.log('[Custom Tiles] Generated:', customTiles);
-    }
+    customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, requiredCustomTypes);
+    console.log('[Custom Tiles] Generated:', customTiles);
 
     const blueprint = await generateDungeonBlueprint(
       $,
@@ -3681,7 +3865,33 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       url: generateSpriteFromStyle(visualStyle, "door", `${geoKey}_door`)
     };
     dungeon.tiles.pillar = {
-      url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`)
+      url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`),
+      spriteSpec: {
+        profile: 'cylinder',
+        depth: 0.8,
+        heightRatio: 1.0,
+        baseWidth: 0.5,
+        gridWidth: 0.5,
+        detail: {
+          bandCount: 3,
+          grooveCount: 6,
+          grooveDepth: 0.25,
+          taper: 0.06,
+          baseHeight: 0.18,
+          capHeight: 0.12,
+          baseFlare: 0.12,
+          capFlare: 0.1,
+          wear: 0.25,
+          chips: 0.2,
+          cracks: 0.2,
+          noise: 0.3,
+          skin: 'mosaic',
+          skinStrength: 0.35,
+          carving: 'runes',
+          accentColor: null,
+          accentStrength: 0
+        }
+      }
     };
 
     customTiles.forEach((tile, i) => {
@@ -3690,10 +3900,37 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       tile.name = tileName;
       const style = {
         palette: visualStyle && visualStyle.palette ? visualStyle.palette : undefined,
-        procedure: tile.procedure || {}
+        procedure: tile.procedure || {},
+        spriteSpec: tile.spriteSpec || null
       };
       dungeon.tiles[tileName] = {
-        url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`)
+        url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`),
+        spriteSpec: tile.spriteSpec || {
+          profile: 'flat',
+          depth: 0.5,
+          heightRatio: 0.9,
+          baseWidth: 0.6,
+          gridWidth: 0.6,
+          detail: {
+            bandCount: 0,
+            grooveCount: 0,
+            grooveDepth: 0.1,
+            taper: 0,
+            baseHeight: 0.1,
+            capHeight: 0.08,
+            baseFlare: 0.05,
+            capFlare: 0.05,
+            wear: 0.2,
+            chips: 0.15,
+            cracks: 0.15,
+            noise: 0.25,
+            skin: '',
+            skinStrength: 0,
+            carving: '',
+            accentColor: null,
+            accentStrength: 0
+          }
+        }
       };
     });
 
@@ -10702,12 +10939,15 @@ try {
       console.error("⚠️ Could not generate style JSON. Using fallback.");
     }
       const puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: ([^\n]+)/)?.[1]?.trim() || '';
-      let customTiles = []; // Default empty
-      if (classification && classification.indoor === false) {
-        // NEW: Generate custom tiles INSIDE Retort context (uses $)
-        customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, true);
-        console.log('[Custom Tiles] Generated:', customTiles);
-      }
+      const requiredCustomTypes = Array.isArray(classification?.features)
+        ? classification.features
+            .map(f => String(f).toLowerCase())
+            .map(f => (f === 'altars' ? 'altar' : f === 'statues' ? 'statue' : f === 'arches' ? 'arch' : f))
+            .filter(f => !['pillars', 'mountains'].includes(f))
+        : [];
+      let customTiles = [];
+      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, requiredCustomTypes);
+      console.log('[Custom Tiles] Generated:', customTiles);
       const blueprint = await generateDungeonBlueprint(
         $,
         roomDescription,
@@ -10746,6 +10986,7 @@ try {
       start: { x: startX, y: startY },
       tiles: {},
       cells: {},
+      customTiles,
       classification,
       visualStyle,
       blueprint,
@@ -10772,7 +11013,33 @@ try {
     url: generateSpriteFromStyle(visualStyle, "door", `${geoKey}_door`)
   };
   dungeon.tiles.pillar = {
-    url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`)
+    url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`),
+    spriteSpec: {
+      profile: 'cylinder',
+      depth: 0.8,
+      heightRatio: 1.0,
+      baseWidth: 0.5,
+      gridWidth: 0.5,
+      detail: {
+        bandCount: 3,
+        grooveCount: 6,
+        grooveDepth: 0.25,
+        taper: 0.06,
+        baseHeight: 0.18,
+        capHeight: 0.12,
+        baseFlare: 0.12,
+        capFlare: 0.1,
+        wear: 0.25,
+        chips: 0.2,
+        cracks: 0.2,
+        noise: 0.3,
+        skin: 'mosaic',
+        skinStrength: 0.35,
+        carving: 'runes',
+        accentColor: null,
+        accentStrength: 0
+      }
+    }
   };
     // 🔴 STEP 3 — Generate sprites for customs (if any)
     customTiles.forEach((tile, i) => {
@@ -10781,11 +11048,38 @@ try {
       tile.name = tileName;
       const style = {
         palette: visualStyle && visualStyle.palette ? visualStyle.palette : undefined,
-        procedure: tile.procedure || {}
+        procedure: tile.procedure || {},
+        spriteSpec: tile.spriteSpec || null
       };
-      dungeon.tiles[tileName] = {
-        url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`)
-      };
+  dungeon.tiles[tileName] = {
+    url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`),
+    spriteSpec: tile.spriteSpec || {
+      profile: 'flat',
+      depth: 0.5,
+      heightRatio: 0.9,
+      baseWidth: 0.6,
+      gridWidth: 0.6,
+      detail: {
+        bandCount: 0,
+        grooveCount: 0,
+        grooveDepth: 0.1,
+        taper: 0,
+        baseHeight: 0.1,
+        capHeight: 0.08,
+        baseFlare: 0.05,
+        capFlare: 0.05,
+        wear: 0.2,
+        chips: 0.15,
+        cracks: 0.15,
+        noise: 0.25,
+        skin: '',
+        skinStrength: 0,
+        carving: '',
+        accentColor: null,
+        accentStrength: 0
+      }
+    }
+  };
     });
 
     // 🔴 STEP 4 — Build layout using blueprint (fallback to legacy if missing)

@@ -92,12 +92,20 @@ function runSpriteProgram(ctx, palette, program) {
       }
 
       case 'column': {
-        const wRatio = Math.max(0.2, Math.min(0.6, step.width || 0.35));
+        const wRatio = Math.max(0.2, Math.min(0.9, step.width || 0.35));
         const hRatio = Math.max(0.5, Math.min(0.9, step.height || 0.8));
         const shaftW = s * wRatio;
         const shaftH = s * hRatio;
-        const shaftX = (s - shaftW) / 2;
+        const xOffset = Math.max(-0.5, Math.min(0.5, step.xOffset || 0));
+        const shaftX = (s - shaftW) / 2 + s * xOffset;
         const shaftY = s - shaftH - s * 0.08;
+
+        if (step.solidBase !== false) {
+          const baseW = s * Math.max(wRatio, 0.65);
+          const baseX = (s - baseW) / 2;
+          ctx.fillStyle = getColor(step.bodyColor, palette.primary);
+          ctx.fillRect(baseX, shaftY, baseW, shaftH);
+        }
 
         // body
         ctx.fillStyle = getColor(step.bodyColor, palette.primary);
@@ -371,6 +379,7 @@ function runSpriteProgram(ctx, palette, program) {
 
 function drawCustomTile(ctx, palette, customType, customStyle = {}) {
   const s = BASE_SIZE * UPSCALE;
+  ctx.clearRect(0, 0, s, s);
   ctx.imageSmoothingEnabled = false;
 
   const proc = (customStyle && customStyle.procedure) || {};
@@ -427,12 +436,15 @@ function drawCustomTile(ctx, palette, customType, customStyle = {}) {
   if (Array.isArray(proc.program) && proc.program.length) {
     // program usually includes its own background + vignette
     runSpriteProgram(ctx, localPalette, proc.program);
+    applySpriteDepthShading(ctx, localPalette, customStyle.spriteSpec || {});
     return;
   }
 
   // --- Otherwise fall back to the primitives logic OR fixed customs ---
   if (!proc.primitives || !proc.primitives.length) {
-    return drawFixedCustomTile(ctx, localPalette, customType, customStyle);
+    drawFixedCustomTile(ctx, localPalette, customType, customStyle);
+    applySpriteDepthShading(ctx, localPalette, customStyle.spriteSpec || {});
+    return;
   }
 
   const primitives = proc.primitives || [];
@@ -666,14 +678,7 @@ function drawCustomTile(ctx, palette, customType, customStyle = {}) {
   });
 
   ctx.restore();
-
-  // Procedural vignette (always, for depth)
-  const vignette = ctx.createRadialGradient(s/2, s/2, 0, s/2, s/2, s*0.7);
-  vignette.addColorStop(0, 'rgba(0,0,0,0)');
-  vignette.addColorStop(0.7, 'rgba(0,0,0,0.4)');
-  vignette.addColorStop(1, 'rgba(0,0,0,0.75)');
-  ctx.fillStyle = vignette;
-  ctx.fillRect(0, 0, s, s);
+  applySpriteDepthShading(ctx, localPalette, customStyle.spriteSpec || {});
 }
 
 
@@ -681,6 +686,7 @@ function drawCustomTile(ctx, palette, customType, customStyle = {}) {
 function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
   const s = BASE_SIZE * UPSCALE;
   ctx.imageSmoothingEnabled = false;
+  ctx.clearRect(0, 0, s, s);
 
   const localPalette = {
     primary:   customStyle.primary   || palette.primary   || "#553344",
@@ -688,10 +694,6 @@ function drawFixedCustomTile(ctx, palette, customType, customStyle = {}) {
     highlight: customStyle.highlight || palette.highlight || "#ff4040",
     shadow:    customStyle.shadow    || palette.shadow    || "#050307"
   };
-
-  // Base dark fill
-  ctx.fillStyle = localPalette.secondary;
-  ctx.fillRect(0, 0, s, s);
 
   switch (customType) {
     case 'archway':
@@ -1094,6 +1096,44 @@ function drawTorchWallFromStyle(ctx, palette, wallStyle, torchStyle, includeWall
   ctx.fillRect(cx - s * 0.04, cy + s * 0.02, s * 0.08, s * 0.02);
 }
 
+function applySpriteDepthShading(ctx, palette, spriteSpec = {}) {
+  const s = BASE_SIZE * UPSCALE;
+  const img = ctx.getImageData(0, 0, s, s);
+  const data = img.data;
+  const profile = spriteSpec.profile || 'flat';
+  const depth = typeof spriteSpec.depth === 'number' ? spriteSpec.depth : 0.6;
+  const rim = typeof spriteSpec.rim === 'number' ? spriteSpec.rim : 0.25;
+  const ao = typeof spriteSpec.ao === 'number' ? spriteSpec.ao : 0.35;
+
+  for (let y = 0; y < s; y++) {
+    const v = y / Math.max(1, s - 1);
+    const aoMul = 1 - ao * Math.pow(v, 2);
+    for (let x = 0; x < s; x++) {
+      const idx = (y * s + x) * 4;
+      const a = data[idx + 3];
+      if (a === 0) continue;
+      const u = x / Math.max(1, s - 1);
+      let shade = 1.0;
+      if (profile === 'cylinder') {
+        const nx = (u - 0.5) * 2;
+        const nz = Math.sqrt(Math.max(0, 1 - nx * nx));
+        shade = 0.65 + 0.35 * nz;
+      } else if (profile === 'slab') {
+        const edge = Math.abs(u - 0.5) * 2;
+        shade = 0.7 + 0.3 * (1 - edge);
+      } else {
+        shade = 0.85 + 0.15 * (1 - Math.abs(u - 0.5) * 2);
+      }
+      const rimBoost = rim * (1 - Math.abs(u - 0.5) * 2);
+      const finalShade = (1 - depth) + depth * shade;
+      data[idx] = Math.min(255, data[idx] * finalShade * aoMul + 255 * rimBoost * 0.08);
+      data[idx + 1] = Math.min(255, data[idx + 1] * finalShade * aoMul + 255 * rimBoost * 0.06);
+      data[idx + 2] = Math.min(255, data[idx + 2] * finalShade * aoMul + 255 * rimBoost * 0.03);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
 function drawPillar(ctx, palette) {
   const s = BASE_SIZE * UPSCALE;
 
@@ -1135,6 +1175,8 @@ function drawPillar(ctx, palette) {
   ctx.fillRect(shaftX - s * 0.08, shaftY - s * 0.08, shaftW + s * 0.16, s * 0.1);
   ctx.fillStyle = palette.primary;
   ctx.fillRect(shaftX - s * 0.05, shaftY - s * 0.05, shaftW + s * 0.1, s * 0.06);
+
+  applySpriteDepthShading(ctx, palette, { profile: 'cylinder', depth: 0.8, rim: 0.25, ao: 0.35 });
 }
 
 // ===== Main entry point (modified to support custom tiles) =====
