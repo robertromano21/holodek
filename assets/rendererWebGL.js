@@ -997,7 +997,7 @@
             // Pass 2: base color fill (no depth writes).
             createGpuMesh(solidMesh, { unlit: 1, toonSteps: 3, depthTestOnly: true }),
             // Pass 3: detail lighting on top (no depth writes).
-            createGpuMesh(detailMesh, { unlit: debugSolid ? 1 : 0, toonSteps: 3, depthTestOnly: true })
+            createGpuMesh(detailMesh, { unlit: debugSolid ? 1 : 0, toonSteps: 3, depthTestOnly: true, depthBias: -0.0006 })
           ],
           _debugKey: debugKey
         };
@@ -1740,18 +1740,25 @@ void main() {
   // Directional light: comes from u_lightDir in XY and u_lightElev as Z component.
   vec3 L = normalize(vec3(u_lightDir, u_lightElev));
   float ndotl = max(0.0, dot(N, L));
-  float light = 0.25 + ndotl * u_lightIntensity;
+  float baseLight = 0.25 + ndotl * u_lightIntensity;
 
-  // Torch contribution
+  // Torch contribution (kept separate so bright sides can still get a boost).
   float torch = accumulateTorchLit(v_worldPos, N);
-  light += torch;
 
   // Distance shading
   float dist2 = dot(v_worldPos.xy - u_camPos, v_worldPos.xy - u_camPos);
   float dist = sqrt(max(dist2, 0.0));
   float depthShade = 1.0 - saturate(dist / max(u_depthShadeScale, 1e-3));
-  light *= mix(0.55, 1.0, depthShade);
+  baseLight *= mix(0.55, 1.0, depthShade);
 
+  // Gradiated tone ramp (smoother than the posterized 3-tone look).
+  float lit = baseLight + torch * 1.1;
+  float t = clamp(lit, 0.0, 2.0);
+  vec3 ramp = mix(u_toneShadow, u_toneMid, smoothstep(0.0, 0.6, t));
+  ramp = mix(ramp, u_toneHighlight, smoothstep(0.35, 1.2, t));
+  ramp = mix(ramp, u_toneHighlight * TORCH_COLOR, smoothstep(1.0, 2.0, t));
+
+  /*
   // Posterize light gently (controls "banding" on low-poly cylinders)
   float steps = max(1.0, u_toonSteps);
   float t = saturate(light);
@@ -1766,12 +1773,17 @@ void main() {
     float k = saturate((t - 0.45) / 0.55);
     ramp = mix(u_toneMid, u_toneHighlight, k);
   }
+  */
 
   // Apply per-vertex color as albedo
   vec3 col = v_color * ramp;
 
-  // Torch tint (subtle warm push)
-  col = mix(col, col * TORCH_COLOR, saturate(torch * 0.25));
+  // Additive torch splash so it affects both shadowed and lit sides.
+  vec3 torchTint = mix(v_color, vec3(1.0), 0.4) * TORCH_COLOR;
+  float torchMix = saturate(torch * 0.6);
+  col = mix(col, torchTint, torchMix);
+  col += TORCH_COLOR * torch * 0.12;
+  col = clamp(col, 0.0, 1.0);
 
   outColor = vec4(col, 1.0);
 }`;
@@ -2074,6 +2086,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
     },
+
+
 
     ensureDebugCanvas(container, displayW, displayH) {
       if (!container) return null;
@@ -2463,7 +2477,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform1fv(this.uniformLocations.torchRadius, radiusArr);
         gl.uniform1fv(this.uniformLocations.torchIntensity, intensityArr);
       }
-
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
       gl.uniform1i(this.uniformLocations.cells, 0);
@@ -2501,6 +2514,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const isCustom = tileName === 'pillar'
             || (tileName.startsWith && tileName.startsWith('custom_'))
             || hasSpriteSpec;
+
+          const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+          const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + 2;
+          const meta = (window.dungeonTexturesMeta && tileName)
+            ? window.dungeonTexturesMeta[tileName]
+            : null;
+          const heightRatio = typeof meta?.heightRatio === 'number' ? meta.heightRatio : 1.0;
+          const baseWidth = typeof meta?.baseWidth === 'number' ? meta.baseWidth : SPRITE_WIDTH_RATIO;
+
           if (!isTorch && !isCustom) continue;
 
           // Base position (wall cell center)
@@ -2530,13 +2552,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             }
           }
 
-          const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
-          const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + 2;
-          const meta = (window.dungeonTexturesMeta && tileName)
-            ? window.dungeonTexturesMeta[tileName]
-            : null;
-          const heightRatio = typeof meta?.heightRatio === 'number' ? meta.heightRatio : 1.0;
-          const baseWidth = typeof meta?.baseWidth === 'number' ? meta.baseWidth : SPRITE_WIDTH_RATIO;
           if (!isTorch && isCustom && this.voxelProgram) {
             const voxelMesh = this.getVoxelMesh(tileName, dungeon);
             if (voxelMesh) {
