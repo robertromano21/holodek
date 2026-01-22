@@ -92,7 +92,7 @@
 
   const MAX_TORCH_LIGHTS = 32;
       const TORCH_LIGHT_RADIUS_FLOOR = 6.0;
-      const TORCH_LIGHT_RADIUS_VOXEL_SCALE = 2.5;
+      const TORCH_LIGHT_RADIUS_VOXEL_SCALE = 6.0;
   const TORCH_LIGHT_FALLOFF = 0.6;
   const TORCH_LIGHT_COLOR = { r: 255, g: 190, b: 130 };
 
@@ -995,7 +995,7 @@
             // Pass 1: depth-only seal for occlusion and solidity.
             createGpuMesh(solidMesh, { unlit: 1, toonSteps: 3, depthOnly: true }),
             // Pass 2: base color fill (no depth writes).
-            createGpuMesh(solidMesh, { unlit: 1, toonSteps: 3, depthTestOnly: true }),
+            createGpuMesh(solidMesh, { unlit: 0, toonSteps: 3, depthTestOnly: true }),
             // Pass 3: detail lighting on top (no depth writes).
             createGpuMesh(detailMesh, { unlit: debugSolid ? 1 : 0, toonSteps: 3, depthTestOnly: true, depthBias: -0.0006 })
           ],
@@ -1127,6 +1127,7 @@ uniform vec3 u_skyTop;
 uniform vec3 u_skyBot;
 uniform float u_depthFar;
 uniform float u_depthFarDepth;
+uniform float u_shadowStrength;
 uniform int u_torchCount;
 uniform vec3 u_torchPos[32];
 uniform float u_torchRadius[32];
@@ -1153,12 +1154,14 @@ bool inBounds(int x, int y) {
   return x >= 0 && y >= 0 && x < u_gridSize.x && y < u_gridSize.y;
 }
 
-// Normal-aware torch lighting (half-Lambert for better wall self-illumination)
+// Normal-aware torch lighting (half-Lambert + ambient fill for multi-light look)
 float accumulateTorchLit(vec3 worldPos, vec3 normal) {
   float total = 0.0;
+  const float TORCH_AMBIENT = 0.5;
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
+    toL.z *= 0.5;
     float dist = length(toL);
     if (dist >= u_torchRadius[i]) continue;
     vec3 L = normalize(toL);
@@ -1166,7 +1169,8 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal) {
     float ndotl = ndotl_raw * 0.5 + 0.5;  // half-Lambert
     ndotl = max(0.0, ndotl);             // prevent lighting if far behind
     float falloff = 1.0 - dist / u_torchRadius[i];
-    total += ndotl * falloff * falloff * u_torchIntensity[i] * TORCH_FALLOFF;
+    float atten = falloff * falloff * u_torchIntensity[i] * TORCH_FALLOFF;
+    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
   }
   return total;
 }
@@ -1265,10 +1269,12 @@ void main() {
           float lit = clamp(accumulateTorchLit(worldPos, normal), 0.0, 1.0);
           float litSide = clamp(lit * TORCH_SIDE_BOOST, 0.0, 1.5);
 
-          float shade = max(0.3, 1.0 - nextDist / 10.0);
-          float base = shade + litSide * 0.6;
-          float warmShift = 0.75 + 0.45 * litSide;
-          vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * litSide;
+          float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
+          float shade = max(shadowFloor, 1.0 - nextDist / 10.0);
+          float torchLight = litSide * 0.9;
+          float base = shade + torchLight;
+          float warmShift = 0.75 + 0.45 * torchLight;
+          vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
           vec3 col = tex.rgb * base + torchAdd;
 
           if (nextDist < sideDistClosest) {
@@ -1326,7 +1332,8 @@ void main() {
 
       vec4 tex = texture(u_wallAtlas, atlasUV);
       if (tex.a > 0.04 && frag.y >= lineTop && frag.y <= extendedBottom) {
-        float shade = max(0.3, 1.0 - perpDist / 10.0);
+        float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
+        float shade = max(shadowFloor, 1.0 - perpDist / 10.0);
         float sideFactor = (side == 0) ? 1.0 : 0.85;
         vec2 normal2D = (side == 0) ? vec2(float(stepX), 0.0) : vec2(0.0, float(stepY));
         float dotLight = dot(normal2D, u_lightDir);
@@ -1354,9 +1361,10 @@ void main() {
         float litWall = clamp(lit * TORCH_WALL_BOOST, 0.0, 1.5);
 
         // rest unchanged
-        float base = rowShade + litWall * 0.6;
-        float warmShift = 0.75 + 0.45 * litWall;
-        vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * litWall;
+        float torchLight = litWall * 0.9;
+        float base = rowShade + torchLight;
+        float warmShift = 0.75 + 0.45 * torchLight;
+        vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
 
         vec3 finalCol = tex.rgb * base + torchAdd;
 
@@ -1436,10 +1444,12 @@ void main() {
     float lit = clamp(accumulateTorchLit(hitPos, normal), 0.0, 1.0);
     float litFloor = clamp(lit * TORCH_FLOOR_BOOST, 0.0, 1.5);
 
-    float shade = max(0.3, 1.0 - floorDist / 10.0);
-    float base = shade + litFloor * 0.6;
-    float warmShift = 0.75 + 0.45 * litFloor;
-    vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * litFloor;
+    float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
+    float shade = max(shadowFloor, 1.0 - floorDist / 10.0);
+    float torchLight = litFloor * 0.9;
+    float base = shade + torchLight;
+    float warmShift = 0.75 + 0.45 * torchLight;
+    vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
 
     outColor = vec4(tex.rgb * base + torchAdd, 1.0);
     gl_FragDepth = floorDist / u_depthFarDepth;
@@ -1501,6 +1511,7 @@ void main() {
         skyBot: gl.getUniformLocation(this.program, 'u_skyBot'),
         depthFar: gl.getUniformLocation(this.program, 'u_depthFar'),
         depthFarDepth: gl.getUniformLocation(this.program, 'u_depthFarDepth'),
+        shadowStrength: gl.getUniformLocation(this.program, 'u_shadowStrength'),
         torchCount: gl.getUniformLocation(this.program, 'u_torchCount'),
         torchPos: gl.getUniformLocation(this.program, 'u_torchPos[0]'),
         torchColor: gl.getUniformLocation(this.program, 'u_torchColor[0]'),
@@ -1572,6 +1583,7 @@ void main() {
         'uniform float u_spriteHeight;',
         'uniform float u_spriteVFlip;',
         'uniform float u_depthShadeScale;',
+        'uniform float u_shadowStrength;',
         'uniform int u_torchCount;',
         'uniform vec3 u_torchPos[32];',
         'uniform float u_torchRadius[32];',
@@ -1590,6 +1602,8 @@ void main() {
         '  float ndotl = max(0.0, dot(normal, lightDir));',
         '  float dirShade = 0.6 + 0.4 * ndotl;',
         '  float shade = 1.0 - u_lightIntensity * u_depthAmount + u_lightIntensity * u_depthAmount * dirShade;',
+        '  float contrast = mix(1.0, 1.25, u_shadowStrength);',
+        '  shade = pow(max(1e-3, shade), contrast);',
         '  float vFrac = mix(v_uv.y, 1.0 - v_uv.y, u_spriteVFlip);',
         '  vec3 worldPos = vec3(u_spritePos.xy, u_spritePos.z + vFrac * u_spriteHeight);',
         '  const float TORCH_SPRITE_BOOST = 1.3;',
@@ -1602,12 +1616,15 @@ void main() {
         '    vec3 L = normalize(toL);',
         '    float ndotlTorch = max(0.0, dot(normal, L));',
         '    float falloff = 1.0 - dist / u_torchRadius[i];',
-        '    torchLit += ndotlTorch * falloff * falloff * u_torchIntensity[i];',
+        '    float atten = falloff * falloff * u_torchIntensity[i];',
+        '    const float TORCH_AMBIENT = 0.35;',
+        '    torchLit += (TORCH_AMBIENT + ndotlTorch * (1.0 - TORCH_AMBIENT)) * atten;',
         '  }',
         '  torchLit *= TORCH_SPRITE_BOOST;',
         '  vec3 torchColor = vec3(1.0, 190.0/255.0, 130.0/255.0);',
         '  float distanceShade = max(0.3, 1.0 - v_depth * u_depthShadeScale);',
-        '  vec3 col = (tex.rgb * shade + torchColor * torchLit * 0.35) * distanceShade;',
+        '  float torchLight = torchLit * 0.6;',
+        '  vec3 col = (tex.rgb * (shade + torchLight) + torchColor * torchLit * 0.35) * distanceShade;',
         '  outColor = vec4(col, tex.a) * u_tint;',
         '  gl_FragDepth = v_depth;',
         '}'
@@ -1681,6 +1698,9 @@ uniform float u_lightIntensity;
 
 uniform float u_depthShadeScale;
 uniform float u_depthBias;
+uniform float u_shadowStrength;
+uniform float u_highlightBoost;
+uniform float u_torchLightScale;
 
 uniform vec3 u_toneShadow;
 uniform vec3 u_toneMid;
@@ -1707,6 +1727,7 @@ float saturate(float x) { return clamp(x, 0.0, 1.0); }
 // Half-Lambert torch lighting so attached walls / sides still receive light
 float accumulateTorchLit(vec3 worldPos, vec3 normal) {
   float total = 0.0;
+  const float TORCH_AMBIENT = 0.35;
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
@@ -1718,7 +1739,7 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal) {
     float ndotl = ndotl_raw * 0.5 + 0.5;   // half-Lambert
     ndotl = max(0.0, ndotl);
     float atten = pow(1.0 - dist / rad, TORCH_FALLOFF);
-    total += ndotl * atten * u_torchIntensity[i];
+    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten * u_torchIntensity[i];
   }
   return total;
 }
@@ -1740,23 +1761,34 @@ void main() {
   // Directional light: comes from u_lightDir in XY and u_lightElev as Z component.
   vec3 L = normalize(vec3(u_lightDir, u_lightElev));
   float ndotl = max(0.0, dot(N, L));
-  float baseLight = 0.25 + ndotl * u_lightIntensity;
+  float baseLight = 0.15 + ndotl * u_lightIntensity;
 
   // Torch contribution (kept separate so bright sides can still get a boost).
   float torch = accumulateTorchLit(v_worldPos, N);
+  float torchLight = torch * u_torchLightScale;
 
-  // Distance shading
+  // Distance shading (match wall falloff)
   float dist2 = dot(v_worldPos.xy - u_camPos, v_worldPos.xy - u_camPos);
   float dist = sqrt(max(dist2, 0.0));
-  float depthShade = 1.0 - saturate(dist / max(u_depthShadeScale, 1e-3));
-  baseLight *= mix(0.55, 1.0, depthShade);
+  float distanceShade = max(0.3, 1.0 - dist / max(u_depthShadeScale, 1e-3));
+  baseLight *= distanceShade;
 
   // Gradiated tone ramp (smoother than the posterized 3-tone look).
-  float lit = baseLight + torch * 1.1;
+  float lit = baseLight + torchLight;
   float t = clamp(lit, 0.0, 2.0);
-  vec3 ramp = mix(u_toneShadow, u_toneMid, smoothstep(0.0, 0.6, t));
-  ramp = mix(ramp, u_toneHighlight, smoothstep(0.35, 1.2, t));
-  ramp = mix(ramp, u_toneHighlight * TORCH_COLOR, smoothstep(1.0, 2.0, t));
+  float contrast = mix(1.0, 2.65, u_shadowStrength);
+  t = pow(t / 2.0, contrast) * 2.0;
+  t = t / (1.0 + 0.35 * t);
+  float steps = mix(6.0, 3.0, u_shadowStrength);
+  float tPoster = floor(t * steps) / steps;
+  float tMix = mix(t, tPoster, u_shadowStrength);
+  vec3 shadowCol = mix(u_toneShadow, u_toneShadow * 0.4, u_shadowStrength);
+  vec3 ramp = mix(shadowCol, u_toneMid, smoothstep(0.0, 0.6, tMix));
+  float highlightBoost = mix(1.0, 1.6, u_highlightBoost);
+  float hi1 = saturate(smoothstep(0.35, 1.2, tMix) * highlightBoost);
+  float hi2 = saturate(smoothstep(1.0, 2.0, tMix) * highlightBoost);
+  ramp = mix(ramp, u_toneHighlight, hi1);
+  ramp = mix(ramp, u_toneHighlight * TORCH_COLOR, hi2);
 
   /*
   // Posterize light gently (controls "banding" on low-poly cylinders)
@@ -1780,9 +1812,9 @@ void main() {
 
   // Additive torch splash so it affects both shadowed and lit sides.
   vec3 torchTint = mix(v_color, vec3(1.0), 0.4) * TORCH_COLOR;
-  float torchMix = saturate(torch * 0.6);
+  float torchMix = saturate(torchLight * 0.5);
   col = mix(col, torchTint, torchMix);
-  col += TORCH_COLOR * torch * 0.12;
+  col += TORCH_COLOR * torchLight * 0.12;
   col = clamp(col, 0.0, 1.0);
 
   outColor = vec4(col, 1.0);
@@ -1807,6 +1839,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         spriteHeight: gl.getUniformLocation(this.spriteProgram, 'u_spriteHeight'),
         spriteVFlip: gl.getUniformLocation(this.spriteProgram, 'u_spriteVFlip'),
         depthShadeScale: gl.getUniformLocation(this.spriteProgram, 'u_depthShadeScale'),
+        shadowStrength: gl.getUniformLocation(this.spriteProgram, 'u_shadowStrength'),
         torchCount: gl.getUniformLocation(this.spriteProgram, 'u_torchCount'),
         torchPos: gl.getUniformLocation(this.spriteProgram, 'u_torchPos[0]'),
         torchRadius: gl.getUniformLocation(this.spriteProgram, 'u_torchRadius[0]'),
@@ -1831,6 +1864,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           depthFarDepth: gl.getUniformLocation(this.voxelProgram, 'u_depthFarDepth'),
           depthShadeScale: gl.getUniformLocation(this.voxelProgram, 'u_depthShadeScale'),
           depthBias: gl.getUniformLocation(this.voxelProgram, 'u_depthBias'),
+          shadowStrength: gl.getUniformLocation(this.voxelProgram, 'u_shadowStrength'),
+          highlightBoost: gl.getUniformLocation(this.voxelProgram, 'u_highlightBoost'),
+          torchLightScale: gl.getUniformLocation(this.voxelProgram, 'u_torchLightScale'),
           modelPos: gl.getUniformLocation(this.voxelProgram, 'u_modelPos'),
           modelScale: gl.getUniformLocation(this.voxelProgram, 'u_modelScale'),
           lightDir: gl.getUniformLocation(this.voxelProgram, 'u_lightDir'),
@@ -2348,8 +2384,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       const torchLights = [];
       const now = performance.now();
+      const torchOcclusion = (typeof window !== 'undefined') ? window.TORCH_OCCLUSION !== false : true;
 
       const isWallTile = (tile) => ['wall', 'door', 'torch'].includes(tile);
+      const isSolidCell = (cell) => {
+        const tile = cell?.tile || 'floor';
+        if (tile === 'wall' || tile === 'torch') return true;
+        if (tile === 'door') return cell?.door?.isOpen === false;
+        return false;
+      };
       const getTorchFacing = (wx, wy, cell) => {
         let facing = (cell?.torchFacing || '').trim().toUpperCase();
         if (['N', 'S', 'E', 'W'].includes(facing)) return facing;
@@ -2366,6 +2409,80 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           }
         }
         return 'N';
+      };
+      const hasLineOfSight = (x0, y0, x1, y1) => {
+        const startX = Math.floor(x0);
+        const startY = Math.floor(y0);
+        const endX = Math.floor(x1);
+        const endY = Math.floor(y1);
+        if (startX === endX && startY === endY) return true;
+
+        const dx = x1 - x0;
+        const dy = y1 - y0;
+        const stepX = dx > 0 ? 1 : -1;
+        const stepY = dy > 0 ? 1 : -1;
+        const tDeltaX = dx !== 0 ? Math.abs(1 / dx) : Infinity;
+        const tDeltaY = dy !== 0 ? Math.abs(1 / dy) : Infinity;
+        const fracX = dx > 0 ? (Math.floor(x0) + 1 - x0) : (x0 - Math.floor(x0));
+        const fracY = dy > 0 ? (Math.floor(y0) + 1 - y0) : (y0 - Math.floor(y0));
+        let tMaxX = dx !== 0 ? fracX * tDeltaX : Infinity;
+        let tMaxY = dy !== 0 ? fracY * tDeltaY : Infinity;
+
+        let x = startX;
+        let y = startY;
+        let steps = 0;
+        while ((x !== endX || y !== endY) && steps < 512) {
+          if (tMaxX < tMaxY) {
+            tMaxX += tDeltaX;
+            x += stepX;
+          } else {
+            tMaxY += tDeltaY;
+            y += stepY;
+          }
+          if (x === endX && y === endY) break;
+          const cell = dungeon.cells?.[`${x},${y}`];
+          if (!cell || isSolidCell(cell)) return false;
+          steps++;
+        }
+        return true;
+      };
+      const makeTorchUniformData = () => ({
+        count: 0,
+        posArr: new Float32Array(MAX_TORCH_LIGHTS * 3),
+        radiusArr: new Float32Array(MAX_TORCH_LIGHTS),
+        intensityArr: new Float32Array(MAX_TORCH_LIGHTS)
+      });
+      const packTorchUniforms = (list, out, wrapped = false) => {
+        const count = Math.min(list.length, MAX_TORCH_LIGHTS);
+        out.count = count;
+        for (let i = 0; i < count; i++) {
+          const t = wrapped ? list[i].t : list[i];
+          const bi = i * 3;
+          out.posArr[bi] = t.x;
+          out.posArr[bi + 1] = t.y;
+          out.posArr[bi + 2] = t.z;
+          out.radiusArr[i] = t.radius;
+          out.intensityArr[i] = t.intensity;
+        }
+        return out;
+      };
+      const torchUniformData = makeTorchUniformData();
+      const occludedTorchUniformData = makeTorchUniformData();
+      const visibleTorchScratch = [];
+      const getTorchUniformData = (targetX, targetY, radiusScale) => {
+        if (!torchOcclusion) return torchUniformData;
+        if (!torchUniformData.count) return torchUniformData;
+        visibleTorchScratch.length = 0;
+        for (const t of torchLights) {
+          const dx = t.x - targetX;
+          const dy = t.y - targetY;
+          const rad = t.radius * radiusScale;
+          if (dx * dx + dy * dy > rad * rad) continue;
+          if (!hasLineOfSight(t.x, t.y, targetX, targetY)) continue;
+          visibleTorchScratch.push({ t, dist2: dx * dx + dy * dy });
+        }
+        visibleTorchScratch.sort((a, b) => a.dist2 - b.dist2);
+        return packTorchUniforms(visibleTorchScratch, occludedTorchUniformData, true);
       };
       for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
         for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
@@ -2401,6 +2518,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           });
         }
       }
+      torchLights.sort((a, b) => a.dist2 - b.dist2);
+      packTorchUniforms(torchLights, torchUniformData);
 
       gl.viewport(0, 0, width, height);
       gl.clearColor(0, 0, 0, 1);
@@ -2435,6 +2554,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const depthFar = isOutdoor ? outdoorDepthFar : 60.0;
       const depthFarDepth = isOutdoor ? outdoorDepthFarDepth : 60.0;
       const depthShadeScale = depthFarDepth / 10.0;
+      const shadowStrength = Number.isFinite(window.SHADOW_STRENGTH) ? window.SHADOW_STRENGTH : 0.6;
+      const shadowStrengthClamped = Math.max(0.0, Math.min(4.0, shadowStrength));
+      const highlightBoost = Number.isFinite(window.HIGHLIGHT_BOOST) ? window.HIGHLIGHT_BOOST : 0.6;
+      const highlightBoostClamped = Math.max(0.0, Math.min(4.0, highlightBoost));
+      const torchLightScale = Number.isFinite(window.TORCH_LIGHT_SCALE) ? window.TORCH_LIGHT_SCALE : 0.4;
+      const torchLightScaleClamped = Math.max(0.0, Math.min(2.0, torchLightScale));
+      const torchRadiusVoxelScale = Number.isFinite(window.TORCH_LIGHT_RADIUS_VOXEL_SCALE)
+        ? window.TORCH_LIGHT_RADIUS_VOXEL_SCALE
+        : TORCH_LIGHT_RADIUS_VOXEL_SCALE;
+      const torchRadiusVoxelScaleClamped = Math.max(0.0, Math.min(10.0, torchRadiusVoxelScale));
+      const voxelShadeScale = 10.0;
       const maxRayDist = Math.max(
         camX,
         this.gridW - camX,
@@ -2452,30 +2582,22 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform3f(this.uniformLocations.skyBot, skyBotRgb.r, skyBotRgb.g, skyBotRgb.b);
       gl.uniform1f(this.uniformLocations.depthFar, depthFar);
       gl.uniform1f(this.uniformLocations.depthFarDepth, depthFarDepth);
+      if (this.uniformLocations.shadowStrength) {
+        gl.uniform1f(this.uniformLocations.shadowStrength, shadowStrengthClamped);
+      }
       if (this.uniformLocations.torchCount) {
-        torchLights.sort((a, b) => a.dist2 - b.dist2);
-        const count = Math.min(torchLights.length, MAX_TORCH_LIGHTS);
-        const posArr = new Float32Array(MAX_TORCH_LIGHTS * 3);
         const colorArr = new Float32Array(MAX_TORCH_LIGHTS * 3);
-        const radiusArr = new Float32Array(MAX_TORCH_LIGHTS);
-        const intensityArr = new Float32Array(MAX_TORCH_LIGHTS);
-        for (let i = 0; i < count; i++) {
-          const t = torchLights[i];
+        for (let i = 0; i < torchUniformData.count; i++) {
           const bi = i * 3;
-          posArr[bi] = t.x;
-          posArr[bi + 1] = t.y;
-          posArr[bi + 2] = t.z;
           colorArr[bi] = TORCH_LIGHT_COLOR.r / 255;
           colorArr[bi + 1] = TORCH_LIGHT_COLOR.g / 255;
           colorArr[bi + 2] = TORCH_LIGHT_COLOR.b / 255;
-          radiusArr[i] = t.radius;
-          intensityArr[i] = t.intensity;
         }
-        gl.uniform1i(this.uniformLocations.torchCount, count);
-        gl.uniform3fv(this.uniformLocations.torchPos, posArr);
+        gl.uniform1i(this.uniformLocations.torchCount, torchUniformData.count);
+        gl.uniform3fv(this.uniformLocations.torchPos, torchUniformData.posArr);
         gl.uniform3fv(this.uniformLocations.torchColor, colorArr);
-        gl.uniform1fv(this.uniformLocations.torchRadius, radiusArr);
-        gl.uniform1fv(this.uniformLocations.torchIntensity, intensityArr);
+        gl.uniform1fv(this.uniformLocations.torchRadius, torchUniformData.radiusArr);
+        gl.uniform1fv(this.uniformLocations.torchIntensity, torchUniformData.intensityArr);
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
@@ -2686,7 +2808,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform1f(this.voxelUniforms.eyeZ, eyeZ);
         gl.uniform1f(this.voxelUniforms.depthFarDepth, depthFarDepth);
         if (this.voxelUniforms.depthShadeScale) {
-          gl.uniform1f(this.voxelUniforms.depthShadeScale, depthShadeScale);
+          gl.uniform1f(this.voxelUniforms.depthShadeScale, voxelShadeScale);
+        }
+        if (this.voxelUniforms.shadowStrength) {
+          gl.uniform1f(this.voxelUniforms.shadowStrength, shadowStrengthClamped);
+        }
+        if (this.voxelUniforms.highlightBoost) {
+          gl.uniform1f(this.voxelUniforms.highlightBoost, highlightBoostClamped);
+        }
+        if (this.voxelUniforms.torchLightScale) {
+          gl.uniform1f(this.voxelUniforms.torchLightScale, torchLightScaleClamped);
         }
         let baseVoxelDepthBias = 0.0;
         if (this.voxelUniforms.depthBias) {
@@ -2699,28 +2830,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform1f(this.voxelUniforms.lightElev, lighting.elevation);
         gl.uniform1f(this.voxelUniforms.lightIntensity, lighting.intensity);
         if (this.voxelUniforms.torchRadiusScale) {
-          gl.uniform1f(this.voxelUniforms.torchRadiusScale, TORCH_LIGHT_RADIUS_VOXEL_SCALE);
-        }
-
-        if (this.voxelUniforms.torchCount) {
-          torchLights.sort((a, b) => a.dist2 - b.dist2);
-          const count = Math.min(torchLights.length, MAX_TORCH_LIGHTS);
-          const posArr = new Float32Array(MAX_TORCH_LIGHTS * 3);
-          const radiusArr = new Float32Array(MAX_TORCH_LIGHTS);
-          const intensityArr = new Float32Array(MAX_TORCH_LIGHTS);
-          for (let i = 0; i < count; i++) {
-            const t = torchLights[i];
-            const bi = i * 3;
-            posArr[bi] = t.x;
-            posArr[bi + 1] = t.y;
-            posArr[bi + 2] = t.z;
-            radiusArr[i] = t.radius;
-            intensityArr[i] = t.intensity;
-          }
-          gl.uniform1i(this.voxelUniforms.torchCount, count);
-          gl.uniform3fv(this.voxelUniforms.torchPos, posArr);
-          gl.uniform1fv(this.voxelUniforms.torchRadius, radiusArr);
-          gl.uniform1fv(this.voxelUniforms.torchIntensity, intensityArr);
+          gl.uniform1f(this.voxelUniforms.torchRadiusScale, torchRadiusVoxelScaleClamped);
         }
 
         gl.enableVertexAttribArray(this.voxelAttribs.pos);
@@ -2729,6 +2839,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
         const stride = 9 * 4;
         for (const inst of voxelInstances) {
+          if (this.voxelUniforms.torchCount) {
+            const centerX = inst.modelPos.x + inst.modelScale.x * 0.5;
+            const centerY = inst.modelPos.y + inst.modelScale.y * 0.5;
+            const torchData = getTorchUniformData(centerX, centerY, torchRadiusVoxelScaleClamped);
+            gl.uniform1i(this.voxelUniforms.torchCount, torchData.count);
+            gl.uniform3fv(this.voxelUniforms.torchPos, torchData.posArr);
+            gl.uniform1fv(this.voxelUniforms.torchRadius, torchData.radiusArr);
+            gl.uniform1fv(this.voxelUniforms.torchIntensity, torchData.intensityArr);
+          }
           const passes = inst.mesh.passes || [inst.mesh];
           for (const pass of passes) {
             gl.bindBuffer(gl.ARRAY_BUFFER, pass.vbo);
@@ -2797,29 +2916,20 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-
-      if (this.spriteUniforms.torchCount) {
-        torchLights.sort((a, b) => a.dist2 - b.dist2);
-        const count = Math.min(torchLights.length, MAX_TORCH_LIGHTS);
-        const posArr = new Float32Array(MAX_TORCH_LIGHTS * 3);
-        const radiusArr = new Float32Array(MAX_TORCH_LIGHTS);
-        const intensityArr = new Float32Array(MAX_TORCH_LIGHTS);
-        for (let i = 0; i < count; i++) {
-          const t = torchLights[i];
-          const bi = i * 3;
-          posArr[bi] = t.x;
-          posArr[bi + 1] = t.y;
-          posArr[bi + 2] = t.z;
-          radiusArr[i] = t.radius;
-          intensityArr[i] = t.intensity;
-        }
-        gl.uniform1i(this.spriteUniforms.torchCount, count);
-        gl.uniform3fv(this.spriteUniforms.torchPos, posArr);
-        gl.uniform1fv(this.spriteUniforms.torchRadius, radiusArr);
-        gl.uniform1fv(this.spriteUniforms.torchIntensity, intensityArr);
+      if (this.spriteUniforms.shadowStrength) {
+        gl.uniform1f(this.spriteUniforms.shadowStrength, shadowStrengthClamped);
       }
 
       for (const spr of sprites) {
+        if (this.spriteUniforms.torchCount) {
+          const torchData = spr.type === 'torch'
+            ? torchUniformData
+            : getTorchUniformData(spr.lightX, spr.lightY, 1.0);
+          gl.uniform1i(this.spriteUniforms.torchCount, torchData.count);
+          gl.uniform3fv(this.spriteUniforms.torchPos, torchData.posArr);
+          gl.uniform1fv(this.spriteUniforms.torchRadius, torchData.radiusArr);
+          gl.uniform1fv(this.spriteUniforms.torchIntensity, torchData.intensityArr);
+        }
         const tex = spr.texImg ? this.getSpriteTexture(spr.texImg) : null;
 
         // Main sprite
