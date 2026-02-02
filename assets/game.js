@@ -710,12 +710,7 @@ function movePlayerByDelta(dx, dy) {
   const targetCell  = currentDungeon.cells[keyTarget];
   const currentCell = currentDungeon.cells[keyCurrent];
 
-  if (
-    !targetCell ||
-    targetCell.tile === 'wall'   ||
-    targetCell.tile === 'torch'  ||
-    targetCell.tile === 'pillar'
-  ) {
+  if (!targetCell || isBlockedDungeonCell(targetCell)) {
     console.log('Blocked by wall');
     return;
   }
@@ -735,6 +730,11 @@ function movePlayerByDelta(dx, dy) {
 
   if (Math.abs(targetFloor - currentFloor) > MAX_STEP) {
     console.log('Too steep to move there');
+    return;
+  }
+
+  if (isObstacleAtPos(proposedDungeonX + 0.5, proposedDungeonY + 0.5)) {
+    console.log('Blocked by obstacle');
     return;
   }
   
@@ -845,10 +845,56 @@ const PLAYER_RADIUS = 0.2;
 const Z_SMOOTH = 8.0;
 const RUN_MULT = 1.6;
 
+function isObstacleTile(tile) {
+  return tile === 'pillar' || (tile && tile.startsWith('custom_'));
+}
+
+function getObstacleRadiusForTile(tile) {
+  if (!tile || !currentDungeon || !currentDungeon.tiles) return 0;
+  const spec = currentDungeon.tiles[tile]?.spriteSpec || {};
+  const baseWidth = Number.isFinite(spec.baseWidth)
+    ? spec.baseWidth
+    : (Number.isFinite(spec.gridWidth) ? spec.gridWidth : 0.6);
+  const radius = (baseWidth * 0.5) - 0.02;
+  return Math.max(0.12, Math.min(0.48, radius));
+}
+
+function isObstacleAtPos(x, y) {
+  if (!currentDungeon || !currentDungeon.cells) return false;
+  const cx = Math.floor(x);
+  const cy = Math.floor(y);
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      const cell = currentDungeon.cells[`${cx + ox},${cy + oy}`];
+      if (!cell) continue;
+      const tile = String(cell.tile || '');
+      if (!isObstacleTile(tile)) continue;
+      const radius = getObstacleRadiusForTile(tile);
+      if (radius <= 0) continue;
+      const centerX = cx + ox + 0.5;
+      const centerY = cy + oy + 0.5;
+      const dx = x - centerX;
+      const dy = y - centerY;
+      const minDist = radius + PLAYER_RADIUS;
+      if ((dx * dx + dy * dy) < (minDist * minDist)) return true;
+    }
+  }
+  return false;
+}
+
 function isBlockedDungeonCell(cell) {
   if (!cell) return true;
-  if (cell.tile === 'wall' || cell.tile === 'torch' || cell.tile === 'pillar') return true;
-  if (cell.tile === 'door' && !cell.door?.isOpen) return true;
+  const tile = String(cell.tile || '');
+  if (tile === 'wall' || tile === 'torch') return true;
+  if (tile === 'door' && !cell.door?.isOpen) return true;
+  return false;
+}
+
+function isSpawnBlockedCell(cell) {
+  if (!cell) return true;
+  const tile = String(cell.tile || '');
+  if (isBlockedDungeonCell(cell)) return true;
+  if (isObstacleTile(tile)) return true;
   return false;
 }
 
@@ -875,7 +921,7 @@ function findNearestUnblockedTile(dungeon, start, maxRadius = 25) {
   while (queue.length) {
     const { x, y, dist } = queue.shift();
     const cell = dungeon.cells[key(x, y)];
-    if (cell && !isBlockedDungeonCell(cell)) {
+    if (cell && !isSpawnBlockedCell(cell)) {
       nearest = { x, y };
       break;
     }
@@ -913,6 +959,7 @@ function canOccupyPos(nextX, nextY) {
     const toY = Math.floor(nextY + oy);
     if (!canEnterTile(fromX, fromY, toX, toY)) return false;
   }
+  if (isObstacleAtPos(nextX, nextY)) return false;
   return true;
 }
 
@@ -930,7 +977,7 @@ function ensurePlayerOnValidTile() {
   const tileY = Math.floor(playerPosY);
   const cell = currentDungeon.cells[`${tileX},${tileY}`];
 
-  if (!cell || isBlockedDungeonCell(cell)) {
+  if (!cell || isBlockedDungeonCell(cell) || isObstacleAtPos(playerPosX, playerPosY)) {
     const safe = findNearestUnblockedTile(currentDungeon, { x: tileX, y: tileY });
     playerDungeonX = safe.x;
     playerDungeonY = safe.y;
@@ -2013,6 +2060,7 @@ window.updateCombatScene = function(characters) {
 
     const wallColor  = 0x550000;
     const floorColor = 0x222222;
+    const customColor = 0xaa44aa;
 
     const pos = getPlayerPosForMap();
     const cx = Math.floor(pos.x);
@@ -2025,16 +2073,24 @@ window.updateCombatScene = function(characters) {
         const k = `${cx + dx},${cy + dy}`;
         const cell = currentDungeon.cells[k];
         if (!cell) continue;
+        const tile = String(cell.tile || '');
 
         const gx = (dx + half) * cs - offsetX;
         const gy = (dy + half) * cs - offsetY;
 
-          if (cell.tile === 'wall' || cell.tile === 'door' || cell.tile === 'pillar' || cell.tile === 'torch') {
+          if (tile === 'wall' || tile === 'door' || tile === 'torch') {
           gfx.fillStyle(wallColor, 1);
           gfx.fillRect(gx, gy, cs, cs);
         } else {
           gfx.fillStyle(floorColor, 0.35);
           gfx.fillRect(gx, gy, cs, cs);
+        }
+
+        if (tile === 'pillar' || tile.startsWith('custom_')) {
+          const centerGx = gx + cs * 0.5;
+          const centerGy = gy + cs * 0.5;
+          gfx.fillStyle(customColor, 0.7);
+          gfx.fillRect(centerGx - cs * 0.2, centerGy - cs * 0.2, cs * 0.4, cs * 0.4);
         }
       }
     }
@@ -2096,8 +2152,8 @@ window.updateCombatScene = function(characters) {
                 this.dungeonGraphics.fillStyle(floorColor, 0.35);
                 this.dungeonGraphics.fillRect(gx, gy, size, size);
 
-                // Solid walls/doors only (remove torch/pillar if they are walkable)
-                if (tile === 'wall' || tile === 'door' || tile === 'pillar') {
+                // Solid walls/doors only
+                if (tile === 'wall' || tile === 'door') {
                     this.dungeonGraphics.fillStyle(wallColor, 0.65);
                     this.dungeonGraphics.fillRect(
                         gx,
@@ -2114,7 +2170,7 @@ window.updateCombatScene = function(characters) {
                     const centerGy = gy + cellSize / 2;
                     this.dungeonGraphics.fillStyle(torchColor, 0.8);
                     this.dungeonGraphics.fillCircle(centerGx, centerGy, cellSize * 0.2);
-                } else if (tile.startsWith('custom_')) {
+                } else if (tile === 'pillar' || tile.startsWith('custom_')) {
                     // Purple marker or load actual small texture if you want
                     const centerGx = gx + cellSize / 2;
                     const centerGy = gy + cellSize / 2;
@@ -9857,7 +9913,7 @@ function findNearestWalkableStart(dungeon, start, maxRadius = 25) {
 
   const cells = dungeon.cells;
   const key = (x, y) => `${x},${y}`;
-  const isWalkable = (cell) => cell && cell.tile && cell.tile !== 'wall';
+  const isWalkable = (cell) => cell && !isSpawnBlockedCell(cell);
 
   const indoorRooms = Array.isArray(dungeon.indoorRooms) ? dungeon.indoorRooms : null;
   const isIndoor = dungeon.classification && dungeon.classification.indoor !== false;

@@ -90,7 +90,7 @@
     return { dirX, dirY, elevation, intensity, color };
   }
 
-  const MAX_TORCH_LIGHTS = 32;
+  const MAX_TORCH_LIGHTS = 64;
       const TORCH_LIGHT_RADIUS_FLOOR = 6.0;
       const TORCH_LIGHT_RADIUS_VOXEL_SCALE = 6.0;
   const TORCH_LIGHT_FALLOFF = 0.6;
@@ -249,6 +249,8 @@
       const name = String(tileName || '');
       const typeHint = this.getCustomTypeFromName(name) || name;
       const type = tileName === 'pillar' ? 'pillar' : typeHint;
+      const nameLower = name.toLowerCase();
+      const typeLower = String(type || '').toLowerCase();
       const detail = meta.detail || {};
       const clamp = (value, min, max, fallback) => {
         const v = Number.isFinite(value) ? value : fallback;
@@ -265,7 +267,15 @@
         }
       };
 
-      if (tileName === 'pillar' || type.includes('column') || meta.profile === 'cylinder') {
+      const isColumnLike =
+        tileName === 'pillar' ||
+        nameLower.includes('pillar') ||
+        nameLower.includes('column') ||
+        typeLower.includes('pillar') ||
+        typeLower.includes('column') ||
+        meta.profile === 'cylinder';
+
+      if (isColumnLike) {
         const radius = width / 2;
         const maxRadius = Math.max(1, (size - 2) / 2);
         const baseHeight = Math.max(1, Math.floor(height * clamp(detail.baseHeight, 0, 0.3, 0.18)));
@@ -752,7 +762,14 @@
       const skin = String(detail.skin || '').toLowerCase();
       const skinStrength = clampRange(detail.skinStrength, 0, 1, skin ? 0.35 : 0);
 
-      const isColumn = (tileName === 'pillar' || String(tileName).includes('column'));
+      const tileNameLower = String(tileName || '').toLowerCase();
+      const metaTypeLower = tileMeta?.type ? String(tileMeta.type).toLowerCase() : '';
+      const isColumn =
+        tileName === 'pillar' ||
+        tileNameLower.includes('pillar') ||
+        tileNameLower.includes('column') ||
+        metaTypeLower.includes('pillar') ||
+        metaTypeLower.includes('column');
 
       // Columns look terrible with per-voxel speckle — tame it.
       let useNoise = noise;
@@ -773,7 +790,7 @@
       let grooveStrength = clampRange(detail.grooveDepth, 0, 1, 0.2) * 0.45;
 
       // Pillars/columns: grooves should read as carving, not voids.
-      if (tileName === 'pillar' || String(tileName).includes('column')) {
+      if (isColumn) {
         grooveStrength *= 0.18;
       }
 
@@ -951,10 +968,7 @@
         }
       }
 
-      const isColumnLike =
-        tileName === 'pillar' ||
-        String(tileName).includes('column') ||
-        String(tileName).includes('columns');
+      const isColumnLike = isColumn;
 
       const gl = this.gl;
       const createGpuMesh = (mesh, hints) => {
@@ -1129,18 +1143,29 @@ uniform float u_depthFar;
 uniform float u_depthFarDepth;
 uniform float u_shadowStrength;
 uniform int u_torchCount;
-uniform vec3 u_torchPos[32];
-uniform float u_torchRadius[32];
-uniform float u_torchIntensity[32];
+uniform vec3 u_torchPos[${MAX_TORCH_LIGHTS}];
+uniform float u_torchRadius[${MAX_TORCH_LIGHTS}];
+uniform float u_torchIntensity[${MAX_TORCH_LIGHTS}];
 
 const int MAX_STEPS = 400;
-const int MAX_TORCH = 32;
-const float TORCH_FALLOFF = 0.6;
+const int MAX_TORCH = ${MAX_TORCH_LIGHTS};
+const float TORCH_FALLOFF = 0.45;
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
 // Per-surface torch tuning knobs (1.0 = default).
 const float TORCH_WALL_BOOST = 1.3;
 const float TORCH_SIDE_BOOST = 1.1;
 const float TORCH_FLOOR_BOOST = 1.4;
+const float TORCH_LIGHT_SCALE = 0.7;
+const float TORCH_ONLY = 0.0;
+const int SHADOW_TORCH_LIMIT = MAX_TORCH;
+const int SHADOW_DDA_STEPS = 96;
+const float OBSTACLE_SHADOW_RADIUS = 0.35;
+const float OBSTACLE_SHADOW_SOFT = 0.22;
+const float OBSTACLE_SHADOW_SPREAD = 0.12;
+const float SHADOW_DARKEN = 0.75;
+const float SHADOW_RADIUS_SCALE = 1.6;
+const float STEP_SHADOW_EPS = 0.05;
+const float TORCH_SHADOW_MIX = 0.7;
 
 vec4 fetchCell(int x, int y) {
   int yy = u_flipY == 1 ? (u_gridSize.y - 1 - y) : y;
@@ -1154,10 +1179,280 @@ bool inBounds(int x, int y) {
   return x >= 0 && y >= 0 && x < u_gridSize.x && y < u_gridSize.y;
 }
 
+bool isObstacleCell(vec4 cell) {
+  return cell.a > 0.001 && cell.a < 0.999;
+}
+
+bool isCasterCell(vec4 cell) {
+  return cell.a > 0.001;
+}
+
+float casterRadiusFromCell(vec4 cell) {
+  return (cell.a >= 0.999) ? 0.5 : max(0.12, cell.a);
+}
+
+float floorHeightFromCell(vec4 cell) {
+  return u_heightMin + cell.g * 255.0 * (u_heightRange / 255.0);
+}
+
+float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad, float intensity) {
+  vec2 toHit = hitXY - torchPos;
+  float distHit = length(toHit);
+  if (distHit < 0.05 || distHit > rad * 1.35) return 0.0;
+  vec2 lightDir = normalize(casterCenter - torchPos);
+  vec2 v = hitXY - casterCenter;
+  float proj = dot(v, lightDir);
+  if (proj <= 0.0) return 0.0;
+  float len = clamp(rad * 1.1, 0.8, 12.0);
+  float radius = casterRadius + proj * OBSTACLE_SHADOW_SPREAD;
+  float perp = length(v - lightDir * proj);
+  float core = smoothstep(radius, radius - OBSTACLE_SHADOW_SOFT, perp);
+  float front = smoothstep(0.0, 0.12, proj);
+  float back = 1.0 - smoothstep(len * 0.85, len, proj);
+  float strength = core * front * back * intensity;
+  return strength;
+}
+
+float shadowStrengthFromWallSlab(
+  vec2 hitXY,
+  vec2 casterCenter,
+  vec2 torchPos,
+  float rad,
+  float intensity,
+  vec2 faceNormal,
+  bool infiniteAlongFace
+) {
+  vec2 toHit = hitXY - torchPos;
+  float distHit = length(toHit);
+  if (distHit < 0.05 || distHit > rad * 1.35) return 0.0;
+  vec2 dir = toHit / max(distHit, 1e-4);
+
+  vec2 toCaster = casterCenter - torchPos;
+  bool useX;
+  float faceSignX = 0.0;
+  float faceSignY = 0.0;
+  if (abs(faceNormal.x) > 0.5 || abs(faceNormal.y) > 0.5) {
+    useX = abs(faceNormal.x) > 0.5;
+    faceSignX = (faceNormal.x >= 0.0) ? 1.0 : -1.0;
+    faceSignY = (faceNormal.y >= 0.0) ? 1.0 : -1.0;
+  } else {
+    useX = abs(toCaster.x) >= abs(toCaster.y);
+    faceSignX = (toCaster.x >= 0.0) ? -1.0 : 1.0;
+    faceSignY = (toCaster.y >= 0.0) ? -1.0 : 1.0;
+  }
+  float tPlane = 0.0;
+  float perpDist = 0.0;
+
+  if (useX) {
+    float faceX = casterCenter.x + 0.5 * faceSignX;
+    if (abs(dir.x) < 1e-4) return 0.0;
+    tPlane = (faceX - torchPos.x) / dir.x;
+    if (tPlane <= 0.0 || tPlane >= distHit) return 0.0;
+    if (infiniteAlongFace) {
+      perpDist = 0.0;
+    } else {
+      float hitY = hitXY.y;
+      float clampedY = clamp(hitY, casterCenter.y - 0.5, casterCenter.y + 0.5);
+      perpDist = abs(hitY - clampedY);
+    }
+  } else {
+    float faceY = casterCenter.y + 0.5 * faceSignY;
+    if (abs(dir.y) < 1e-4) return 0.0;
+    tPlane = (faceY - torchPos.y) / dir.y;
+    if (tPlane <= 0.0 || tPlane >= distHit) return 0.0;
+    if (infiniteAlongFace) {
+      perpDist = 0.0;
+    } else {
+      float hitX = hitXY.x;
+      float clampedX = clamp(hitX, casterCenter.x - 0.5, casterCenter.x + 0.5);
+      perpDist = abs(hitX - clampedX);
+    }
+  }
+
+  float proj = distHit - tPlane;
+  float len = clamp(rad * 1.35, 1.2, 12.0);
+  float halfWidth = 0.5;
+  float spread = halfWidth / max(tPlane, 0.2);
+  float radius = halfWidth + proj * spread;
+  radius = min(radius, halfWidth + rad);
+  float soft = max(0.14, OBSTACLE_SHADOW_SOFT * 1.1);
+  float core = smoothstep(radius, radius - soft, perpDist);
+  float front = smoothstep(0.0, 0.18, proj);
+  float back = 1.0 - smoothstep(len * 0.85, len, proj);
+  float strength = core * front * back * intensity;
+  return strength;
+}
+
+float computeShadowForTorch(
+  vec2 hitXY,
+  int targetX,
+  int targetY,
+  vec2 surfaceNormal2D,
+  vec2 torchPos,
+  float rad,
+  float intensity
+) {
+  float obstacleShadow = 0.0;
+  vec4 targetCell = fetchCell(targetX, targetY);
+  bool targetIsWall = targetCell.a >= 0.999;
+  bool surfaceIsFloor = (abs(surfaceNormal2D.x) < 0.1 && abs(surfaceNormal2D.y) < 0.1);
+  bool allowTargetCaster = surfaceIsFloor && isObstacleCell(targetCell);
+
+  vec2 toHit = hitXY - torchPos;
+  float distHit = length(toHit);
+  float shadowRad = rad * SHADOW_RADIUS_SCALE;
+  float maxShadow = shadowRad * 1.15;
+  if (distHit < 0.05 || distHit > maxShadow) return obstacleShadow;
+  float distFade = 1.0 - smoothstep(shadowRad * 0.85, maxShadow, distHit);
+
+  vec2 dir = toHit / max(distHit, 1e-4);
+
+  vec2 casterCenter = vec2(0.0);
+  float casterRadius = 0.0;
+  vec2 casterFaceNormal = vec2(0.0);
+  bool casterIsWall = false;
+  bool casterIsTarget = false;
+  bool foundCaster = false;
+
+  int mapX = int(floor(torchPos.x));
+  int mapY = int(floor(torchPos.y));
+  int torchCellX = mapX;
+  int torchCellY = mapY;
+  int endX = int(floor(hitXY.x));
+  int endY = int(floor(hitXY.y));
+  float invDx = abs(dir.x) < 1e-4 ? 1e4 : abs(1.0 / dir.x);
+  float invDy = abs(dir.y) < 1e-4 ? 1e4 : abs(1.0 / dir.y);
+  int stepX = dir.x < 0.0 ? -1 : 1;
+  int stepY = dir.y < 0.0 ? -1 : 1;
+  float sideDistX = (stepX == -1 ? (torchPos.x - float(mapX)) : (float(mapX + 1) - torchPos.x)) * invDx;
+  float sideDistY = (stepY == -1 ? (torchPos.y - float(mapY)) : (float(mapY + 1) - torchPos.y)) * invDy;
+
+  for (int s = 0; s < SHADOW_DDA_STEPS; s++) {
+    float nextT = min(sideDistX, sideDistY);
+    if (nextT >= distHit - 0.02) break;
+    int prevX = mapX;
+    int prevY = mapY;
+    bool steppedX = (sideDistX < sideDistY);
+    if (steppedX) {
+      sideDistX += invDx;
+      mapX += stepX;
+    } else {
+      sideDistY += invDy;
+      mapY += stepY;
+    }
+    if (!inBounds(mapX, mapY)) break;
+    vec4 prevCell = fetchCell(prevX, prevY);
+    vec4 currCell = fetchCell(mapX, mapY);
+    if (prevCell.a < 0.5 && currCell.a < 0.5) {
+      float prevH = floorHeightFromCell(prevCell);
+      float currH = floorHeightFromCell(currCell);
+      float dh = currH - prevH;
+      if (abs(dh) > STEP_SHADOW_EPS) {
+        bool currHigher = dh > 0.0;
+        casterCenter = currHigher
+          ? vec2(float(mapX) + 0.5, float(mapY) + 0.5)
+          : vec2(float(prevX) + 0.5, float(prevY) + 0.5);
+        casterRadius = 0.5;
+        casterIsWall = true;
+        casterFaceNormal = steppedX
+          ? vec2(currHigher ? -float(stepX) : float(stepX), 0.0)
+          : vec2(0.0, currHigher ? -float(stepY) : float(stepY));
+        foundCaster = true;
+        break;
+      }
+    }
+    bool isTargetCell = (mapX == targetX && mapY == targetY);
+    if (isTargetCell && !allowTargetCaster) break;
+    if (mapX == torchCellX && mapY == torchCellY) {
+      if (mapX == endX && mapY == endY) break;
+      continue;
+    }
+    vec4 sCell = currCell;
+    if (isCasterCell(sCell)) {
+      casterCenter = vec2(float(mapX) + 0.5, float(mapY) + 0.5);
+      casterRadius = casterRadiusFromCell(sCell);
+      casterIsWall = sCell.a >= 0.999;
+      casterIsTarget = isTargetCell;
+      if (!casterIsWall) {
+        vec2 toCenter = casterCenter - torchPos;
+        float proj = dot(toCenter, dir);
+        float perp = length(toCenter - dir * proj);
+        if (perp > casterRadius + 0.05) {
+          if (mapX == endX && mapY == endY) break;
+          continue;
+        }
+      }
+      casterFaceNormal = steppedX ? vec2(-float(stepX), 0.0) : vec2(0.0, -float(stepY));
+      foundCaster = true;
+      break;
+    }
+    if (isTargetCell) break;
+    if (mapX == endX && mapY == endY) break;
+  }
+
+  if (!foundCaster && allowTargetCaster) {
+    vec2 center = vec2(float(targetX) + 0.5, float(targetY) + 0.5);
+    float targetRadius = casterRadiusFromCell(targetCell);
+    vec2 toCenter = center - torchPos;
+    float proj = dot(toCenter, dir);
+    float perp = length(toCenter - dir * proj);
+    float distCenter = length(toCenter);
+    if (proj > 0.0 && distCenter < distHit + 0.02 && perp <= targetRadius + 0.05) {
+      float strength = shadowStrengthFromCaster(hitXY, center, targetRadius, torchPos, shadowRad, intensity) * distFade;
+      obstacleShadow = max(obstacleShadow, strength);
+    }
+  }
+
+  if (!foundCaster) return obstacleShadow;
+  float distCaster = length(casterCenter - torchPos);
+  if (!casterIsTarget && distCaster >= distHit - 0.02) return obstacleShadow;
+  if (casterIsWall) {
+    float torchCasterDist = length(casterCenter - torchPos);
+    if (torchCasterDist < 0.9) {
+      return obstacleShadow;
+    }
+    if (targetIsWall && (abs(surfaceNormal2D.x) > 0.5 || abs(surfaceNormal2D.y) > 0.5)) {
+      if (abs(surfaceNormal2D.x) > 0.5 && mapX == targetX) return obstacleShadow;
+      if (abs(surfaceNormal2D.y) > 0.5 && mapY == targetY) return obstacleShadow;
+    }
+    float slabStrength = shadowStrengthFromWallSlab(
+      hitXY,
+      casterCenter,
+      torchPos,
+      shadowRad,
+      intensity,
+      casterFaceNormal,
+      surfaceIsFloor
+    ) * distFade;
+    obstacleShadow = max(obstacleShadow, slabStrength);
+    return obstacleShadow;
+  }
+  float strength = shadowStrengthFromCaster(hitXY, casterCenter, casterRadius, torchPos, shadowRad, intensity) * distFade;
+  obstacleShadow = max(obstacleShadow, strength);
+  return obstacleShadow;
+}
+
 // Normal-aware torch lighting (half-Lambert + ambient fill for multi-light look)
-float accumulateTorchLit(vec3 worldPos, vec3 normal) {
+float accumulateTorchLit(
+  vec3 worldPos,
+  vec3 normal,
+  int targetX,
+  int targetY,
+  vec2 surfaceNormal2D,
+  out float shadowBlend,
+  out vec2 primaryDir2D,
+  out float primaryStrengthOut
+) {
   float total = 0.0;
+  shadowBlend = 0.0;
+  float primaryStrength = -1.0;
+  float primaryShadow = 0.0;
+  float shadowStack = 1.0;
+  float sumStrength = 0.0;
+  vec2 dirSum2D = vec2(0.0);
   const float TORCH_AMBIENT = 0.5;
+  primaryDir2D = vec2(0.0);
+  primaryStrengthOut = 0.0;
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
@@ -1166,11 +1461,37 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal) {
     if (dist >= u_torchRadius[i]) continue;
     vec3 L = normalize(toL);
     float ndotl_raw = dot(L, normal);
-    float ndotl = ndotl_raw * 0.5 + 0.5;  // half-Lambert
-    ndotl = max(0.0, ndotl);             // prevent lighting if far behind
+    if (ndotl_raw <= 0.0) continue;      // prevent torch light wrapping around backfaces
+    float ndotl = ndotl_raw * 0.5 + 0.5; // half-Lambert
     float falloff = 1.0 - dist / u_torchRadius[i];
-    float atten = falloff * falloff * u_torchIntensity[i] * TORCH_FALLOFF;
+    float shadowFactor = computeShadowForTorch(worldPos.xy, targetX, targetY, surfaceNormal2D, u_torchPos[i].xy, u_torchRadius[i], u_torchIntensity[i]);
+    float shadowMul = (shadowFactor > 0.98)
+      ? 0.0
+      : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
+    float rawStrength = falloff * falloff * u_torchIntensity[i];
+    float atten = rawStrength * TORCH_FALLOFF * shadowMul;
+    if (rawStrength > primaryStrength) {
+      primaryStrength = rawStrength;
+      primaryShadow = shadowFactor;
+    }
+    shadowStack *= (1.0 - shadowFactor);
+    sumStrength += rawStrength;
+    vec2 dir2d = u_torchPos[i].xy - worldPos.xy;
+    float dirLen = length(dir2d);
+    if (dirLen > 1e-4) {
+      dirSum2D += (dir2d / dirLen) * rawStrength;
+    }
     total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
+  }
+  float combinedShadow = 1.0 - shadowStack;
+  shadowBlend = max(primaryShadow, combinedShadow);
+  if (sumStrength > 1e-4) {
+    float dirLen = length(dirSum2D);
+    primaryDir2D = (dirLen > 1e-4) ? (dirSum2D / dirLen) : normalize(u_lightDir);
+    primaryStrengthOut = sumStrength;
+  } else {
+    primaryDir2D = normalize(u_lightDir);
+    primaryStrengthOut = 0.0;
   }
   return total;
 }
@@ -1264,18 +1585,44 @@ void main() {
           vec3 normal = sideDistX < sideDistY
             ? vec3(-float(stepX), 0.0, 0.0)
             : vec3(0.0, -float(stepY), 0.0);
+          vec2 normal2D = sideDistX < sideDistY
+            ? vec2(-float(stepX), 0.0)
+            : vec2(0.0, -float(stepY));
 
           vec3 worldPos = vec3(u_camPos + rayDir * nextDist, bottomZ + world_v);
-          float lit = clamp(accumulateTorchLit(worldPos, normal), 0.0, 1.0);
+          float shadowBlend = 0.0;
+          vec2 primaryDir2D = vec2(0.0);
+          float primaryStrength = 0.0;
+          float lit = clamp(
+            accumulateTorchLit(
+              worldPos,
+              normal,
+              int(floor(worldPos.x)),
+              int(floor(worldPos.y)),
+              normal2D,
+              shadowBlend,
+              primaryDir2D,
+              primaryStrength
+            ),
+            0.0,
+            1.0
+          );
           float litSide = clamp(lit * TORCH_SIDE_BOOST, 0.0, 1.5);
 
           float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
           float shade = max(shadowFloor, 1.0 - nextDist / 10.0);
-          float torchLight = litSide * 0.9;
-          float base = shade + torchLight;
+          if (TORCH_ONLY > 0.5) shade = 1.0;
+          float torchLight = litSide * TORCH_LIGHT_SCALE;
+          float base = shade;
           float warmShift = 0.75 + 0.45 * torchLight;
           vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
-          vec3 col = tex.rgb * base + torchAdd;
+          float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
+          float lightPresence = clamp(primaryStrength, 0.0, 1.0);
+          float shadowFade = smoothstep(0.08, 0.45, torchLight);
+          keyShadow *= (1.0 - lightPresence * 0.75);
+          keyShadow *= (1.0 - shadowFade);
+          float baseShadowMul = 1.0 - keyShadow;
+          vec3 col = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
 
           if (nextDist < sideDistClosest) {
             sideDistClosest = nextDist;
@@ -1334,13 +1681,10 @@ void main() {
       if (tex.a > 0.04 && frag.y >= lineTop && frag.y <= extendedBottom) {
         float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
         float shade = max(shadowFloor, 1.0 - perpDist / 10.0);
+        if (TORCH_ONLY > 0.5) shade = 1.0;
         float sideFactor = (side == 0) ? 1.0 : 0.85;
         vec2 normal2D = (side == 0) ? vec2(float(stepX), 0.0) : vec2(0.0, float(stepY));
-        float dotLight = dot(normal2D, u_lightDir);
-        float lightFactor = 0.6 + 0.4 * dotLight;
-        float litShade = shade * sideFactor * (1.0 - u_lightIntensity + u_lightIntensity * lightFactor);
         float grad = max(0.35, 1.0 - 0.18 * globalV);
-        float rowShade = litShade * grad;
 
         vec3 wallNormalTorch = vec3(-normal2D, 0.0);
 
@@ -1357,16 +1701,46 @@ void main() {
         vec3 exactWorldPos = vec3(hitXY, worldZ);
 
         // Use exact position directly (no offset needed anymore)
-        float lit = clamp(accumulateTorchLit(exactWorldPos, wallNormalTorch), 0.0, 1.0);
+        float shadowBlend = 0.0;
+        vec2 primaryDir2D = vec2(0.0);
+        float primaryStrength = 0.0;
+        float lit = clamp(
+          accumulateTorchLit(
+            exactWorldPos,
+            wallNormalTorch,
+            mapX,
+            mapY,
+            normal2D,
+            shadowBlend,
+            primaryDir2D,
+            primaryStrength
+          ),
+          0.0,
+          1.0
+        );
         float litWall = clamp(lit * TORCH_WALL_BOOST, 0.0, 1.5);
 
+        vec2 keyDir2D = (primaryStrength > 0.0001) ? primaryDir2D : normalize(u_lightDir);
+        float dotLight = dot(normal2D, keyDir2D);
+        float lightFactor = 0.6 + 0.4 * dotLight;
+        float keyStrength = clamp(primaryStrength, 0.0, 1.0);
+        float litShade = shade * sideFactor * (1.0 - u_lightIntensity + u_lightIntensity * lightFactor * max(0.2, keyStrength));
+        if (TORCH_ONLY > 0.5) litShade = shade * sideFactor;
+        float rowShade = litShade * grad;
+
         // rest unchanged
-        float torchLight = litWall * 0.9;
-        float base = rowShade + torchLight;
+        float torchLight = litWall * TORCH_LIGHT_SCALE;
+        float base = rowShade;
         float warmShift = 0.75 + 0.45 * torchLight;
         vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
 
-        vec3 finalCol = tex.rgb * base + torchAdd;
+        float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
+        float lightPresence = clamp(primaryStrength, 0.0, 1.0);
+        float shadowFade = smoothstep(0.08, 0.45, torchLight);
+        keyShadow *= (1.0 - lightPresence * 0.75);
+        keyShadow *= (1.0 - shadowFade);
+        float baseShadowMul = 1.0 - keyShadow;
+        vec3 finalCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
 
         wallCol = vec4(finalCol, tex.a);
         wallDist = perpDist;
@@ -1441,17 +1815,40 @@ void main() {
     vec4 tex = texture(u_floorTex, frac);
 
     vec3 normal = vec3(0.0, 0.0, 1.0);
-    float lit = clamp(accumulateTorchLit(hitPos, normal), 0.0, 1.0);
+    float shadowBlend = 0.0;
+    vec2 primaryDir2D = vec2(0.0);
+    float primaryStrength = 0.0;
+    float lit = clamp(
+      accumulateTorchLit(
+        hitPos,
+        normal,
+        int(floor(hitPos.x)),
+        int(floor(hitPos.y)),
+        vec2(0.0, 0.0),
+        shadowBlend,
+        primaryDir2D,
+        primaryStrength
+      ),
+      0.0,
+      1.0
+    );
     float litFloor = clamp(lit * TORCH_FLOOR_BOOST, 0.0, 1.5);
 
     float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
     float shade = max(shadowFloor, 1.0 - floorDist / 10.0);
-    float torchLight = litFloor * 0.9;
-    float base = shade + torchLight;
+    if (TORCH_ONLY > 0.5) shade = 1.0;
+    float torchLight = litFloor * TORCH_LIGHT_SCALE;
+    float base = shade;
     float warmShift = 0.75 + 0.45 * torchLight;
     vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
-
-    outColor = vec4(tex.rgb * base + torchAdd, 1.0);
+    float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
+    float lightPresence = clamp(primaryStrength, 0.0, 1.0);
+    float shadowFade = smoothstep(0.08, 0.45, torchLight);
+    keyShadow *= (1.0 - lightPresence * 0.75);
+    keyShadow *= (1.0 - shadowFade);
+    float baseShadowMul = 1.0 - keyShadow;
+    vec3 floorCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
+    outColor = vec4(floorCol, 1.0);
     gl_FragDepth = floorDist / u_depthFarDepth;
     return;
   }
@@ -1585,9 +1982,9 @@ void main() {
         'uniform float u_depthShadeScale;',
         'uniform float u_shadowStrength;',
         'uniform int u_torchCount;',
-        'uniform vec3 u_torchPos[32];',
-        'uniform float u_torchRadius[32];',
-        'uniform float u_torchIntensity[32];',
+        'uniform vec3 u_torchPos[' + MAX_TORCH_LIGHTS + '];',
+        'uniform float u_torchRadius[' + MAX_TORCH_LIGHTS + '];',
+        'uniform float u_torchIntensity[' + MAX_TORCH_LIGHTS + '];',
         'out vec4 outColor;',
         'void main() {',
         '  vec4 tex = texture(u_tex, v_uv);',
@@ -1608,7 +2005,7 @@ void main() {
         '  vec3 worldPos = vec3(u_spritePos.xy, u_spritePos.z + vFrac * u_spriteHeight);',
         '  const float TORCH_SPRITE_BOOST = 1.3;',
         '  float torchLit = 0.0;',
-        '  for (int i = 0; i < 32; i++) {',
+        '  for (int i = 0; i < ' + MAX_TORCH_LIGHTS + '; i++) {',
         '    if (i >= u_torchCount) break;',
         '    vec3 toL = u_torchPos[i] - worldPos;',
         '    float dist = length(toL);',
@@ -1713,20 +2110,114 @@ uniform float u_unlit;
 uniform float u_toonSteps;
 
 uniform int u_torchCount;
-uniform vec3 u_torchPos[32];
-uniform float u_torchRadius[32];
-uniform float u_torchIntensity[32];
+uniform vec3 u_torchPos[${MAX_TORCH_LIGHTS}];
+uniform float u_torchRadius[${MAX_TORCH_LIGHTS}];
+uniform float u_torchIntensity[${MAX_TORCH_LIGHTS}];
 uniform float u_torchRadiusScale;
+uniform sampler2D u_cells;
+uniform ivec2 u_gridSize;
+uniform int u_flipY;
 
-const int MAX_TORCH = 32;
+const int MAX_TORCH = ${MAX_TORCH_LIGHTS};
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
 const float TORCH_FALLOFF = 0.6;
+const int SHADOW_DDA_STEPS = 64;
+const float SHADOW_RADIUS_SCALE = 1.6;
+const float SHADOW_DARKEN = 0.75;
+const float TORCH_ONLY = 0.0;
 
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
 
+vec4 fetchCell(int x, int y) {
+  int yy = (u_flipY == 1) ? (u_gridSize.y - 1 - y) : y;
+  if (x < 0 || yy < 0 || x >= u_gridSize.x || yy >= u_gridSize.y) {
+    return vec4(0.0);
+  }
+  return texelFetch(u_cells, ivec2(x, yy), 0);
+}
+
+bool inBounds(int x, int y) {
+  return x >= 0 && y >= 0 && x < u_gridSize.x && y < u_gridSize.y;
+}
+
+bool isCasterCell(vec4 cell) {
+  return cell.a > 0.001;
+}
+
+float casterRadiusFromCell(vec4 cell) {
+  return (cell.a >= 0.999) ? 0.5 : max(0.12, cell.a);
+}
+
+float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad) {
+  vec2 toHit = hitXY - torchPos;
+  float distHit = length(toHit);
+  if (distHit < 0.05 || distHit > rad) return 0.0;
+  vec2 lightDir = normalize(casterCenter - torchPos);
+  vec2 v = hitXY - casterCenter;
+  float proj = dot(v, lightDir);
+  if (proj <= 0.0) return 0.0;
+  float len = clamp(rad * 1.1, 0.8, 12.0);
+  float radius = casterRadius + proj * 0.12;
+  float perp = length(v - lightDir * proj);
+  float core = smoothstep(radius, radius - 0.22, perp);
+  float front = smoothstep(0.0, 0.12, proj);
+  float back = 1.0 - smoothstep(len * 0.85, len, proj);
+  float strength = core * front * back;
+  return strength;
+}
+
+float torchShadowFactor(vec2 hitXY, vec2 torchPos, float rad) {
+  vec2 toHit = hitXY - torchPos;
+  float distHit = length(toHit);
+  float shadowRad = rad * SHADOW_RADIUS_SCALE;
+  if (distHit < 0.05 || distHit > shadowRad) return 0.0;
+  vec2 dir = toHit / max(distHit, 1e-4);
+
+  int mapX = int(floor(torchPos.x));
+  int mapY = int(floor(torchPos.y));
+  int torchCellX = mapX;
+  int torchCellY = mapY;
+  int endX = int(floor(hitXY.x));
+  int endY = int(floor(hitXY.y));
+  float invDx = abs(dir.x) < 1e-4 ? 1e4 : abs(1.0 / dir.x);
+  float invDy = abs(dir.y) < 1e-4 ? 1e4 : abs(1.0 / dir.y);
+  int stepX = dir.x < 0.0 ? -1 : 1;
+  int stepY = dir.y < 0.0 ? -1 : 1;
+  float sideDistX = (stepX == -1 ? (torchPos.x - float(mapX)) : (float(mapX + 1) - torchPos.x)) * invDx;
+  float sideDistY = (stepY == -1 ? (torchPos.y - float(mapY)) : (float(mapY + 1) - torchPos.y)) * invDy;
+
+  for (int s = 0; s < SHADOW_DDA_STEPS; s++) {
+    float nextT = min(sideDistX, sideDistY);
+    if (nextT >= distHit - 0.02) break;
+    if (sideDistX < sideDistY) {
+      sideDistX += invDx;
+      mapX += stepX;
+    } else {
+      sideDistY += invDy;
+      mapY += stepY;
+    }
+    if (!inBounds(mapX, mapY)) break;
+    if (mapX == torchCellX && mapY == torchCellY) continue;
+    if (mapX == endX && mapY == endY) break;
+    vec4 cell = fetchCell(mapX, mapY);
+    if (!isCasterCell(cell)) continue;
+    if (cell.a >= 0.999) return 1.0;
+    vec2 center = vec2(float(mapX) + 0.5, float(mapY) + 0.5);
+    float radius = casterRadiusFromCell(cell);
+    vec2 toCenter = center - torchPos;
+    float proj = dot(toCenter, dir);
+    float perp = length(toCenter - dir * proj);
+    if (perp > radius + 0.05) continue;
+    return clamp(shadowStrengthFromCaster(hitXY, center, radius, torchPos, shadowRad), 0.0, 1.0);
+  }
+  return 0.0;
+}
+
 // Half-Lambert torch lighting so attached walls / sides still receive light
-float accumulateTorchLit(vec3 worldPos, vec3 normal) {
+float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out float dirStrength) {
   float total = 0.0;
+  float ndotlSum = 0.0;
+  float sumStrength = 0.0;
   const float TORCH_AMBIENT = 0.35;
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
@@ -1736,11 +2227,20 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal) {
     if (dist >= rad) continue;
     vec3 L = toL / max(dist, 1e-4);
     float ndotl_raw = dot(L, normal);
-    float ndotl = ndotl_raw * 0.5 + 0.5;   // half-Lambert
+    float ndotl = ndotl_raw * 0.5 + 0.5;   // half-Lambert for fill
     ndotl = max(0.0, ndotl);
-    float atten = pow(1.0 - dist / rad, TORCH_FALLOFF);
-    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten * u_torchIntensity[i];
+    float shadowFactor = torchShadowFactor(worldPos.xy, u_torchPos[i].xy, rad);
+    float shadowMul = (shadowFactor > 0.98)
+      ? 0.0
+      : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
+    float rawStrength = pow(1.0 - dist / rad, TORCH_FALLOFF) * u_torchIntensity[i];
+    float atten = rawStrength * shadowMul;
+    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
+    sumStrength += rawStrength;
+    ndotlSum += max(0.0, ndotl_raw) * rawStrength;
   }
+  dirStrength = sumStrength;
+  dirWeight = (sumStrength > 1e-4) ? (ndotlSum / sumStrength) : 0.0;
   return total;
 }
 
@@ -1758,20 +2258,13 @@ void main() {
 
   vec3 N = normalize(v_normal);
 
-  // Directional light: comes from u_lightDir in XY and u_lightElev as Z component.
-  vec3 L = normalize(vec3(u_lightDir, u_lightElev));
-  float ndotl = max(0.0, dot(N, L));
-  float baseLight = 0.15 + ndotl * u_lightIntensity;
-
   // Torch contribution (kept separate so bright sides can still get a boost).
-  float torch = accumulateTorchLit(v_worldPos, N);
+  float dirWeight = 0.0;
+  float dirStrength = 0.0;
+  float torch = accumulateTorchLit(v_worldPos, N, dirWeight, dirStrength);
   float torchLight = torch * u_torchLightScale;
-
-  // Distance shading (match wall falloff)
-  float dist2 = dot(v_worldPos.xy - u_camPos, v_worldPos.xy - u_camPos);
-  float dist = sqrt(max(dist2, 0.0));
-  float distanceShade = max(0.3, 1.0 - dist / max(u_depthShadeScale, 1e-3));
-  baseLight *= distanceShade;
+  float ndotl = clamp(dirWeight, 0.0, 1.0);
+  float baseLight = 0.15 + ndotl * u_lightIntensity * max(0.2, clamp(dirStrength, 0.0, 1.0));
 
   // Gradiated tone ramp (smoother than the posterized 3-tone look).
   float lit = baseLight + torchLight;
@@ -1867,6 +2360,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           shadowStrength: gl.getUniformLocation(this.voxelProgram, 'u_shadowStrength'),
           highlightBoost: gl.getUniformLocation(this.voxelProgram, 'u_highlightBoost'),
           torchLightScale: gl.getUniformLocation(this.voxelProgram, 'u_torchLightScale'),
+          cells: gl.getUniformLocation(this.voxelProgram, 'u_cells'),
+          gridSize: gl.getUniformLocation(this.voxelProgram, 'u_gridSize'),
+          flipY: gl.getUniformLocation(this.voxelProgram, 'u_flipY'),
           modelPos: gl.getUniformLocation(this.voxelProgram, 'u_modelPos'),
           modelScale: gl.getUniformLocation(this.voxelProgram, 'u_modelScale'),
           lightDir: gl.getUniformLocation(this.voxelProgram, 'u_lightDir'),
@@ -1994,6 +2490,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             tile === 'wall' ||
             tile === 'torch' ||
             isDoorClosed;
+          const isObstacle = tile === 'pillar' || (typeof tile === 'string' && tile.startsWith('custom_'));
 
           // Torch uses wall art. Doors can also fall back to wall art if you don't have a door atlas entry.
           const tileName = (tile === 'torch' || tile === 'door') ? 'wall' : tile;
@@ -2011,7 +2508,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           data[idx]     = tileId;
           data[idx + 1] = fh;
           data[idx + 2] = ch;
-          data[idx + 3] = isSolid ? 255 : 0;
+          let obstacleRadius = 0;
+          if (isObstacle) {
+            const spec = dungeon.tiles?.[tile]?.spriteSpec || {};
+            const baseWidth = Number.isFinite(spec.baseWidth)
+              ? spec.baseWidth
+              : (Number.isFinite(spec.gridWidth) ? spec.gridWidth : 0.6);
+            obstacleRadius = Math.max(0.12, Math.min(0.48, baseWidth * 0.5));
+          }
+          data[idx + 3] = isSolid
+            ? 255
+            : (isObstacle ? Math.max(1, Math.min(254, Math.round(obstacleRadius * 255))) : 0);
         }
       }
 
@@ -2819,6 +3326,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (this.voxelUniforms.torchLightScale) {
           gl.uniform1f(this.voxelUniforms.torchLightScale, torchLightScaleClamped);
         }
+        if (this.voxelUniforms.gridSize) {
+          gl.uniform2i(this.voxelUniforms.gridSize, this.gridW, this.gridH);
+        }
+        if (this.voxelUniforms.flipY) {
+          gl.uniform1i(this.voxelUniforms.flipY, 1);
+        }
         let baseVoxelDepthBias = 0.0;
         if (this.voxelUniforms.depthBias) {
           baseVoxelDepthBias = Number.isFinite(window.VOXEL_DEPTH_BIAS)
@@ -2831,6 +3344,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform1f(this.voxelUniforms.lightIntensity, lighting.intensity);
         if (this.voxelUniforms.torchRadiusScale) {
           gl.uniform1f(this.voxelUniforms.torchRadiusScale, torchRadiusVoxelScaleClamped);
+        }
+        if (this.voxelUniforms.cells) {
+          gl.activeTexture(gl.TEXTURE0);
+          gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
+          gl.uniform1i(this.voxelUniforms.cells, 0);
         }
 
         gl.enableVertexAttribArray(this.voxelAttribs.pos);
