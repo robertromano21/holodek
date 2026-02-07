@@ -1205,11 +1205,13 @@ float cross2(vec2 a, vec2 b) {
 }
 
 float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
-  float base = max(0.06, OBSTACLE_SHADOW_SOFT * 0.55);
-  float diffused = base + max(0.0, proj) * SHADOW_DIFFUSION;
+  float contact = smoothstep(0.04, 0.32, max(0.0, proj));
+  float baseNear = 0.008;
+  float baseFar = max(0.05, OBSTACLE_SHADOW_SOFT * 0.5);
+  float diffused = mix(baseNear, baseFar, contact) + max(0.0, proj) * SHADOW_DIFFUSION;
   // Tiny atmospheric/thermal refraction jitter on the penumbra only.
   float ripple = 1.0 + SHADOW_REFRACTION * sin(hitXY.x * 11.73 + hitXY.y * 7.91 + distHit * SHADOW_REFRACTION_FREQ);
-  return max(0.035, diffused * ripple);
+  return max(0.006, diffused * ripple);
 }
 
 float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad, float intensity) {
@@ -2193,10 +2195,10 @@ float casterRadiusFromCell(vec4 cell) {
 }
 
 float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
-  float base = 0.07;
-  float diffused = base + max(0.0, proj) * SHADOW_DIFFUSION;
+  float contact = smoothstep(0.04, 0.32, max(0.0, proj));
+  float diffused = mix(0.008, 0.05, contact) + max(0.0, proj) * SHADOW_DIFFUSION;
   float ripple = 1.0 + SHADOW_REFRACTION * sin(hitXY.x * 9.7 + hitXY.y * 6.3 + distHit * SHADOW_REFRACTION_FREQ);
-  return max(0.04, diffused * ripple);
+  return max(0.006, diffused * ripple);
 }
 
 float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad) {
