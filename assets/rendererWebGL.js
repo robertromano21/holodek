@@ -1458,13 +1458,15 @@ float accumulateTorchLit(
     vec3 toL = u_torchPos[i] - worldPos;
     toL.z *= 0.5;
     float dist = length(toL);
-    if (dist >= u_torchRadius[i]) continue;
+    float lightRadius = u_torchRadius[i];
+    float shadowRadius = lightRadius * SHADOW_RADIUS_SCALE;
+    if (dist >= shadowRadius) continue;
     vec3 L = normalize(toL);
     float ndotl_raw = dot(L, normal);
     if (ndotl_raw <= 0.0) continue;      // prevent torch light wrapping around backfaces
     float ndotl = ndotl_raw * 0.5 + 0.5; // half-Lambert
-    float falloff = 1.0 - dist / u_torchRadius[i];
-    float shadowFactor = computeShadowForTorch(worldPos.xy, targetX, targetY, surfaceNormal2D, u_torchPos[i].xy, u_torchRadius[i], u_torchIntensity[i]);
+    float falloff = max(0.0, 1.0 - dist / lightRadius);
+    float shadowFactor = computeShadowForTorch(worldPos.xy, targetX, targetY, surfaceNormal2D, u_torchPos[i].xy, lightRadius, u_torchIntensity[i]);
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
@@ -2223,17 +2225,19 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out fl
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
     float dist = length(toL);
-    float rad = u_torchRadius[i] * u_torchRadiusScale;
-    if (dist >= rad) continue;
+    float lightRad = u_torchRadius[i] * u_torchRadiusScale;
+    float shadowRad = lightRad * SHADOW_RADIUS_SCALE;
+    if (dist >= shadowRad) continue;
     vec3 L = toL / max(dist, 1e-4);
     float ndotl_raw = dot(L, normal);
     float ndotl = ndotl_raw * 0.5 + 0.5;   // half-Lambert for fill
     ndotl = max(0.0, ndotl);
-    float shadowFactor = torchShadowFactor(worldPos.xy, u_torchPos[i].xy, rad);
+    float shadowFactor = torchShadowFactor(worldPos.xy, u_torchPos[i].xy, lightRad);
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
-    float rawStrength = pow(1.0 - dist / rad, TORCH_FALLOFF) * u_torchIntensity[i];
+    float lightFalloff = max(0.0, 1.0 - dist / lightRad);
+    float rawStrength = pow(lightFalloff, TORCH_FALLOFF) * u_torchIntensity[i];
     float atten = rawStrength * shadowMul;
     total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
     sumStrength += rawStrength;
