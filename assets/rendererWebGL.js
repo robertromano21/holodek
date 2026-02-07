@@ -1133,6 +1133,7 @@ uniform float u_heightRange;
 uniform float u_minFloor;
 uniform float u_wallUScale;
 uniform vec2 u_lightDir;
+uniform float u_lightElev;
 uniform float u_lightIntensity;
 uniform int u_maxSteps;
 uniform int u_atlasCols;
@@ -1532,6 +1533,19 @@ float accumulateTorchLit(
   return total;
 }
 
+float globalDirectionalShade(vec3 normal) {
+  vec3 n = normalize(normal);
+  vec3 sun = normalize(vec3(u_lightDir, max(0.05, u_lightElev)));
+  float ndotl = max(0.0, dot(n, sun));
+  // Keep global light subtle on vertical faces (wall/riser sides),
+  // stronger on upward-facing surfaces (floors).
+  float up = clamp(n.z, 0.0, 1.0);
+  float ambient = mix(0.03, 0.11, up) + 0.03 * u_lightIntensity;
+  float diffuseGain = mix(0.18, 0.5, up);
+  float diffuse = ndotl * diffuseGain * (0.35 + 0.65 * u_lightIntensity);
+  return clamp(ambient + diffuse, 0.0, 1.0);
+}
+
 void main() {
   vec2 frag = vec2(v_uv.x, 1.0 - v_uv.y) * u_resolution;
   float cameraX = 2.0 * frag.x / u_resolution.x - 1.0;
@@ -1646,7 +1660,7 @@ void main() {
           float litSide = clamp(lit * TORCH_SIDE_BOOST, 0.0, 1.5);
 
           float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
-          float shade = max(shadowFloor, 1.0 - nextDist / 10.0);
+          float shade = max(shadowFloor, globalDirectionalShade(normal));
           if (TORCH_ONLY > 0.5) shade = 1.0;
           float torchLight = litSide * TORCH_LIGHT_SCALE;
           float base = shade;
@@ -1716,13 +1730,13 @@ void main() {
       vec4 tex = texture(u_wallAtlas, atlasUV);
       if (tex.a > 0.04 && frag.y >= lineTop && frag.y <= extendedBottom) {
         float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
-        float shade = max(shadowFloor, 1.0 - perpDist / 10.0);
-        if (TORCH_ONLY > 0.5) shade = 1.0;
         float sideFactor = (side == 0) ? 1.0 : 0.85;
         vec2 normal2D = (side == 0) ? vec2(float(stepX), 0.0) : vec2(0.0, float(stepY));
         float grad = max(0.35, 1.0 - 0.18 * globalV);
 
         vec3 wallNormalTorch = vec3(-normal2D, 0.0);
+        float shade = max(shadowFloor, globalDirectionalShade(wallNormalTorch));
+        if (TORCH_ONLY > 0.5) shade = 1.0;
 
         float planeCoord;
         float t;
@@ -1871,7 +1885,7 @@ void main() {
     float litFloor = clamp(lit * TORCH_FLOOR_BOOST, 0.0, 1.5);
 
     float shadowFloor = mix(0.3, 0.12, u_shadowStrength);
-    float shade = max(shadowFloor, 1.0 - floorDist / 10.0);
+    float shade = max(shadowFloor, globalDirectionalShade(normal));
     if (TORCH_ONLY > 0.5) shade = 1.0;
     float torchLight = litFloor * TORCH_LIGHT_SCALE;
     float base = shade;
@@ -1936,6 +1950,7 @@ void main() {
         minFloor: gl.getUniformLocation(this.program, 'u_minFloor'),
         wallUScale: gl.getUniformLocation(this.program, 'u_wallUScale'),
         lightDir: gl.getUniformLocation(this.program, 'u_lightDir'),
+        lightElev: gl.getUniformLocation(this.program, 'u_lightElev'),
         lightIntensity: gl.getUniformLocation(this.program, 'u_lightIntensity'),
         maxSteps: gl.getUniformLocation(this.program, 'u_maxSteps'),
         atlasCols: gl.getUniformLocation(this.program, 'u_atlasCols'),
@@ -3113,6 +3128,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform1f(this.uniformLocations.minFloor, minFloor);
       gl.uniform1f(this.uniformLocations.wallUScale, 0.25);
       gl.uniform2f(this.uniformLocations.lightDir, lighting.dirX, lighting.dirY);
+      if (this.uniformLocations.lightElev) {
+        gl.uniform1f(this.uniformLocations.lightElev, lighting.elevation);
+      }
       gl.uniform1f(this.uniformLocations.lightIntensity, lighting.intensity);
       const outdoorDepthFar = 1000000.0;
       const outdoorDepthFarDepth = 300.0;
