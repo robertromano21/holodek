@@ -1170,7 +1170,11 @@ const float SHADOW_DARKEN = 0.75;
 const float SHADOW_RADIUS_SCALE = 1.6;
 const float SHADOW_OCCLUSION_RADIUS_SCALE = 4.0;
 const float SHADOW_DECAY_SCALE = 2.8;
+const float SHADOW_VIEW_FADE_START = 0.28;
+const float SHADOW_VIEW_FADE_END = 0.72;
 const float STEP_SHADOW_EPS = 0.05;
+const bool ENABLE_FLOOR_STEP_SHADOWS = false;
+const float STEP_SHADOW_MIN_HEIGHT = 0.45;
 const float TORCH_SHADOW_MIX = 0.7;
 
 vec4 fetchCell(int x, int y) {
@@ -1375,11 +1379,11 @@ float computeShadowForTorch(
     if (!inBounds(mapX, mapY)) break;
     vec4 prevCell = fetchCell(prevX, prevY);
     vec4 currCell = fetchCell(mapX, mapY);
-    if (prevCell.a < 0.5 && currCell.a < 0.5) {
+    if (ENABLE_FLOOR_STEP_SHADOWS && prevCell.a < 0.5 && currCell.a < 0.5) {
       float prevH = floorHeightFromCell(prevCell);
       float currH = floorHeightFromCell(currCell);
       float dh = currH - prevH;
-      if (abs(dh) > STEP_SHADOW_EPS) {
+      if (abs(dh) > max(STEP_SHADOW_EPS, STEP_SHADOW_MIN_HEIGHT)) {
         bool currHigher = dh > 0.0;
         casterCenter = currHigher
           ? vec2(float(mapX) + 0.5, float(mapY) + 0.5)
@@ -1501,11 +1505,12 @@ float accumulateTorchLit(
     float coreFalloff = max(0.0, 1.0 - normDist);
     float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
     float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
+    float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
+    if (rawStrength <= 0.001) continue;
     float shadowFactor = computeShadowForTorch(worldPos.xy, targetX, targetY, surfaceNormal2D, u_torchPos[i].xy, lightRadius, u_torchIntensity[i]);
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
-    float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
     float atten = rawStrength * TORCH_FALLOFF * shadowMul;
     if (rawStrength > primaryStrength) {
       primaryStrength = rawStrength;
@@ -1544,6 +1549,12 @@ float globalDirectionalShade(vec3 normal) {
   float diffuseGain = mix(0.18, 0.5, up);
   float diffuse = ndotl * diffuseGain * (0.35 + 0.65 * u_lightIntensity);
   return clamp(ambient + diffuse, 0.0, 1.0);
+}
+
+float viewShadowFade(float dist) {
+  float startD = max(8.0, u_depthFarDepth * SHADOW_VIEW_FADE_START);
+  float endD = max(startD + 4.0, u_depthFarDepth * SHADOW_VIEW_FADE_END);
+  return 1.0 - smoothstep(startD, endD, dist);
 }
 
 void main() {
@@ -1671,6 +1682,7 @@ void main() {
           float shadowFade = smoothstep(0.5, 1.2, torchLight);
           keyShadow *= (1.0 - lightPresence * 0.35);
           keyShadow *= (1.0 - shadowFade * 0.2);
+          keyShadow *= viewShadowFade(nextDist);
           float baseShadowMul = 1.0 - keyShadow;
           vec3 col = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
 
@@ -1789,6 +1801,7 @@ void main() {
         float shadowFade = smoothstep(0.5, 1.2, torchLight);
         keyShadow *= (1.0 - lightPresence * 0.35);
         keyShadow *= (1.0 - shadowFade * 0.2);
+        keyShadow *= viewShadowFade(perpDist);
         float baseShadowMul = 1.0 - keyShadow;
         vec3 finalCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
 
@@ -1896,6 +1909,7 @@ void main() {
     float shadowFade = smoothstep(0.5, 1.2, torchLight);
     keyShadow *= (1.0 - lightPresence * 0.35);
     keyShadow *= (1.0 - shadowFade * 0.2);
+    keyShadow *= viewShadowFade(floorDist);
     float baseShadowMul = 1.0 - keyShadow;
     vec3 floorCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
     outColor = vec4(floorCol, 1.0);
@@ -2298,15 +2312,16 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out fl
     float ndotl_raw = dot(L, normal);
     float ndotl = ndotl_raw * 0.5 + 0.5;   // half-Lambert for fill
     ndotl = max(0.0, ndotl);
-    float shadowFactor = torchShadowFactor(worldPos.xy, u_torchPos[i].xy, lightRad);
-    float shadowMul = (shadowFactor > 0.98)
-      ? 0.0
-      : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
     float normDist = dist / max(lightRad, 1e-4);
     float coreFalloff = max(0.0, 1.0 - normDist);
     float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
     float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
     float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
+    if (rawStrength <= 0.001) continue;
+    float shadowFactor = torchShadowFactor(worldPos.xy, u_torchPos[i].xy, lightRad);
+    float shadowMul = (shadowFactor > 0.98)
+      ? 0.0
+      : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
     float atten = rawStrength * shadowMul;
     total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
     sumStrength += rawStrength;
