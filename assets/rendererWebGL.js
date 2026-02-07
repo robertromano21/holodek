@@ -1162,8 +1162,13 @@ const int SHADOW_DDA_STEPS = 96;
 const float OBSTACLE_SHADOW_RADIUS = 0.35;
 const float OBSTACLE_SHADOW_SOFT = 0.22;
 const float OBSTACLE_SHADOW_SPREAD = 0.12;
+const float SHADOW_DIFFUSION = 0.05;
+const float SHADOW_REFRACTION = 0.015;
+const float SHADOW_REFRACTION_FREQ = 3.2;
 const float SHADOW_DARKEN = 0.75;
 const float SHADOW_RADIUS_SCALE = 1.6;
+const float SHADOW_OCCLUSION_RADIUS_SCALE = 4.0;
+const float SHADOW_DECAY_SCALE = 2.8;
 const float STEP_SHADOW_EPS = 0.05;
 const float TORCH_SHADOW_MIX = 0.7;
 
@@ -1195,20 +1200,32 @@ float floorHeightFromCell(vec4 cell) {
   return u_heightMin + cell.g * 255.0 * (u_heightRange / 255.0);
 }
 
+float cross2(vec2 a, vec2 b) {
+  return a.x * b.y - a.y * b.x;
+}
+
+float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
+  float base = max(0.06, OBSTACLE_SHADOW_SOFT * 0.55);
+  float diffused = base + max(0.0, proj) * SHADOW_DIFFUSION;
+  // Tiny atmospheric/thermal refraction jitter on the penumbra only.
+  float ripple = 1.0 + SHADOW_REFRACTION * sin(hitXY.x * 11.73 + hitXY.y * 7.91 + distHit * SHADOW_REFRACTION_FREQ);
+  return max(0.035, diffused * ripple);
+}
+
 float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad, float intensity) {
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
-  if (distHit < 0.05 || distHit > rad * 1.35) return 0.0;
+  if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
   vec2 lightDir = normalize(casterCenter - torchPos);
   vec2 v = hitXY - casterCenter;
   float proj = dot(v, lightDir);
   if (proj <= 0.0) return 0.0;
-  float len = clamp(rad * 1.1, 0.8, 12.0);
-  float radius = casterRadius + proj * OBSTACLE_SHADOW_SPREAD;
   float perp = length(v - lightDir * proj);
-  float core = smoothstep(radius, radius - OBSTACLE_SHADOW_SOFT, perp);
+  float penumbra = edgeDiffusion(proj, distHit, hitXY);
+  float core = 1.0 - smoothstep(casterRadius, casterRadius + penumbra, perp);
   float front = smoothstep(0.0, 0.12, proj);
-  float back = 1.0 - smoothstep(len * 0.85, len, proj);
+  float decayLen = max(0.8, rad * SHADOW_DECAY_SCALE);
+  float back = exp(-max(0.0, proj) / decayLen);
   float strength = core * front * back * intensity;
   return strength;
 }
@@ -1224,7 +1241,7 @@ float shadowStrengthFromWallSlab(
 ) {
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
-  if (distHit < 0.05 || distHit > rad * 1.35) return 0.0;
+  if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
   vec2 dir = toHit / max(distHit, 1e-4);
 
   vec2 toCaster = casterCenter - torchPos;
@@ -1241,44 +1258,57 @@ float shadowStrengthFromWallSlab(
     faceSignY = (toCaster.y >= 0.0) ? -1.0 : 1.0;
   }
   float tPlane = 0.0;
-  float perpDist = 0.0;
+  float faceCoord = 0.0;
 
   if (useX) {
     float faceX = casterCenter.x + 0.5 * faceSignX;
     if (abs(dir.x) < 1e-4) return 0.0;
     tPlane = (faceX - torchPos.x) / dir.x;
     if (tPlane <= 0.0 || tPlane >= distHit) return 0.0;
-    if (infiniteAlongFace) {
-      perpDist = 0.0;
-    } else {
-      float hitY = hitXY.y;
-      float clampedY = clamp(hitY, casterCenter.y - 0.5, casterCenter.y + 0.5);
-      perpDist = abs(hitY - clampedY);
-    }
+    faceCoord = faceX;
   } else {
     float faceY = casterCenter.y + 0.5 * faceSignY;
     if (abs(dir.y) < 1e-4) return 0.0;
     tPlane = (faceY - torchPos.y) / dir.y;
     if (tPlane <= 0.0 || tPlane >= distHit) return 0.0;
-    if (infiniteAlongFace) {
-      perpDist = 0.0;
-    } else {
-      float hitX = hitXY.x;
-      float clampedX = clamp(hitX, casterCenter.x - 0.5, casterCenter.x + 0.5);
-      perpDist = abs(hitX - clampedX);
-    }
+    faceCoord = faceY;
   }
 
   float proj = distHit - tPlane;
-  float len = clamp(rad * 1.35, 1.2, 12.0);
-  float halfWidth = 0.5;
-  float spread = halfWidth / max(tPlane, 0.2);
-  float radius = halfWidth + proj * spread;
-  radius = min(radius, halfWidth + rad);
-  float soft = max(0.14, OBSTACLE_SHADOW_SOFT * 1.1);
-  float core = smoothstep(radius, radius - soft, perpDist);
+  float edgePad = infiniteAlongFace ? 8.0 : 0.0;
+  vec2 edgeA;
+  vec2 edgeB;
+  if (useX) {
+    edgeA = vec2(faceCoord, casterCenter.y - 0.5 - edgePad);
+    edgeB = vec2(faceCoord, casterCenter.y + 0.5 + edgePad);
+  } else {
+    edgeA = vec2(casterCenter.x - 0.5 - edgePad, faceCoord);
+    edgeB = vec2(casterCenter.x + 0.5 + edgePad, faceCoord);
+  }
+
+  vec2 rayA = edgeA - torchPos;
+  vec2 rayB = edgeB - torchPos;
+  float lenA = length(rayA);
+  float lenB = length(rayB);
+  if (lenA < 1e-4 || lenB < 1e-4) return 0.0;
+  float orient = cross2(rayA, rayB);
+  if (abs(orient) < 1e-5) return 0.0;
+  if (orient < 0.0) {
+    vec2 tmp = rayA;
+    rayA = rayB;
+    rayB = tmp;
+    float tmpLen = lenA;
+    lenA = lenB;
+    lenB = tmpLen;
+  }
+
+  float distToA = cross2(rayA, toHit) / max(lenA, 1e-4);
+  float distToB = cross2(toHit, rayB) / max(lenB, 1e-4);
+  float soft = edgeDiffusion(proj, distHit, hitXY);
+  float core = smoothstep(0.0, soft, distToA) * smoothstep(0.0, soft, distToB);
   float front = smoothstep(0.0, 0.18, proj);
-  float back = 1.0 - smoothstep(len * 0.85, len, proj);
+  float decayLen = max(1.2, rad * SHADOW_DECAY_SCALE);
+  float back = exp(-max(0.0, proj) / decayLen);
   float strength = core * front * back * intensity;
   return strength;
 }
@@ -1301,9 +1331,8 @@ float computeShadowForTorch(
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
   float shadowRad = rad * SHADOW_RADIUS_SCALE;
-  float maxShadow = shadowRad * 1.15;
+  float maxShadow = rad * SHADOW_OCCLUSION_RADIUS_SCALE;
   if (distHit < 0.05 || distHit > maxShadow) return obstacleShadow;
-  float distFade = 1.0 - smoothstep(shadowRad * 0.85, maxShadow, distHit);
 
   vec2 dir = toHit / max(distHit, 1e-4);
 
@@ -1398,7 +1427,7 @@ float computeShadowForTorch(
     float perp = length(toCenter - dir * proj);
     float distCenter = length(toCenter);
     if (proj > 0.0 && distCenter < distHit + 0.02 && perp <= targetRadius + 0.05) {
-      float strength = shadowStrengthFromCaster(hitXY, center, targetRadius, torchPos, shadowRad, intensity) * distFade;
+      float strength = shadowStrengthFromCaster(hitXY, center, targetRadius, torchPos, shadowRad, intensity);
       obstacleShadow = max(obstacleShadow, strength);
     }
   }
@@ -1423,11 +1452,11 @@ float computeShadowForTorch(
       intensity,
       casterFaceNormal,
       surfaceIsFloor
-    ) * distFade;
+    );
     obstacleShadow = max(obstacleShadow, slabStrength);
     return obstacleShadow;
   }
-  float strength = shadowStrengthFromCaster(hitXY, casterCenter, casterRadius, torchPos, shadowRad, intensity) * distFade;
+  float strength = shadowStrengthFromCaster(hitXY, casterCenter, casterRadius, torchPos, shadowRad, intensity);
   obstacleShadow = max(obstacleShadow, strength);
   return obstacleShadow;
 }
@@ -1459,18 +1488,21 @@ float accumulateTorchLit(
     toL.z *= 0.5;
     float dist = length(toL);
     float lightRadius = u_torchRadius[i];
-    float shadowRadius = lightRadius * SHADOW_RADIUS_SCALE;
+    float shadowRadius = lightRadius * SHADOW_OCCLUSION_RADIUS_SCALE;
     if (dist >= shadowRadius) continue;
     vec3 L = normalize(toL);
     float ndotl_raw = dot(L, normal);
     if (ndotl_raw <= 0.0) continue;      // prevent torch light wrapping around backfaces
     float ndotl = ndotl_raw * 0.5 + 0.5; // half-Lambert
-    float falloff = max(0.0, 1.0 - dist / lightRadius);
+    float normDist = dist / max(lightRadius, 1e-4);
+    float coreFalloff = max(0.0, 1.0 - normDist);
+    float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
+    float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
     float shadowFactor = computeShadowForTorch(worldPos.xy, targetX, targetY, surfaceNormal2D, u_torchPos[i].xy, lightRadius, u_torchIntensity[i]);
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
-    float rawStrength = falloff * falloff * u_torchIntensity[i];
+    float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
     float atten = rawStrength * TORCH_FALLOFF * shadowMul;
     if (rawStrength > primaryStrength) {
       primaryStrength = rawStrength;
@@ -1619,10 +1651,10 @@ void main() {
           float warmShift = 0.75 + 0.45 * torchLight;
           vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
           float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
-          float lightPresence = clamp(primaryStrength, 0.0, 1.0);
-          float shadowFade = smoothstep(0.08, 0.45, torchLight);
-          keyShadow *= (1.0 - lightPresence * 0.75);
-          keyShadow *= (1.0 - shadowFade);
+          float lightPresence = smoothstep(0.65, 1.5, primaryStrength);
+          float shadowFade = smoothstep(0.5, 1.2, torchLight);
+          keyShadow *= (1.0 - lightPresence * 0.35);
+          keyShadow *= (1.0 - shadowFade * 0.2);
           float baseShadowMul = 1.0 - keyShadow;
           vec3 col = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
 
@@ -1737,10 +1769,10 @@ void main() {
         vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
 
         float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
-        float lightPresence = clamp(primaryStrength, 0.0, 1.0);
-        float shadowFade = smoothstep(0.08, 0.45, torchLight);
-        keyShadow *= (1.0 - lightPresence * 0.75);
-        keyShadow *= (1.0 - shadowFade);
+        float lightPresence = smoothstep(0.65, 1.5, primaryStrength);
+        float shadowFade = smoothstep(0.5, 1.2, torchLight);
+        keyShadow *= (1.0 - lightPresence * 0.35);
+        keyShadow *= (1.0 - shadowFade * 0.2);
         float baseShadowMul = 1.0 - keyShadow;
         vec3 finalCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
 
@@ -1844,10 +1876,10 @@ void main() {
     float warmShift = 0.75 + 0.45 * torchLight;
     vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
     float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
-    float lightPresence = clamp(primaryStrength, 0.0, 1.0);
-    float shadowFade = smoothstep(0.08, 0.45, torchLight);
-    keyShadow *= (1.0 - lightPresence * 0.75);
-    keyShadow *= (1.0 - shadowFade);
+    float lightPresence = smoothstep(0.65, 1.5, primaryStrength);
+    float shadowFade = smoothstep(0.5, 1.2, torchLight);
+    keyShadow *= (1.0 - lightPresence * 0.35);
+    keyShadow *= (1.0 - shadowFade * 0.2);
     float baseShadowMul = 1.0 - keyShadow;
     vec3 floorCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
     outColor = vec4(floorCol, 1.0);
@@ -2011,11 +2043,16 @@ void main() {
         '    if (i >= u_torchCount) break;',
         '    vec3 toL = u_torchPos[i] - worldPos;',
         '    float dist = length(toL);',
-        '    if (dist >= u_torchRadius[i]) continue;',
+        '    float lightRadius = u_torchRadius[i];',
+        '    float shadowRadius = lightRadius * 1.5;',
+        '    if (dist >= shadowRadius) continue;',
         '    vec3 L = normalize(toL);',
         '    float ndotlTorch = max(0.0, dot(normal, L));',
-        '    float falloff = 1.0 - dist / u_torchRadius[i];',
-        '    float atten = falloff * falloff * u_torchIntensity[i];',
+        '    float normDist = dist / max(lightRadius, 1e-4);',
+        '    float coreFalloff = max(0.0, 1.0 - normDist);',
+        '    float tailFalloff = exp(-2.4 * max(0.0, normDist - 1.0));',
+        '    float rangeGate = 1.0 - smoothstep(1.05, 1.5, normDist);',
+        '    float atten = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];',
         '    const float TORCH_AMBIENT = 0.35;',
         '    torchLit += (TORCH_AMBIENT + ndotlTorch * (1.0 - TORCH_AMBIENT)) * atten;',
         '  }',
@@ -2125,8 +2162,13 @@ const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
 const float TORCH_FALLOFF = 0.6;
 const int SHADOW_DDA_STEPS = 64;
 const float SHADOW_RADIUS_SCALE = 1.6;
+const float SHADOW_DIFFUSION = 0.05;
+const float SHADOW_REFRACTION = 0.012;
+const float SHADOW_REFRACTION_FREQ = 2.8;
 const float SHADOW_DARKEN = 0.75;
 const float TORCH_ONLY = 0.0;
+const float SHADOW_OCCLUSION_RADIUS_SCALE = 4.0;
+const float SHADOW_DECAY_SCALE = 2.8;
 
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -2150,20 +2192,27 @@ float casterRadiusFromCell(vec4 cell) {
   return (cell.a >= 0.999) ? 0.5 : max(0.12, cell.a);
 }
 
+float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
+  float base = 0.07;
+  float diffused = base + max(0.0, proj) * SHADOW_DIFFUSION;
+  float ripple = 1.0 + SHADOW_REFRACTION * sin(hitXY.x * 9.7 + hitXY.y * 6.3 + distHit * SHADOW_REFRACTION_FREQ);
+  return max(0.04, diffused * ripple);
+}
+
 float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad) {
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
-  if (distHit < 0.05 || distHit > rad) return 0.0;
+  if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
   vec2 lightDir = normalize(casterCenter - torchPos);
   vec2 v = hitXY - casterCenter;
   float proj = dot(v, lightDir);
   if (proj <= 0.0) return 0.0;
-  float len = clamp(rad * 1.1, 0.8, 12.0);
-  float radius = casterRadius + proj * 0.12;
   float perp = length(v - lightDir * proj);
-  float core = smoothstep(radius, radius - 0.22, perp);
+  float penumbra = edgeDiffusion(proj, distHit, hitXY);
+  float core = 1.0 - smoothstep(casterRadius, casterRadius + penumbra, perp);
   float front = smoothstep(0.0, 0.12, proj);
-  float back = 1.0 - smoothstep(len * 0.85, len, proj);
+  float decayLen = max(0.8, rad * SHADOW_DECAY_SCALE);
+  float back = exp(-max(0.0, proj) / decayLen);
   float strength = core * front * back;
   return strength;
 }
@@ -2171,7 +2220,7 @@ float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius
 float torchShadowFactor(vec2 hitXY, vec2 torchPos, float rad) {
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
-  float shadowRad = rad * SHADOW_RADIUS_SCALE;
+  float shadowRad = rad * SHADOW_OCCLUSION_RADIUS_SCALE;
   if (distHit < 0.05 || distHit > shadowRad) return 0.0;
   vec2 dir = toHit / max(distHit, 1e-4);
 
@@ -2226,7 +2275,7 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out fl
     vec3 toL = u_torchPos[i] - worldPos;
     float dist = length(toL);
     float lightRad = u_torchRadius[i] * u_torchRadiusScale;
-    float shadowRad = lightRad * SHADOW_RADIUS_SCALE;
+    float shadowRad = lightRad * SHADOW_OCCLUSION_RADIUS_SCALE;
     if (dist >= shadowRad) continue;
     vec3 L = toL / max(dist, 1e-4);
     float ndotl_raw = dot(L, normal);
@@ -2236,8 +2285,11 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out fl
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
-    float lightFalloff = max(0.0, 1.0 - dist / lightRad);
-    float rawStrength = pow(lightFalloff, TORCH_FALLOFF) * u_torchIntensity[i];
+    float normDist = dist / max(lightRad, 1e-4);
+    float coreFalloff = max(0.0, 1.0 - normDist);
+    float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
+    float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
+    float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
     float atten = rawStrength * shadowMul;
     total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
     sumStrength += rawStrength;
