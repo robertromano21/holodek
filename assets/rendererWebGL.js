@@ -1205,8 +1205,17 @@ float floorHeightFromCell(vec4 cell) {
   return u_heightMin + cell.g * 255.0 * (u_heightRange / 255.0);
 }
 
-float cross2(vec2 a, vec2 b) {
-  return a.x * b.y - a.y * b.x;
+float wrapSignedAngle(float a) {
+  const float PI = 3.141592653589793;
+  const float TAU = 6.283185307179586;
+  return mod(a + PI, TAU) - PI;
+}
+
+void expandAngleSpan(vec2 ray, float baseAngle, inout float minDelta, inout float maxDelta) {
+  if (dot(ray, ray) < 1e-8) return;
+  float delta = wrapSignedAngle(atan(ray.y, ray.x) - baseAngle);
+  minDelta = min(minDelta, delta);
+  maxDelta = max(maxDelta, delta);
 }
 
 float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
@@ -1250,69 +1259,53 @@ float shadowStrengthFromWallSlab(
   float distHit = length(toHit);
   if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
   vec2 dir = toHit / max(distHit, 1e-4);
+  float minX = casterCenter.x - 0.5;
+  float maxX = casterCenter.x + 0.5;
+  float minY = casterCenter.y - 0.5;
+  float maxY = casterCenter.y + 0.5;
+  if (abs(dir.x) < 1e-5 && (torchPos.x < minX || torchPos.x > maxX)) return 0.0;
+  if (abs(dir.y) < 1e-5 && (torchPos.y < minY || torchPos.y > maxY)) return 0.0;
+  float tx1 = (abs(dir.x) < 1e-5) ? -1e9 : ((minX - torchPos.x) / dir.x);
+  float tx2 = (abs(dir.x) < 1e-5) ?  1e9 : ((maxX - torchPos.x) / dir.x);
+  float ty1 = (abs(dir.y) < 1e-5) ? -1e9 : ((minY - torchPos.y) / dir.y);
+  float ty2 = (abs(dir.y) < 1e-5) ?  1e9 : ((maxY - torchPos.y) / dir.y);
+  float tMinX = min(tx1, tx2);
+  float tMaxX = max(tx1, tx2);
+  float tMinY = min(ty1, ty2);
+  float tMaxY = max(ty1, ty2);
+  float tEntry = max(tMinX, tMinY);
+  float tExit = min(tMaxX, tMaxY);
+  if (tExit <= max(0.0, tEntry)) return 0.0;
+  if (tEntry >= distHit) return 0.0;
+  float proj = distHit - max(0.0, tEntry);
+  if (proj <= 0.0) return 0.0;
 
   vec2 toCaster = casterCenter - torchPos;
-  bool useX;
-  float faceSignX = 0.0;
-  float faceSignY = 0.0;
+  float casterDist = length(toCaster);
+  if (casterDist < 1e-4) return 0.0;
+  vec2 casterDir = toCaster / casterDist;
+
+  float baseAngle = atan(toCaster.y, toCaster.x);
+  float minDelta = 1e9;
+  float maxDelta = -1e9;
+  expandAngleSpan(casterCenter + vec2(-0.5, -0.5) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2(-0.5,  0.5) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2( 0.5, -0.5) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2( 0.5,  0.5) - torchPos, baseAngle, minDelta, maxDelta);
+  if (maxDelta <= minDelta) return 0.0;
+
+  float hitDelta = wrapSignedAngle(atan(toHit.y, toHit.x) - baseAngle);
+  float angularSoft = edgeDiffusion(proj, distHit, hitXY) / max(distHit, 1e-4);
+  if (infiniteAlongFace) {
+    angularSoft *= 1.2;
+  }
+  float insideMin = smoothstep(minDelta - angularSoft, minDelta + angularSoft, hitDelta);
+  float insideMax = 1.0 - smoothstep(maxDelta - angularSoft, maxDelta + angularSoft, hitDelta);
+  float core = insideMin * insideMax;
   if (abs(faceNormal.x) > 0.5 || abs(faceNormal.y) > 0.5) {
-    useX = abs(faceNormal.x) > 0.5;
-    faceSignX = (faceNormal.x >= 0.0) ? 1.0 : -1.0;
-    faceSignY = (faceNormal.y >= 0.0) ? 1.0 : -1.0;
-  } else {
-    useX = abs(toCaster.x) >= abs(toCaster.y);
-    faceSignX = (toCaster.x >= 0.0) ? -1.0 : 1.0;
-    faceSignY = (toCaster.y >= 0.0) ? -1.0 : 1.0;
+    float entryAlign = max(0.0, dot(casterDir, -faceNormal));
+    core *= mix(0.75, 1.0, entryAlign);
   }
-  float tPlane = 0.0;
-  float faceCoord = 0.0;
-
-  if (useX) {
-    float faceX = casterCenter.x + 0.5 * faceSignX;
-    if (abs(dir.x) < 1e-4) return 0.0;
-    tPlane = (faceX - torchPos.x) / dir.x;
-    if (tPlane <= 0.0 || tPlane >= distHit) return 0.0;
-    faceCoord = faceX;
-  } else {
-    float faceY = casterCenter.y + 0.5 * faceSignY;
-    if (abs(dir.y) < 1e-4) return 0.0;
-    tPlane = (faceY - torchPos.y) / dir.y;
-    if (tPlane <= 0.0 || tPlane >= distHit) return 0.0;
-    faceCoord = faceY;
-  }
-
-  float proj = distHit - tPlane;
-  float edgePad = infiniteAlongFace ? 8.0 : 0.0;
-  vec2 edgeA;
-  vec2 edgeB;
-  if (useX) {
-    edgeA = vec2(faceCoord, casterCenter.y - 0.5 - edgePad);
-    edgeB = vec2(faceCoord, casterCenter.y + 0.5 + edgePad);
-  } else {
-    edgeA = vec2(casterCenter.x - 0.5 - edgePad, faceCoord);
-    edgeB = vec2(casterCenter.x + 0.5 + edgePad, faceCoord);
-  }
-
-  vec2 rayA = edgeA - torchPos;
-  vec2 rayB = edgeB - torchPos;
-  float lenA = length(rayA);
-  float lenB = length(rayB);
-  if (lenA < 1e-4 || lenB < 1e-4) return 0.0;
-  float orient = cross2(rayA, rayB);
-  if (abs(orient) < 1e-5) return 0.0;
-  if (orient < 0.0) {
-    vec2 tmp = rayA;
-    rayA = rayB;
-    rayB = tmp;
-    float tmpLen = lenA;
-    lenA = lenB;
-    lenB = tmpLen;
-  }
-
-  float distToA = cross2(rayA, toHit) / max(lenA, 1e-4);
-  float distToB = cross2(toHit, rayB) / max(lenB, 1e-4);
-  float soft = edgeDiffusion(proj, distHit, hitXY);
-  float core = smoothstep(0.0, soft, distToA) * smoothstep(0.0, soft, distToB);
   float front = smoothstep(0.0, 0.18, proj);
   float decayLen = max(1.2, rad * SHADOW_DECAY_SCALE);
   float back = exp(-max(0.0, proj) / decayLen);
@@ -1349,6 +1342,8 @@ float computeShadowForTorch(
   bool casterIsWall = false;
   bool casterIsTarget = false;
   bool foundCaster = false;
+  int casterMapX = -999999;
+  int casterMapY = -999999;
 
   int mapX = int(floor(torchPos.x));
   int mapY = int(floor(torchPos.y));
@@ -1368,15 +1363,87 @@ float computeShadowForTorch(
     if (nextT >= distHit - 0.02) break;
     int prevX = mapX;
     int prevY = mapY;
-    bool steppedX = (sideDistX < sideDistY);
-    if (steppedX) {
-      sideDistX += invDx;
-      mapX += stepX;
-    } else {
-      sideDistY += invDy;
-      mapY += stepY;
+    float edgeDelta = abs(sideDistX - sideDistY);
+    bool cornerStep = edgeDelta <= 1e-5;
+    bool steppedX = (sideDistX < sideDistY) || cornerStep;
+    bool steppedY = (sideDistY < sideDistX) || cornerStep;
+    int nextMapX = mapX + (steppedX ? stepX : 0);
+    int nextMapY = mapY + (steppedY ? stepY : 0);
+    if (steppedX) sideDistX += invDx;
+    if (steppedY) sideDistY += invDy;
+
+    bool cornerReachedTarget = false;
+    if (cornerStep) {
+      int sideAX = prevX + stepX;
+      int sideAY = prevY;
+      if (inBounds(sideAX, sideAY)) {
+        bool sideATarget = (sideAX == targetX && sideAY == targetY);
+        if (sideATarget && !allowTargetCaster) {
+          cornerReachedTarget = true;
+        } else if (!(sideAX == torchCellX && sideAY == torchCellY)) {
+          vec4 sideCellA = fetchCell(sideAX, sideAY);
+          if (isCasterCell(sideCellA)) {
+            casterCenter = vec2(float(sideAX) + 0.5, float(sideAY) + 0.5);
+            casterRadius = casterRadiusFromCell(sideCellA);
+            casterIsWall = sideCellA.a >= 0.999;
+            casterIsTarget = sideATarget;
+            casterMapX = sideAX;
+            casterMapY = sideAY;
+            if (!casterIsWall) {
+              vec2 toCenterA = casterCenter - torchPos;
+              float projA = dot(toCenterA, dir);
+              float perpA = length(toCenterA - dir * projA);
+              if (perpA <= casterRadius + 0.05) {
+                casterFaceNormal = vec2(-float(stepX), 0.0);
+                foundCaster = true;
+              }
+            } else {
+              casterFaceNormal = vec2(-float(stepX), 0.0);
+              foundCaster = true;
+            }
+          }
+        }
+      }
+      int sideBX = prevX;
+      int sideBY = prevY + stepY;
+      if (!foundCaster && inBounds(sideBX, sideBY)) {
+        bool sideBTarget = (sideBX == targetX && sideBY == targetY);
+        if (sideBTarget && !allowTargetCaster) {
+          cornerReachedTarget = true;
+        } else if (!(sideBX == torchCellX && sideBY == torchCellY)) {
+          vec4 sideCellB = fetchCell(sideBX, sideBY);
+          if (isCasterCell(sideCellB)) {
+            casterCenter = vec2(float(sideBX) + 0.5, float(sideBY) + 0.5);
+            casterRadius = casterRadiusFromCell(sideCellB);
+            casterIsWall = sideCellB.a >= 0.999;
+            casterIsTarget = sideBTarget;
+            casterMapX = sideBX;
+            casterMapY = sideBY;
+            if (!casterIsWall) {
+              vec2 toCenterB = casterCenter - torchPos;
+              float projB = dot(toCenterB, dir);
+              float perpB = length(toCenterB - dir * projB);
+              if (perpB <= casterRadius + 0.05) {
+                casterFaceNormal = vec2(0.0, -float(stepY));
+                foundCaster = true;
+              }
+            } else {
+              casterFaceNormal = vec2(0.0, -float(stepY));
+              foundCaster = true;
+            }
+          }
+        }
+      }
     }
+
+    mapX = nextMapX;
+    mapY = nextMapY;
+    if (foundCaster) break;
+    if (cornerReachedTarget) break;
     if (!inBounds(mapX, mapY)) break;
+    if (!steppedX && !steppedY) {
+      break;
+    }
     vec4 prevCell = fetchCell(prevX, prevY);
     vec4 currCell = fetchCell(mapX, mapY);
     if (ENABLE_FLOOR_STEP_SHADOWS && prevCell.a < 0.5 && currCell.a < 0.5) {
@@ -1393,6 +1460,8 @@ float computeShadowForTorch(
         casterFaceNormal = steppedX
           ? vec2(currHigher ? -float(stepX) : float(stepX), 0.0)
           : vec2(0.0, currHigher ? -float(stepY) : float(stepY));
+        casterMapX = currHigher ? mapX : prevX;
+        casterMapY = currHigher ? mapY : prevY;
         foundCaster = true;
         break;
       }
@@ -1409,6 +1478,8 @@ float computeShadowForTorch(
       casterRadius = casterRadiusFromCell(sCell);
       casterIsWall = sCell.a >= 0.999;
       casterIsTarget = isTargetCell;
+      casterMapX = mapX;
+      casterMapY = mapY;
       if (!casterIsWall) {
         vec2 toCenter = casterCenter - torchPos;
         float proj = dot(toCenter, dir);
@@ -1443,13 +1514,12 @@ float computeShadowForTorch(
   float distCaster = length(casterCenter - torchPos);
   if (!casterIsTarget && distCaster >= distHit - 0.02) return obstacleShadow;
   if (casterIsWall) {
-    float torchCasterDist = length(casterCenter - torchPos);
-    if (torchCasterDist < 0.9) {
+    if (casterMapX == torchCellX && casterMapY == torchCellY) {
       return obstacleShadow;
     }
     if (targetIsWall && (abs(surfaceNormal2D.x) > 0.5 || abs(surfaceNormal2D.y) > 0.5)) {
-      if (abs(surfaceNormal2D.x) > 0.5 && mapX == targetX) return obstacleShadow;
-      if (abs(surfaceNormal2D.y) > 0.5 && mapY == targetY) return obstacleShadow;
+      if (abs(surfaceNormal2D.x) > 0.5 && casterMapX == targetX) return obstacleShadow;
+      if (abs(surfaceNormal2D.y) > 0.5 && casterMapY == targetY) return obstacleShadow;
     }
     float slabStrength = shadowStrengthFromWallSlab(
       hitXY,
@@ -2045,6 +2115,11 @@ void main() {
         'uniform float u_spriteHeight;',
         'uniform float u_spriteVFlip;',
         'uniform float u_depthShadeScale;',
+        'uniform float u_haloMode;',
+        'uniform float u_haloDepthSpan;',
+        'uniform float u_haloCapMin;',
+        'uniform vec2 u_haloClipDir;',
+        'uniform vec2 u_haloClipSpan;',
         'uniform float u_shadowStrength;',
         'uniform int u_torchCount;',
         'uniform vec3 u_torchPos[' + MAX_TORCH_LIGHTS + '];',
@@ -2054,6 +2129,19 @@ void main() {
         'void main() {',
         '  vec4 tex = texture(u_tex, v_uv);',
         '  if (tex.a < 0.01) discard;',
+        '  if (u_haloMode > 0.5) {',
+        '    vec2 p = v_uv * 2.0 - 1.0;',
+        '    float r2 = dot(p, p);',
+        '    if (r2 > 1.0) discard;',
+        '    float sphereZRaw = sqrt(max(0.0, 1.0 - r2));',
+        '    float capMin = clamp(u_haloCapMin, 0.0, 0.95);',
+        '    if (sphereZRaw < capMin) discard;',
+        '    float sphereZ = (sphereZRaw - capMin) / max(1e-4, 1.0 - capMin);',
+        '    float depth = clamp(v_depth - u_haloDepthSpan * sphereZ, 0.0, 1.0);',
+        '    outColor = vec4(tex.rgb, tex.a) * u_tint;',
+        '    gl_FragDepth = depth;',
+        '    return;',
+        '  }',
         '  vec3 normal = vec3(0.0, 0.0, 1.0);',
         '  if (u_profile > 0.5) {',
         '    float nx = (v_uv.x - 0.5) * 2.0;',
@@ -2420,6 +2508,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         spriteHeight: gl.getUniformLocation(this.spriteProgram, 'u_spriteHeight'),
         spriteVFlip: gl.getUniformLocation(this.spriteProgram, 'u_spriteVFlip'),
         depthShadeScale: gl.getUniformLocation(this.spriteProgram, 'u_depthShadeScale'),
+        haloMode: gl.getUniformLocation(this.spriteProgram, 'u_haloMode'),
+        haloDepthSpan: gl.getUniformLocation(this.spriteProgram, 'u_haloDepthSpan'),
+        haloCapMin: gl.getUniformLocation(this.spriteProgram, 'u_haloCapMin'),
+        haloClipDir: gl.getUniformLocation(this.spriteProgram, 'u_haloClipDir'),
+        haloClipSpan: gl.getUniformLocation(this.spriteProgram, 'u_haloClipSpan'),
         shadowStrength: gl.getUniformLocation(this.spriteProgram, 'u_shadowStrength'),
         torchCount: gl.getUniformLocation(this.spriteProgram, 'u_torchCount'),
         torchPos: gl.getUniformLocation(this.spriteProgram, 'u_torchPos[0]'),
@@ -2975,7 +3068,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const TORCH_VIS_RADIUS = Math.max(VIS_RADIUS, 64);
       const TORCH_MOUNT_HEIGHT = 0.45;
       const TORCH_MOUNT_RATIO = 0.55;
-      const TORCH_WALL_OFFSET = 0.6;
+      const TORCH_LIGHT_OFFSET = 0.515;
+      const TORCH_SPRITE_OFFSET = 0.56;
+      const TORCH_SPRITE_DEPTH_BIAS = 0.008;
+      const TORCH_FLAME_DEPTH_BIAS = 0.00025;
+      const TORCH_HALO_DEPTH_PUSH = 0.00035;
 
       const torchLights = [];
       const now = performance.now();
@@ -3005,6 +3102,25 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
         return 'N';
       };
+      const torchFacingToNormal = (facing) => {
+        if (facing === 'N') return { x: 0, y: -1 };
+        if (facing === 'S') return { x: 0, y: 1 };
+        if (facing === 'W') return { x: -1, y: 0 };
+        return { x: 1, y: 0 };
+      };
+      const getTorchPlacement = (wx, wy, cell) => {
+        const facing = getTorchFacing(wx, wy, cell);
+        const n = torchFacingToNormal(facing);
+        const cx = wx + 0.5;
+        const cy = wy + 0.5;
+        return {
+          facing,
+          lightX: cx + n.x * TORCH_LIGHT_OFFSET,
+          lightY: cy + n.y * TORCH_LIGHT_OFFSET,
+          renderX: cx + n.x * TORCH_SPRITE_OFFSET,
+          renderY: cy + n.y * TORCH_SPRITE_OFFSET
+        };
+      };
       const hasLineOfSight = (x0, y0, x1, y1) => {
         const startX = Math.floor(x0);
         const startY = Math.floor(y0);
@@ -3027,7 +3143,25 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         let y = startY;
         let steps = 0;
         while ((x !== endX || y !== endY) && steps < 512) {
-          if (tMaxX < tMaxY) {
+          const tie = Math.abs(tMaxX - tMaxY) <= 1e-6;
+          if (tie) {
+            const sideAX = x + stepX;
+            const sideAY = y;
+            const sideBX = x;
+            const sideBY = y + stepY;
+            if (!(sideAX === endX && sideAY === endY)) {
+              const sideCellA = dungeon.cells?.[`${sideAX},${sideAY}`];
+              if (!sideCellA || isSolidCell(sideCellA)) return false;
+            }
+            if (!(sideBX === endX && sideBY === endY)) {
+              const sideCellB = dungeon.cells?.[`${sideBX},${sideBY}`];
+              if (!sideCellB || isSolidCell(sideCellB)) return false;
+            }
+            tMaxX += tDeltaX;
+            tMaxY += tDeltaY;
+            x += stepX;
+            y += stepY;
+          } else if (tMaxX < tMaxY) {
             tMaxX += tDeltaX;
             x += stepX;
           } else {
@@ -3086,13 +3220,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const cell = dungeon.cells?.[`${wx},${wy}`];
           if (!cell || cell.tile !== 'torch') continue;
 
-          let worldX = wx + 0.5;
-          let worldY = wy + 0.5;
-          const facing = getTorchFacing(wx, wy, cell);
-          if (facing === 'N') worldY -= TORCH_WALL_OFFSET;
-          if (facing === 'S') worldY += TORCH_WALL_OFFSET;
-          if (facing === 'W') worldX -= TORCH_WALL_OFFSET;
-          if (facing === 'E') worldX += TORCH_WALL_OFFSET;
+          const placement = getTorchPlacement(wx, wy, cell);
+          const worldX = placement.lightX;
+          const worldY = placement.lightY;
 
           const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
           const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + TORCH_MOUNT_HEIGHT;
@@ -3249,27 +3379,18 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           let renderX = wx + 0.5;
           let renderY = wy + 0.5;
 
-          // Light position (offset forward for correct glow)
+          // Torch sprite and light use different offsets:
+          // sprite is farther out for visibility, light hugs the wall face for robust occlusion.
           let lightX = renderX;
           let lightY = renderY;
+          let torchFacing = null;
           if (isTorch) {
-            const facing = getTorchFacing(wx, wy, cell);
-            if (facing === 'N') {
-              renderY -= TORCH_WALL_OFFSET;
-              lightY -= TORCH_WALL_OFFSET;
-            }
-            if (facing === 'S') {
-              renderY += TORCH_WALL_OFFSET;
-              lightY += TORCH_WALL_OFFSET;
-            }
-            if (facing === 'W') {
-              renderX -= TORCH_WALL_OFFSET;
-              lightX -= TORCH_WALL_OFFSET;
-            }
-            if (facing === 'E') {
-              renderX += TORCH_WALL_OFFSET;
-              lightX += TORCH_WALL_OFFSET;
-            }
+            const placement = getTorchPlacement(wx, wy, cell);
+            renderX = placement.renderX;
+            renderY = placement.renderY;
+            lightX = placement.lightX;
+            lightY = placement.lightY;
+            torchFacing = placement.facing;
           }
 
           if (!isTorch && isCustom && this.voxelProgram) {
@@ -3364,7 +3485,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           if (drawRight < 0 || drawLeft >= width) continue;
 
           const flickerSeed = ((wx * 928371 + wy * 1237) % 1000) / 1000;
-          const depthBias = isTorch ? 0.03 : 0.0;
+          const depthBias = isTorch ? TORCH_SPRITE_DEPTH_BIAS : 0.0;
 
           sprites.push({
             type: isTorch ? 'torch' : 'custom',
@@ -3383,9 +3504,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             screenWidth: spriteScreenWidth,
             mountScreenY,
             depth: Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / depthFarDepth)),
+            viewDist: safeTransformY,
             baseZ: spriteBaseZ,
             worldHeight: spriteWorldHeight,
-            flickerSeed
+            flickerSeed,
+            torchFacing
           });
         }
       }
@@ -3528,8 +3651,36 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (this.spriteUniforms.shadowStrength) {
         gl.uniform1f(this.spriteUniforms.shadowStrength, shadowStrengthClamped);
       }
-
+      const projectWorldPoint = (wx, wy, wz) => {
+        const relX = wx - camX;
+        const relY = wy - camY;
+        const invDet = 1.0 / (planeX * dirY - dirX * planeY);
+        const tx = invDet * (dirY * relX - dirX * relY);
+        const ty = invDet * (-planeY * relX + planeX * relY);
+        if (ty <= 0.02) return null;
+        return {
+          x: (width * 0.5) * (1.0 + tx / ty),
+          y: (height * 0.5) + (eyeZ - wz) * focalLength / ty,
+          depth: Math.min(1.0, Math.max(0.0, ty / depthFarDepth)),
+          viewDist: ty
+        };
+      };
       for (const spr of sprites) {
+        if (this.spriteUniforms.haloMode) {
+          gl.uniform1f(this.spriteUniforms.haloMode, 0.0);
+        }
+        if (this.spriteUniforms.haloDepthSpan) {
+          gl.uniform1f(this.spriteUniforms.haloDepthSpan, 0.0);
+        }
+        if (this.spriteUniforms.haloCapMin) {
+          gl.uniform1f(this.spriteUniforms.haloCapMin, 0.0);
+        }
+        if (this.spriteUniforms.haloClipDir) {
+          gl.uniform2f(this.spriteUniforms.haloClipDir, 1.0, 0.0);
+        }
+        if (this.spriteUniforms.haloClipSpan) {
+          gl.uniform2f(this.spriteUniforms.haloClipSpan, 1.0, 1.0);
+        }
         if (this.spriteUniforms.torchCount) {
           const torchData = spr.type === 'torch'
             ? torchUniformData
@@ -3620,7 +3771,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const flameTop = flameBottom - flameH;
 
         if (flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
-          const flameDepth = spr.depth - 0.0005;
+          const flameDepth = Math.max(0.0, spr.depth - TORCH_FLAME_DEPTH_BIAS);
           const flameVerts = new Float32Array([
             (flameLeft / width) * 2 - 1, 1 - (flameBottom / height) * 2, 0, 1, flameDepth,
             (flameRight / width) * 2 - 1, 1 - (flameBottom / height) * 2, 1, 1, flameDepth,
@@ -3641,34 +3792,177 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (this.haloTex) {
           const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
           const haloSize = Math.min(600, glowRadius * 2);
-          const haloLeft = Math.floor(spr.screenX - haloSize / 2);
-          const haloRight = haloLeft + haloSize;
           const haloCenterY = flameCenterY;
-          const haloTop = haloCenterY - haloSize / 2;
-          const haloBottom = haloCenterY + haloSize / 2;
-
-          const haloVerts = new Float32Array([
-            (haloLeft / width) * 2 - 1, 1 - (haloBottom / height) * 2, 0, 1, spr.depth - 0.001,
-            (haloRight / width) * 2 - 1, 1 - (haloBottom / height) * 2, 1, 1, spr.depth - 0.001,
-            (haloLeft / width) * 2 - 1, 1 - (haloTop / height) * 2, 0, 0, spr.depth - 0.001,
-            (haloRight / width) * 2 - 1, 1 - (haloTop / height) * 2, 1, 0, spr.depth - 0.001
-          ]);
-
-          gl.bufferData(gl.ARRAY_BUFFER, haloVerts, gl.STREAM_DRAW);
-          gl.bindTexture(gl.TEXTURE_2D, this.haloTex);
-          gl.uniform1i(this.spriteUniforms.tex, 0);
-          if (this.spriteUniforms.depthShadeScale) {
-            gl.uniform1f(this.spriteUniforms.depthShadeScale, 0.0);
+          const haloWorldRadius = (haloSize * 0.5) * Math.max(0.1, spr.viewDist || 0.1) / Math.max(1.0, focalLength);
+          let haloDepthSpan = Math.min(0.04, Math.max(0.0002, haloWorldRadius / Math.max(1e-3, depthFarDepth)));
+          // Keep only the top 25% spherical cap so the halo is a shallow wall-adhered bubble.
+          let haloCapMin = 0.75;
+          let haloClipDirX = 1.0;
+          let haloClipDirY = 0.0;
+          let haloClipNeg = 1.0;
+          let haloClipPos = 1.0;
+          let haloVerts = null;
+          let haloDrawMode = gl.TRIANGLE_STRIP;
+          let haloVertexCount = 0;
+          const hasWallFacing = !!spr.torchFacing;
+          if (hasWallFacing) {
+            const n = torchFacingToNormal(spr.torchFacing);
+            const t = { x: -n.y, y: n.x };
+            const toCamX = camX - spr.lightX;
+            const toCamY = camY - spr.lightY;
+            const toCamLen = Math.hypot(toCamX, toCamY);
+            if (toCamLen > 1e-4) {
+              const facing = Math.max(0.0, (n.x * toCamX + n.y * toCamY) / toCamLen);
+              // Keep a visible bubble even when view is parallel to the wall,
+              // while still reducing protrusion to avoid corner bleed.
+              const parallelBulgeFloor = 0.72;
+              haloDepthSpan *= (parallelBulgeFloor + (1.0 - parallelBulgeFloor) * facing);
+            }
+            const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - TORCH_FLAME_RATIO) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
+            const c = projectWorldPoint(spr.lightX, spr.lightY, haloCenterZ);
+            if (c) {
+              // The halo bubble is approximated in screen-space depth.
+              // Near screen edges that approximation over-bulges and can look warped/dragged.
+              const offAxis = Math.min(1.0, Math.abs((c.x / Math.max(1, width)) * 2.0 - 1.0));
+              haloDepthSpan *= (1.0 - 0.45 * offAxis * offAxis);
+            }
+            // Ensure the bubble actually protrudes in front of the wall plane.
+            // If span drops below the adhesion depth push, the halo appears flat/painted on.
+            const minBubbleSpan = TORCH_HALO_DEPTH_PUSH * 1.8;
+            haloDepthSpan = Math.max(minBubbleSpan, haloDepthSpan);
+            const buildWallHaloMesh = (radius, segments) => {
+              if (!c) return null;
+              const grid = Math.max(2, segments | 0);
+              const row = grid + 1;
+              const points = new Array(row * row);
+              const capMin = Math.max(0.0, Math.min(0.95, haloCapMin));
+              const capDen = Math.max(1e-4, 1.0 - capMin);
+              const maxOut = radius * (1.0 - capMin);
+              for (let iy = 0; iy <= grid; iy++) {
+                const vv = -1 + (2 * iy) / grid;
+                for (let ix = 0; ix <= grid; ix++) {
+                  const uu = -1 + (2 * ix) / grid;
+                  const r2 = uu * uu + vv * vv;
+                  const sphereZRaw = Math.sqrt(Math.max(0, 1 - r2));
+                  const capT = Math.max(0.0, (sphereZRaw - capMin) / capDen);
+                  const out = maxOut * capT;
+                  const p = projectWorldPoint(
+                    spr.lightX + t.x * radius * uu + n.x * out,
+                    spr.lightY + t.y * radius * uu + n.y * out,
+                    haloCenterZ + radius * vv
+                  );
+                  if (!p) return null;
+                  points[iy * row + ix] = p;
+                }
+              }
+              const vertCount = grid * grid * 6;
+              const out = new Float32Array(vertCount * 5);
+              let o = 0;
+              const emit = (pt, u, v) => {
+                out[o++] = (pt.x / width) * 2 - 1;
+                out[o++] = 1 - (pt.y / height) * 2;
+                out[o++] = u;
+                out[o++] = v;
+                out[o++] = Math.min(1.0, Math.max(0.0, pt.depth + TORCH_HALO_DEPTH_PUSH));
+              };
+              for (let iy = 0; iy < grid; iy++) {
+                const v0 = iy / grid;
+                const v1 = (iy + 1) / grid;
+                for (let ix = 0; ix < grid; ix++) {
+                  const u0 = ix / grid;
+                  const u1 = (ix + 1) / grid;
+                  const p00 = points[iy * row + ix];
+                  const p10 = points[iy * row + ix + 1];
+                  const p01 = points[(iy + 1) * row + ix];
+                  const p11 = points[(iy + 1) * row + ix + 1];
+                  emit(p00, u0, v0);
+                  emit(p10, u1, v0);
+                  emit(p11, u1, v1);
+                  emit(p00, u0, v0);
+                  emit(p11, u1, v1);
+                  emit(p01, u0, v1);
+                }
+              }
+              return { verts: out, count: vertCount };
+            };
+            // Near the camera plane, projection can fail for full radius.
+            // Shrink until all mesh vertices are valid to avoid unstable warping.
+            let probeRadius = haloWorldRadius;
+            for (let i = 0; i < 6; i++) {
+              const mesh = buildWallHaloMesh(probeRadius, 6);
+              if (mesh) {
+                haloVerts = mesh.verts;
+                haloVertexCount = mesh.count;
+                haloDrawMode = gl.TRIANGLES;
+                break;
+              }
+              probeRadius *= 0.65;
+            }
           }
 
-          gl.depthMask(false);
-          gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-          const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
-          gl.uniform4f(this.spriteUniforms.tint, 1.0, 0.9, 0.7, glowAlpha);
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          if (!haloVerts && !hasWallFacing) {
+            const haloLeft = Math.floor(spr.screenX - haloSize / 2);
+            const haloRight = haloLeft + haloSize;
+            const haloTop = haloCenterY - haloSize / 2;
+            const haloBottom = haloCenterY + haloSize / 2;
+            const haloDepth = Math.min(1.0, spr.depth + TORCH_HALO_DEPTH_PUSH);
+            haloVerts = new Float32Array([
+              (haloLeft / width) * 2 - 1, 1 - (haloBottom / height) * 2, 0, 1, haloDepth,
+              (haloRight / width) * 2 - 1, 1 - (haloBottom / height) * 2, 1, 1, haloDepth,
+              (haloLeft / width) * 2 - 1, 1 - (haloTop / height) * 2, 0, 0, haloDepth,
+              (haloRight / width) * 2 - 1, 1 - (haloTop / height) * 2, 1, 0, haloDepth
+            ]);
+            haloDrawMode = gl.TRIANGLE_STRIP;
+            haloVertexCount = 4;
+          }
 
-          gl.depthMask(true);
-          gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+          if (haloVerts) {
+            gl.bufferData(gl.ARRAY_BUFFER, haloVerts, gl.STREAM_DRAW);
+            gl.bindTexture(gl.TEXTURE_2D, this.haloTex);
+            gl.uniform1i(this.spriteUniforms.tex, 0);
+            if (this.spriteUniforms.depthShadeScale) {
+              gl.uniform1f(this.spriteUniforms.depthShadeScale, 0.0);
+            }
+            if (this.spriteUniforms.haloMode) {
+              gl.uniform1f(this.spriteUniforms.haloMode, 1.0);
+            }
+            if (this.spriteUniforms.haloDepthSpan) {
+              gl.uniform1f(this.spriteUniforms.haloDepthSpan, haloDepthSpan);
+            }
+            if (this.spriteUniforms.haloCapMin) {
+              gl.uniform1f(this.spriteUniforms.haloCapMin, haloCapMin);
+            }
+            if (this.spriteUniforms.haloClipDir) {
+              gl.uniform2f(this.spriteUniforms.haloClipDir, haloClipDirX, haloClipDirY);
+            }
+            if (this.spriteUniforms.haloClipSpan) {
+              gl.uniform2f(this.spriteUniforms.haloClipSpan, haloClipNeg, haloClipPos);
+            }
+
+            gl.depthMask(false);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+            const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
+            gl.uniform4f(this.spriteUniforms.tint, 1.0, 0.9, 0.7, glowAlpha);
+            gl.drawArrays(haloDrawMode, 0, haloVertexCount);
+
+            gl.depthMask(true);
+            gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+            if (this.spriteUniforms.haloMode) {
+              gl.uniform1f(this.spriteUniforms.haloMode, 0.0);
+            }
+            if (this.spriteUniforms.haloDepthSpan) {
+              gl.uniform1f(this.spriteUniforms.haloDepthSpan, 0.0);
+            }
+            if (this.spriteUniforms.haloCapMin) {
+              gl.uniform1f(this.spriteUniforms.haloCapMin, 0.0);
+            }
+            if (this.spriteUniforms.haloClipDir) {
+              gl.uniform2f(this.spriteUniforms.haloClipDir, 1.0, 0.0);
+            }
+            if (this.spriteUniforms.haloClipSpan) {
+              gl.uniform2f(this.spriteUniforms.haloClipSpan, 1.0, 1.0);
+            }
+          }
         }
       }
 
