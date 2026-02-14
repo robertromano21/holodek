@@ -3507,6 +3507,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             viewDist: safeTransformY,
             baseZ: spriteBaseZ,
             worldHeight: spriteWorldHeight,
+            floorZ: floorH,
+            ceilZ: ceilH,
+            cellX: wx,
+            cellY: wy,
             flickerSeed,
             torchFacing
           });
@@ -3802,53 +3806,139 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           let haloClipNeg = 1.0;
           let haloClipPos = 1.0;
           let haloVerts = null;
+          const haloFoldMeshes = [];
           let haloDrawMode = gl.TRIANGLE_STRIP;
           let haloVertexCount = 0;
           const hasWallFacing = !!spr.torchFacing;
           if (hasWallFacing) {
             const n = torchFacingToNormal(spr.torchFacing);
+            // Corner-occlusion guard: if the wall-attached light anchor is not visible
+            // from the camera, skip halo rendering for this torch.
+            const haloAnchorX = spr.lightX + n.x * 0.01;
+            const haloAnchorY = spr.lightY + n.y * 0.01;
+            if (torchOcclusion && !hasLineOfSight(camX, camY, haloAnchorX, haloAnchorY)) {
+              haloVerts = null;
+            } else {
             const t = { x: -n.y, y: n.x };
             const toCamX = camX - spr.lightX;
             const toCamY = camY - spr.lightY;
             const toCamLen = Math.hypot(toCamX, toCamY);
-            if (toCamLen > 1e-4) {
-              const facing = Math.max(0.0, (n.x * toCamX + n.y * toCamY) / toCamLen);
-              // Keep a visible bubble even when view is parallel to the wall,
-              // while still reducing protrusion to avoid corner bleed.
-              const parallelBulgeFloor = 0.72;
-              haloDepthSpan *= (parallelBulgeFloor + (1.0 - parallelBulgeFloor) * facing);
-            }
+            const facing = toCamLen > 1e-4
+              ? Math.max(0.0, (n.x * toCamX + n.y * toCamY) / toCamLen)
+              : 1.0;
+            const wallDepthBias = TORCH_HALO_DEPTH_PUSH * (0.55 + 0.45 * facing);
+            const torchCellX = Number.isFinite(spr.cellX) ? spr.cellX : Math.floor(spr.lightX);
+            const torchCellY = Number.isFinite(spr.cellY) ? spr.cellY : Math.floor(spr.lightY);
+            const frontCellX = torchCellX + n.x;
+            const frontCellY = torchCellY + n.y;
+            // Anchor halo to the wall face center so corner wrapping can share an exact edge.
+            const faceCenterX = torchCellX + 0.5 + n.x * 0.5;
+            const faceCenterY = torchCellY + 0.5 + n.y * 0.5;
+            const faceHalfSpan = 0.5;
+            const cellAt = (x, y) => ({ x: Math.floor(x), y: Math.floor(y) });
+            const isSolidCellXY = (cx, cy) => {
+              const ccell = dungeon.cells?.[`${cx},${cy}`];
+              return isSolidCell(ccell);
+            };
+            const isSolidAt = (x, y) => {
+              const cxy = cellAt(x, y);
+              return isSolidCellXY(cxy.x, cxy.y);
+            };
+            const getFoldSide = (side) => {
+              const cornerX = faceCenterX + t.x * faceHalfSpan * side;
+              const cornerY = faceCenterY + t.y * faceHalfSpan * side;
+              // Deterministic grid-topology fold detection for inner corners:
+              // if the cell in front+side is solid, there is a perpendicular wall to fold onto.
+              const edgeFrontX = frontCellX + t.x * side;
+              const edgeFrontY = frontCellY + t.y * side;
+              if (isSolidCellXY(edgeFrontX, edgeFrontY)) {
+                return {
+                  cornerX,
+                  cornerY,
+                  tangentX: n.x * side,
+                  tangentY: n.y * side
+                };
+              }
+              // Try both possible perpendicular wall normals around this corner edge.
+              const mCandidates = [
+                { x: t.x * side, y: t.y * side },
+                { x: -t.x * side, y: -t.y * side }
+              ];
+              const eps = 0.08;
+              for (const m of mCandidates) {
+                const back = cellAt(cornerX - m.x * eps, cornerY - m.y * eps);
+                const front = cellAt(cornerX + m.x * eps, cornerY + m.y * eps);
+                const backSolid = isSolidAt(cornerX - m.x * eps, cornerY - m.y * eps);
+                const frontOpen = !isSolidAt(cornerX + m.x * eps, cornerY + m.y * eps);
+                // Ignore "folds" that simply point back into the current torch wall cell.
+                const backIsTorchCell = (back.x === torchCellX && back.y === torchCellY);
+                const frontIsTorchCell = (front.x === torchCellX && front.y === torchCellY);
+                if (!(backSolid && frontOpen)) continue;
+                if (backIsTorchCell || frontIsTorchCell) continue;
+                return {
+                  cornerX,
+                  cornerY,
+                  tangentX: n.x * side,
+                  tangentY: n.y * side
+                };
+              }
+              return null;
+            };
+            const foldPos = getFoldSide(1);
+            const foldNeg = getFoldSide(-1);
             const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - TORCH_FLAME_RATIO) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
-            const c = projectWorldPoint(spr.lightX, spr.lightY, haloCenterZ);
-            if (c) {
-              // The halo bubble is approximated in screen-space depth.
-              // Near screen edges that approximation over-bulges and can look warped/dragged.
-              const offAxis = Math.min(1.0, Math.abs((c.x / Math.max(1, width)) * 2.0 - 1.0));
-              haloDepthSpan *= (1.0 - 0.45 * offAxis * offAxis);
-            }
-            // Ensure the bubble actually protrudes in front of the wall plane.
-            // If span drops below the adhesion depth push, the halo appears flat/painted on.
-            const minBubbleSpan = TORCH_HALO_DEPTH_PUSH * 1.8;
-            haloDepthSpan = Math.max(minBubbleSpan, haloDepthSpan);
+            const c = projectWorldPoint(faceCenterX, faceCenterY, haloCenterZ);
+            // Wall halos should remain flat to the wall plane.
+            haloDepthSpan = 0.0;
+            haloCapMin = 0.0;
+            const computeBasisScale = (radius) => {
+              const refUPos = projectWorldPoint(
+                faceCenterX + t.x * radius,
+                faceCenterY + t.y * radius,
+                haloCenterZ
+              );
+              const refUNeg = projectWorldPoint(
+                faceCenterX - t.x * radius,
+                faceCenterY - t.y * radius,
+                haloCenterZ
+              );
+              const refVPos = projectWorldPoint(
+                faceCenterX,
+                faceCenterY,
+                haloCenterZ + radius
+              );
+              const refVNeg = projectWorldPoint(
+                faceCenterX,
+                faceCenterY,
+                haloCenterZ - radius
+              );
+              if (!(refUPos && refUNeg && refVPos && refVNeg)) return 1.0;
+              const ux = 0.5 * (refUPos.x - refUNeg.x);
+              const uy = 0.5 * (refUPos.y - refUNeg.y);
+              const vx = 0.5 * (refVPos.x - refVNeg.x);
+              const vy = 0.5 * (refVPos.y - refVNeg.y);
+              const uLen = Math.hypot(ux, uy);
+              const vLen = Math.hypot(vx, vy);
+              if (uLen <= 1e-5 || vLen <= 1e-5) return 1.0;
+              const ratio = Math.max(0.85, Math.min(1.45, vLen / uLen));
+              const circularMix = Math.pow(Math.max(0.0, Math.min(1.0, facing)), 1.2);
+              return 1.0 + (ratio - 1.0) * circularMix;
+            };
             const buildWallHaloMesh = (radius, segments) => {
               if (!c) return null;
               const grid = Math.max(2, segments | 0);
               const row = grid + 1;
               const points = new Array(row * row);
-              const capMin = Math.max(0.0, Math.min(0.95, haloCapMin));
-              const capDen = Math.max(1e-4, 1.0 - capMin);
-              const maxOut = radius * (1.0 - capMin);
+              const basisScale = computeBasisScale(radius);
+              const basisTx = t.x * basisScale;
+              const basisTy = t.y * basisScale;
               for (let iy = 0; iy <= grid; iy++) {
                 const vv = -1 + (2 * iy) / grid;
                 for (let ix = 0; ix <= grid; ix++) {
                   const uu = -1 + (2 * ix) / grid;
-                  const r2 = uu * uu + vv * vv;
-                  const sphereZRaw = Math.sqrt(Math.max(0, 1 - r2));
-                  const capT = Math.max(0.0, (sphereZRaw - capMin) / capDen);
-                  const out = maxOut * capT;
                   const p = projectWorldPoint(
-                    spr.lightX + t.x * radius * uu + n.x * out,
-                    spr.lightY + t.y * radius * uu + n.y * out,
+                    faceCenterX + basisTx * radius * uu,
+                    faceCenterY + basisTy * radius * uu,
                     haloCenterZ + radius * vv
                   );
                   if (!p) return null;
@@ -3863,7 +3953,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
                 out[o++] = 1 - (pt.y / height) * 2;
                 out[o++] = u;
                 out[o++] = v;
-                out[o++] = Math.min(1.0, Math.max(0.0, pt.depth + TORCH_HALO_DEPTH_PUSH));
+                out[o++] = Math.min(1.0, Math.max(0.0, pt.depth - wallDepthBias));
               };
               for (let iy = 0; iy < grid; iy++) {
                 const v0 = iy / grid;
@@ -3883,7 +3973,61 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
                   emit(p01, u0, v1);
                 }
               }
-              return { verts: out, count: vertCount };
+              return { verts: out, count: vertCount, basisScale, radius };
+            };
+            const buildFoldHaloMesh = (fold, side, radius, segments, basisScale) => {
+              if (!fold) return null;
+              const scaledRadius = Math.max(1e-4, basisScale * radius);
+              const uEdge = faceHalfSpan / scaledRadius;
+              if (uEdge >= 1.0) return null;
+              const grid = Math.max(2, segments | 0);
+              const uSteps = Math.max(1, Math.round(grid * (1.0 - uEdge)));
+              const vSteps = grid;
+              const row = uSteps + 1;
+              const points = new Array((vSteps + 1) * row);
+              for (let iy = 0; iy <= vSteps; iy++) {
+                const vv = -1 + (2 * iy) / vSteps;
+                for (let ix = 0; ix <= uSteps; ix++) {
+                  const alpha = ix / uSteps;
+                  const uu = side > 0
+                    ? (uEdge + (1.0 - uEdge) * alpha)
+                    : (-uEdge - (1.0 - uEdge) * alpha);
+                  const over = Math.max(0.0, Math.abs(scaledRadius * uu) - faceHalfSpan);
+                  const p = projectWorldPoint(
+                    fold.cornerX + fold.tangentX * over,
+                    fold.cornerY + fold.tangentY * over,
+                    haloCenterZ + radius * vv
+                  );
+                  if (!p) return null;
+                  points[iy * row + ix] = { pt: p, uu, vv };
+                }
+              }
+              const vertCount = uSteps * vSteps * 6;
+              if (vertCount <= 0) return null;
+              const out = new Float32Array(vertCount * 5);
+              let o = 0;
+              const emit = (node) => {
+                out[o++] = (node.pt.x / width) * 2 - 1;
+                out[o++] = 1 - (node.pt.y / height) * 2;
+                out[o++] = (node.uu + 1.0) * 0.5;
+                out[o++] = (node.vv + 1.0) * 0.5;
+                out[o++] = Math.min(1.0, Math.max(0.0, node.pt.depth - wallDepthBias));
+              };
+              for (let iy = 0; iy < vSteps; iy++) {
+                for (let ix = 0; ix < uSteps; ix++) {
+                  const p00 = points[iy * row + ix];
+                  const p10 = points[iy * row + ix + 1];
+                  const p01 = points[(iy + 1) * row + ix];
+                  const p11 = points[(iy + 1) * row + ix + 1];
+                  emit(p00);
+                  emit(p10);
+                  emit(p11);
+                  emit(p00);
+                  emit(p11);
+                  emit(p01);
+                }
+              }
+              return { verts: out, count: vertCount, mode: gl.TRIANGLES };
             };
             // Near the camera plane, projection can fail for full radius.
             // Shrink until all mesh vertices are valid to avoid unstable warping.
@@ -3894,9 +4038,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
                 haloVerts = mesh.verts;
                 haloVertexCount = mesh.count;
                 haloDrawMode = gl.TRIANGLES;
+                const posFoldMesh = buildFoldHaloMesh(foldPos, 1, mesh.radius, 6, mesh.basisScale);
+                const negFoldMesh = buildFoldHaloMesh(foldNeg, -1, mesh.radius, 6, mesh.basisScale);
+                if (posFoldMesh) haloFoldMeshes.push(posFoldMesh);
+                if (negFoldMesh) haloFoldMeshes.push(negFoldMesh);
                 break;
               }
               probeRadius *= 0.65;
+            }
             }
           }
 
@@ -3944,6 +4093,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
             gl.uniform4f(this.spriteUniforms.tint, 1.0, 0.9, 0.7, glowAlpha);
             gl.drawArrays(haloDrawMode, 0, haloVertexCount);
+            for (const foldMesh of haloFoldMeshes) {
+              gl.bufferData(gl.ARRAY_BUFFER, foldMesh.verts, gl.STREAM_DRAW);
+              gl.drawArrays(foldMesh.mode || gl.TRIANGLES, 0, foldMesh.count);
+            }
 
             gl.depthMask(true);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
