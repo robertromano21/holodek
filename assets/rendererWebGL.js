@@ -1147,6 +1147,7 @@ uniform int u_torchCount;
 uniform vec3 u_torchPos[${MAX_TORCH_LIGHTS}];
 uniform float u_torchRadius[${MAX_TORCH_LIGHTS}];
 uniform float u_torchIntensity[${MAX_TORCH_LIGHTS}];
+uniform float u_torchRadiusScale;
 
 const int MAX_STEPS = 400;
 const int MAX_TORCH = ${MAX_TORCH_LIGHTS};
@@ -1565,7 +1566,8 @@ float accumulateTorchLit(
     toL.z *= 0.5;
     float dist = length(toL);
     float lightRadius = u_torchRadius[i];
-    float shadowRadius = lightRadius * SHADOW_OCCLUSION_RADIUS_SCALE;
+    float shadowRadiusScale = max(1.0, u_torchRadiusScale);
+    float shadowRadius = lightRadius * shadowRadiusScale * SHADOW_OCCLUSION_RADIUS_SCALE;
     if (dist >= shadowRadius) continue;
     vec3 L = normalize(toL);
     float ndotl_raw = dot(L, normal);
@@ -1576,8 +1578,17 @@ float accumulateTorchLit(
     float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
     float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
     float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
+    float shadowFactor = computeShadowForTorch(
+      worldPos.xy,
+      targetX,
+      targetY,
+      surfaceNormal2D,
+      u_torchPos[i].xy,
+      lightRadius * shadowRadiusScale,
+      u_torchIntensity[i]
+    );
+    shadowStack *= (1.0 - shadowFactor);
     if (rawStrength <= 0.001) continue;
-    float shadowFactor = computeShadowForTorch(worldPos.xy, targetX, targetY, surfaceNormal2D, u_torchPos[i].xy, lightRadius, u_torchIntensity[i]);
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
@@ -1586,7 +1597,6 @@ float accumulateTorchLit(
       primaryStrength = rawStrength;
       primaryShadow = shadowFactor;
     }
-    shadowStack *= (1.0 - shadowFactor);
     sumStrength += rawStrength;
     vec2 dir2d = u_torchPos[i].xy - worldPos.xy;
     float dirLen = length(dir2d);
@@ -2048,7 +2058,8 @@ void main() {
         torchPos: gl.getUniformLocation(this.program, 'u_torchPos[0]'),
         torchColor: gl.getUniformLocation(this.program, 'u_torchColor[0]'),
         torchRadius: gl.getUniformLocation(this.program, 'u_torchRadius[0]'),
-        torchIntensity: gl.getUniformLocation(this.program, 'u_torchIntensity[0]')
+        torchIntensity: gl.getUniformLocation(this.program, 'u_torchIntensity[0]'),
+        torchRadiusScale: gl.getUniformLocation(this.program, 'u_torchRadiusScale')
       };
 
       this.posBuffer = gl.createBuffer();
@@ -3312,6 +3323,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform1f(this.uniformLocations.depthFarDepth, depthFarDepth);
       if (this.uniformLocations.shadowStrength) {
         gl.uniform1f(this.uniformLocations.shadowStrength, shadowStrengthClamped);
+      }
+      if (this.uniformLocations.torchRadiusScale) {
+        gl.uniform1f(this.uniformLocations.torchRadiusScale, torchRadiusVoxelScaleClamped);
       }
       if (this.uniformLocations.torchCount) {
         const colorArr = new Float32Array(MAX_TORCH_LIGHTS * 3);
