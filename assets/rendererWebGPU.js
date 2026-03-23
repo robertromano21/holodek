@@ -9,6 +9,12 @@
   if (typeof window.WEBGPU_DRIVE_VOXEL_TORCH === 'undefined') {
     window.WEBGPU_DRIVE_VOXEL_TORCH = true;
   }
+  if (typeof window.WEBGPU_BLOOM === 'undefined') {
+    window.WEBGPU_BLOOM = true;
+  }
+  if (typeof window.WEBGPU_POST_TORCH_MASK === 'undefined') {
+    window.WEBGPU_POST_TORCH_MASK = false;
+  }
 
   const DISPLAY_W = 640;
   const DISPLAY_H = 480;
@@ -39,7 +45,39 @@
 
   function getSpriteVoxelTorchBlend() {
     const raw = Number(window.WEBGPU_SPRITE_VOXEL_TORCH_BLEND);
-    if (!Number.isFinite(raw)) return 0.16;
+    if (!Number.isFinite(raw)) return 0.12;
+    return Math.max(0.0, Math.min(2.0, raw));
+  }
+
+  function isPostTorchMaskEnabled() {
+    return window.WEBGPU_POST_TORCH_MASK === true;
+  }
+
+  function isBloomEnabled() {
+    return window.WEBGPU_BLOOM !== false;
+  }
+
+  function getBloomIntensity() {
+    const raw = Number(window.WEBGPU_BLOOM_INTENSITY);
+    if (!Number.isFinite(raw)) return 0.1;
+    return Math.max(0.0, Math.min(3.0, raw));
+  }
+
+  function getBloomThreshold() {
+    const raw = Number(window.WEBGPU_BLOOM_THRESHOLD);
+    if (!Number.isFinite(raw)) return 0.77;
+    return Math.max(0.0, Math.min(1.0, raw));
+  }
+
+  function getBloomDownsample() {
+    const raw = Number(window.WEBGPU_BLOOM_DOWNSAMPLE);
+    if (!Number.isFinite(raw)) return 3;
+    return Math.max(1, Math.min(4, Math.floor(raw)));
+  }
+
+  function getBloomWarmBoost() {
+    const raw = Number(window.WEBGPU_BLOOM_WARM_BOOST);
+    if (!Number.isFinite(raw)) return 0.18;
     return Math.max(0.0, Math.min(2.0, raw));
   }
 
@@ -76,11 +114,21 @@ struct ScreenRect {
   bounds : vec4<f32>, // x0,y0,x1,y1 in normalized uv space
 };
 
+struct PostParams {
+  bloomIntensity : f32,
+  bloomEnabled : f32,
+  _pad0 : f32,
+  _pad1 : f32,
+};
+
 @group(0) @binding(0) var frameTex : texture_2d<f32>;
 @group(0) @binding(1) var frameSamp : sampler;
 @group(0) @binding(2) var<uniform> params : TorchParams;
 @group(0) @binding(3) var<storage, read> torchLights : array<TorchLight>;
 @group(0) @binding(4) var<storage, read> spriteVoxelRects : array<ScreenRect>;
+@group(0) @binding(5) var bloomTex : texture_2d<f32>;
+@group(0) @binding(6) var bloomSamp : sampler;
+@group(0) @binding(7) var<uniform> postParams : PostParams;
 
 @vertex
 fn vsMain(@builtin(vertex_index) vertexIndex : u32) -> VsOut {
@@ -133,9 +181,16 @@ fn spriteVoxelMask(uv : vec2<f32>) -> f32 {
     if (uv.x < b.x || uv.x > b.z || uv.y < b.y || uv.y > b.w) {
       continue;
     }
-    let edge = min(min(uv.x - b.x, b.z - uv.x), min(uv.y - b.y, b.w - uv.y));
-    let feather = 0.004;
-    let localMask = clamp(edge / feather, 0.0, 1.0);
+    let center = vec2<f32>(0.5 * (b.x + b.z), 0.5 * (b.y + b.w));
+    let halfSize = vec2<f32>(max(0.0005, 0.5 * (b.z - b.x)), max(0.0005, 0.5 * (b.w - b.y)));
+    let radius = max(0.0005, min(halfSize.x, halfSize.y) * 0.32);
+    let inner = max(halfSize - vec2<f32>(radius, radius), vec2<f32>(0.0001, 0.0001));
+    let d = abs(uv - center) - inner;
+    let outside = length(max(d, vec2<f32>(0.0, 0.0))) - radius;
+    let inside = min(max(d.x, d.y), 0.0);
+    let sdf = outside + inside;
+    let feather = max(0.002, min(halfSize.x, halfSize.y) * 0.22);
+    let localMask = 1.0 - smoothstep(0.0, feather, sdf);
     mask = max(mask, localMask);
   }
   return mask;
@@ -145,36 +200,124 @@ fn spriteVoxelMask(uv : vec2<f32>) -> f32 {
 fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
   let base = textureSample(frameTex, frameSamp, in.uv);
   let torchCount = min(params.torchCount, MAX_SHADER_TORCH);
-  let spriteMask = spriteVoxelMask(in.uv);
-  let blend = params.torchBlend + params.spriteVoxelBlend * spriteMask;
-  if (blend <= 0.0001 || torchCount == 0u) {
-    return base;
-  }
-
-  let aspect = max(0.25, params.resolution.x / max(1.0, params.resolution.y));
-  var torchAdd = vec3<f32>(0.0, 0.0, 0.0);
-  for (var i : u32 = 0u; i < MAX_SHADER_TORCH; i = i + 1u) {
-    if (i >= torchCount) {
-      break;
+  var mixedRgb = base.rgb;
+  if (torchCount > 0u && (params.torchBlend > 0.0001 || params.spriteVoxelBlend > 0.0001)) {
+    let spriteMask = spriteVoxelMask(in.uv);
+    let blend = params.torchBlend + params.spriteVoxelBlend * spriteMask;
+    if (blend > 0.0001) {
+      let aspect = max(0.25, params.resolution.x / max(1.0, params.resolution.y));
+      var torchAdd = vec3<f32>(0.0, 0.0, 0.0);
+      for (var i : u32 = 0u; i < MAX_SHADER_TORCH; i = i + 1u) {
+        if (i >= torchCount) {
+          break;
+        }
+        let t = torchLights[i];
+        let p = projectTorch(t.posRad.xyz);
+        if (p.z <= 0.05) {
+          continue;
+        }
+        let radialNorm = max(0.002, (t.posRad.w * params.focalLength / max(0.08, p.z)) / params.resolution.y);
+        let toFrag = in.uv - p.xy;
+        let d = vec2<f32>(toFrag.x / (radialNorm / aspect), toFrag.y / radialNorm);
+        let dist = length(d);
+        let soft = max(0.0, 1.0 - dist);
+        let glow = soft * soft * (0.65 + 0.35 * soft);
+        let intensity = max(0.0, t.intensityColor.x);
+        let warm = t.intensityColor.yzw;
+        torchAdd += warm * glow * intensity;
+      }
+      mixedRgb = clamp(mixedRgb + torchAdd * blend, vec3<f32>(0.0), vec3<f32>(1.0));
     }
-    let t = torchLights[i];
-    let p = projectTorch(t.posRad.xyz);
-    if (p.z <= 0.05) {
-      continue;
-    }
-    let radialNorm = max(0.002, (t.posRad.w * params.focalLength / max(0.08, p.z)) / params.resolution.y);
-    let toFrag = in.uv - p.xy;
-    let d = vec2<f32>(toFrag.x / (radialNorm / aspect), toFrag.y / radialNorm);
-    let dist = length(d);
-    let soft = max(0.0, 1.0 - dist);
-    let glow = soft * soft * (0.65 + 0.35 * soft);
-    let intensity = max(0.0, t.intensityColor.x);
-    let warm = t.intensityColor.yzw;
-    torchAdd += warm * glow * intensity;
   }
-
-  let mixedRgb = clamp(base.rgb + torchAdd * blend, vec3<f32>(0.0), vec3<f32>(1.0));
+  if (postParams.bloomEnabled > 0.5 && postParams.bloomIntensity > 0.0001) {
+    let bloom = textureSampleLevel(bloomTex, bloomSamp, in.uv, 0.0).rgb;
+    mixedRgb = clamp(mixedRgb + bloom * postParams.bloomIntensity, vec3<f32>(0.0), vec3<f32>(1.0));
+  }
   return vec4<f32>(mixedRgb, base.a);
+}
+`;
+
+  const bloomBlurWgsl = `
+struct VsOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+};
+
+struct BlurParams {
+  texelSize : vec2<f32>,
+  direction : vec2<f32>,
+  threshold : f32,
+  applyThreshold : f32,
+  warmBoost : f32,
+  _pad0 : f32,
+};
+
+@group(0) @binding(0) var srcTex : texture_2d<f32>;
+@group(0) @binding(1) var srcSamp : sampler;
+@group(0) @binding(2) var<uniform> blur : BlurParams;
+
+@vertex
+fn vsMain(@builtin(vertex_index) vertexIndex : u32) -> VsOut {
+  var pos = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>( 1.0,  1.0)
+  );
+  var uv = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(1.0, 0.0)
+  );
+  var out : VsOut;
+  out.pos = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+  out.uv = uv[vertexIndex];
+  return out;
+}
+
+fn thresholdColor(c : vec3<f32>) -> vec3<f32> {
+  if (blur.applyThreshold > 0.5) {
+    let bright = max(c.r, max(c.g, c.b));
+    let extracted = max(bright - blur.threshold, 0.0);
+    if (extracted <= 0.00001) {
+      return vec3<f32>(0.0);
+    }
+    let rgWarm = smoothstep(0.02, 0.22, c.r - c.g);
+    let gbWarm = smoothstep(0.01, 0.25, c.g - c.b);
+    let torchHue = rgWarm * gbWarm;
+    let hueGate = 0.3 + 0.7 * torchHue;
+    let norm = extracted / max(bright, 0.0001);
+    let warmBoost = 1.0 + torchHue * blur.warmBoost;
+    return c * norm * hueGate * warmBoost;
+  }
+  return c;
+}
+
+@fragment
+fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
+  let step = blur.direction * blur.texelSize;
+  let w0 = 0.22702703;
+  let w1 = 0.19459459;
+  let w2 = 0.12162162;
+  let w3 = 0.05405405;
+  let w4 = 0.01621622;
+  var sum = thresholdColor(textureSample(srcTex, srcSamp, in.uv).rgb) * w0;
+
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv + step * 1.0).rgb) * w1;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv - step * 1.0).rgb) * w1;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv + step * 2.0).rgb) * w2;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv - step * 2.0).rgb) * w2;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv + step * 3.0).rgb) * w3;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv - step * 3.0).rgb) * w3;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv + step * 4.0).rgb) * w4;
+  sum += thresholdColor(textureSample(srcTex, srcSamp, in.uv - step * 4.0).rgb) * w4;
+
+  return vec4<f32>(sum, 1.0);
 }
 `;
 
@@ -192,12 +335,24 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _device: null,
     _pipeline: null,
     _sampler: null,
+    _bloomSampler: null,
+    _bloomPipeline: null,
+    _bloomBindGroupLayout: null,
     _frameTexture: null,
     _frameTextureView: null,
+    _bloomPingTexture: null,
+    _bloomPingView: null,
+    _bloomPongTexture: null,
+    _bloomPongView: null,
     _bindGroupLayout: null,
     _bindGroup: null,
+    _bloomBindGroupH: null,
+    _bloomBindGroupV: null,
     _frameWidth: 0,
     _frameHeight: 0,
+    _bloomWidth: 0,
+    _bloomHeight: 0,
+    _bloomDownsample: 0,
     _reportedNoWebGPU: false,
     _presentedAtLeastOnce: false,
     _isDeviceLost: false,
@@ -212,6 +367,11 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _torchParamsFrame: null,
     _torchParamsBuffer: null,
     _torchStorageBuffer: null,
+    _postParamsBuffer: null,
+    _postParamArrayBuffer: new ArrayBuffer(16),
+    _postParamsDirty: false,
+    _bloomParamsBuffer: null,
+    _bloomParamArrayBuffer: new ArrayBuffer(32),
     _rectCapacity: getSpriteVoxelRectCapacity(),
     _rectCpuData: new Float32Array(getSpriteVoxelRectCapacity() * RECT_BUFFER_STRIDE_FLOATS),
     _rectCount: 0,
@@ -223,6 +383,9 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _lastTorchBlend: 0,
     _lastSpriteVoxelBlend: 0,
     _lastRectCountUploaded: 0,
+    _lastBloomIntensity: 0,
+    _lastBloomThreshold: 0,
+    _lastBloomEnabled: false,
 
     _ensureHiddenHost() {
       if (this._hiddenHost) return this._hiddenHost;
@@ -256,11 +419,26 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       if (this._frameTexture) {
         this._frameTexture.destroy();
       }
+      if (this._bloomPingTexture) {
+        this._bloomPingTexture.destroy();
+      }
+      if (this._bloomPongTexture) {
+        this._bloomPongTexture.destroy();
+      }
       this._frameTexture = null;
       this._frameTextureView = null;
+      this._bloomPingTexture = null;
+      this._bloomPingView = null;
+      this._bloomPongTexture = null;
+      this._bloomPongView = null;
       this._bindGroup = null;
+      this._bloomBindGroupH = null;
+      this._bloomBindGroupV = null;
       this._frameWidth = 0;
       this._frameHeight = 0;
+      this._bloomWidth = 0;
+      this._bloomHeight = 0;
+      this._bloomDownsample = 0;
     },
 
     _ensureTorchBuffers() {
@@ -312,6 +490,21 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         this._rectDataDirty = true;
         this._bindGroup = null;
       }
+      if (!this._postParamsBuffer) {
+        this._postParamsBuffer = this._device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this._postParamsDirty = true;
+        this._bindGroup = null;
+      }
+      if (!this._bloomParamsBuffer) {
+        this._bloomParamsBuffer = this._device.createBuffer({
+          size: 32,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this._bindGroup = null;
+      }
       return true;
     },
 
@@ -343,36 +536,104 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       return true;
     },
 
+    _ensureBloomResources(frameW, frameH) {
+      if (!this._device || !this._bloomBindGroupLayout || !this._bloomSampler || !this._bloomParamsBuffer || !this._frameTextureView) {
+        return false;
+      }
+      const downsample = getBloomDownsample();
+      const bw = Math.max(1, Math.floor(frameW / downsample));
+      const bh = Math.max(1, Math.floor(frameH / downsample));
+      const sameSize = (
+        this._bloomPingTexture &&
+        this._bloomPongTexture &&
+        this._bloomWidth === bw &&
+        this._bloomHeight === bh &&
+        this._bloomDownsample === downsample
+      );
+      if (!sameSize) {
+        if (this._bloomPingTexture) this._bloomPingTexture.destroy();
+        if (this._bloomPongTexture) this._bloomPongTexture.destroy();
+        this._bloomPingTexture = this._device.createTexture({
+          size: { width: bw, height: bh, depthOrArrayLayers: 1 },
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        });
+        this._bloomPongTexture = this._device.createTexture({
+          size: { width: bw, height: bh, depthOrArrayLayers: 1 },
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        });
+        this._bloomPingView = this._bloomPingTexture.createView();
+        this._bloomPongView = this._bloomPongTexture.createView();
+        this._bloomWidth = bw;
+        this._bloomHeight = bh;
+        this._bloomDownsample = downsample;
+        this._bindGroup = null;
+        this._bloomBindGroupH = null;
+        this._bloomBindGroupV = null;
+      }
+
+      if (!this._bloomBindGroupH) {
+        this._bloomBindGroupH = this._device.createBindGroup({
+          layout: this._bloomBindGroupLayout,
+          entries: [
+            { binding: 0, resource: this._frameTextureView },
+            { binding: 1, resource: this._bloomSampler },
+            { binding: 2, resource: { buffer: this._bloomParamsBuffer } }
+          ]
+        });
+      }
+      if (!this._bloomBindGroupV) {
+        this._bloomBindGroupV = this._device.createBindGroup({
+          layout: this._bloomBindGroupLayout,
+          entries: [
+            { binding: 0, resource: this._bloomPingView },
+            { binding: 1, resource: this._bloomSampler },
+            { binding: 2, resource: { buffer: this._bloomParamsBuffer } }
+          ]
+        });
+      }
+      return true;
+    },
+
     _ensureFrameResources() {
       const src = this._sourceCanvas;
       if (!src || !this._device || !this._bindGroupLayout || !this._ensureTorchBuffers()) return false;
       const w = Math.max(1, src.width | 0);
       const h = Math.max(1, src.height | 0);
-      if (w === this._frameWidth && h === this._frameHeight && this._frameTexture && this._bindGroup) {
-        return true;
+      const sizeChanged = !(w === this._frameWidth && h === this._frameHeight && this._frameTexture && this._frameTextureView);
+      if (sizeChanged) {
+        if (this._frameTexture) this._frameTexture.destroy();
+        this._frameTexture = this._device.createTexture({
+          size: { width: w, height: h, depthOrArrayLayers: 1 },
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
+        });
+        this._frameTextureView = this._frameTexture.createView();
+        this._frameWidth = w;
+        this._frameHeight = h;
+        this._bindGroup = null;
+        this._bloomBindGroupH = null;
       }
-      this._resetFrameResources();
-      this._frameTexture = this._device.createTexture({
-        size: { width: w, height: h, depthOrArrayLayers: 1 },
-        format: 'rgba8unorm',
-        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
-      });
-      this._frameTextureView = this._frameTexture.createView();
-      this._bindGroup = this._device.createBindGroup({
-        layout: this._bindGroupLayout,
-        entries: [
-          { binding: 0, resource: this._frameTextureView },
-          { binding: 1, resource: this._sampler },
-          { binding: 2, resource: { buffer: this._torchParamsBuffer } },
-          { binding: 3, resource: { buffer: this._torchStorageBuffer } },
-          { binding: 4, resource: { buffer: this._rectStorageBuffer } }
-        ]
-      });
-      this._frameWidth = w;
-      this._frameHeight = h;
       if (this.canvas && (this.canvas.width !== w || this.canvas.height !== h)) {
         this.canvas.width = w;
         this.canvas.height = h;
+      }
+      if (!this._ensureBloomResources(w, h)) return false;
+      if (!this._bindGroup) {
+        this._bindGroup = this._device.createBindGroup({
+          layout: this._bindGroupLayout,
+          entries: [
+            { binding: 0, resource: this._frameTextureView },
+            { binding: 1, resource: this._sampler },
+            { binding: 2, resource: { buffer: this._torchParamsBuffer } },
+            { binding: 3, resource: { buffer: this._torchStorageBuffer } },
+            { binding: 4, resource: { buffer: this._rectStorageBuffer } },
+            { binding: 5, resource: this._bloomPongView },
+            { binding: 6, resource: this._bloomSampler },
+            { binding: 7, resource: { buffer: this._postParamsBuffer } }
+          ]
+        });
       }
       return true;
     },
@@ -381,9 +642,11 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       if (!this._device || !this._torchParamsBuffer || !this._torchStorageBuffer || !this._rectStorageBuffer) return;
 
       const frame = this._torchParamsFrame || {};
-      const blend = getTorchBlend();
-      const driveSpriteVoxel = this.shouldDriveVoxelTorch();
-      const spriteVoxelBlend = driveSpriteVoxel ? getSpriteVoxelTorchBlend() : 0.0;
+      const blend = this.shouldApplyPostTorchOverlay() ? getTorchBlend() : 0.0;
+      const driveSpriteVoxel = this.shouldDriveSpriteTorch();
+      const spriteVoxelBlend = (driveSpriteVoxel && this.shouldApplyPostTorchOverlay())
+        ? getSpriteVoxelTorchBlend()
+        : 0.0;
       const width = Number.isFinite(frame.width) ? frame.width : Math.max(1, this._frameWidth || LOW_RES_W);
       const height = Number.isFinite(frame.height) ? frame.height : Math.max(1, this._frameHeight || LOW_RES_H);
       const focalLength = Number.isFinite(frame.focalLength) ? frame.focalLength : (height / (2 * Math.tan(Math.PI / 6)));
@@ -447,6 +710,95 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       this._lastTorchUploadAt = Date.now();
     },
 
+    _uploadPostData() {
+      if (!this._device || !this._postParamsBuffer) return;
+      const bloomEnabled = isBloomEnabled() ? 1.0 : 0.0;
+      const bloomIntensity = bloomEnabled > 0.5 ? getBloomIntensity() : 0.0;
+      if (
+        !this._postParamsDirty &&
+        Math.abs(this._lastBloomIntensity - bloomIntensity) <= 1e-6 &&
+        ((bloomEnabled > 0.5 ? 1 : 0) === (this._lastBloomEnabled ? 1 : 0))
+      ) {
+        return;
+      }
+      const dv = new DataView(this._postParamArrayBuffer);
+      dv.setFloat32(0, bloomIntensity, true);
+      dv.setFloat32(4, bloomEnabled, true);
+      dv.setFloat32(8, 0.0, true);
+      dv.setFloat32(12, 0.0, true);
+      this._device.queue.writeBuffer(this._postParamsBuffer, 0, this._postParamArrayBuffer);
+      this._postParamsDirty = false;
+      this._lastBloomIntensity = bloomIntensity;
+      this._lastBloomEnabled = bloomEnabled > 0.5;
+    },
+
+    _writeBloomBlurParams(directionX, directionY, applyThreshold) {
+      if (!this._device || !this._bloomParamsBuffer || this._bloomWidth < 1 || this._bloomHeight < 1) return;
+      const dv = new DataView(this._bloomParamArrayBuffer);
+      dv.setFloat32(0, 1.0 / this._bloomWidth, true);
+      dv.setFloat32(4, 1.0 / this._bloomHeight, true);
+      dv.setFloat32(8, directionX, true);
+      dv.setFloat32(12, directionY, true);
+      dv.setFloat32(16, getBloomThreshold(), true);
+      dv.setFloat32(20, applyThreshold ? 1.0 : 0.0, true);
+      dv.setFloat32(24, getBloomWarmBoost(), true);
+      dv.setFloat32(28, 0.0, true);
+      this._device.queue.writeBuffer(this._bloomParamsBuffer, 0, this._bloomParamArrayBuffer);
+      this._lastBloomThreshold = getBloomThreshold();
+    },
+
+    _runBloomPasses(encoder) {
+      if (!encoder || !this._bloomPipeline || !this._bloomBindGroupH || !this._bloomBindGroupV || !this._bloomPingView || !this._bloomPongView) {
+        return;
+      }
+      if (!isBloomEnabled() || getBloomIntensity() <= 0.0001) {
+        const clearPass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: this._bloomPongView,
+              loadOp: 'clear',
+              storeOp: 'store',
+              clearValue: { r: 0, g: 0, b: 0, a: 1 }
+            }
+          ]
+        });
+        clearPass.end();
+        return;
+      }
+
+      this._writeBloomBlurParams(1.0, 0.0, true);
+      const passH = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: this._bloomPingView,
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 }
+          }
+        ]
+      });
+      passH.setPipeline(this._bloomPipeline);
+      passH.setBindGroup(0, this._bloomBindGroupH);
+      passH.draw(6, 1, 0, 0);
+      passH.end();
+
+      this._writeBloomBlurParams(0.0, 1.0, false);
+      const passV = encoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: this._bloomPongView,
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 }
+          }
+        ]
+      });
+      passV.setPipeline(this._bloomPipeline);
+      passV.setBindGroup(0, this._bloomBindGroupV);
+      passV.draw(6, 1, 0, 0);
+      passV.end();
+    },
+
     async _upgradeToWebGPU() {
       if (!navigator.gpu || window.forceWebGPURenderer === false) {
         this.mode = 'legacy';
@@ -501,10 +853,18 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         }
 
         const shaderModule = device.createShaderModule({ code: fullscreenWgsl });
+        const bloomShaderModule = device.createShaderModule({ code: bloomBlurWgsl });
         const sampler = device.createSampler({
           magFilter: 'nearest',
           minFilter: 'nearest',
           mipmapFilter: 'nearest',
+          addressModeU: 'clamp-to-edge',
+          addressModeV: 'clamp-to-edge'
+        });
+        const bloomSampler = device.createSampler({
+          magFilter: 'linear',
+          minFilter: 'linear',
+          mipmapFilter: 'linear',
           addressModeU: 'clamp-to-edge',
           addressModeV: 'clamp-to-edge'
         });
@@ -534,16 +894,59 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
               binding: 4,
               visibility: GPUShaderStage.FRAGMENT,
               buffer: { type: 'read-only-storage' }
+            },
+            {
+              binding: 5,
+              visibility: GPUShaderStage.FRAGMENT,
+              texture: { sampleType: 'float' }
+            },
+            {
+              binding: 6,
+              visibility: GPUShaderStage.FRAGMENT,
+              sampler: { type: 'filtering' }
+            },
+            {
+              binding: 7,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'uniform' }
+            }
+          ]
+        });
+        const bloomBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.FRAGMENT,
+              texture: { sampleType: 'float' }
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.FRAGMENT,
+              sampler: { type: 'filtering' }
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'uniform' }
             }
           ]
         });
         const pipelineLayout = device.createPipelineLayout({
           bindGroupLayouts: [bindGroupLayout]
         });
+        const bloomPipelineLayout = device.createPipelineLayout({
+          bindGroupLayouts: [bloomBindGroupLayout]
+        });
         const pipeline = device.createRenderPipeline({
           layout: pipelineLayout,
           vertex: { module: shaderModule, entryPoint: 'vsMain' },
           fragment: { module: shaderModule, entryPoint: 'fsMain', targets: [{ format: presentationFormat }] },
+          primitive: { topology: 'triangle-list', cullMode: 'none' }
+        });
+        const bloomPipeline = device.createRenderPipeline({
+          layout: bloomPipelineLayout,
+          vertex: { module: bloomShaderModule, entryPoint: 'vsMain' },
+          fragment: { module: bloomShaderModule, entryPoint: 'fsMain', targets: [{ format: 'rgba8unorm' }] },
           primitive: { topology: 'triangle-list', cullMode: 'none' }
         });
 
@@ -552,7 +955,10 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         this._gpuCanvasContext = context;
         this._pipeline = pipeline;
         this._sampler = sampler;
+        this._bloomSampler = bloomSampler;
+        this._bloomPipeline = bloomPipeline;
         this._bindGroupLayout = bindGroupLayout;
+        this._bloomBindGroupLayout = bloomBindGroupLayout;
         this._ensureTorchBuffers();
         this.mode = 'webgpu';
         this._lastModeChangeAt = Date.now();
@@ -652,6 +1058,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
 
       try {
         this._uploadTorchData();
+        this._uploadPostData();
         this._device.queue.copyExternalImageToTexture(
           { source: this._sourceCanvas },
           { texture: this._frameTexture },
@@ -659,6 +1066,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         );
 
         const encoder = this._device.createCommandEncoder();
+        this._runBloomPasses(encoder);
         const pass = encoder.beginRenderPass({
           colorAttachments: [
             {
@@ -707,11 +1115,19 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     },
 
     shouldDriveSpriteTorch() {
-      return this.mode === 'webgpu' && window.WEBGPU_DRIVE_SPRITE_VOXEL_TORCH !== false;
+      return this.mode === 'webgpu'
+        && isPostTorchMaskEnabled()
+        && window.WEBGPU_DRIVE_SPRITE_VOXEL_TORCH !== false;
     },
 
     shouldDriveVoxelTorch() {
       return this.shouldDriveSpriteTorch() && window.WEBGPU_DRIVE_VOXEL_TORCH !== false;
+    },
+
+    shouldApplyPostTorchOverlay() {
+      return this.mode === 'webgpu'
+        && this.shouldDriveSpriteTorch()
+        && getSpriteVoxelTorchBlend() > 0.0001;
     },
 
     getDebugState() {
@@ -729,9 +1145,16 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         torchBlend: this._lastTorchBlend,
         driveSpriteTorch: this.shouldDriveSpriteTorch(),
         driveVoxelTorch: this.shouldDriveVoxelTorch(),
+        postTorchOverlay: this.shouldApplyPostTorchOverlay(),
         spriteVoxelTorchBlend: this._lastSpriteVoxelBlend,
         rectBufferCapacity: this._rectCapacity,
         rectCount: this._rectCount,
+        bloomEnabled: isBloomEnabled(),
+        bloomIntensity: this._lastBloomIntensity,
+        bloomThreshold: this._lastBloomThreshold,
+        bloomWarmBoost: getBloomWarmBoost(),
+        bloomDownsample: this._bloomDownsample || getBloomDownsample(),
+        bloomSize: this._bloomWidth > 0 && this._bloomHeight > 0 ? `${this._bloomWidth}x${this._bloomHeight}` : null,
         lastTorchFrameAt: this._lastTorchFrameAt || null,
         lastTorchUploadAt: this._lastTorchUploadAt || null
       };

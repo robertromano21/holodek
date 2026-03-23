@@ -3083,12 +3083,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         ((typeof webgpuRenderer.shouldDriveVoxelTorch === 'function' && webgpuRenderer.shouldDriveVoxelTorch())
           || (driveSpriteTorchFromWebGPU && window.WEBGPU_DRIVE_VOXEL_TORCH !== false))
       );
-      const collectSpriteTorchRectsForWebGPU = driveSpriteTorchFromWebGPU;
-      const collectVoxelTorchRectsForWebGPU = driveVoxelTorchFromWebGPU;
+      const applyPostTorchOverlay = !!(
+        webgpuRenderer &&
+        typeof webgpuRenderer.shouldApplyPostTorchOverlay === 'function' &&
+        webgpuRenderer.shouldApplyPostTorchOverlay()
+      );
+      const collectSpriteTorchRectsForWebGPU = driveSpriteTorchFromWebGPU && applyPostTorchOverlay;
+      const collectVoxelTorchRectsForWebGPU = driveVoxelTorchFromWebGPU && applyPostTorchOverlay;
       const voxelGlTorchFallbackMax = driveVoxelTorchFromWebGPU
         ? (Number.isFinite(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_MAX)
           ? Math.max(0, Math.min(MAX_TORCH_LIGHTS, Math.floor(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_MAX)))
-          : Math.min(16, MAX_TORCH_LIGHTS))
+          : MAX_TORCH_LIGHTS)
         : MAX_TORCH_LIGHTS;
       const voxelGlTorchFallbackScale = driveVoxelTorchFromWebGPU
         ? (Number.isFinite(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_SCALE)
@@ -3465,13 +3470,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
                   2,
                   Math.abs(Math.max(baseWidth, 0.35) * focalLength / ty)
                 );
-                const inflate = Math.max(2, spriteScreenWidth * 0.1);
                 if (collectVoxelTorchRectsForWebGPU) {
+                  const insetX = Math.max(1, spriteScreenWidth * 0.18);
+                  const insetY = Math.max(1, spriteScreenHeight * 0.1);
                   pushSpriteVoxelRect(
-                    centerX - spriteScreenWidth * 0.5 - inflate,
-                    centerY - spriteScreenHeight * 0.5 - inflate,
-                    centerX + spriteScreenWidth * 0.5 + inflate,
-                    centerY + spriteScreenHeight * 0.5 + inflate
+                    centerX - spriteScreenWidth * 0.5 + insetX,
+                    centerY - spriteScreenHeight * 0.5 + insetY,
+                    centerX + spriteScreenWidth * 0.5 - insetX,
+                    centerY + spriteScreenHeight * 0.5 - insetY
                   );
                 }
               }
@@ -3589,8 +3595,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             flickerSeed,
             torchFacing
           });
-          if (collectSpriteTorchRectsForWebGPU) {
-            pushSpriteVoxelRect(drawLeft - 2, drawStartY - 2, drawRight + 2, drawEndY + 2);
+          if (collectSpriteTorchRectsForWebGPU && !isTorch) {
+            const insetX = Math.max(1, (drawRight - drawLeft) * 0.18);
+            const insetY = Math.max(1, (drawEndY - drawStartY) * 0.12);
+            pushSpriteVoxelRect(
+              drawLeft + insetX,
+              drawStartY + insetY,
+              drawRight - insetX,
+              drawEndY - insetY
+            );
           }
         }
       }
