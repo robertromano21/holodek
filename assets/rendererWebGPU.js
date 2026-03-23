@@ -1,0 +1,749 @@
+(function () {
+  const legacyRenderer = window.webglDungeonRenderer;
+  if (!legacyRenderer || typeof legacyRenderer.init !== 'function' || typeof legacyRenderer.renderScene !== 'function') {
+    return;
+  }
+  if (typeof window.WEBGPU_DRIVE_SPRITE_VOXEL_TORCH === 'undefined') {
+    window.WEBGPU_DRIVE_SPRITE_VOXEL_TORCH = true;
+  }
+  if (typeof window.WEBGPU_DRIVE_VOXEL_TORCH === 'undefined') {
+    window.WEBGPU_DRIVE_VOXEL_TORCH = true;
+  }
+
+  const DISPLAY_W = 640;
+  const DISPLAY_H = 480;
+  const PIXEL_SCALE = 4;
+  const LOW_RES_W = Math.max(1, Math.floor(DISPLAY_W / PIXEL_SCALE));
+  const LOW_RES_H = Math.max(1, Math.floor(DISPLAY_H / PIXEL_SCALE));
+  const TORCH_BUFFER_STRIDE_FLOATS = 8; // vec4 pos/radius + vec4 intensity/color
+  const RECT_BUFFER_STRIDE_FLOATS = 4; // vec4 x0,y0,x1,y1
+  const TORCH_LIGHT_DEFAULT_COLOR = { r: 255, g: 190, b: 130 };
+
+  function getTorchBufferCapacity() {
+    const raw = Number(window.WEBGPU_MAX_TORCH_LIGHTS);
+    if (!Number.isFinite(raw)) return 4096;
+    return Math.max(64, Math.min(8192, Math.floor(raw)));
+  }
+
+  function getTorchBlend() {
+    const raw = Number(window.WEBGPU_TORCH_BLEND);
+    if (!Number.isFinite(raw)) return 0.0;
+    return Math.max(0.0, Math.min(2.0, raw));
+  }
+
+  function getSpriteVoxelRectCapacity() {
+    const raw = Number(window.WEBGPU_MAX_SPRITE_VOXEL_RECTS);
+    if (!Number.isFinite(raw)) return 4096;
+    return Math.max(256, Math.min(16384, Math.floor(raw)));
+  }
+
+  function getSpriteVoxelTorchBlend() {
+    const raw = Number(window.WEBGPU_SPRITE_VOXEL_TORCH_BLEND);
+    if (!Number.isFinite(raw)) return 0.16;
+    return Math.max(0.0, Math.min(2.0, raw));
+  }
+
+  const fullscreenWgsl = `
+const MAX_SHADER_TORCH : u32 = 512u;
+const MAX_SHADER_RECTS : u32 = 768u;
+
+struct VsOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+};
+
+struct TorchParams {
+  resolution : vec2<f32>,
+  camPos : vec2<f32>,
+  camDir : vec2<f32>,
+  plane : vec2<f32>,
+  focalLength : f32,
+  eyeZ : f32,
+  torchBlend : f32,
+  torchCount : u32,
+  spriteVoxelBlend : f32,
+  rectCount : u32,
+  _pad0 : u32,
+  _pad1 : u32,
+};
+
+struct TorchLight {
+  posRad : vec4<f32>,         // xyz + radius
+  intensityColor : vec4<f32>, // intensity + rgb
+};
+
+struct ScreenRect {
+  bounds : vec4<f32>, // x0,y0,x1,y1 in normalized uv space
+};
+
+@group(0) @binding(0) var frameTex : texture_2d<f32>;
+@group(0) @binding(1) var frameSamp : sampler;
+@group(0) @binding(2) var<uniform> params : TorchParams;
+@group(0) @binding(3) var<storage, read> torchLights : array<TorchLight>;
+@group(0) @binding(4) var<storage, read> spriteVoxelRects : array<ScreenRect>;
+
+@vertex
+fn vsMain(@builtin(vertex_index) vertexIndex : u32) -> VsOut {
+  var pos = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>( 1.0,  1.0)
+  );
+  var uv = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 1.0),
+    vec2<f32>(1.0, 0.0)
+  );
+  var out : VsOut;
+  out.pos = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+  out.uv = uv[vertexIndex];
+  return out;
+}
+
+fn projectTorch(torchPos : vec3<f32>) -> vec3<f32> {
+  let rel = torchPos.xy - params.camPos;
+  let invDet = 1.0 / max(1e-6, params.plane.x * params.camDir.y - params.camDir.x * params.plane.y);
+  let transformX = invDet * (params.camDir.y * rel.x - params.camDir.x * rel.y);
+  let transformY = invDet * (-params.plane.y * rel.x + params.plane.x * rel.y);
+  if (transformY <= 0.05) {
+    return vec3<f32>(-10.0, -10.0, transformY);
+  }
+  let screenX = 0.5 * (1.0 + transformX / transformY);
+  let screenY = 0.5 - ((torchPos.z - params.eyeZ) * params.focalLength / transformY) / params.resolution.y;
+  return vec3<f32>(screenX, screenY, transformY);
+}
+
+fn spriteVoxelMask(uv : vec2<f32>) -> f32 {
+  let rectCount = min(params.rectCount, MAX_SHADER_RECTS);
+  if (rectCount == 0u) {
+    return 0.0;
+  }
+  var mask = 0.0;
+  for (var i : u32 = 0u; i < MAX_SHADER_RECTS; i = i + 1u) {
+    if (i >= rectCount) {
+      break;
+    }
+    let b = spriteVoxelRects[i].bounds;
+    if (uv.x < b.x || uv.x > b.z || uv.y < b.y || uv.y > b.w) {
+      continue;
+    }
+    let edge = min(min(uv.x - b.x, b.z - uv.x), min(uv.y - b.y, b.w - uv.y));
+    let feather = 0.004;
+    let localMask = clamp(edge / feather, 0.0, 1.0);
+    mask = max(mask, localMask);
+  }
+  return mask;
+}
+
+@fragment
+fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
+  let base = textureSample(frameTex, frameSamp, in.uv);
+  let torchCount = min(params.torchCount, MAX_SHADER_TORCH);
+  let spriteMask = spriteVoxelMask(in.uv);
+  let blend = params.torchBlend + params.spriteVoxelBlend * spriteMask;
+  if (blend <= 0.0001 || torchCount == 0u) {
+    return base;
+  }
+
+  let aspect = max(0.25, params.resolution.x / max(1.0, params.resolution.y));
+  var torchAdd = vec3<f32>(0.0, 0.0, 0.0);
+  for (var i : u32 = 0u; i < MAX_SHADER_TORCH; i = i + 1u) {
+    if (i >= torchCount) {
+      break;
+    }
+    let t = torchLights[i];
+    let p = projectTorch(t.posRad.xyz);
+    if (p.z <= 0.05) {
+      continue;
+    }
+    let radialNorm = max(0.002, (t.posRad.w * params.focalLength / max(0.08, p.z)) / params.resolution.y);
+    let toFrag = in.uv - p.xy;
+    let d = vec2<f32>(toFrag.x / (radialNorm / aspect), toFrag.y / radialNorm);
+    let dist = length(d);
+    let soft = max(0.0, 1.0 - dist);
+    let glow = soft * soft * (0.65 + 0.35 * soft);
+    let intensity = max(0.0, t.intensityColor.x);
+    let warm = t.intensityColor.yzw;
+    torchAdd += warm * glow * intensity;
+  }
+
+  let mixedRgb = clamp(base.rgb + torchAdd * blend, vec3<f32>(0.0), vec3<f32>(1.0));
+  return vec4<f32>(mixedRgb, base.a);
+}
+`;
+
+  const renderer = {
+    gl: null,
+    canvas: null,
+    legacyRenderer,
+    mode: 'legacy',
+    _container: null,
+    _initPromise: null,
+    _hiddenHost: null,
+    _sourceCanvas: null,
+    _gpuCanvasContext: null,
+    _adapter: null,
+    _device: null,
+    _pipeline: null,
+    _sampler: null,
+    _frameTexture: null,
+    _frameTextureView: null,
+    _bindGroupLayout: null,
+    _bindGroup: null,
+    _frameWidth: 0,
+    _frameHeight: 0,
+    _reportedNoWebGPU: false,
+    _presentedAtLeastOnce: false,
+    _isDeviceLost: false,
+    _lastFallbackReason: '',
+    _lastErrorMessage: '',
+    _lastModeChangeAt: 0,
+    _torchCapacity: getTorchBufferCapacity(),
+    _torchCpuData: new Float32Array(getTorchBufferCapacity() * TORCH_BUFFER_STRIDE_FLOATS),
+    _torchCount: 0,
+    _torchDataDirty: false,
+    _torchParamsDirty: false,
+    _torchParamsFrame: null,
+    _torchParamsBuffer: null,
+    _torchStorageBuffer: null,
+    _rectCapacity: getSpriteVoxelRectCapacity(),
+    _rectCpuData: new Float32Array(getSpriteVoxelRectCapacity() * RECT_BUFFER_STRIDE_FLOATS),
+    _rectCount: 0,
+    _rectDataDirty: false,
+    _rectStorageBuffer: null,
+    _torchParamArrayBuffer: new ArrayBuffer(64),
+    _lastTorchFrameAt: 0,
+    _lastTorchUploadAt: 0,
+    _lastTorchBlend: 0,
+    _lastSpriteVoxelBlend: 0,
+    _lastRectCountUploaded: 0,
+
+    _ensureHiddenHost() {
+      if (this._hiddenHost) return this._hiddenHost;
+      const host = document.createElement('div');
+      host.style.display = 'none';
+      this._hiddenHost = host;
+      if (document.body) {
+        document.body.appendChild(host);
+      } else {
+        document.addEventListener('DOMContentLoaded', () => {
+          if (!host.parentNode) document.body.appendChild(host);
+        }, { once: true });
+      }
+      return host;
+    },
+
+    _createPresentationCanvas() {
+      if (this.canvas) return this.canvas;
+      const canvas = document.createElement('canvas');
+      canvas.width = LOW_RES_W;
+      canvas.height = LOW_RES_H;
+      canvas.style.width = `${DISPLAY_W}px`;
+      canvas.style.height = `${DISPLAY_H}px`;
+      canvas.style.imageRendering = 'pixelated';
+      canvas.style.imageRendering = 'crisp-edges';
+      this.canvas = canvas;
+      return canvas;
+    },
+
+    _resetFrameResources() {
+      if (this._frameTexture) {
+        this._frameTexture.destroy();
+      }
+      this._frameTexture = null;
+      this._frameTextureView = null;
+      this._bindGroup = null;
+      this._frameWidth = 0;
+      this._frameHeight = 0;
+    },
+
+    _ensureTorchBuffers() {
+      if (!this._device) return false;
+      const requiredCapacity = getTorchBufferCapacity();
+      const requiredRectCapacity = getSpriteVoxelRectCapacity();
+      if (requiredCapacity !== this._torchCapacity) {
+        this._torchCapacity = requiredCapacity;
+        this._torchCpuData = new Float32Array(this._torchCapacity * TORCH_BUFFER_STRIDE_FLOATS);
+        this._torchCount = 0;
+        this._torchDataDirty = true;
+        this._bindGroup = null;
+        if (this._torchStorageBuffer) {
+          this._torchStorageBuffer.destroy();
+          this._torchStorageBuffer = null;
+        }
+      }
+      if (requiredRectCapacity !== this._rectCapacity) {
+        this._rectCapacity = requiredRectCapacity;
+        this._rectCpuData = new Float32Array(this._rectCapacity * RECT_BUFFER_STRIDE_FLOATS);
+        this._rectCount = 0;
+        this._rectDataDirty = true;
+        this._bindGroup = null;
+        if (this._rectStorageBuffer) {
+          this._rectStorageBuffer.destroy();
+          this._rectStorageBuffer = null;
+        }
+      }
+      if (!this._torchParamsBuffer) {
+        this._torchParamsBuffer = this._device.createBuffer({
+          size: 64,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this._bindGroup = null;
+      }
+      if (!this._torchStorageBuffer) {
+        this._torchStorageBuffer = this._device.createBuffer({
+          size: this._torchCapacity * TORCH_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        this._torchDataDirty = true;
+        this._bindGroup = null;
+      }
+      if (!this._rectStorageBuffer) {
+        this._rectStorageBuffer = this._device.createBuffer({
+          size: this._rectCapacity * RECT_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        this._rectDataDirty = true;
+        this._bindGroup = null;
+      }
+      return true;
+    },
+
+    _restoreLegacyViewport(reason) {
+      if (this.mode === 'legacy') return;
+      this.mode = 'legacy';
+      this._lastModeChangeAt = Date.now();
+      this._lastFallbackReason = reason ? String(reason) : 'Unknown fallback reason';
+      this._presentedAtLeastOnce = false;
+      this._resetFrameResources();
+      const container = this._container || document.getElementById('dungeon-container');
+      if (container && this.legacyRenderer.canvas) {
+        container.innerHTML = '';
+        container.appendChild(this.legacyRenderer.canvas);
+      }
+      console.warn('[WebGPU] Falling back to legacy WebGL viewport.', reason || '');
+    },
+
+    _attachWebGPUViewport() {
+      const container = this._container || document.getElementById('dungeon-container');
+      if (!container || !this.canvas) return false;
+      if (this.canvas.parentNode === container) return true;
+      const host = this._ensureHiddenHost();
+      if (this.legacyRenderer.canvas && this.legacyRenderer.canvas.parentNode === container) {
+        host.appendChild(this.legacyRenderer.canvas);
+      }
+      container.innerHTML = '';
+      container.appendChild(this.canvas);
+      return true;
+    },
+
+    _ensureFrameResources() {
+      const src = this._sourceCanvas;
+      if (!src || !this._device || !this._bindGroupLayout || !this._ensureTorchBuffers()) return false;
+      const w = Math.max(1, src.width | 0);
+      const h = Math.max(1, src.height | 0);
+      if (w === this._frameWidth && h === this._frameHeight && this._frameTexture && this._bindGroup) {
+        return true;
+      }
+      this._resetFrameResources();
+      this._frameTexture = this._device.createTexture({
+        size: { width: w, height: h, depthOrArrayLayers: 1 },
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT
+      });
+      this._frameTextureView = this._frameTexture.createView();
+      this._bindGroup = this._device.createBindGroup({
+        layout: this._bindGroupLayout,
+        entries: [
+          { binding: 0, resource: this._frameTextureView },
+          { binding: 1, resource: this._sampler },
+          { binding: 2, resource: { buffer: this._torchParamsBuffer } },
+          { binding: 3, resource: { buffer: this._torchStorageBuffer } },
+          { binding: 4, resource: { buffer: this._rectStorageBuffer } }
+        ]
+      });
+      this._frameWidth = w;
+      this._frameHeight = h;
+      if (this.canvas && (this.canvas.width !== w || this.canvas.height !== h)) {
+        this.canvas.width = w;
+        this.canvas.height = h;
+      }
+      return true;
+    },
+
+    _uploadTorchData() {
+      if (!this._device || !this._torchParamsBuffer || !this._torchStorageBuffer || !this._rectStorageBuffer) return;
+
+      const frame = this._torchParamsFrame || {};
+      const blend = getTorchBlend();
+      const driveSpriteVoxel = this.shouldDriveVoxelTorch();
+      const spriteVoxelBlend = driveSpriteVoxel ? getSpriteVoxelTorchBlend() : 0.0;
+      const width = Number.isFinite(frame.width) ? frame.width : Math.max(1, this._frameWidth || LOW_RES_W);
+      const height = Number.isFinite(frame.height) ? frame.height : Math.max(1, this._frameHeight || LOW_RES_H);
+      const focalLength = Number.isFinite(frame.focalLength) ? frame.focalLength : (height / (2 * Math.tan(Math.PI / 6)));
+      const camX = Number.isFinite(frame.camX) ? frame.camX : 0.0;
+      const camY = Number.isFinite(frame.camY) ? frame.camY : 0.0;
+      const dirX = Number.isFinite(frame.dirX) ? frame.dirX : 1.0;
+      const dirY = Number.isFinite(frame.dirY) ? frame.dirY : 0.0;
+      const planeX = Number.isFinite(frame.planeX) ? frame.planeX : 0.0;
+      const planeY = Number.isFinite(frame.planeY) ? frame.planeY : 0.57735;
+      const eyeZ = Number.isFinite(frame.eyeZ) ? frame.eyeZ : 0.5;
+
+      if (this._torchDataDirty && this._torchCount > 0) {
+        const bytes = this._torchCount * TORCH_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+        this._device.queue.writeBuffer(this._torchStorageBuffer, 0, this._torchCpuData.buffer, 0, bytes);
+        this._torchDataDirty = false;
+      } else if (this._torchDataDirty && this._torchCount === 0) {
+        const zeros = new Float32Array(TORCH_BUFFER_STRIDE_FLOATS);
+        this._device.queue.writeBuffer(this._torchStorageBuffer, 0, zeros);
+        this._torchDataDirty = false;
+      }
+
+      if (this._rectDataDirty && this._rectCount > 0) {
+        const rectBytes = this._rectCount * RECT_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+        this._device.queue.writeBuffer(this._rectStorageBuffer, 0, this._rectCpuData.buffer, 0, rectBytes);
+        this._rectDataDirty = false;
+      } else if (this._rectDataDirty && this._rectCount === 0) {
+        const zeros = new Float32Array(RECT_BUFFER_STRIDE_FLOATS);
+        this._device.queue.writeBuffer(this._rectStorageBuffer, 0, zeros);
+        this._rectDataDirty = false;
+      }
+
+      if (
+        this._torchParamsDirty ||
+        Math.abs(this._lastTorchBlend - blend) > 1e-6 ||
+        Math.abs(this._lastSpriteVoxelBlend - spriteVoxelBlend) > 1e-6 ||
+        this._lastRectCountUploaded !== this._rectCount
+      ) {
+        const dv = new DataView(this._torchParamArrayBuffer);
+        dv.setFloat32(0, width, true);
+        dv.setFloat32(4, height, true);
+        dv.setFloat32(8, camX, true);
+        dv.setFloat32(12, camY, true);
+        dv.setFloat32(16, dirX, true);
+        dv.setFloat32(20, dirY, true);
+        dv.setFloat32(24, planeX, true);
+        dv.setFloat32(28, planeY, true);
+        dv.setFloat32(32, focalLength, true);
+        dv.setFloat32(36, eyeZ, true);
+        dv.setFloat32(40, blend, true);
+        dv.setUint32(44, this._torchCount >>> 0, true);
+        dv.setFloat32(48, spriteVoxelBlend, true);
+        dv.setUint32(52, this._rectCount >>> 0, true);
+        dv.setUint32(56, 0, true);
+        dv.setUint32(60, 0, true);
+        this._device.queue.writeBuffer(this._torchParamsBuffer, 0, this._torchParamArrayBuffer);
+        this._torchParamsDirty = false;
+        this._lastTorchBlend = blend;
+        this._lastSpriteVoxelBlend = spriteVoxelBlend;
+        this._lastRectCountUploaded = this._rectCount;
+      }
+      this._lastTorchUploadAt = Date.now();
+    },
+
+    async _upgradeToWebGPU() {
+      if (!navigator.gpu || window.forceWebGPURenderer === false) {
+        this.mode = 'legacy';
+        this._lastModeChangeAt = Date.now();
+        this._lastFallbackReason = !navigator.gpu
+          ? 'navigator.gpu unavailable'
+          : 'window.forceWebGPURenderer disabled';
+        if (!navigator.gpu && !this._reportedNoWebGPU) {
+          this._reportedNoWebGPU = true;
+          console.info('[WebGPU] navigator.gpu unavailable. Staying on WebGL renderer.');
+        }
+        return;
+      }
+      try {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          this.mode = 'legacy';
+          this._lastModeChangeAt = Date.now();
+          this._lastFallbackReason = 'No WebGPU adapter returned by navigator.gpu.requestAdapter()';
+          console.warn('[WebGPU] No adapter available. Staying on WebGL renderer.');
+          return;
+        }
+        const device = await adapter.requestDevice();
+        const canvas = this._createPresentationCanvas();
+        const context = canvas.getContext('webgpu');
+        if (!context) {
+          this.mode = 'legacy';
+          this._lastModeChangeAt = Date.now();
+          this._lastFallbackReason = 'Could not acquire webgpu context from canvas.getContext("webgpu")';
+          console.warn('[WebGPU] Could not acquire webgpu context. Staying on WebGL renderer.');
+          return;
+        }
+        const presentationFormat = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({
+          device,
+          format: presentationFormat,
+          alphaMode: 'opaque'
+        });
+
+        device.lost.then((info) => {
+          this._isDeviceLost = true;
+          this._restoreLegacyViewport(info && info.message ? info.message : 'WebGPU device lost');
+        }).catch(() => {
+          this._restoreLegacyViewport('WebGPU device lost');
+        });
+
+        if (typeof device.addEventListener === 'function') {
+          device.addEventListener('uncapturederror', (event) => {
+            const message = event && event.error && event.error.message ? event.error.message : 'Uncaptured WebGPU error';
+            this._restoreLegacyViewport(message);
+          });
+        }
+
+        const shaderModule = device.createShaderModule({ code: fullscreenWgsl });
+        const sampler = device.createSampler({
+          magFilter: 'nearest',
+          minFilter: 'nearest',
+          mipmapFilter: 'nearest',
+          addressModeU: 'clamp-to-edge',
+          addressModeV: 'clamp-to-edge'
+        });
+        const bindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.FRAGMENT,
+              texture: { sampleType: 'float' }
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.FRAGMENT,
+              sampler: { type: 'filtering' }
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'uniform' }
+            },
+            {
+              binding: 3,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'read-only-storage' }
+            },
+            {
+              binding: 4,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'read-only-storage' }
+            }
+          ]
+        });
+        const pipelineLayout = device.createPipelineLayout({
+          bindGroupLayouts: [bindGroupLayout]
+        });
+        const pipeline = device.createRenderPipeline({
+          layout: pipelineLayout,
+          vertex: { module: shaderModule, entryPoint: 'vsMain' },
+          fragment: { module: shaderModule, entryPoint: 'fsMain', targets: [{ format: presentationFormat }] },
+          primitive: { topology: 'triangle-list', cullMode: 'none' }
+        });
+
+        this._adapter = adapter;
+        this._device = device;
+        this._gpuCanvasContext = context;
+        this._pipeline = pipeline;
+        this._sampler = sampler;
+        this._bindGroupLayout = bindGroupLayout;
+        this._ensureTorchBuffers();
+        this.mode = 'webgpu';
+        this._lastModeChangeAt = Date.now();
+        this._lastFallbackReason = '';
+
+        console.info('[WebGPU] Presentation path armed (torch storage-buffer pipeline enabled).');
+        if (typeof window.requestAnimationFrame === 'function' && typeof window.renderDungeonView === 'function') {
+          window.requestAnimationFrame(() => window.renderDungeonView());
+        }
+      } catch (err) {
+        this._lastErrorMessage = err && err.message ? String(err.message) : String(err || 'WebGPU init failed');
+        this._restoreLegacyViewport(err && err.message ? err.message : 'WebGPU init failed');
+      }
+    },
+
+    init(container) {
+      if (!container) return false;
+      this._container = container;
+
+      if (!this.legacyRenderer.gl) {
+        const ok = this.legacyRenderer.init(container);
+        if (!ok) {
+          this.gl = null;
+          return false;
+        }
+      }
+
+      this.gl = this.legacyRenderer.gl || { backend: 'webgpu-compat' };
+      this._sourceCanvas = this.legacyRenderer.canvas || null;
+      if (!this._sourceCanvas) return false;
+
+      if (!this._initPromise && this.mode !== 'webgpu' && !this._isDeviceLost) {
+        this.mode = 'upgrading';
+        this._lastModeChangeAt = Date.now();
+        this._initPromise = this._upgradeToWebGPU().finally(() => {
+          this._initPromise = null;
+        });
+      }
+      return true;
+    },
+
+    updateTorchFrame(frame) {
+      const lights = Array.isArray(frame?.lights) ? frame.lights : [];
+      const rects = Array.isArray(frame?.spriteVoxelRects) ? frame.spriteVoxelRects : [];
+      const torchColor = frame?.torchColor || TORCH_LIGHT_DEFAULT_COLOR;
+      const r = (Number.isFinite(torchColor.r) ? torchColor.r : TORCH_LIGHT_DEFAULT_COLOR.r) / 255;
+      const g = (Number.isFinite(torchColor.g) ? torchColor.g : TORCH_LIGHT_DEFAULT_COLOR.g) / 255;
+      const b = (Number.isFinite(torchColor.b) ? torchColor.b : TORCH_LIGHT_DEFAULT_COLOR.b) / 255;
+      const count = Math.min(lights.length, this._torchCapacity);
+      this._torchCount = count;
+      const out = this._torchCpuData;
+      for (let i = 0; i < count; i++) {
+        const t = lights[i] || {};
+        const base = i * TORCH_BUFFER_STRIDE_FLOATS;
+        out[base] = Number.isFinite(t.x) ? t.x : 0.0;
+        out[base + 1] = Number.isFinite(t.y) ? t.y : 0.0;
+        out[base + 2] = Number.isFinite(t.z) ? t.z : 0.0;
+        out[base + 3] = Number.isFinite(t.radius) ? t.radius : 0.0;
+        out[base + 4] = Number.isFinite(t.intensity) ? t.intensity : 0.0;
+        out[base + 5] = r;
+        out[base + 6] = g;
+        out[base + 7] = b;
+      }
+      const rectCount = Math.min(rects.length, this._rectCapacity);
+      this._rectCount = rectCount;
+      const rectOut = this._rectCpuData;
+      for (let i = 0; i < rectCount; i++) {
+        const rect = rects[i] || {};
+        const base = i * RECT_BUFFER_STRIDE_FLOATS;
+        rectOut[base] = Number.isFinite(rect.x0) ? rect.x0 : 0.0;
+        rectOut[base + 1] = Number.isFinite(rect.y0) ? rect.y0 : 0.0;
+        rectOut[base + 2] = Number.isFinite(rect.x1) ? rect.x1 : 0.0;
+        rectOut[base + 3] = Number.isFinite(rect.y1) ? rect.y1 : 0.0;
+      }
+      this._torchDataDirty = true;
+      this._rectDataDirty = true;
+      this._torchParamsDirty = true;
+      this._torchParamsFrame = {
+        width: frame?.width,
+        height: frame?.height,
+        focalLength: frame?.focalLength,
+        camX: frame?.camX,
+        camY: frame?.camY,
+        dirX: frame?.dirX,
+        dirY: frame?.dirY,
+        planeX: frame?.planeX,
+        planeY: frame?.planeY,
+        eyeZ: frame?.eyeZ
+      };
+      this._lastTorchFrameAt = Date.now();
+    },
+
+    _presentSourceToWebGPU() {
+      if (this.mode !== 'webgpu') return;
+      if (!this._device || !this._gpuCanvasContext || !this._sourceCanvas || !this._pipeline) return;
+      if (!this._ensureFrameResources() || !this._bindGroup) return;
+
+      try {
+        this._uploadTorchData();
+        this._device.queue.copyExternalImageToTexture(
+          { source: this._sourceCanvas },
+          { texture: this._frameTexture },
+          { width: this._frameWidth, height: this._frameHeight, depthOrArrayLayers: 1 }
+        );
+
+        const encoder = this._device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: this._gpuCanvasContext.getCurrentTexture().createView(),
+              loadOp: 'clear',
+              storeOp: 'store',
+              clearValue: { r: 0, g: 0, b: 0, a: 1 }
+            }
+          ]
+        });
+        pass.setPipeline(this._pipeline);
+        pass.setBindGroup(0, this._bindGroup);
+        pass.draw(6, 1, 0, 0);
+        pass.end();
+        this._device.queue.submit([encoder.finish()]);
+
+        if (!this._presentedAtLeastOnce) {
+          this._presentedAtLeastOnce = true;
+          this._attachWebGPUViewport();
+        }
+      } catch (err) {
+        this._lastErrorMessage = err && err.message ? String(err.message) : String(err || 'WebGPU present failed');
+        this._restoreLegacyViewport(err && err.message ? err.message : 'WebGPU present failed');
+      }
+    },
+
+    renderScene() {
+      if (!this.legacyRenderer) return;
+      this.legacyRenderer.renderScene();
+      this._sourceCanvas = this.legacyRenderer.canvas || this._sourceCanvas;
+      this._presentSourceToWebGPU();
+    },
+
+    render(rasterCanvas) {
+      if (rasterCanvas && typeof rasterCanvas.width === 'number' && typeof rasterCanvas.height === 'number') {
+        this._sourceCanvas = rasterCanvas;
+      } else if (this.legacyRenderer && typeof this.legacyRenderer.render === 'function') {
+        this.legacyRenderer.render(rasterCanvas);
+        this._sourceCanvas = this.legacyRenderer.canvas || this._sourceCanvas;
+      }
+      this._presentSourceToWebGPU();
+    },
+
+    shouldDriveSpriteVoxelTorch() {
+      return this.shouldDriveSpriteTorch();
+    },
+
+    shouldDriveSpriteTorch() {
+      return this.mode === 'webgpu' && window.WEBGPU_DRIVE_SPRITE_VOXEL_TORCH !== false;
+    },
+
+    shouldDriveVoxelTorch() {
+      return this.shouldDriveSpriteTorch() && window.WEBGPU_DRIVE_VOXEL_TORCH !== false;
+    },
+
+    getDebugState() {
+      return {
+        gpuAvailable: !!navigator.gpu,
+        mode: this.mode,
+        presentedAtLeastOnce: !!this._presentedAtLeastOnce,
+        webgpuCanvasVisible: !!(this.canvas && this.canvas.parentElement && this.canvas.parentElement.id === 'dungeon-container'),
+        forceWebGPURenderer: window.forceWebGPURenderer !== false,
+        lastFallbackReason: this._lastFallbackReason || null,
+        lastErrorMessage: this._lastErrorMessage || null,
+        lastModeChangeAt: this._lastModeChangeAt || null,
+        torchBufferCapacity: this._torchCapacity,
+        torchCount: this._torchCount,
+        torchBlend: this._lastTorchBlend,
+        driveSpriteTorch: this.shouldDriveSpriteTorch(),
+        driveVoxelTorch: this.shouldDriveVoxelTorch(),
+        spriteVoxelTorchBlend: this._lastSpriteVoxelBlend,
+        rectBufferCapacity: this._rectCapacity,
+        rectCount: this._rectCount,
+        lastTorchFrameAt: this._lastTorchFrameAt || null,
+        lastTorchUploadAt: this._lastTorchUploadAt || null
+      };
+    }
+  };
+
+  window.webglDungeonRendererLegacy = legacyRenderer;
+  window.webgpuDungeonRenderer = renderer;
+  window.webglDungeonRenderer = renderer;
+  window.useWebGLRenderer = true;
+
+  if (typeof window.renderDungeonView === 'function') {
+    window.renderDungeonView();
+  }
+})();

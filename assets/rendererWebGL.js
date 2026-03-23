@@ -3072,6 +3072,29 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const skyBotRgb = hexToRgb(skyBot);
 
       const gl = this.gl;
+      const webgpuRenderer = window.webgpuDungeonRenderer;
+      const driveSpriteTorchFromWebGPU = !!(
+        webgpuRenderer &&
+        ((typeof webgpuRenderer.shouldDriveSpriteTorch === 'function' && webgpuRenderer.shouldDriveSpriteTorch())
+          || (typeof webgpuRenderer.shouldDriveSpriteVoxelTorch === 'function' && webgpuRenderer.shouldDriveSpriteVoxelTorch()))
+      );
+      const driveVoxelTorchFromWebGPU = !!(
+        webgpuRenderer &&
+        ((typeof webgpuRenderer.shouldDriveVoxelTorch === 'function' && webgpuRenderer.shouldDriveVoxelTorch())
+          || (driveSpriteTorchFromWebGPU && window.WEBGPU_DRIVE_VOXEL_TORCH !== false))
+      );
+      const collectSpriteTorchRectsForWebGPU = driveSpriteTorchFromWebGPU;
+      const collectVoxelTorchRectsForWebGPU = driveVoxelTorchFromWebGPU;
+      const voxelGlTorchFallbackMax = driveVoxelTorchFromWebGPU
+        ? (Number.isFinite(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_MAX)
+          ? Math.max(0, Math.min(MAX_TORCH_LIGHTS, Math.floor(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_MAX)))
+          : Math.min(16, MAX_TORCH_LIGHTS))
+        : MAX_TORCH_LIGHTS;
+      const voxelGlTorchFallbackScale = driveVoxelTorchFromWebGPU
+        ? (Number.isFinite(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_SCALE)
+          ? Math.max(0.0, Math.min(2.0, window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_SCALE))
+          : 1.0)
+        : 1.0;
       const layoutW = dungeon.layout?.width || 32;
       const layoutH = dungeon.layout?.height || 32;
       const maxDim = Math.max(layoutW, layoutH);
@@ -3358,6 +3381,21 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       // Sprites/torches pass (billboards in screen space, depth-tested)
       const sprites = [];
       const voxelInstances = [];
+      const webgpuSpriteVoxelRects = [];
+      const pushSpriteVoxelRect = (x0, y0, x1, y1) => {
+        if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return;
+        const left = Math.max(0, Math.min(width, Math.min(x0, x1)));
+        const right = Math.max(0, Math.min(width, Math.max(x0, x1)));
+        const top = Math.max(0, Math.min(height, Math.min(y0, y1)));
+        const bottom = Math.max(0, Math.min(height, Math.max(y0, y1)));
+        if (right - left < 1 || bottom - top < 1) return;
+        webgpuSpriteVoxelRects.push({
+          x0: left / width,
+          y0: top / height,
+          x1: right / width,
+          y1: bottom / height
+        });
+      };
       const SPRITE_WORLD_HEIGHT = 1.8;
       const SPRITE_WIDTH_RATIO = 0.7;
       // Keep these in sync with the (better) canvas sprite pass values in game.js
@@ -3413,6 +3451,29 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               let voxelHeight = SPRITE_WORLD_HEIGHT;
               if (ceilH > floorH) {
                 voxelHeight = Math.max(0.5, (ceilH - floorH) * heightRatio);
+              }
+              const relX = renderX - camX;
+              const relY = renderY - camY;
+              const invDet = 1.0 / (planeX * dirY - dirX * planeY);
+              const tx = invDet * (dirY * relX - dirX * relY);
+              const ty = invDet * (-planeY * relX + planeX * relY);
+              if (ty > 0.02) {
+                const centerX = (width * 0.5) * (1.0 + tx / ty);
+                const centerY = (height * 0.5) + (eyeZ - (floorH + voxelHeight * 0.5)) * focalLength / ty;
+                const spriteScreenHeight = Math.abs(voxelHeight * focalLength / ty);
+                const spriteScreenWidth = Math.max(
+                  2,
+                  Math.abs(Math.max(baseWidth, 0.35) * focalLength / ty)
+                );
+                const inflate = Math.max(2, spriteScreenWidth * 0.1);
+                if (collectVoxelTorchRectsForWebGPU) {
+                  pushSpriteVoxelRect(
+                    centerX - spriteScreenWidth * 0.5 - inflate,
+                    centerY - spriteScreenHeight * 0.5 - inflate,
+                    centerX + spriteScreenWidth * 0.5 + inflate,
+                    centerY + spriteScreenHeight * 0.5 + inflate
+                  );
+                }
               }
               voxelInstances.push({
                 mesh: voxelMesh,
@@ -3528,7 +3589,28 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             flickerSeed,
             torchFacing
           });
+          if (collectSpriteTorchRectsForWebGPU) {
+            pushSpriteVoxelRect(drawLeft - 2, drawStartY - 2, drawRight + 2, drawEndY + 2);
+          }
         }
+      }
+      if (webgpuRenderer && typeof webgpuRenderer.updateTorchFrame === 'function') {
+        webgpuRenderer.updateTorchFrame({
+          now,
+          width,
+          height,
+          focalLength,
+          camX,
+          camY,
+          dirX,
+          dirY,
+          planeX,
+          planeY,
+          eyeZ,
+          torchColor: TORCH_LIGHT_COLOR,
+          lights: torchLights,
+          spriteVoxelRects: webgpuSpriteVoxelRects
+        });
       }
 
       // Voxel pass for pillars/custom tiles (depth-tested against raycast walls)
@@ -3556,7 +3638,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           gl.uniform1f(this.voxelUniforms.highlightBoost, highlightBoostClamped);
         }
         if (this.voxelUniforms.torchLightScale) {
-          gl.uniform1f(this.voxelUniforms.torchLightScale, torchLightScaleClamped);
+          gl.uniform1f(this.voxelUniforms.torchLightScale, torchLightScaleClamped * voxelGlTorchFallbackScale);
         }
         if (this.voxelUniforms.gridSize) {
           gl.uniform2i(this.voxelUniforms.gridSize, this.gridW, this.gridH);
@@ -3593,10 +3675,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             const centerX = inst.modelPos.x + inst.modelScale.x * 0.5;
             const centerY = inst.modelPos.y + inst.modelScale.y * 0.5;
             const torchData = getTorchUniformData(centerX, centerY, torchRadiusVoxelScaleClamped);
-            gl.uniform1i(this.voxelUniforms.torchCount, torchData.count);
-            gl.uniform3fv(this.voxelUniforms.torchPos, torchData.posArr);
-            gl.uniform1fv(this.voxelUniforms.torchRadius, torchData.radiusArr);
-            gl.uniform1fv(this.voxelUniforms.torchIntensity, torchData.intensityArr);
+            const voxelTorchCount = driveVoxelTorchFromWebGPU
+              ? Math.min(torchData.count, voxelGlTorchFallbackMax)
+              : torchData.count;
+            gl.uniform1i(this.voxelUniforms.torchCount, voxelTorchCount);
+            if (voxelTorchCount > 0) {
+              gl.uniform3fv(this.voxelUniforms.torchPos, torchData.posArr.subarray(0, voxelTorchCount * 3));
+              gl.uniform1fv(this.voxelUniforms.torchRadius, torchData.radiusArr.subarray(0, voxelTorchCount));
+              gl.uniform1fv(this.voxelUniforms.torchIntensity, torchData.intensityArr.subarray(0, voxelTorchCount));
+            }
           }
           const passes = inst.mesh.passes || [inst.mesh];
           for (const pass of passes) {
@@ -3700,13 +3787,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           gl.uniform2f(this.spriteUniforms.haloClipSpan, 1.0, 1.0);
         }
         if (this.spriteUniforms.torchCount) {
-          const torchData = spr.type === 'torch'
-            ? torchUniformData
-            : getTorchUniformData(spr.lightX, spr.lightY, 1.0);
-          gl.uniform1i(this.spriteUniforms.torchCount, torchData.count);
-          gl.uniform3fv(this.spriteUniforms.torchPos, torchData.posArr);
-          gl.uniform1fv(this.spriteUniforms.torchRadius, torchData.radiusArr);
-          gl.uniform1fv(this.spriteUniforms.torchIntensity, torchData.intensityArr);
+          if (driveSpriteTorchFromWebGPU) {
+            gl.uniform1i(this.spriteUniforms.torchCount, 0);
+          } else {
+            const torchData = spr.type === 'torch'
+              ? torchUniformData
+              : getTorchUniformData(spr.lightX, spr.lightY, 1.0);
+            gl.uniform1i(this.spriteUniforms.torchCount, torchData.count);
+            gl.uniform3fv(this.spriteUniforms.torchPos, torchData.posArr);
+            gl.uniform1fv(this.spriteUniforms.torchRadius, torchData.radiusArr);
+            gl.uniform1fv(this.spriteUniforms.torchIntensity, torchData.intensityArr);
+          }
         }
         const tex = spr.texImg ? this.getSpriteTexture(spr.texImg) : null;
 

@@ -10241,6 +10241,7 @@ function sampleTextureNormal(normalData, texW, texH, fracX, fracY) {
   const ty = v * (texH - 1);
 
   const x0 = Math.floor(tx);
+  
   const y0 = Math.floor(ty);
   const x1 = Math.min(x0 + 1, texW - 1);
   const y1 = Math.min(y0 + 1, texH - 1);
