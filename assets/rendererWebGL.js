@@ -1160,11 +1160,11 @@ const float TORCH_FLOOR_BOOST = 1.4;
 const float TORCH_LIGHT_SCALE = 0.7;
 const float TORCH_ONLY = 0.0;
 const int SHADOW_TORCH_LIMIT = MAX_TORCH;
-const int SHADOW_DDA_STEPS = 96;
+const int SHADOW_DDA_STEPS = 160;
 const float OBSTACLE_SHADOW_RADIUS = 0.35;
-const float OBSTACLE_SHADOW_SOFT = 0.22;
+const float OBSTACLE_SHADOW_SOFT = 0.14;
 const float OBSTACLE_SHADOW_SPREAD = 0.12;
-const float SHADOW_DIFFUSION = 0.05;
+const float SHADOW_DIFFUSION = 0.022;
 const float SHADOW_REFRACTION = 0.015;
 const float SHADOW_REFRACTION_FREQ = 3.2;
 const float SHADOW_DARKEN = 0.75;
@@ -1174,8 +1174,8 @@ const float SHADOW_DECAY_SCALE = 2.8;
 const float SHADOW_VIEW_FADE_START = 0.28;
 const float SHADOW_VIEW_FADE_END = 0.72;
 const float STEP_SHADOW_EPS = 0.05;
-const bool ENABLE_FLOOR_STEP_SHADOWS = false;
-const float STEP_SHADOW_MIN_HEIGHT = 0.45;
+const bool ENABLE_FLOOR_STEP_SHADOWS = true;
+const float STEP_SHADOW_MIN_HEIGHT = 0.03;
 const float TORCH_SHADOW_MIX = 0.7;
 
 vec4 fetchCell(int x, int y) {
@@ -1206,6 +1206,150 @@ float floorHeightFromCell(vec4 cell) {
   return u_heightMin + cell.g * 255.0 * (u_heightRange / 255.0);
 }
 
+float ceilHeightFromCell(vec4 cell) {
+  return u_heightMin + cell.b * 255.0 * (u_heightRange / 255.0);
+}
+
+vec2 casterHalfExtFromCell(vec4 cell) {
+  if (cell.a >= 0.999) return vec2(0.5);
+  float r = casterRadiusFromCell(cell);
+  float halfExt = clamp(r * 0.6, 0.06, 0.4);
+  return vec2(halfExt);
+}
+
+bool rayIntersectsBox2D(vec2 origin, vec2 dir, vec2 center, vec2 halfExt, float maxT) {
+  vec2 bMin = center - halfExt;
+  vec2 bMax = center + halfExt;
+  if (abs(dir.x) < 1e-5 && (origin.x < bMin.x || origin.x > bMax.x)) return false;
+  if (abs(dir.y) < 1e-5 && (origin.y < bMin.y || origin.y > bMax.y)) return false;
+  float tx1 = (abs(dir.x) < 1e-5) ? -1e9 : ((bMin.x - origin.x) / dir.x);
+  float tx2 = (abs(dir.x) < 1e-5) ?  1e9 : ((bMax.x - origin.x) / dir.x);
+  float ty1 = (abs(dir.y) < 1e-5) ? -1e9 : ((bMin.y - origin.y) / dir.y);
+  float ty2 = (abs(dir.y) < 1e-5) ?  1e9 : ((bMax.y - origin.y) / dir.y);
+  float tEntry = max(min(tx1, tx2), min(ty1, ty2));
+  float tExit = min(max(tx1, tx2), max(ty1, ty2));
+  if (tExit <= max(0.0, tEntry)) return false;
+  if (tEntry >= maxT) return false;
+  return tExit > 0.0;
+}
+
+bool segmentIntersectsPrism(
+  vec3 startPos,
+  vec3 endPos,
+  vec2 center,
+  vec2 halfExt,
+  float minZ,
+  float maxZ,
+  float maxT
+) {
+  vec3 dir = endPos - startPos;
+  vec3 bMin = vec3(center - halfExt, minZ);
+  vec3 bMax = vec3(center + halfExt, maxZ);
+  float tMin = 0.0;
+  float tMax = maxT;
+
+  if (abs(dir.x) < 1e-6) {
+    if (startPos.x < bMin.x || startPos.x > bMax.x) return false;
+  } else {
+    float tx1 = (bMin.x - startPos.x) / dir.x;
+    float tx2 = (bMax.x - startPos.x) / dir.x;
+    tMin = max(tMin, min(tx1, tx2));
+    tMax = min(tMax, max(tx1, tx2));
+    if (tMax <= tMin) return false;
+  }
+
+  if (abs(dir.y) < 1e-6) {
+    if (startPos.y < bMin.y || startPos.y > bMax.y) return false;
+  } else {
+    float ty1 = (bMin.y - startPos.y) / dir.y;
+    float ty2 = (bMax.y - startPos.y) / dir.y;
+    tMin = max(tMin, min(ty1, ty2));
+    tMax = min(tMax, max(ty1, ty2));
+    if (tMax <= tMin) return false;
+  }
+
+  if (abs(dir.z) < 1e-6) {
+    if (startPos.z < bMin.z || startPos.z > bMax.z) return false;
+  } else {
+    float tz1 = (bMin.z - startPos.z) / dir.z;
+    float tz2 = (bMax.z - startPos.z) / dir.z;
+    tMin = max(tMin, min(tz1, tz2));
+    tMax = min(tMax, max(tz1, tz2));
+    if (tMax <= tMin) return false;
+  }
+
+  return tMax > max(tMin, 0.0);
+}
+
+bool cellOccludesSegment(
+  vec4 cell,
+  int cellX,
+  int cellY,
+  vec2 enterNormal,
+  vec3 startPos,
+  vec3 endPos
+) {
+  if (!isCasterCell(cell)) return false;
+  bool isWall = cell.a >= 0.999;
+  vec2 center = vec2(float(cellX) + 0.5, float(cellY) + 0.5);
+  vec2 halfExt = casterHalfExtFromCell(cell);
+  if (isWall && (abs(enterNormal.x) > 0.5 || abs(enterNormal.y) > 0.5)) {
+    // For walls, occlude using the actual entered face slab so corners anchor correctly.
+    float t = 0.03;
+    if (abs(enterNormal.x) > 0.5) {
+      halfExt.x = min(halfExt.x, t);
+      center.x += enterNormal.x * (0.5 - halfExt.x);
+    }
+    if (abs(enterNormal.y) > 0.5) {
+      halfExt.y = min(halfExt.y, t);
+      center.y += enterNormal.y * (0.5 - halfExt.y);
+    }
+  }
+  float zMin = floorHeightFromCell(cell);
+  if (isWall) {
+    // Match wall rendering: walls are visually extended down to u_minFloor.
+    zMin = min(zMin, u_minFloor);
+  }
+  float zMax = ceilHeightFromCell(cell);
+  if (zMax <= zMin + 0.01) return false;
+  return segmentIntersectsPrism(startPos, endPos, center, halfExt, zMin, zMax, 0.9995);
+}
+
+bool stepBoundaryOccludesSegment(
+  vec4 cellA,
+  vec4 cellB,
+  int ax,
+  int ay,
+  int bx,
+  int by,
+  vec3 startPos,
+  vec3 endPos
+) {
+  if (!ENABLE_FLOOR_STEP_SHADOWS) return false;
+  if (cellA.a >= 0.5 || cellB.a >= 0.5) return false;
+  float hA = floorHeightFromCell(cellA);
+  float hB = floorHeightFromCell(cellB);
+  float dh = hB - hA;
+  if (abs(dh) <= max(STEP_SHADOW_EPS, STEP_SHADOW_MIN_HEIGHT)) return false;
+  float zMin = min(hA, hB);
+  float zMax = max(hA, hB);
+  if (zMax <= zMin + 0.01) return false;
+
+  vec2 center;
+  vec2 halfExt;
+  const float riserThickness = 0.03;
+  if (ax != bx) {
+    float edgeX = float(max(ax, bx));
+    center = vec2(edgeX, float(ay) + 0.5);
+    halfExt = vec2(riserThickness, 0.5);
+  } else {
+    float edgeY = float(max(ay, by));
+    center = vec2(float(ax) + 0.5, edgeY);
+    halfExt = vec2(0.5, riserThickness);
+  }
+  return segmentIntersectsPrism(startPos, endPos, center, halfExt, zMin, zMax, 0.9995);
+}
+
 float wrapSignedAngle(float a) {
   const float PI = 3.141592653589793;
   const float TAU = 6.283185307179586;
@@ -1229,86 +1373,50 @@ float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
   return max(0.006, diffused * ripple);
 }
 
-float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad, float intensity) {
-  vec2 toHit = hitXY - torchPos;
-  float distHit = length(toHit);
-  if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
-  vec2 lightDir = normalize(casterCenter - torchPos);
-  vec2 v = hitXY - casterCenter;
-  float proj = dot(v, lightDir);
-  if (proj <= 0.0) return 0.0;
-  float perp = length(v - lightDir * proj);
-  float penumbra = edgeDiffusion(proj, distHit, hitXY);
-  float core = 1.0 - smoothstep(casterRadius, casterRadius + penumbra, perp);
-  float front = smoothstep(0.0, 0.12, proj);
-  float decayLen = max(0.8, rad * SHADOW_DECAY_SCALE);
-  float back = exp(-max(0.0, proj) / decayLen);
-  float strength = core * front * back * intensity;
-  return strength;
+float shadowHeightMask(float distHit, float distCaster, float torchZ, float hitZ, float casterTop) {
+  if (distHit < 1e-4) return 0.0;
+  float zAtCaster = torchZ + (hitZ - torchZ) * (distCaster / distHit);
+  float soft = 0.03 + min(0.18, distCaster * 0.02);
+  return 1.0 - smoothstep(casterTop - soft, casterTop + soft, zAtCaster);
 }
 
-float shadowStrengthFromWallSlab(
+float shadowStrengthFromBox(
   vec2 hitXY,
   vec2 casterCenter,
+  vec2 casterHalfExt,
   vec2 torchPos,
-  float rad,
-  float intensity,
-  vec2 faceNormal,
-  bool infiniteAlongFace
+  float intensity
 ) {
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
-  if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
+  if (distHit < 0.05) return 0.0;
   vec2 dir = toHit / max(distHit, 1e-4);
-  float minX = casterCenter.x - 0.5;
-  float maxX = casterCenter.x + 0.5;
-  float minY = casterCenter.y - 0.5;
-  float maxY = casterCenter.y + 0.5;
-  if (abs(dir.x) < 1e-5 && (torchPos.x < minX || torchPos.x > maxX)) return 0.0;
-  if (abs(dir.y) < 1e-5 && (torchPos.y < minY || torchPos.y > maxY)) return 0.0;
-  float tx1 = (abs(dir.x) < 1e-5) ? -1e9 : ((minX - torchPos.x) / dir.x);
-  float tx2 = (abs(dir.x) < 1e-5) ?  1e9 : ((maxX - torchPos.x) / dir.x);
-  float ty1 = (abs(dir.y) < 1e-5) ? -1e9 : ((minY - torchPos.y) / dir.y);
-  float ty2 = (abs(dir.y) < 1e-5) ?  1e9 : ((maxY - torchPos.y) / dir.y);
-  float tMinX = min(tx1, tx2);
-  float tMaxX = max(tx1, tx2);
-  float tMinY = min(ty1, ty2);
-  float tMaxY = max(ty1, ty2);
-  float tEntry = max(tMinX, tMinY);
-  float tExit = min(tMaxX, tMaxY);
-  if (tExit <= max(0.0, tEntry)) return 0.0;
-  if (tEntry >= distHit) return 0.0;
-  float proj = distHit - max(0.0, tEntry);
-  if (proj <= 0.0) return 0.0;
+  if (!rayIntersectsBox2D(torchPos, dir, casterCenter, casterHalfExt, distHit + 0.02)) return 0.0;
 
   vec2 toCaster = casterCenter - torchPos;
   float casterDist = length(toCaster);
-  if (casterDist < 1e-4) return 0.0;
-  vec2 casterDir = toCaster / casterDist;
+  if (casterDist < 1e-4 || casterDist >= distHit - 0.01) return 0.0;
 
   float baseAngle = atan(toCaster.y, toCaster.x);
   float minDelta = 1e9;
   float maxDelta = -1e9;
-  expandAngleSpan(casterCenter + vec2(-0.5, -0.5) - torchPos, baseAngle, minDelta, maxDelta);
-  expandAngleSpan(casterCenter + vec2(-0.5,  0.5) - torchPos, baseAngle, minDelta, maxDelta);
-  expandAngleSpan(casterCenter + vec2( 0.5, -0.5) - torchPos, baseAngle, minDelta, maxDelta);
-  expandAngleSpan(casterCenter + vec2( 0.5,  0.5) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2(-casterHalfExt.x, -casterHalfExt.y) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2(-casterHalfExt.x,  casterHalfExt.y) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2( casterHalfExt.x, -casterHalfExt.y) - torchPos, baseAngle, minDelta, maxDelta);
+  expandAngleSpan(casterCenter + vec2( casterHalfExt.x,  casterHalfExt.y) - torchPos, baseAngle, minDelta, maxDelta);
   if (maxDelta <= minDelta) return 0.0;
 
   float hitDelta = wrapSignedAngle(atan(toHit.y, toHit.x) - baseAngle);
+  float proj = distHit - casterDist;
+  if (proj <= 0.0) return 0.0;
+
   float angularSoft = edgeDiffusion(proj, distHit, hitXY) / max(distHit, 1e-4);
-  if (infiniteAlongFace) {
-    angularSoft *= 1.2;
-  }
+  angularSoft = clamp(angularSoft * 0.4, 0.0005, 0.008);
   float insideMin = smoothstep(minDelta - angularSoft, minDelta + angularSoft, hitDelta);
   float insideMax = 1.0 - smoothstep(maxDelta - angularSoft, maxDelta + angularSoft, hitDelta);
   float core = insideMin * insideMax;
-  if (abs(faceNormal.x) > 0.5 || abs(faceNormal.y) > 0.5) {
-    float entryAlign = max(0.0, dot(casterDir, -faceNormal));
-    core *= mix(0.75, 1.0, entryAlign);
-  }
-  float front = smoothstep(0.0, 0.18, proj);
-  float decayLen = max(1.2, rad * SHADOW_DECAY_SCALE);
+  float front = smoothstep(0.0, 0.12, proj);
+  float decayLen = max(2.0, distHit * 0.9);
   float back = exp(-max(0.0, proj) / decayLen);
   float strength = core * front * back * intensity;
   return strength;
@@ -1316,35 +1424,25 @@ float shadowStrengthFromWallSlab(
 
 float computeShadowForTorch(
   vec2 hitXY,
+  float hitZ,
   int targetX,
   int targetY,
   vec2 surfaceNormal2D,
   vec2 torchPos,
+  float torchZ,
   float rad,
   float intensity
 ) {
-  float obstacleShadow = 0.0;
   vec4 targetCell = fetchCell(targetX, targetY);
-  bool targetIsWall = targetCell.a >= 0.999;
   bool surfaceIsFloor = (abs(surfaceNormal2D.x) < 0.1 && abs(surfaceNormal2D.y) < 0.1);
   bool allowTargetCaster = surfaceIsFloor && isObstacleCell(targetCell);
+  vec3 startPos = vec3(torchPos, torchZ);
+  vec3 endPos = vec3(hitXY, hitZ);
 
   vec2 toHit = hitXY - torchPos;
-  float distHit = length(toHit);
-  float shadowRad = rad * SHADOW_RADIUS_SCALE;
-  float maxShadow = rad * SHADOW_OCCLUSION_RADIUS_SCALE;
-  if (distHit < 0.05 || distHit > maxShadow) return obstacleShadow;
-
-  vec2 dir = toHit / max(distHit, 1e-4);
-
-  vec2 casterCenter = vec2(0.0);
-  float casterRadius = 0.0;
-  vec2 casterFaceNormal = vec2(0.0);
-  bool casterIsWall = false;
-  bool casterIsTarget = false;
-  bool foundCaster = false;
-  int casterMapX = -999999;
-  int casterMapY = -999999;
+  float distXY = length(toHit);
+  if (distXY < 0.01) return 0.0;
+  vec2 dir = toHit / distXY;
 
   int mapX = int(floor(torchPos.x));
   int mapY = int(floor(torchPos.y));
@@ -1360,183 +1458,84 @@ float computeShadowForTorch(
   float sideDistY = (stepY == -1 ? (torchPos.y - float(mapY)) : (float(mapY + 1) - torchPos.y)) * invDy;
 
   for (int s = 0; s < SHADOW_DDA_STEPS; s++) {
-    float nextT = min(sideDistX, sideDistY);
-    if (nextT >= distHit - 0.02) break;
-    int prevX = mapX;
-    int prevY = mapY;
-    float edgeDelta = abs(sideDistX - sideDistY);
-    bool cornerStep = edgeDelta <= 1e-5;
-    bool steppedX = (sideDistX < sideDistY) || cornerStep;
-    bool steppedY = (sideDistY < sideDistX) || cornerStep;
-    int nextMapX = mapX + (steppedX ? stepX : 0);
-    int nextMapY = mapY + (steppedY ? stepY : 0);
-    if (steppedX) sideDistX += invDx;
-    if (steppedY) sideDistY += invDy;
-
-    bool cornerReachedTarget = false;
-    if (cornerStep) {
-      int sideAX = prevX + stepX;
-      int sideAY = prevY;
-      if (inBounds(sideAX, sideAY)) {
-        bool sideATarget = (sideAX == targetX && sideAY == targetY);
-        if (sideATarget && !allowTargetCaster) {
-          cornerReachedTarget = true;
-        } else if (!(sideAX == torchCellX && sideAY == torchCellY)) {
-          vec4 sideCellA = fetchCell(sideAX, sideAY);
-          if (isCasterCell(sideCellA)) {
-            casterCenter = vec2(float(sideAX) + 0.5, float(sideAY) + 0.5);
-            casterRadius = casterRadiusFromCell(sideCellA);
-            casterIsWall = sideCellA.a >= 0.999;
-            casterIsTarget = sideATarget;
-            casterMapX = sideAX;
-            casterMapY = sideAY;
-            if (!casterIsWall) {
-              vec2 toCenterA = casterCenter - torchPos;
-              float projA = dot(toCenterA, dir);
-              float perpA = length(toCenterA - dir * projA);
-              if (perpA <= casterRadius + 0.05) {
-                casterFaceNormal = vec2(-float(stepX), 0.0);
-                foundCaster = true;
-              }
-            } else {
-              casterFaceNormal = vec2(-float(stepX), 0.0);
-              foundCaster = true;
-            }
-          }
-        }
-      }
-      int sideBX = prevX;
-      int sideBY = prevY + stepY;
-      if (!foundCaster && inBounds(sideBX, sideBY)) {
-        bool sideBTarget = (sideBX == targetX && sideBY == targetY);
-        if (sideBTarget && !allowTargetCaster) {
-          cornerReachedTarget = true;
-        } else if (!(sideBX == torchCellX && sideBY == torchCellY)) {
-          vec4 sideCellB = fetchCell(sideBX, sideBY);
-          if (isCasterCell(sideCellB)) {
-            casterCenter = vec2(float(sideBX) + 0.5, float(sideBY) + 0.5);
-            casterRadius = casterRadiusFromCell(sideCellB);
-            casterIsWall = sideCellB.a >= 0.999;
-            casterIsTarget = sideBTarget;
-            casterMapX = sideBX;
-            casterMapY = sideBY;
-            if (!casterIsWall) {
-              vec2 toCenterB = casterCenter - torchPos;
-              float projB = dot(toCenterB, dir);
-              float perpB = length(toCenterB - dir * projB);
-              if (perpB <= casterRadius + 0.05) {
-                casterFaceNormal = vec2(0.0, -float(stepY));
-                foundCaster = true;
-              }
-            } else {
-              casterFaceNormal = vec2(0.0, -float(stepY));
-              foundCaster = true;
-            }
-          }
-        }
-      }
-    }
-
-    mapX = nextMapX;
-    mapY = nextMapY;
-    if (foundCaster) break;
-    if (cornerReachedTarget) break;
-    if (!inBounds(mapX, mapY)) break;
-    if (!steppedX && !steppedY) {
-      break;
-    }
-    vec4 prevCell = fetchCell(prevX, prevY);
-    vec4 currCell = fetchCell(mapX, mapY);
-    if (ENABLE_FLOOR_STEP_SHADOWS && prevCell.a < 0.5 && currCell.a < 0.5) {
-      float prevH = floorHeightFromCell(prevCell);
-      float currH = floorHeightFromCell(currCell);
-      float dh = currH - prevH;
-      if (abs(dh) > max(STEP_SHADOW_EPS, STEP_SHADOW_MIN_HEIGHT)) {
-        bool currHigher = dh > 0.0;
-        casterCenter = currHigher
-          ? vec2(float(mapX) + 0.5, float(mapY) + 0.5)
-          : vec2(float(prevX) + 0.5, float(prevY) + 0.5);
-        casterRadius = 0.5;
-        casterIsWall = true;
-        casterFaceNormal = steppedX
-          ? vec2(currHigher ? -float(stepX) : float(stepX), 0.0)
-          : vec2(0.0, currHigher ? -float(stepY) : float(stepY));
-        casterMapX = currHigher ? mapX : prevX;
-        casterMapY = currHigher ? mapY : prevY;
-        foundCaster = true;
-        break;
-      }
-    }
-    bool isTargetCell = (mapX == targetX && mapY == targetY);
-    if (isTargetCell && !allowTargetCaster) break;
-    if (mapX == torchCellX && mapY == torchCellY) {
-      if (mapX == endX && mapY == endY) break;
-      continue;
-    }
-    vec4 sCell = currCell;
-    if (isCasterCell(sCell)) {
-      casterCenter = vec2(float(mapX) + 0.5, float(mapY) + 0.5);
-      casterRadius = casterRadiusFromCell(sCell);
-      casterIsWall = sCell.a >= 0.999;
-      casterIsTarget = isTargetCell;
-      casterMapX = mapX;
-      casterMapY = mapY;
-      if (!casterIsWall) {
-        vec2 toCenter = casterCenter - torchPos;
-        float proj = dot(toCenter, dir);
-        float perp = length(toCenter - dir * proj);
-        if (perp > casterRadius + 0.05) {
-          if (mapX == endX && mapY == endY) break;
-          continue;
-        }
-      }
-      casterFaceNormal = steppedX ? vec2(-float(stepX), 0.0) : vec2(0.0, -float(stepY));
-      foundCaster = true;
-      break;
-    }
-    if (isTargetCell) break;
     if (mapX == endX && mapY == endY) break;
+    float edgeDelta = abs(sideDistX - sideDistY);
+    bool cornerStep = edgeDelta <= 1e-4;
+
+    if (sideDistX < sideDistY && !cornerStep) {
+      int prevX = mapX;
+      int prevY = mapY;
+      mapX += stepX;
+      sideDistX += invDx;
+      if (!inBounds(mapX, mapY)) break;
+      vec4 prevCell = fetchCell(prevX, prevY);
+      vec4 currCell = fetchCell(mapX, mapY);
+      if (stepBoundaryOccludesSegment(prevCell, currCell, prevX, prevY, mapX, mapY, startPos, endPos)) return 1.0;
+      bool isTargetCell = (mapX == targetX && mapY == targetY);
+      if (!(mapX == torchCellX && mapY == torchCellY) && (!isTargetCell || allowTargetCaster)) {
+        if (cellOccludesSegment(currCell, mapX, mapY, vec2(-float(stepX), 0.0), startPos, endPos)) return 1.0;
+      }
+      if (isTargetCell) break;
+    } else if (sideDistY < sideDistX && !cornerStep) {
+      int prevX = mapX;
+      int prevY = mapY;
+      mapY += stepY;
+      sideDistY += invDy;
+      if (!inBounds(mapX, mapY)) break;
+      vec4 prevCell = fetchCell(prevX, prevY);
+      vec4 currCell = fetchCell(mapX, mapY);
+      if (stepBoundaryOccludesSegment(prevCell, currCell, prevX, prevY, mapX, mapY, startPos, endPos)) return 1.0;
+      bool isTargetCell = (mapX == targetX && mapY == targetY);
+      if (!(mapX == torchCellX && mapY == torchCellY) && (!isTargetCell || allowTargetCaster)) {
+        if (cellOccludesSegment(currCell, mapX, mapY, vec2(0.0, -float(stepY)), startPos, endPos)) return 1.0;
+      }
+      if (isTargetCell) break;
+    } else {
+      int prevX = mapX;
+      int prevY = mapY;
+      int sideAX = mapX + stepX;
+      int sideAY = mapY;
+      int sideBX = mapX;
+      int sideBY = mapY + stepY;
+      sideDistX += invDx;
+      sideDistY += invDy;
+      mapX += stepX;
+      mapY += stepY;
+
+      vec4 prevCell = fetchCell(prevX, prevY);
+      if (inBounds(sideAX, sideAY)) {
+        vec4 cellA = fetchCell(sideAX, sideAY);
+        if (stepBoundaryOccludesSegment(prevCell, cellA, prevX, prevY, sideAX, sideAY, startPos, endPos)) return 1.0;
+        bool isTargetA = (sideAX == targetX && sideAY == targetY);
+        if (!(sideAX == torchCellX && sideAY == torchCellY) && (!isTargetA || allowTargetCaster)) {
+          if (cellOccludesSegment(cellA, sideAX, sideAY, vec2(-float(stepX), 0.0), startPos, endPos)) return 1.0;
+        }
+      }
+      if (inBounds(sideBX, sideBY)) {
+        vec4 cellB = fetchCell(sideBX, sideBY);
+        if (stepBoundaryOccludesSegment(prevCell, cellB, prevX, prevY, sideBX, sideBY, startPos, endPos)) return 1.0;
+        bool isTargetB = (sideBX == targetX && sideBY == targetY);
+        if (!(sideBX == torchCellX && sideBY == torchCellY) && (!isTargetB || allowTargetCaster)) {
+          if (cellOccludesSegment(cellB, sideBX, sideBY, vec2(0.0, -float(stepY)), startPos, endPos)) return 1.0;
+        }
+      }
+      if (!inBounds(mapX, mapY)) break;
+      bool isTargetDiag = (mapX == targetX && mapY == targetY);
+      if (!(mapX == torchCellX && mapY == torchCellY) && (!isTargetDiag || allowTargetCaster)) {
+        vec4 cellDiag = fetchCell(mapX, mapY);
+        // Corner-crossing rays can enter the diagonal cell directly; test it too.
+        if (cellOccludesSegment(cellDiag, mapX, mapY, vec2(0.0), startPos, endPos)) return 1.0;
+      }
+      if (mapX == targetX && mapY == targetY) break;
+    }
   }
 
-  if (!foundCaster && allowTargetCaster) {
-    vec2 center = vec2(float(targetX) + 0.5, float(targetY) + 0.5);
-    float targetRadius = casterRadiusFromCell(targetCell);
-    vec2 toCenter = center - torchPos;
-    float proj = dot(toCenter, dir);
-    float perp = length(toCenter - dir * proj);
-    float distCenter = length(toCenter);
-    if (proj > 0.0 && distCenter < distHit + 0.02 && perp <= targetRadius + 0.05) {
-      float strength = shadowStrengthFromCaster(hitXY, center, targetRadius, torchPos, shadowRad, intensity);
-      obstacleShadow = max(obstacleShadow, strength);
-    }
+  if (allowTargetCaster && inBounds(targetX, targetY)) {
+    vec4 tCell = fetchCell(targetX, targetY);
+    if (cellOccludesSegment(tCell, targetX, targetY, vec2(0.0), startPos, endPos)) return 1.0;
   }
 
-  if (!foundCaster) return obstacleShadow;
-  float distCaster = length(casterCenter - torchPos);
-  if (!casterIsTarget && distCaster >= distHit - 0.02) return obstacleShadow;
-  if (casterIsWall) {
-    if (casterMapX == torchCellX && casterMapY == torchCellY) {
-      return obstacleShadow;
-    }
-    if (targetIsWall && (abs(surfaceNormal2D.x) > 0.5 || abs(surfaceNormal2D.y) > 0.5)) {
-      if (abs(surfaceNormal2D.x) > 0.5 && casterMapX == targetX) return obstacleShadow;
-      if (abs(surfaceNormal2D.y) > 0.5 && casterMapY == targetY) return obstacleShadow;
-    }
-    float slabStrength = shadowStrengthFromWallSlab(
-      hitXY,
-      casterCenter,
-      torchPos,
-      shadowRad,
-      intensity,
-      casterFaceNormal,
-      surfaceIsFloor
-    );
-    obstacleShadow = max(obstacleShadow, slabStrength);
-    return obstacleShadow;
-  }
-  float strength = shadowStrengthFromCaster(hitXY, casterCenter, casterRadius, torchPos, shadowRad, intensity);
-  obstacleShadow = max(obstacleShadow, strength);
-  return obstacleShadow;
+  return 0.0;
 }
 
 // Normal-aware torch lighting (half-Lambert + ambient fill for multi-light look)
@@ -1563,12 +1562,14 @@ float accumulateTorchLit(
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
+    vec2 toLxy = u_torchPos[i].xy - worldPos.xy;
+    float distXY = length(toLxy);
     toL.z *= 0.5;
     float dist = length(toL);
     float lightRadius = u_torchRadius[i];
     float shadowRadiusScale = max(1.0, u_torchRadiusScale);
     float shadowRadius = lightRadius * shadowRadiusScale * SHADOW_OCCLUSION_RADIUS_SCALE;
-    if (dist >= shadowRadius) continue;
+    if (distXY >= shadowRadius) continue;
     vec3 L = normalize(toL);
     float ndotl_raw = dot(L, normal);
     if (ndotl_raw <= 0.0) continue;      // prevent torch light wrapping around backfaces
@@ -1578,16 +1579,29 @@ float accumulateTorchLit(
     float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
     float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
     float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
-    float shadowFactor = computeShadowForTorch(
-      worldPos.xy,
-      targetX,
-      targetY,
-      surfaceNormal2D,
-      u_torchPos[i].xy,
-      lightRadius * shadowRadiusScale,
-      u_torchIntensity[i]
-    );
-    shadowStack *= (1.0 - shadowFactor);
+    // Shadow casting uses a softer distance tail than direct light so multiple
+    // torches can still project distinct occlusion wedges at medium range.
+    float normDistShadow = distXY / max(lightRadius, 1e-4);
+    float coreFalloffShadow = max(0.0, 1.0 - normDistShadow);
+    float tailFalloffShadow = exp(-2.2 * max(0.0, normDistShadow - 1.0));
+    float shadowDrive = (coreFalloffShadow * coreFalloffShadow + 0.22 * tailFalloffShadow) * u_torchIntensity[i];
+    float shadowFactor = 0.0;
+    float shadowWeight = 0.0;
+    if (shadowDrive > 0.002) {
+      shadowFactor = computeShadowForTorch(
+        worldPos.xy,
+        worldPos.z,
+        targetX,
+        targetY,
+        surfaceNormal2D,
+        u_torchPos[i].xy,
+        u_torchPos[i].z,
+        lightRadius * shadowRadiusScale,
+        u_torchIntensity[i]
+      );
+      shadowWeight = clamp(shadowDrive * 2.2, 0.0, 1.0);
+      shadowStack *= (1.0 - shadowFactor * shadowWeight);
+    }
     if (rawStrength <= 0.001) continue;
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
@@ -1595,7 +1609,7 @@ float accumulateTorchLit(
     float atten = rawStrength * TORCH_FALLOFF * shadowMul;
     if (rawStrength > primaryStrength) {
       primaryStrength = rawStrength;
-      primaryShadow = shadowFactor;
+      primaryShadow = shadowFactor * shadowWeight;
     }
     sumStrength += rawStrength;
     vec2 dir2d = u_torchPos[i].xy - worldPos.xy;
