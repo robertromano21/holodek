@@ -110,6 +110,11 @@ struct TorchLight {
   intensityColor : vec4<f32>, // intensity + rgb
 };
 
+struct ProjectedTorch {
+  screenRad : vec4<f32>,      // x, y, depth, radialNorm
+  intensityColor : vec4<f32>, // intensity + rgb
+};
+
 struct ScreenRect {
   bounds : vec4<f32>, // x0,y0,x1,y1 in normalized uv space
 };
@@ -129,6 +134,7 @@ struct PostParams {
 @group(0) @binding(5) var bloomTex : texture_2d<f32>;
 @group(0) @binding(6) var bloomSamp : sampler;
 @group(0) @binding(7) var<uniform> postParams : PostParams;
+@group(0) @binding(8) var<storage, read> projectedTorches : array<ProjectedTorch>;
 
 @vertex
 fn vsMain(@builtin(vertex_index) vertexIndex : u32) -> VsOut {
@@ -211,12 +217,12 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         if (i >= torchCount) {
           break;
         }
-        let t = torchLights[i];
-        let p = projectTorch(t.posRad.xyz);
+        let t = projectedTorches[i];
+        let p = t.screenRad.xyz;
         if (p.z <= 0.05) {
           continue;
         }
-        let radialNorm = max(0.002, (t.posRad.w * params.focalLength / max(0.08, p.z)) / params.resolution.y);
+        let radialNorm = max(0.002, t.screenRad.w);
         let toFrag = in.uv - p.xy;
         let d = vec2<f32>(toFrag.x / (radialNorm / aspect), toFrag.y / radialNorm);
         let dist = length(d);
@@ -234,6 +240,71 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     mixedRgb = clamp(mixedRgb + bloom * postParams.bloomIntensity, vec3<f32>(0.0), vec3<f32>(1.0));
   }
   return vec4<f32>(mixedRgb, base.a);
+}
+`;
+
+  const torchProjectWgsl = `
+const MAX_SHADER_TORCH : u32 = 512u;
+
+struct TorchParams {
+  resolution : vec2<f32>,
+  camPos : vec2<f32>,
+  camDir : vec2<f32>,
+  plane : vec2<f32>,
+  focalLength : f32,
+  eyeZ : f32,
+  torchBlend : f32,
+  torchCount : u32,
+  spriteVoxelBlend : f32,
+  rectCount : u32,
+  _pad0 : u32,
+  _pad1 : u32,
+};
+
+struct TorchLight {
+  posRad : vec4<f32>,         // xyz + radius
+  intensityColor : vec4<f32>, // intensity + rgb
+};
+
+struct ProjectedTorch {
+  screenRad : vec4<f32>,      // x, y, depth, radialNorm
+  intensityColor : vec4<f32>, // intensity + rgb
+};
+
+@group(0) @binding(0) var<uniform> params : TorchParams;
+@group(0) @binding(1) var<storage, read> torchLights : array<TorchLight>;
+@group(0) @binding(2) var<storage, read_write> projectedTorches : array<ProjectedTorch>;
+
+fn projectTorch(torchPos : vec3<f32>) -> vec3<f32> {
+  let rel = torchPos.xy - params.camPos;
+  let invDet = 1.0 / max(1e-6, params.plane.x * params.camDir.y - params.camDir.x * params.plane.y);
+  let transformX = invDet * (params.camDir.y * rel.x - params.camDir.x * rel.y);
+  let transformY = invDet * (-params.plane.y * rel.x + params.plane.x * rel.y);
+  if (transformY <= 0.05) {
+    return vec3<f32>(-10.0, -10.0, transformY);
+  }
+  let screenX = 0.5 * (1.0 + transformX / transformY);
+  let screenY = 0.5 - ((torchPos.z - params.eyeZ) * params.focalLength / transformY) / params.resolution.y;
+  return vec3<f32>(screenX, screenY, transformY);
+}
+
+@compute @workgroup_size(64)
+fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i = gid.x;
+  if (i >= MAX_SHADER_TORCH) {
+    return;
+  }
+  var outProj : ProjectedTorch;
+  outProj.screenRad = vec4<f32>(-10.0, -10.0, -1.0, 0.0);
+  outProj.intensityColor = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  if (i < params.torchCount) {
+    let t = torchLights[i];
+    let p = projectTorch(t.posRad.xyz);
+    let radialNorm = max(0.002, (t.posRad.w / max(0.1, p.z)) * (params.focalLength / params.resolution.y));
+    outProj.screenRad = vec4<f32>(p, radialNorm);
+    outProj.intensityColor = t.intensityColor;
+  }
+  projectedTorches[i] = outProj;
 }
 `;
 
@@ -334,6 +405,8 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _adapter: null,
     _device: null,
     _pipeline: null,
+    _torchProjectPipeline: null,
+    _torchProjectBindGroupLayout: null,
     _sampler: null,
     _bloomSampler: null,
     _bloomPipeline: null,
@@ -346,6 +419,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _bloomPongView: null,
     _bindGroupLayout: null,
     _bindGroup: null,
+    _torchProjectBindGroup: null,
     _bloomBindGroupH: null,
     _bloomBindGroupV: null,
     _frameWidth: 0,
@@ -367,6 +441,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _torchParamsFrame: null,
     _torchParamsBuffer: null,
     _torchStorageBuffer: null,
+    _projectedTorchBuffer: null,
     _postParamsBuffer: null,
     _postParamArrayBuffer: new ArrayBuffer(16),
     _postParamsDirty: false,
@@ -380,6 +455,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _torchParamArrayBuffer: new ArrayBuffer(64),
     _lastTorchFrameAt: 0,
     _lastTorchUploadAt: 0,
+    _lastTorchProjectAt: 0,
     _lastTorchBlend: 0,
     _lastSpriteVoxelBlend: 0,
     _lastRectCountUploaded: 0,
@@ -432,6 +508,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       this._bloomPongTexture = null;
       this._bloomPongView = null;
       this._bindGroup = null;
+      this._torchProjectBindGroup = null;
       this._bloomBindGroupH = null;
       this._bloomBindGroupV = null;
       this._frameWidth = 0;
@@ -455,6 +532,11 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
           this._torchStorageBuffer.destroy();
           this._torchStorageBuffer = null;
         }
+        if (this._projectedTorchBuffer) {
+          this._projectedTorchBuffer.destroy();
+          this._projectedTorchBuffer = null;
+        }
+        this._torchProjectBindGroup = null;
       }
       if (requiredRectCapacity !== this._rectCapacity) {
         this._rectCapacity = requiredRectCapacity;
@@ -481,6 +563,15 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         });
         this._torchDataDirty = true;
         this._bindGroup = null;
+        this._torchProjectBindGroup = null;
+      }
+      if (!this._projectedTorchBuffer) {
+        this._projectedTorchBuffer = this._device.createBuffer({
+          size: this._torchCapacity * TORCH_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE
+        });
+        this._bindGroup = null;
+        this._torchProjectBindGroup = null;
       }
       if (!this._rectStorageBuffer) {
         this._rectStorageBuffer = this._device.createBuffer({
@@ -598,7 +689,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
 
     _ensureFrameResources() {
       const src = this._sourceCanvas;
-      if (!src || !this._device || !this._bindGroupLayout || !this._ensureTorchBuffers()) return false;
+      if (!src || !this._device || !this._bindGroupLayout || !this._torchProjectBindGroupLayout || !this._ensureTorchBuffers()) return false;
       const w = Math.max(1, src.width | 0);
       const h = Math.max(1, src.height | 0);
       const sizeChanged = !(w === this._frameWidth && h === this._frameHeight && this._frameTexture && this._frameTextureView);
@@ -631,7 +722,18 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
             { binding: 4, resource: { buffer: this._rectStorageBuffer } },
             { binding: 5, resource: this._bloomPongView },
             { binding: 6, resource: this._bloomSampler },
-            { binding: 7, resource: { buffer: this._postParamsBuffer } }
+            { binding: 7, resource: { buffer: this._postParamsBuffer } },
+            { binding: 8, resource: { buffer: this._projectedTorchBuffer } }
+          ]
+        });
+      }
+      if (!this._torchProjectBindGroup) {
+        this._torchProjectBindGroup = this._device.createBindGroup({
+          layout: this._torchProjectBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this._torchParamsBuffer } },
+            { binding: 1, resource: { buffer: this._torchStorageBuffer } },
+            { binding: 2, resource: { buffer: this._projectedTorchBuffer } }
           ]
         });
       }
@@ -799,6 +901,19 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       passV.end();
     },
 
+    _runTorchProjectPass(encoder) {
+      if (!encoder || !this._torchProjectPipeline || !this._torchProjectBindGroup) return;
+      if (this._lastTorchBlend <= 0.0001 && this._lastSpriteVoxelBlend <= 0.0001) return;
+      const count = Math.min(512, this._torchCount >>> 0);
+      if (count < 1) return;
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this._torchProjectPipeline);
+      pass.setBindGroup(0, this._torchProjectBindGroup);
+      pass.dispatchWorkgroups(Math.ceil(count / 64));
+      pass.end();
+      this._lastTorchProjectAt = Date.now();
+    },
+
     async _upgradeToWebGPU() {
       if (!navigator.gpu || window.forceWebGPURenderer === false) {
         this.mode = 'legacy';
@@ -853,6 +968,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         }
 
         const shaderModule = device.createShaderModule({ code: fullscreenWgsl });
+        const torchProjectModule = device.createShaderModule({ code: torchProjectWgsl });
         const bloomShaderModule = device.createShaderModule({ code: bloomBlurWgsl });
         const sampler = device.createSampler({
           magFilter: 'nearest',
@@ -909,6 +1025,30 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
               binding: 7,
               visibility: GPUShaderStage.FRAGMENT,
               buffer: { type: 'uniform' }
+            },
+            {
+              binding: 8,
+              visibility: GPUShaderStage.FRAGMENT,
+              buffer: { type: 'read-only-storage' }
+            }
+          ]
+        });
+        const torchProjectBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' }
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' }
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' }
             }
           ]
         });
@@ -937,6 +1077,9 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         const bloomPipelineLayout = device.createPipelineLayout({
           bindGroupLayouts: [bloomBindGroupLayout]
         });
+        const torchProjectPipelineLayout = device.createPipelineLayout({
+          bindGroupLayouts: [torchProjectBindGroupLayout]
+        });
         const pipeline = device.createRenderPipeline({
           layout: pipelineLayout,
           vertex: { module: shaderModule, entryPoint: 'vsMain' },
@@ -949,11 +1092,17 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
           fragment: { module: bloomShaderModule, entryPoint: 'fsMain', targets: [{ format: 'rgba8unorm' }] },
           primitive: { topology: 'triangle-list', cullMode: 'none' }
         });
+        const torchProjectPipeline = device.createComputePipeline({
+          layout: torchProjectPipelineLayout,
+          compute: { module: torchProjectModule, entryPoint: 'csMain' }
+        });
 
         this._adapter = adapter;
         this._device = device;
         this._gpuCanvasContext = context;
         this._pipeline = pipeline;
+        this._torchProjectPipeline = torchProjectPipeline;
+        this._torchProjectBindGroupLayout = torchProjectBindGroupLayout;
         this._sampler = sampler;
         this._bloomSampler = bloomSampler;
         this._bloomPipeline = bloomPipeline;
@@ -1066,6 +1215,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         );
 
         const encoder = this._device.createCommandEncoder();
+        this._runTorchProjectPass(encoder);
         this._runBloomPasses(encoder);
         const pass = encoder.beginRenderPass({
           colorAttachments: [
@@ -1156,7 +1306,8 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         bloomDownsample: this._bloomDownsample || getBloomDownsample(),
         bloomSize: this._bloomWidth > 0 && this._bloomHeight > 0 ? `${this._bloomWidth}x${this._bloomHeight}` : null,
         lastTorchFrameAt: this._lastTorchFrameAt || null,
-        lastTorchUploadAt: this._lastTorchUploadAt || null
+        lastTorchUploadAt: this._lastTorchUploadAt || null,
+        lastTorchProjectAt: this._lastTorchProjectAt || null
       };
     }
   };
