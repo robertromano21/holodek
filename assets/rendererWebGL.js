@@ -115,6 +115,22 @@
     return base + pulse + crackle + jitter;
   }
 
+  function isVoxelPrewarmEnabled() {
+    return window.WEBGPU_VOXEL_PREWARM !== false;
+  }
+
+  function getVoxelPrewarmBudgetMs() {
+    const raw = Number(window.WEBGPU_VOXEL_PREWARM_BUDGET_MS);
+    if (!Number.isFinite(raw)) return 4.0;
+    return Math.max(1.0, Math.min(12.0, raw));
+  }
+
+  function getVoxelPrewarmBatchSize() {
+    const raw = Number(window.WEBGPU_VOXEL_PREWARM_BATCH);
+    if (!Number.isFinite(raw)) return 2;
+    return Math.max(1, Math.min(16, Math.floor(raw)));
+  }
+
   function buildAtlas(textures) {
     const keys = Object.keys(textures || {}).filter((name) => {
       if (name === 'floor') return false;
@@ -187,6 +203,10 @@
     haloTex: null,
     flameTex: null,
     customPadCache: {},
+    _voxelPrewarmHandle: null,
+    _voxelPrewarmQueue: [],
+    _voxelPrewarmToken: 0,
+    _voxelPrewarmKey: null,
 
     getCustomTypeFromName(name) {
       const match = /^custom_(.+)_\d+$/.exec(String(name || ''));
@@ -198,6 +218,77 @@
       const type = this.getCustomTypeFromName(tileName);
       if (!type) return null;
       return dungeon.customTiles.find((t) => t && t.type === type) || null;
+    },
+
+    _cancelVoxelPrewarmJob() {
+      const handle = this._voxelPrewarmHandle;
+      if (handle !== null) {
+        if (typeof window.cancelIdleCallback === 'function') {
+          window.cancelIdleCallback(handle);
+        } else {
+          clearTimeout(handle);
+        }
+      }
+      this._voxelPrewarmHandle = null;
+      this._voxelPrewarmQueue = [];
+      this._voxelPrewarmToken++;
+    },
+
+    _scheduleVoxelPrewarm(dungeon, cacheKey) {
+      if (!isVoxelPrewarmEnabled() || !dungeon || !dungeon.cells) return;
+      const names = new Set();
+      for (const cell of Object.values(dungeon.cells)) {
+        if (!cell) continue;
+        const tile = cell.tile;
+        if (typeof tile !== 'string' || !tile) continue;
+        const hasSpec = !!dungeon.tiles?.[tile]?.spriteSpec;
+        if (tile === 'pillar' || tile.startsWith('custom_') || hasSpec) {
+          names.add(tile);
+        }
+      }
+      if (!names.size) return;
+
+      this._cancelVoxelPrewarmJob();
+      this._voxelPrewarmQueue = Array.from(names);
+      this._voxelPrewarmKey = cacheKey || null;
+      const token = this._voxelPrewarmToken;
+
+      const scheduleNext = () => {
+        if (token !== this._voxelPrewarmToken) return;
+        const run = (deadline) => {
+          if (token !== this._voxelPrewarmToken) return;
+          const batch = getVoxelPrewarmBatchSize();
+          const budgetMs = getVoxelPrewarmBudgetMs();
+          const start = performance.now();
+          let built = 0;
+          while (this._voxelPrewarmQueue.length > 0) {
+            const tileName = this._voxelPrewarmQueue.shift();
+            if (!this.voxelMeshes[tileName]) {
+              this.getVoxelMesh(tileName, dungeon);
+            }
+            built++;
+            const elapsed = performance.now() - start;
+            const idleLeft = deadline && typeof deadline.timeRemaining === 'function'
+              ? deadline.timeRemaining()
+              : Infinity;
+            if (built >= batch || elapsed >= budgetMs || idleLeft <= 0.25) break;
+          }
+          if (this._voxelPrewarmQueue.length > 0 && token === this._voxelPrewarmToken) {
+            scheduleNext();
+          } else if (token === this._voxelPrewarmToken) {
+            this._voxelPrewarmHandle = null;
+            this._voxelPrewarmQueue = [];
+          }
+        };
+
+        if (typeof window.requestIdleCallback === 'function') {
+          this._voxelPrewarmHandle = window.requestIdleCallback(run, { timeout: 32 });
+        } else {
+          this._voxelPrewarmHandle = setTimeout(() => run(null), 0);
+        }
+      };
+
+      scheduleNext();
     },
 
     getMaterialPalette(material, basePalette) {
@@ -2612,9 +2703,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         ? Object.keys(atlasCandidate.map || {}).sort().join('|')
         : 'none';
       const paletteKey = JSON.stringify(dungeon.visualStyle?.palette || {});
-      if (this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey) {
+      const needsVoxelReset = (this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
+      if (needsVoxelReset) {
         this.voxelMeshes = {};
         this.voxelPaletteKey = paletteKey;
+        this._cancelVoxelPrewarmJob();
       }
       if (
         this.dungeonKey === key &&
@@ -2757,6 +2850,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       this.atlasReady = atlasReady;
       this.atlasKey = atlasKey;
       this.floorTexReady = floorReady;
+      if (needsVoxelReset) {
+        this._scheduleVoxelPrewarm(dungeon, key);
+      }
     },
 
     getSpriteTexture(img) {
