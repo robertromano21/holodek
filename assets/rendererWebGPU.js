@@ -15,6 +15,12 @@
   if (typeof window.WEBGPU_POST_TORCH_MASK === 'undefined') {
     window.WEBGPU_POST_TORCH_MASK = false;
   }
+  if (typeof window.WEBGPU_GPU_HALO_FLAME === 'undefined') {
+    window.WEBGPU_GPU_HALO_FLAME = false;
+  }
+  if (typeof window.WEBGPU_GPU_HALO_FLAME_INTENSITY === 'undefined') {
+    window.WEBGPU_GPU_HALO_FLAME_INTENSITY = 1.0;
+  }
 
   const DISPLAY_W = 640;
   const DISPLAY_H = 480;
@@ -23,6 +29,7 @@
   const LOW_RES_H = Math.max(1, Math.floor(DISPLAY_H / PIXEL_SCALE));
   const TORCH_BUFFER_STRIDE_FLOATS = 8; // vec4 pos/radius + vec4 intensity/color
   const RECT_BUFFER_STRIDE_FLOATS = 4; // vec4 x0,y0,x1,y1
+  const TORCH_SPRITE_BUFFER_STRIDE_FLOATS = 8; // vec4 screen/depth + vec4 view/flicker/facing/pad
   const TORCH_LIGHT_DEFAULT_COLOR = { r: 255, g: 190, b: 130 };
 
   function getTorchBufferCapacity() {
@@ -78,6 +85,16 @@
   function getBloomWarmBoost() {
     const raw = Number(window.WEBGPU_BLOOM_WARM_BOOST);
     if (!Number.isFinite(raw)) return 0.18;
+    return Math.max(0.0, Math.min(2.0, raw));
+  }
+
+  function isGpuHaloFlameEnabled() {
+    return window.WEBGPU_GPU_HALO_FLAME === true;
+  }
+
+  function getGpuHaloFlameIntensity() {
+    const raw = Number(window.WEBGPU_GPU_HALO_FLAME_INTENSITY);
+    if (!Number.isFinite(raw)) return 1.0;
     return Math.max(0.0, Math.min(2.0, raw));
   }
 
@@ -308,6 +325,143 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 `;
 
+  const haloFlameWgsl = `
+const TORCH_FLAME_RATIO : f32 = 0.4;
+const TORCH_HALO_DEPTH_PUSH : f32 = 0.00035;
+const TORCH_FLAME_DEPTH_BIAS : f32 = 0.00025;
+
+struct HaloParams {
+  resolution : vec2<f32>,
+  timeSec : f32,
+  passKind : f32,  // 0 = flame, 1 = halo
+  intensity : f32,
+  _pad0 : f32,
+  _pad1 : f32,
+  _pad2 : f32,
+};
+
+struct TorchSprite {
+  screenDepth : vec4<f32>, // screenX, rawStartY, rawEndY, depth
+  params : vec4<f32>,      // viewDist, flickerSeed, wallFacing(0/1), pad
+};
+
+struct VsOut {
+  @builtin(position) pos : vec4<f32>,
+  @location(0) uv : vec2<f32>,
+  @location(1) flicker : f32,
+  @location(2) wallFacing : f32,
+  @location(3) viewDist : f32,
+};
+
+@group(0) @binding(0) var<uniform> halo : HaloParams;
+@group(0) @binding(1) var<storage, read> torchSprites : array<TorchSprite>;
+
+fn torchFlicker(seed : f32, timeSec : f32) -> f32 {
+  let t = timeSec * 0.6;
+  let speedMod = 0.65
+    + 0.25 * sin(t * (0.35 + seed * 0.12) + seed * 5.1)
+    + 0.1 * sin(t * (0.07 + seed * 0.03) + seed * 17.3);
+  let tt = t * speedMod;
+  let base = 0.72 + 0.08 * sin(tt * (1.1 + seed * 0.4) + seed * 9.7);
+  let pulse = pow(max(0.0, sin(tt * (3.6 + seed * 1.4) + seed * 13.3)), 2.0) * 0.22;
+  let crackle = pow(max(0.0, sin(tt * (9.5 + seed * 3.1) + seed * 27.1)), 3.0) * 0.12;
+  let jitter = sin(tt * (17.0 + seed * 5.7) + seed * 41.0) * 0.04;
+  return base + pulse + crackle + jitter;
+}
+
+@vertex
+fn vsMain(@builtin(vertex_index) vertexIndex : u32, @builtin(instance_index) instanceIndex : u32) -> VsOut {
+  let corners = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0,  1.0),
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0,  1.0),
+    vec2<f32>( 1.0, -1.0)
+  );
+  let uvs = array<vec2<f32>, 6>(
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(1.0, 0.0),
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(0.0, 1.0),
+    vec2<f32>(1.0, 0.0),
+    vec2<f32>(1.0, 1.0)
+  );
+
+  let spr = torchSprites[instanceIndex];
+  let screenX = spr.screenDepth.x;
+  let rawStartY = spr.screenDepth.y;
+  let rawEndY = spr.screenDepth.z;
+  let baseDepth = spr.screenDepth.w;
+  let viewDist = spr.params.x;
+  let flickerSeed = spr.params.y;
+  let wallFacing = spr.params.z;
+
+  let rawHeight = max(1.0, rawEndY - rawStartY);
+  let flicker = torchFlicker(flickerSeed, halo.timeSec);
+  let flameCenterY = rawStartY + rawHeight * TORCH_FLAME_RATIO;
+
+  var centerY = flameCenterY;
+  var halfW : f32;
+  var halfH : f32;
+  var depth = baseDepth;
+  if (halo.passKind > 0.5) {
+    let glowRadius = max(4.0, floor(rawHeight * (0.55 + 0.2 * flicker)));
+    let haloSize = min(600.0, glowRadius * 2.0);
+    halfW = haloSize * 0.5;
+    halfH = haloSize * 0.5;
+    depth = min(1.0, baseDepth + TORCH_HALO_DEPTH_PUSH);
+  } else {
+    let flameH = max(3.0, floor(rawHeight * (0.22 + 0.1 * flicker)));
+    let flameW = max(2.0, floor(flameH * 0.55));
+    let flickerShift = round((flicker - 0.8) * 2.0);
+    let flameBottom = flameCenterY + flickerShift;
+    let flameTop = flameBottom - flameH;
+    centerY = 0.5 * (flameBottom + flameTop);
+    halfW = flameW * 0.5;
+    halfH = flameH * 0.5;
+    depth = max(0.0, baseDepth - TORCH_FLAME_DEPTH_BIAS);
+  }
+
+  let corner = corners[vertexIndex];
+  let px = screenX + corner.x * halfW;
+  let py = centerY + corner.y * halfH;
+  let ndcX = (px / max(1.0, halo.resolution.x)) * 2.0 - 1.0;
+  let ndcY = 1.0 - (py / max(1.0, halo.resolution.y)) * 2.0;
+
+  var out : VsOut;
+  out.pos = vec4<f32>(ndcX, ndcY, depth * 2.0 - 1.0, 1.0);
+  out.uv = uvs[vertexIndex];
+  out.flicker = flicker;
+  out.wallFacing = wallFacing;
+  out.viewDist = viewDist;
+  return out;
+}
+
+@fragment
+fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
+  if (halo.passKind > 0.5) {
+    let p = in.uv * 2.0 - vec2<f32>(1.0, 1.0);
+    let dist = length(p);
+    let soft = max(0.0, 1.0 - dist);
+    let glow = soft * soft * (0.65 + 0.35 * soft);
+    let wallScale = mix(0.92, 1.0, clamp(in.wallFacing, 0.0, 1.0));
+    let depthScale = clamp(1.3 - in.viewDist * 0.025, 0.45, 1.0);
+    let alpha = clamp((0.22 + 0.25 * in.flicker) * glow * wallScale * depthScale * halo.intensity, 0.0, 1.0);
+    return vec4<f32>(vec3<f32>(1.0, 0.9, 0.7) * alpha, alpha);
+  }
+
+  let x = (in.uv.x - 0.5) / 0.52;
+  let y = in.uv.y;
+  let core = 1.0 - smoothstep(0.0, 1.0, length(vec2<f32>(x * 1.15, (y - 0.55) / 0.6)));
+  let tip = 1.0 - smoothstep(0.0, 1.0, length(vec2<f32>(x * 1.7, (y - 0.08) / 0.36)));
+  let shape = max(core, tip * 0.95);
+  let alpha = clamp(shape * (0.85 + 0.15 * in.flicker) * halo.intensity, 0.0, 1.0);
+  let warm = mix(vec3<f32>(1.0, 0.45, 0.08), vec3<f32>(1.0, 0.94, 0.78), clamp(1.0 - y, 0.0, 1.0));
+  return vec4<f32>(warm * alpha, alpha);
+}
+`;
+
   const bloomBlurWgsl = `
 struct VsOut {
   @builtin(position) pos : vec4<f32>,
@@ -407,6 +561,9 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _pipeline: null,
     _torchProjectPipeline: null,
     _torchProjectBindGroupLayout: null,
+    _haloFlamePipelineAlpha: null,
+    _haloFlamePipelineAdd: null,
+    _haloFlameBindGroupLayout: null,
     _sampler: null,
     _bloomSampler: null,
     _bloomPipeline: null,
@@ -420,6 +577,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _bindGroupLayout: null,
     _bindGroup: null,
     _torchProjectBindGroup: null,
+    _haloFlameBindGroup: null,
     _bloomBindGroupH: null,
     _bloomBindGroupV: null,
     _frameWidth: 0,
@@ -452,10 +610,17 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _rectCount: 0,
     _rectDataDirty: false,
     _rectStorageBuffer: null,
+    _torchSpriteCpuData: new Float32Array(getTorchBufferCapacity() * TORCH_SPRITE_BUFFER_STRIDE_FLOATS),
+    _torchSpriteCount: 0,
+    _torchSpriteDataDirty: false,
+    _torchSpriteStorageBuffer: null,
+    _haloParamsBuffer: null,
+    _haloParamArrayBuffer: new ArrayBuffer(32),
     _torchParamArrayBuffer: new ArrayBuffer(64),
     _lastTorchFrameAt: 0,
     _lastTorchUploadAt: 0,
     _lastTorchProjectAt: 0,
+    _lastHaloFlameDrawAt: 0,
     _lastTorchBlend: 0,
     _lastSpriteVoxelBlend: 0,
     _lastRectCountUploaded: 0,
@@ -509,6 +674,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       this._bloomPongView = null;
       this._bindGroup = null;
       this._torchProjectBindGroup = null;
+      this._haloFlameBindGroup = null;
       this._bloomBindGroupH = null;
       this._bloomBindGroupV = null;
       this._frameWidth = 0;
@@ -525,8 +691,11 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       if (requiredCapacity !== this._torchCapacity) {
         this._torchCapacity = requiredCapacity;
         this._torchCpuData = new Float32Array(this._torchCapacity * TORCH_BUFFER_STRIDE_FLOATS);
+        this._torchSpriteCpuData = new Float32Array(this._torchCapacity * TORCH_SPRITE_BUFFER_STRIDE_FLOATS);
         this._torchCount = 0;
+        this._torchSpriteCount = 0;
         this._torchDataDirty = true;
+        this._torchSpriteDataDirty = true;
         this._bindGroup = null;
         if (this._torchStorageBuffer) {
           this._torchStorageBuffer.destroy();
@@ -537,6 +706,11 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
           this._projectedTorchBuffer = null;
         }
         this._torchProjectBindGroup = null;
+        if (this._torchSpriteStorageBuffer) {
+          this._torchSpriteStorageBuffer.destroy();
+          this._torchSpriteStorageBuffer = null;
+        }
+        this._haloFlameBindGroup = null;
       }
       if (requiredRectCapacity !== this._rectCapacity) {
         this._rectCapacity = requiredRectCapacity;
@@ -573,6 +747,14 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         this._bindGroup = null;
         this._torchProjectBindGroup = null;
       }
+      if (!this._torchSpriteStorageBuffer) {
+        this._torchSpriteStorageBuffer = this._device.createBuffer({
+          size: this._torchCapacity * TORCH_SPRITE_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        this._torchSpriteDataDirty = true;
+        this._haloFlameBindGroup = null;
+      }
       if (!this._rectStorageBuffer) {
         this._rectStorageBuffer = this._device.createBuffer({
           size: this._rectCapacity * RECT_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
@@ -595,6 +777,13 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
         });
         this._bindGroup = null;
+      }
+      if (!this._haloParamsBuffer) {
+        this._haloParamsBuffer = this._device.createBuffer({
+          size: 32,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        this._haloFlameBindGroup = null;
       }
       return true;
     },
@@ -689,7 +878,14 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
 
     _ensureFrameResources() {
       const src = this._sourceCanvas;
-      if (!src || !this._device || !this._bindGroupLayout || !this._torchProjectBindGroupLayout || !this._ensureTorchBuffers()) return false;
+      if (
+        !src ||
+        !this._device ||
+        !this._bindGroupLayout ||
+        !this._torchProjectBindGroupLayout ||
+        !this._haloFlameBindGroupLayout ||
+        !this._ensureTorchBuffers()
+      ) return false;
       const w = Math.max(1, src.width | 0);
       const h = Math.max(1, src.height | 0);
       const sizeChanged = !(w === this._frameWidth && h === this._frameHeight && this._frameTexture && this._frameTextureView);
@@ -737,11 +933,26 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
           ]
         });
       }
+      if (!this._haloFlameBindGroup) {
+        this._haloFlameBindGroup = this._device.createBindGroup({
+          layout: this._haloFlameBindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this._haloParamsBuffer } },
+            { binding: 1, resource: { buffer: this._torchSpriteStorageBuffer } }
+          ]
+        });
+      }
       return true;
     },
 
     _uploadTorchData() {
-      if (!this._device || !this._torchParamsBuffer || !this._torchStorageBuffer || !this._rectStorageBuffer) return;
+      if (
+        !this._device ||
+        !this._torchParamsBuffer ||
+        !this._torchStorageBuffer ||
+        !this._rectStorageBuffer ||
+        !this._torchSpriteStorageBuffer
+      ) return;
 
       const frame = this._torchParamsFrame || {};
       const blend = this.shouldApplyPostTorchOverlay() ? getTorchBlend() : 0.0;
@@ -778,6 +989,16 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         const zeros = new Float32Array(RECT_BUFFER_STRIDE_FLOATS);
         this._device.queue.writeBuffer(this._rectStorageBuffer, 0, zeros);
         this._rectDataDirty = false;
+      }
+
+      if (this._torchSpriteDataDirty && this._torchSpriteCount > 0) {
+        const spriteBytes = this._torchSpriteCount * TORCH_SPRITE_BUFFER_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
+        this._device.queue.writeBuffer(this._torchSpriteStorageBuffer, 0, this._torchSpriteCpuData.buffer, 0, spriteBytes);
+        this._torchSpriteDataDirty = false;
+      } else if (this._torchSpriteDataDirty && this._torchSpriteCount === 0) {
+        const zeros = new Float32Array(TORCH_SPRITE_BUFFER_STRIDE_FLOATS);
+        this._device.queue.writeBuffer(this._torchSpriteStorageBuffer, 0, zeros);
+        this._torchSpriteDataDirty = false;
       }
 
       if (
@@ -914,6 +1135,37 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       this._lastTorchProjectAt = Date.now();
     },
 
+    _writeHaloFlameParams(passKind) {
+      if (!this._device || !this._haloParamsBuffer) return;
+      const dv = new DataView(this._haloParamArrayBuffer);
+      dv.setFloat32(0, Math.max(1, this._frameWidth || LOW_RES_W), true);
+      dv.setFloat32(4, Math.max(1, this._frameHeight || LOW_RES_H), true);
+      dv.setFloat32(8, performance.now() * 0.001, true);
+      dv.setFloat32(12, passKind, true);
+      dv.setFloat32(16, getGpuHaloFlameIntensity(), true);
+      dv.setFloat32(20, 0.0, true);
+      dv.setFloat32(24, 0.0, true);
+      dv.setFloat32(28, 0.0, true);
+      this._device.queue.writeBuffer(this._haloParamsBuffer, 0, this._haloParamArrayBuffer);
+    },
+
+    _runHaloFlamePass(pass) {
+      if (!pass || !this._haloFlameBindGroup || !this.shouldDriveHaloFlame()) return;
+      if (this._torchSpriteCount < 1) return;
+      if (!this._haloFlamePipelineAlpha || !this._haloFlamePipelineAdd) return;
+
+      this._writeHaloFlameParams(0.0);
+      pass.setPipeline(this._haloFlamePipelineAlpha);
+      pass.setBindGroup(0, this._haloFlameBindGroup);
+      pass.draw(6, this._torchSpriteCount, 0, 0);
+
+      this._writeHaloFlameParams(1.0);
+      pass.setPipeline(this._haloFlamePipelineAdd);
+      pass.setBindGroup(0, this._haloFlameBindGroup);
+      pass.draw(6, this._torchSpriteCount, 0, 0);
+      this._lastHaloFlameDrawAt = Date.now();
+    },
+
     async _upgradeToWebGPU() {
       if (!navigator.gpu || window.forceWebGPURenderer === false) {
         this.mode = 'legacy';
@@ -969,6 +1221,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
 
         const shaderModule = device.createShaderModule({ code: fullscreenWgsl });
         const torchProjectModule = device.createShaderModule({ code: torchProjectWgsl });
+        const haloFlameModule = device.createShaderModule({ code: haloFlameWgsl });
         const bloomShaderModule = device.createShaderModule({ code: bloomBlurWgsl });
         const sampler = device.createSampler({
           magFilter: 'nearest',
@@ -1052,6 +1305,20 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
             }
           ]
         });
+        const haloFlameBindGroupLayout = device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+              buffer: { type: 'uniform' }
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+              buffer: { type: 'read-only-storage' }
+            }
+          ]
+        });
         const bloomBindGroupLayout = device.createBindGroupLayout({
           entries: [
             {
@@ -1080,6 +1347,9 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         const torchProjectPipelineLayout = device.createPipelineLayout({
           bindGroupLayouts: [torchProjectBindGroupLayout]
         });
+        const haloFlamePipelineLayout = device.createPipelineLayout({
+          bindGroupLayouts: [haloFlameBindGroupLayout]
+        });
         const pipeline = device.createRenderPipeline({
           layout: pipelineLayout,
           vertex: { module: shaderModule, entryPoint: 'vsMain' },
@@ -1096,6 +1366,38 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
           layout: torchProjectPipelineLayout,
           compute: { module: torchProjectModule, entryPoint: 'csMain' }
         });
+        const haloFlamePipelineAlpha = device.createRenderPipeline({
+          layout: haloFlamePipelineLayout,
+          vertex: { module: haloFlameModule, entryPoint: 'vsMain' },
+          fragment: {
+            module: haloFlameModule,
+            entryPoint: 'fsMain',
+            targets: [{
+              format: presentationFormat,
+              blend: {
+                color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }
+              }
+            }]
+          },
+          primitive: { topology: 'triangle-list', cullMode: 'none' }
+        });
+        const haloFlamePipelineAdd = device.createRenderPipeline({
+          layout: haloFlamePipelineLayout,
+          vertex: { module: haloFlameModule, entryPoint: 'vsMain' },
+          fragment: {
+            module: haloFlameModule,
+            entryPoint: 'fsMain',
+            targets: [{
+              format: presentationFormat,
+              blend: {
+                color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
+                alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }
+              }
+            }]
+          },
+          primitive: { topology: 'triangle-list', cullMode: 'none' }
+        });
 
         this._adapter = adapter;
         this._device = device;
@@ -1103,6 +1405,9 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         this._pipeline = pipeline;
         this._torchProjectPipeline = torchProjectPipeline;
         this._torchProjectBindGroupLayout = torchProjectBindGroupLayout;
+        this._haloFlamePipelineAlpha = haloFlamePipelineAlpha;
+        this._haloFlamePipelineAdd = haloFlamePipelineAdd;
+        this._haloFlameBindGroupLayout = haloFlameBindGroupLayout;
         this._sampler = sampler;
         this._bloomSampler = bloomSampler;
         this._bloomPipeline = bloomPipeline;
@@ -1152,6 +1457,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     updateTorchFrame(frame) {
       const lights = Array.isArray(frame?.lights) ? frame.lights : [];
       const rects = Array.isArray(frame?.spriteVoxelRects) ? frame.spriteVoxelRects : [];
+      const torchSprites = Array.isArray(frame?.torchSprites) ? frame.torchSprites : [];
       const torchColor = frame?.torchColor || TORCH_LIGHT_DEFAULT_COLOR;
       const r = (Number.isFinite(torchColor.r) ? torchColor.r : TORCH_LIGHT_DEFAULT_COLOR.r) / 255;
       const g = (Number.isFinite(torchColor.g) ? torchColor.g : TORCH_LIGHT_DEFAULT_COLOR.g) / 255;
@@ -1182,8 +1488,24 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         rectOut[base + 2] = Number.isFinite(rect.x1) ? rect.x1 : 0.0;
         rectOut[base + 3] = Number.isFinite(rect.y1) ? rect.y1 : 0.0;
       }
+      const spriteCount = Math.min(torchSprites.length, this._torchCapacity);
+      this._torchSpriteCount = spriteCount;
+      const spriteOut = this._torchSpriteCpuData;
+      for (let i = 0; i < spriteCount; i++) {
+        const spr = torchSprites[i] || {};
+        const base = i * TORCH_SPRITE_BUFFER_STRIDE_FLOATS;
+        spriteOut[base] = Number.isFinite(spr.screenX) ? spr.screenX : 0.0;
+        spriteOut[base + 1] = Number.isFinite(spr.rawDrawStartY) ? spr.rawDrawStartY : 0.0;
+        spriteOut[base + 2] = Number.isFinite(spr.rawDrawEndY) ? spr.rawDrawEndY : 0.0;
+        spriteOut[base + 3] = Number.isFinite(spr.depth) ? spr.depth : 1.0;
+        spriteOut[base + 4] = Number.isFinite(spr.viewDist) ? spr.viewDist : 0.0;
+        spriteOut[base + 5] = Number.isFinite(spr.flickerSeed) ? spr.flickerSeed : 0.0;
+        spriteOut[base + 6] = spr.wallFacing ? 1.0 : 0.0;
+        spriteOut[base + 7] = 0.0;
+      }
       this._torchDataDirty = true;
       this._rectDataDirty = true;
+      this._torchSpriteDataDirty = true;
       this._torchParamsDirty = true;
       this._torchParamsFrame = {
         width: frame?.width,
@@ -1230,6 +1552,7 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         pass.setPipeline(this._pipeline);
         pass.setBindGroup(0, this._bindGroup);
         pass.draw(6, 1, 0, 0);
+        this._runHaloFlamePass(pass);
         pass.end();
         this._device.queue.submit([encoder.finish()]);
 
@@ -1274,6 +1597,10 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       return this.shouldDriveSpriteTorch() && window.WEBGPU_DRIVE_VOXEL_TORCH !== false;
     },
 
+    shouldDriveHaloFlame() {
+      return this.mode === 'webgpu' && isGpuHaloFlameEnabled();
+    },
+
     shouldApplyPostTorchOverlay() {
       return this.mode === 'webgpu'
         && this.shouldDriveSpriteTorch()
@@ -1295,10 +1622,12 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         torchBlend: this._lastTorchBlend,
         driveSpriteTorch: this.shouldDriveSpriteTorch(),
         driveVoxelTorch: this.shouldDriveVoxelTorch(),
+        driveHaloFlame: this.shouldDriveHaloFlame(),
         postTorchOverlay: this.shouldApplyPostTorchOverlay(),
         spriteVoxelTorchBlend: this._lastSpriteVoxelBlend,
         rectBufferCapacity: this._rectCapacity,
         rectCount: this._rectCount,
+        torchSpriteCount: this._torchSpriteCount,
         bloomEnabled: isBloomEnabled(),
         bloomIntensity: this._lastBloomIntensity,
         bloomThreshold: this._lastBloomThreshold,
@@ -1307,7 +1636,9 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         bloomSize: this._bloomWidth > 0 && this._bloomHeight > 0 ? `${this._bloomWidth}x${this._bloomHeight}` : null,
         lastTorchFrameAt: this._lastTorchFrameAt || null,
         lastTorchUploadAt: this._lastTorchUploadAt || null,
-        lastTorchProjectAt: this._lastTorchProjectAt || null
+        lastTorchProjectAt: this._lastTorchProjectAt || null,
+        lastHaloFlameDrawAt: this._lastHaloFlameDrawAt || null,
+        gpuHaloFlameIntensity: getGpuHaloFlameIntensity()
       };
     }
   };

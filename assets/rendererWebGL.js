@@ -3200,6 +3200,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       );
       const collectSpriteTorchRectsForWebGPU = driveSpriteTorchFromWebGPU && applyPostTorchOverlay;
       const collectVoxelTorchRectsForWebGPU = driveVoxelTorchFromWebGPU && applyPostTorchOverlay;
+      const driveHaloFlameFromWebGPU = !!(
+        webgpuRenderer &&
+        typeof webgpuRenderer.shouldDriveHaloFlame === 'function' &&
+        webgpuRenderer.shouldDriveHaloFlame()
+      );
       const voxelGlTorchFallbackMax = driveVoxelTorchFromWebGPU
         ? (Number.isFinite(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_MAX)
           ? Math.max(0, Math.min(MAX_TORCH_LIGHTS, Math.floor(window.WEBGPU_VOXEL_GL_TORCH_FALLBACK_MAX)))
@@ -3497,6 +3502,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const sprites = [];
       const voxelInstances = [];
       const webgpuSpriteVoxelRects = [];
+      const webgpuTorchSprites = [];
       const pushSpriteVoxelRect = (x0, y0, x1, y1) => {
         if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return;
         const left = Math.max(0, Math.min(width, Math.min(x0, x1)));
@@ -3705,6 +3711,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             flickerSeed,
             torchFacing
           });
+          if (isTorch) {
+            webgpuTorchSprites.push({
+              screenX: spriteScreenX,
+              rawDrawStartY,
+              rawDrawEndY,
+              depth: Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / depthFarDepth)),
+              viewDist: safeTransformY,
+              flickerSeed,
+              wallFacing: !!torchFacing
+            });
+          }
           if (collectSpriteTorchRectsForWebGPU && !isTorch) {
             const insetX = Math.max(1, (drawRight - drawLeft) * 0.18);
             const insetY = Math.max(1, (drawEndY - drawStartY) * 0.12);
@@ -3732,7 +3749,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           eyeZ,
           torchColor: TORCH_LIGHT_COLOR,
           lights: torchLights,
-          spriteVoxelRects: webgpuSpriteVoxelRects
+          spriteVoxelRects: webgpuSpriteVoxelRects,
+          torchSprites: webgpuTorchSprites
         });
       }
 
@@ -3989,6 +4007,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
 
         if (spr.type !== 'torch') continue;
+        if (driveHaloFlameFromWebGPU) continue;
 
         const flicker = torchFlicker(spr.flickerSeed, now);
         // Use the same flame sizing math as the canvas pass so it doesn't look huge at distance.
