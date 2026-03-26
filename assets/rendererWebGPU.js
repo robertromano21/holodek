@@ -21,6 +21,9 @@
   if (typeof window.WEBGPU_GPU_HALO_FLAME_INTENSITY === 'undefined') {
     window.WEBGPU_GPU_HALO_FLAME_INTENSITY = 1.0;
   }
+  if (typeof window.WEBGPU_GPU_VOXEL_MESHING === 'undefined') {
+    window.WEBGPU_GPU_VOXEL_MESHING = true;
+  }
 
   const DISPLAY_W = 640;
   const DISPLAY_H = 480;
@@ -30,6 +33,7 @@
   const TORCH_BUFFER_STRIDE_FLOATS = 8; // vec4 pos/radius + vec4 intensity/color
   const RECT_BUFFER_STRIDE_FLOATS = 4; // vec4 x0,y0,x1,y1
   const TORCH_SPRITE_BUFFER_STRIDE_FLOATS = 8; // vec4 screen/depth + vec4 view/flicker/facing/pad
+  const VOXEL_VERTEX_STRIDE_FLOATS = 9; // pos3 + norm3 + color3
   const TORCH_LIGHT_DEFAULT_COLOR = { r: 255, g: 190, b: 130 };
 
   function getTorchBufferCapacity() {
@@ -96,6 +100,10 @@
     const raw = Number(window.WEBGPU_GPU_HALO_FLAME_INTENSITY);
     if (!Number.isFinite(raw)) return 1.0;
     return Math.max(0.0, Math.min(2.0, raw));
+  }
+
+  function isGpuVoxelMeshingEnabled() {
+    return window.WEBGPU_GPU_VOXEL_MESHING !== false;
   }
 
   const fullscreenWgsl = `
@@ -546,6 +554,175 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
 }
 `;
 
+  const voxelSimpleMeshWgsl = `
+struct MeshParams {
+  size : u32,
+  maxFaces : u32,
+  seamPad : f32,
+  _pad0 : f32,
+  color : vec4<f32>,
+};
+
+struct FaceCounter {
+  count : atomic<u32>,
+};
+
+@group(0) @binding(0) var<uniform> params : MeshParams;
+@group(0) @binding(1) var<storage, read> voxels : array<u32>;
+@group(0) @binding(2) var<storage, read_write> vertexOut : array<f32>;
+@group(0) @binding(3) var<storage, read_write> indexOut : array<u32>;
+@group(0) @binding(4) var<storage, read_write> faceCounter : FaceCounter;
+
+fn voxelIndex(x : i32, y : i32, z : i32, size : i32) -> u32 {
+  return u32(x + y * size + z * size * size);
+}
+
+fn getVoxel(x : i32, y : i32, z : i32, size : i32) -> u32 {
+  if (x < 0 || y < 0 || z < 0 || x >= size || y >= size || z >= size) {
+    return 0u;
+  }
+  return voxels[voxelIndex(x, y, z, size)];
+}
+
+fn applySeam(coord : f32, axisIsNormal : bool, sizeF : f32) -> f32 {
+  if (axisIsNormal || params.seamPad <= 0.000001) {
+    return coord;
+  }
+  let isIntegral = abs(coord - floor(coord)) <= 0.000001;
+  let delta = select(params.seamPad, -params.seamPad, isIntegral);
+  return clamp(coord + delta, 0.0, sizeF);
+}
+
+fn writeVertex(vertexIndex : u32, pos : vec3<f32>, normal : vec3<f32>, sizeF : f32) {
+  let base = vertexIndex * 9u;
+  vertexOut[base + 0u] = pos.x / sizeF;
+  vertexOut[base + 1u] = pos.y / sizeF;
+  vertexOut[base + 2u] = pos.z / sizeF;
+  vertexOut[base + 3u] = normal.x;
+  vertexOut[base + 4u] = normal.y;
+  vertexOut[base + 5u] = normal.z;
+  vertexOut[base + 6u] = params.color.x;
+  vertexOut[base + 7u] = params.color.y;
+  vertexOut[base + 8u] = params.color.z;
+}
+
+fn emitFace(x : i32, y : i32, z : i32, dir : u32, sizeF : f32) {
+  let faceIndex = atomicAdd(&faceCounter.count, 1u);
+  if (faceIndex >= params.maxFaces) {
+    return;
+  }
+
+  var p0 = vec3<f32>(0.0);
+  var p1 = vec3<f32>(0.0);
+  var p2 = vec3<f32>(0.0);
+  var p3 = vec3<f32>(0.0);
+  var normal = vec3<f32>(0.0);
+
+  if (dir == 0u) {
+    normal = vec3<f32>(1.0, 0.0, 0.0);
+    p0 = vec3<f32>(f32(x + 1), f32(y), f32(z));
+    p1 = vec3<f32>(f32(x + 1), f32(y + 1), f32(z));
+    p2 = vec3<f32>(f32(x + 1), f32(y + 1), f32(z + 1));
+    p3 = vec3<f32>(f32(x + 1), f32(y), f32(z + 1));
+  } else if (dir == 1u) {
+    normal = vec3<f32>(-1.0, 0.0, 0.0);
+    p0 = vec3<f32>(f32(x), f32(y), f32(z + 1));
+    p1 = vec3<f32>(f32(x), f32(y + 1), f32(z + 1));
+    p2 = vec3<f32>(f32(x), f32(y + 1), f32(z));
+    p3 = vec3<f32>(f32(x), f32(y), f32(z));
+  } else if (dir == 2u) {
+    normal = vec3<f32>(0.0, 1.0, 0.0);
+    p0 = vec3<f32>(f32(x), f32(y + 1), f32(z));
+    p1 = vec3<f32>(f32(x + 1), f32(y + 1), f32(z));
+    p2 = vec3<f32>(f32(x + 1), f32(y + 1), f32(z + 1));
+    p3 = vec3<f32>(f32(x), f32(y + 1), f32(z + 1));
+  } else if (dir == 3u) {
+    normal = vec3<f32>(0.0, -1.0, 0.0);
+    p0 = vec3<f32>(f32(x), f32(y), f32(z + 1));
+    p1 = vec3<f32>(f32(x + 1), f32(y), f32(z + 1));
+    p2 = vec3<f32>(f32(x + 1), f32(y), f32(z));
+    p3 = vec3<f32>(f32(x), f32(y), f32(z));
+  } else if (dir == 4u) {
+    normal = vec3<f32>(0.0, 0.0, 1.0);
+    p0 = vec3<f32>(f32(x), f32(y), f32(z + 1));
+    p1 = vec3<f32>(f32(x + 1), f32(y), f32(z + 1));
+    p2 = vec3<f32>(f32(x + 1), f32(y + 1), f32(z + 1));
+    p3 = vec3<f32>(f32(x), f32(y + 1), f32(z + 1));
+  } else {
+    normal = vec3<f32>(0.0, 0.0, -1.0);
+    p0 = vec3<f32>(f32(x), f32(y + 1), f32(z));
+    p1 = vec3<f32>(f32(x + 1), f32(y + 1), f32(z));
+    p2 = vec3<f32>(f32(x + 1), f32(y), f32(z));
+    p3 = vec3<f32>(f32(x), f32(y), f32(z));
+  }
+
+  let axisX = abs(normal.x) > 0.5;
+  let axisY = abs(normal.y) > 0.5;
+  let axisZ = abs(normal.z) > 0.5;
+  p0 = vec3<f32>(
+    applySeam(p0.x, axisX, sizeF),
+    applySeam(p0.y, axisY, sizeF),
+    applySeam(p0.z, axisZ, sizeF)
+  );
+  p1 = vec3<f32>(
+    applySeam(p1.x, axisX, sizeF),
+    applySeam(p1.y, axisY, sizeF),
+    applySeam(p1.z, axisZ, sizeF)
+  );
+  p2 = vec3<f32>(
+    applySeam(p2.x, axisX, sizeF),
+    applySeam(p2.y, axisY, sizeF),
+    applySeam(p2.z, axisZ, sizeF)
+  );
+  p3 = vec3<f32>(
+    applySeam(p3.x, axisX, sizeF),
+    applySeam(p3.y, axisY, sizeF),
+    applySeam(p3.z, axisZ, sizeF)
+  );
+
+  let baseVertex = faceIndex * 4u;
+  let baseIndex = faceIndex * 6u;
+  writeVertex(baseVertex + 0u, p0, normal, sizeF);
+  writeVertex(baseVertex + 1u, p1, normal, sizeF);
+  writeVertex(baseVertex + 2u, p2, normal, sizeF);
+  writeVertex(baseVertex + 3u, p3, normal, sizeF);
+
+  indexOut[baseIndex + 0u] = baseVertex + 0u;
+  indexOut[baseIndex + 1u] = baseVertex + 1u;
+  indexOut[baseIndex + 2u] = baseVertex + 2u;
+  indexOut[baseIndex + 3u] = baseVertex + 0u;
+  indexOut[baseIndex + 4u] = baseVertex + 2u;
+  indexOut[baseIndex + 5u] = baseVertex + 3u;
+}
+
+@compute @workgroup_size(64)
+fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let size = i32(params.size);
+  let voxelCount = params.size * params.size * params.size;
+  if (gid.x >= voxelCount || size <= 0) {
+    return;
+  }
+  if (voxels[gid.x] == 0u) {
+    return;
+  }
+
+  let layer = size * size;
+  let linear = i32(gid.x);
+  let z = linear / layer;
+  let rem = linear - z * layer;
+  let y = rem / size;
+  let x = rem - y * size;
+  let sizeF = f32(size);
+
+  if (getVoxel(x + 1, y, z, size) == 0u) { emitFace(x, y, z, 0u, sizeF); }
+  if (getVoxel(x - 1, y, z, size) == 0u) { emitFace(x, y, z, 1u, sizeF); }
+  if (getVoxel(x, y + 1, z, size) == 0u) { emitFace(x, y, z, 2u, sizeF); }
+  if (getVoxel(x, y - 1, z, size) == 0u) { emitFace(x, y, z, 3u, sizeF); }
+  if (getVoxel(x, y, z + 1, size) == 0u) { emitFace(x, y, z, 4u, sizeF); }
+  if (getVoxel(x, y, z - 1, size) == 0u) { emitFace(x, y, z, 5u, sizeF); }
+}
+`;
+
   const renderer = {
     gl: null,
     canvas: null,
@@ -627,6 +804,12 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     _lastBloomIntensity: 0,
     _lastBloomThreshold: 0,
     _lastBloomEnabled: false,
+    _voxelMeshingPipeline: null,
+    _voxelMeshingBindGroupLayout: null,
+    _voxelMeshingInitTried: false,
+    _voxelMeshingUnavailableReason: '',
+    _voxelMeshingJobs: new Map(),
+    _lastVoxelMeshBuildAt: 0,
 
     _ensureHiddenHost() {
       if (this._hiddenHost) return this._hiddenHost;
@@ -788,12 +971,340 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
       return true;
     },
 
+    clearVoxelMeshCache() {
+      this._voxelMeshingJobs.clear();
+    },
+
+    _pruneVoxelMeshCache(maxEntries = 256) {
+      if (this._voxelMeshingJobs.size <= maxEntries) return;
+      const removable = [];
+      for (const [key, job] of this._voxelMeshingJobs.entries()) {
+        if (job && job.status === 'pending') continue;
+        removable.push({
+          key,
+          updatedAt: Number.isFinite(job?.updatedAt) ? job.updatedAt : 0
+        });
+      }
+      removable.sort((a, b) => a.updatedAt - b.updatedAt);
+      while (this._voxelMeshingJobs.size > maxEntries && removable.length > 0) {
+        const next = removable.shift();
+        this._voxelMeshingJobs.delete(next.key);
+      }
+    },
+
+    _ensureVoxelMeshingPipeline() {
+      if (this._voxelMeshingPipeline && this._voxelMeshingBindGroupLayout) return true;
+      if (!isGpuVoxelMeshingEnabled() || !this._device) return false;
+      if (this._voxelMeshingInitTried && (!this._voxelMeshingPipeline || !this._voxelMeshingBindGroupLayout)) {
+        return false;
+      }
+      this._voxelMeshingInitTried = true;
+      try {
+        const module = this._device.createShaderModule({ code: voxelSimpleMeshWgsl });
+        const bindGroupLayout = this._device.createBindGroupLayout({
+          entries: [
+            {
+              binding: 0,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'uniform' }
+            },
+            {
+              binding: 1,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'read-only-storage' }
+            },
+            {
+              binding: 2,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' }
+            },
+            {
+              binding: 3,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' }
+            },
+            {
+              binding: 4,
+              visibility: GPUShaderStage.COMPUTE,
+              buffer: { type: 'storage' }
+            }
+          ]
+        });
+        const pipelineLayout = this._device.createPipelineLayout({
+          bindGroupLayouts: [bindGroupLayout]
+        });
+        const pipeline = this._device.createComputePipeline({
+          layout: pipelineLayout,
+          compute: { module, entryPoint: 'csMain' }
+        });
+        this._voxelMeshingBindGroupLayout = bindGroupLayout;
+        this._voxelMeshingPipeline = pipeline;
+        this._voxelMeshingUnavailableReason = '';
+        return true;
+      } catch (err) {
+        this._voxelMeshingUnavailableReason = err && err.message
+          ? String(err.message)
+          : 'Voxel meshing compute pipeline creation failed';
+        console.warn('[WebGPU] GPU voxel meshing unavailable:', this._voxelMeshingUnavailableReason);
+        return false;
+      }
+    },
+
+    requestSimpleVoxelMesh(request) {
+      if (!isGpuVoxelMeshingEnabled()) {
+        return { status: 'disabled' };
+      }
+      if (!request || typeof request !== 'object') {
+        return { status: 'invalid' };
+      }
+      const cacheKey = typeof request.cacheKey === 'string' ? request.cacheKey : '';
+      if (!cacheKey) {
+        return { status: 'invalid' };
+      }
+      const sizeRaw = Number.isFinite(request.size) ? Math.floor(request.size) : 16;
+      const size = Math.max(2, Math.min(32, sizeRaw));
+      const voxels = request.voxels;
+      const voxelCount = size * size * size;
+      if (!voxels || typeof voxels.length !== 'number' || voxels.length < voxelCount) {
+        return { status: 'invalid' };
+      }
+      if (this.mode !== 'webgpu' || !this._device) {
+        return { status: 'unavailable' };
+      }
+      if (!this._ensureVoxelMeshingPipeline()) {
+        return { status: 'unavailable', reason: this._voxelMeshingUnavailableReason || 'pipeline unavailable' };
+      }
+
+      const existing = this._voxelMeshingJobs.get(cacheKey);
+      if (existing) {
+        existing.updatedAt = Date.now();
+        if (existing.status === 'ready' && existing.mesh) {
+          return { status: 'ready', mesh: existing.mesh };
+        }
+        if (existing.status === 'error') {
+          return { status: 'error', reason: existing.error || 'mesh build failed' };
+        }
+        return { status: 'pending' };
+      }
+
+      const colorIn = Array.isArray(request.color) ? request.color : [1, 1, 1];
+      const color = [
+        Number.isFinite(colorIn[0]) ? colorIn[0] : 1.0,
+        Number.isFinite(colorIn[1]) ? colorIn[1] : 1.0,
+        Number.isFinite(colorIn[2]) ? colorIn[2] : 1.0
+      ];
+      const seamPad = Number.isFinite(request.seamPad) ? request.seamPad : 0.0;
+      const job = {
+        status: 'pending',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        mesh: null,
+        error: null
+      };
+      this._voxelMeshingJobs.set(cacheKey, job);
+      this._pruneVoxelMeshCache();
+      this._startSimpleVoxelMeshBuild(cacheKey, {
+        size,
+        voxels,
+        seamPad,
+        color
+      }, job);
+      return { status: 'pending' };
+    },
+
+    _startSimpleVoxelMeshBuild(cacheKey, request, job) {
+      const device = this._device;
+      const pipeline = this._voxelMeshingPipeline;
+      const bindGroupLayout = this._voxelMeshingBindGroupLayout;
+      if (!device || !pipeline || !bindGroupLayout) {
+        job.status = 'error';
+        job.error = 'GPU meshing pipeline unavailable';
+        job.updatedAt = Date.now();
+        return;
+      }
+
+      const size = request.size | 0;
+      const voxelCount = size * size * size;
+      const maxFaces = voxelCount * 6;
+      const maxVertices = maxFaces * 4;
+      const maxIndices = maxFaces * 6;
+      const voxelData = new Uint32Array(voxelCount);
+      for (let i = 0; i < voxelCount; i++) {
+        voxelData[i] = request.voxels[i] ? 1 : 0;
+      }
+      const paramsArrayBuffer = new ArrayBuffer(32);
+      const paramsView = new DataView(paramsArrayBuffer);
+      paramsView.setUint32(0, size >>> 0, true);
+      paramsView.setUint32(4, maxFaces >>> 0, true);
+      paramsView.setFloat32(8, request.seamPad, true);
+      paramsView.setFloat32(12, 0.0, true);
+      paramsView.setFloat32(16, request.color[0], true);
+      paramsView.setFloat32(20, request.color[1], true);
+      paramsView.setFloat32(24, request.color[2], true);
+      paramsView.setFloat32(28, 0.0, true);
+
+      let voxelBuffer = null;
+      let paramsBuffer = null;
+      let vertexBuffer = null;
+      let indexBuffer = null;
+      let counterBuffer = null;
+      let counterReadBuffer = null;
+      let vertexReadBuffer = null;
+      let indexReadBuffer = null;
+
+      const safeUnmap = (buffer) => {
+        if (!buffer) return;
+        try {
+          buffer.unmap();
+        } catch (_) {}
+      };
+      const safeDestroy = (buffer) => {
+        if (!buffer) return;
+        try {
+          buffer.destroy();
+        } catch (_) {}
+      };
+
+      (async () => {
+        voxelBuffer = device.createBuffer({
+          size: voxelCount * Uint32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        });
+        paramsBuffer = device.createBuffer({
+          size: 32,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        vertexBuffer = device.createBuffer({
+          size: maxVertices * VOXEL_VERTEX_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        });
+        indexBuffer = device.createBuffer({
+          size: maxIndices * Uint32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+        });
+        counterBuffer = device.createBuffer({
+          size: Uint32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+        });
+        counterReadBuffer = device.createBuffer({
+          size: Uint32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        vertexReadBuffer = device.createBuffer({
+          size: maxVertices * VOXEL_VERTEX_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+        indexReadBuffer = device.createBuffer({
+          size: maxIndices * Uint32Array.BYTES_PER_ELEMENT,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+        });
+
+        device.queue.writeBuffer(voxelBuffer, 0, voxelData);
+        device.queue.writeBuffer(paramsBuffer, 0, paramsArrayBuffer);
+        device.queue.writeBuffer(counterBuffer, 0, new Uint32Array([0]));
+
+        const bindGroup = device.createBindGroup({
+          layout: bindGroupLayout,
+          entries: [
+            { binding: 0, resource: { buffer: paramsBuffer } },
+            { binding: 1, resource: { buffer: voxelBuffer } },
+            { binding: 2, resource: { buffer: vertexBuffer } },
+            { binding: 3, resource: { buffer: indexBuffer } },
+            { binding: 4, resource: { buffer: counterBuffer } }
+          ]
+        });
+
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.dispatchWorkgroups(Math.ceil(voxelCount / 64));
+        pass.end();
+        encoder.copyBufferToBuffer(counterBuffer, 0, counterReadBuffer, 0, Uint32Array.BYTES_PER_ELEMENT);
+        encoder.copyBufferToBuffer(
+          vertexBuffer,
+          0,
+          vertexReadBuffer,
+          0,
+          maxVertices * VOXEL_VERTEX_STRIDE_FLOATS * Float32Array.BYTES_PER_ELEMENT
+        );
+        encoder.copyBufferToBuffer(
+          indexBuffer,
+          0,
+          indexReadBuffer,
+          0,
+          maxIndices * Uint32Array.BYTES_PER_ELEMENT
+        );
+        device.queue.submit([encoder.finish()]);
+
+        await Promise.all([
+          counterReadBuffer.mapAsync(GPUMapMode.READ),
+          vertexReadBuffer.mapAsync(GPUMapMode.READ),
+          indexReadBuffer.mapAsync(GPUMapMode.READ)
+        ]);
+
+        const counterData = new Uint32Array(counterReadBuffer.getMappedRange());
+        const faceCount = counterData[0] >>> 0;
+        const vertexCount = faceCount * 4;
+        const indexCount = faceCount * 6;
+        if (vertexCount > 65535) {
+          throw new Error(`GPU voxel mesh exceeds Uint16 index limit (${vertexCount} vertices)`);
+        }
+
+        const vertexValueCount = vertexCount * VOXEL_VERTEX_STRIDE_FLOATS;
+        const vertexSource = new Float32Array(vertexReadBuffer.getMappedRange());
+        const vertices = new Float32Array(vertexValueCount);
+        if (vertexValueCount > 0) {
+          vertices.set(vertexSource.subarray(0, vertexValueCount));
+        }
+
+        const indexSource = new Uint32Array(indexReadBuffer.getMappedRange());
+        const indices = new Uint16Array(indexCount);
+        for (let i = 0; i < indexCount; i++) {
+          indices[i] = indexSource[i] & 0xffff;
+        }
+
+        const current = this._voxelMeshingJobs.get(cacheKey);
+        if (!current || current !== job) {
+          return;
+        }
+        current.status = 'ready';
+        current.mesh = { vertices, indices };
+        current.faceCount = faceCount;
+        current.updatedAt = Date.now();
+        this._lastVoxelMeshBuildAt = current.updatedAt;
+      })().catch((err) => {
+        const current = this._voxelMeshingJobs.get(cacheKey);
+        if (!current || current !== job) return;
+        current.status = 'error';
+        current.error = err && err.message ? String(err.message) : 'GPU voxel meshing failed';
+        current.updatedAt = Date.now();
+      }).finally(() => {
+        safeUnmap(counterReadBuffer);
+        safeUnmap(vertexReadBuffer);
+        safeUnmap(indexReadBuffer);
+        safeDestroy(voxelBuffer);
+        safeDestroy(paramsBuffer);
+        safeDestroy(vertexBuffer);
+        safeDestroy(indexBuffer);
+        safeDestroy(counterBuffer);
+        safeDestroy(counterReadBuffer);
+        safeDestroy(vertexReadBuffer);
+        safeDestroy(indexReadBuffer);
+      });
+    },
+
     _restoreLegacyViewport(reason) {
       if (this.mode === 'legacy') return;
       this.mode = 'legacy';
       this._lastModeChangeAt = Date.now();
       this._lastFallbackReason = reason ? String(reason) : 'Unknown fallback reason';
       this._presentedAtLeastOnce = false;
+      this.clearVoxelMeshCache();
+      this._voxelMeshingPipeline = null;
+      this._voxelMeshingBindGroupLayout = null;
+      this._voxelMeshingInitTried = false;
+      this._voxelMeshingUnavailableReason = '';
       this._resetFrameResources();
       const container = this._container || document.getElementById('dungeon-container');
       if (container && this.legacyRenderer.canvas) {
@@ -1413,6 +1924,11 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         this._bloomPipeline = bloomPipeline;
         this._bindGroupLayout = bindGroupLayout;
         this._bloomBindGroupLayout = bloomBindGroupLayout;
+        this._voxelMeshingPipeline = null;
+        this._voxelMeshingBindGroupLayout = null;
+        this._voxelMeshingInitTried = false;
+        this._voxelMeshingUnavailableReason = '';
+        this.clearVoxelMeshCache();
         this._ensureTorchBuffers();
         this.mode = 'webgpu';
         this._lastModeChangeAt = Date.now();
@@ -1608,6 +2124,15 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
     },
 
     getDebugState() {
+      let voxelMeshPending = 0;
+      let voxelMeshReady = 0;
+      let voxelMeshError = 0;
+      for (const job of this._voxelMeshingJobs.values()) {
+        if (!job) continue;
+        if (job.status === 'ready') voxelMeshReady++;
+        else if (job.status === 'error') voxelMeshError++;
+        else voxelMeshPending++;
+      }
       return {
         gpuAvailable: !!navigator.gpu,
         mode: this.mode,
@@ -1638,7 +2163,13 @@ fn fsMain(in : VsOut) -> @location(0) vec4<f32> {
         lastTorchUploadAt: this._lastTorchUploadAt || null,
         lastTorchProjectAt: this._lastTorchProjectAt || null,
         lastHaloFlameDrawAt: this._lastHaloFlameDrawAt || null,
-        gpuHaloFlameIntensity: getGpuHaloFlameIntensity()
+        gpuHaloFlameIntensity: getGpuHaloFlameIntensity(),
+        gpuVoxelMeshingEnabled: isGpuVoxelMeshingEnabled(),
+        gpuVoxelMeshingReady: voxelMeshReady,
+        gpuVoxelMeshingPending: voxelMeshPending,
+        gpuVoxelMeshingErrors: voxelMeshError,
+        gpuVoxelMeshingLastBuildAt: this._lastVoxelMeshBuildAt || null,
+        gpuVoxelMeshingUnavailableReason: this._voxelMeshingUnavailableReason || null
       };
     }
   };

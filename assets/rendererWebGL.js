@@ -131,6 +131,12 @@
     return Math.max(1, Math.min(16, Math.floor(raw)));
   }
 
+  const VOXEL_MESH_PENDING = { __voxelMeshPending: true };
+
+  function isGpuVoxelMeshingEnabled() {
+    return window.WEBGPU_GPU_VOXEL_MESHING !== false;
+  }
+
   function buildAtlas(textures) {
     const keys = Object.keys(textures || {}).filter((name) => {
       if (name === 'floor') return false;
@@ -220,6 +226,31 @@
       return dungeon.customTiles.find((t) => t && t.type === type) || null;
     },
 
+    _requestGpuSimpleVoxelMesh(cacheKey, voxels, size, seamPadValue, color) {
+      if (!isGpuVoxelMeshingEnabled()) return null;
+      const webgpuRenderer = window.webgpuDungeonRenderer;
+      if (!webgpuRenderer || webgpuRenderer === this) return null;
+      if (typeof webgpuRenderer.requestSimpleVoxelMesh !== 'function') return null;
+      if (webgpuRenderer.mode === 'upgrading') {
+        return { status: 'pending' };
+      }
+      try {
+        const result = webgpuRenderer.requestSimpleVoxelMesh({
+          cacheKey,
+          voxels,
+          size,
+          seamPad: seamPadValue,
+          color
+        });
+        if (result && result.status === 'unavailable' && webgpuRenderer.mode === 'upgrading') {
+          return { status: 'pending' };
+        }
+        return result;
+      } catch (_) {
+        return null;
+      }
+    },
+
     _cancelVoxelPrewarmJob() {
       const handle = this._voxelPrewarmHandle;
       if (handle !== null) {
@@ -264,7 +295,12 @@
           while (this._voxelPrewarmQueue.length > 0) {
             const tileName = this._voxelPrewarmQueue.shift();
             if (!this.voxelMeshes[tileName]) {
-              this.getVoxelMesh(tileName, dungeon);
+              const mesh = this.getVoxelMesh(tileName, dungeon, {
+                allowCpuFallback: false
+              });
+              if (mesh === VOXEL_MESH_PENDING) {
+                this._voxelPrewarmQueue.push(tileName);
+              }
             }
             built++;
             const elapsed = performance.now() - start;
@@ -795,8 +831,9 @@
       }
     },
 
-    getVoxelMesh(tileName, dungeon) {
+    getVoxelMesh(tileName, dungeon, opts = {}) {
       if (!dungeon || !dungeon.tiles || !tileName) return null;
+      const allowCpuFallback = opts.allowCpuFallback !== false;
 
       const hasSpec = !!dungeon.tiles[tileName]?.spriteSpec;
       if (!(hasSpec || tileName === 'pillar' || tileName.startsWith('custom_'))) return null;
@@ -1088,7 +1125,31 @@
       if (isColumnLike) {
         const solidColor = mix(primary, secondary, 0.25);
         const solidColorFn = () => solidColor;
-        const solidMesh = this.meshVoxelsSimple(voxels, 16, solidColorFn, { seamPad: 0.08 });
+        let solidMesh = null;
+        const gpuCacheKey = [
+          tileName,
+          debugKey,
+          'solid',
+          solidColor.map((v) => Number.isFinite(v) ? v.toFixed(6) : '0.000000').join(',')
+        ].join('|');
+        const gpuSolid = this._requestGpuSimpleVoxelMesh(
+          gpuCacheKey,
+          voxels,
+          16,
+          0.08,
+          solidColor
+        );
+        if (gpuSolid && gpuSolid.status === 'ready' && gpuSolid.mesh) {
+          solidMesh = {
+            vertices: new Float32Array(gpuSolid.mesh.vertices),
+            indices: new Uint16Array(gpuSolid.mesh.indices)
+          };
+        } else if (gpuSolid && gpuSolid.status === 'pending' && !allowCpuFallback) {
+          return VOXEL_MESH_PENDING;
+        }
+        if (!solidMesh) {
+          solidMesh = this.meshVoxelsSimple(voxels, 16, solidColorFn, { seamPad: 0.08 });
+        }
         const detailMesh = this.greedyMesh(voxels, 16, colorFn, { seamPad });
 
         // Critical fix: smooth normals on cylindrical shapes so voxel steps don't read as "see-through slits".
@@ -1260,8 +1321,8 @@ const float SHADOW_REFRACTION = 0.015;
 const float SHADOW_REFRACTION_FREQ = 3.2;
 const float SHADOW_DARKEN = 0.75;
 const float SHADOW_RADIUS_SCALE = 1.6;
-const float SHADOW_OCCLUSION_RADIUS_SCALE = 4.0;
-const float SHADOW_DECAY_SCALE = 2.8;
+const float SHADOW_OCCLUSION_RADIUS_SCALE = 2.4;
+const float SHADOW_DECAY_SCALE = 1.4;
 const float SHADOW_VIEW_FADE_START = 0.28;
 const float SHADOW_VIEW_FADE_END = 0.72;
 const float STEP_SHADOW_EPS = 0.05;
@@ -1513,6 +1574,39 @@ float shadowStrengthFromBox(
   return strength;
 }
 
+float accumulateShadowFromCell(
+  float currentShadow,
+  vec4 cell,
+  int cellX,
+  int cellY,
+  vec2 enterNormal,
+  vec3 startPos,
+  vec3 endPos,
+  vec2 hitXY,
+  float hitZ,
+  vec2 torchPos,
+  float torchZ,
+  float rad,
+  float intensity
+) {
+  if (!cellOccludesSegment(cell, cellX, cellY, enterNormal, startPos, endPos)) return currentShadow;
+  if (cell.a >= 0.999) return 1.0;
+
+  vec2 center = vec2(float(cellX) + 0.5, float(cellY) + 0.5);
+  vec2 halfExt = casterHalfExtFromCell(cell);
+  float distHit = length(hitXY - torchPos);
+  float distCaster = length(center - torchPos);
+  if (distHit < 0.05 || distCaster < 1e-4 || distCaster >= distHit - 0.01) return currentShadow;
+
+  float shape = shadowStrengthFromBox(hitXY, center, halfExt, torchPos, intensity);
+  if (shape <= 1e-4) return currentShadow;
+  float height = shadowHeightMask(distHit, distCaster, torchZ, hitZ, ceilHeightFromCell(cell));
+  float shadowRad = max(0.25, rad * SHADOW_OCCLUSION_RADIUS_SCALE);
+  float radialGate = 1.0 - smoothstep(shadowRad * 0.65, shadowRad, distHit);
+  float local = clamp(shape * height * radialGate, 0.0, 1.0);
+  return currentShadow + local * (1.0 - currentShadow);
+}
+
 float computeShadowForTorch(
   vec2 hitXY,
   float hitZ,
@@ -1534,6 +1628,7 @@ float computeShadowForTorch(
   float distXY = length(toHit);
   if (distXY < 0.01) return 0.0;
   vec2 dir = toHit / distXY;
+  float shadow = 0.0;
 
   int mapX = int(floor(torchPos.x));
   int mapY = int(floor(torchPos.y));
@@ -1564,7 +1659,22 @@ float computeShadowForTorch(
       if (stepBoundaryOccludesSegment(prevCell, currCell, prevX, prevY, mapX, mapY, startPos, endPos)) return 1.0;
       bool isTargetCell = (mapX == targetX && mapY == targetY);
       if (!(mapX == torchCellX && mapY == torchCellY) && (!isTargetCell || allowTargetCaster)) {
-        if (cellOccludesSegment(currCell, mapX, mapY, vec2(-float(stepX), 0.0), startPos, endPos)) return 1.0;
+        shadow = accumulateShadowFromCell(
+          shadow,
+          currCell,
+          mapX,
+          mapY,
+          vec2(-float(stepX), 0.0),
+          startPos,
+          endPos,
+          hitXY,
+          hitZ,
+          torchPos,
+          torchZ,
+          rad,
+          intensity
+        );
+        if (shadow >= 0.995) return shadow;
       }
       if (isTargetCell) break;
     } else if (sideDistY < sideDistX && !cornerStep) {
@@ -1578,7 +1688,22 @@ float computeShadowForTorch(
       if (stepBoundaryOccludesSegment(prevCell, currCell, prevX, prevY, mapX, mapY, startPos, endPos)) return 1.0;
       bool isTargetCell = (mapX == targetX && mapY == targetY);
       if (!(mapX == torchCellX && mapY == torchCellY) && (!isTargetCell || allowTargetCaster)) {
-        if (cellOccludesSegment(currCell, mapX, mapY, vec2(0.0, -float(stepY)), startPos, endPos)) return 1.0;
+        shadow = accumulateShadowFromCell(
+          shadow,
+          currCell,
+          mapX,
+          mapY,
+          vec2(0.0, -float(stepY)),
+          startPos,
+          endPos,
+          hitXY,
+          hitZ,
+          torchPos,
+          torchZ,
+          rad,
+          intensity
+        );
+        if (shadow >= 0.995) return shadow;
       }
       if (isTargetCell) break;
     } else {
@@ -1599,7 +1724,22 @@ float computeShadowForTorch(
         if (stepBoundaryOccludesSegment(prevCell, cellA, prevX, prevY, sideAX, sideAY, startPos, endPos)) return 1.0;
         bool isTargetA = (sideAX == targetX && sideAY == targetY);
         if (!(sideAX == torchCellX && sideAY == torchCellY) && (!isTargetA || allowTargetCaster)) {
-          if (cellOccludesSegment(cellA, sideAX, sideAY, vec2(-float(stepX), 0.0), startPos, endPos)) return 1.0;
+          shadow = accumulateShadowFromCell(
+            shadow,
+            cellA,
+            sideAX,
+            sideAY,
+            vec2(-float(stepX), 0.0),
+            startPos,
+            endPos,
+            hitXY,
+            hitZ,
+            torchPos,
+            torchZ,
+            rad,
+            intensity
+          );
+          if (shadow >= 0.995) return shadow;
         }
       }
       if (inBounds(sideBX, sideBY)) {
@@ -1607,7 +1747,22 @@ float computeShadowForTorch(
         if (stepBoundaryOccludesSegment(prevCell, cellB, prevX, prevY, sideBX, sideBY, startPos, endPos)) return 1.0;
         bool isTargetB = (sideBX == targetX && sideBY == targetY);
         if (!(sideBX == torchCellX && sideBY == torchCellY) && (!isTargetB || allowTargetCaster)) {
-          if (cellOccludesSegment(cellB, sideBX, sideBY, vec2(0.0, -float(stepY)), startPos, endPos)) return 1.0;
+          shadow = accumulateShadowFromCell(
+            shadow,
+            cellB,
+            sideBX,
+            sideBY,
+            vec2(0.0, -float(stepY)),
+            startPos,
+            endPos,
+            hitXY,
+            hitZ,
+            torchPos,
+            torchZ,
+            rad,
+            intensity
+          );
+          if (shadow >= 0.995) return shadow;
         }
       }
       if (!inBounds(mapX, mapY)) break;
@@ -1615,7 +1770,22 @@ float computeShadowForTorch(
       if (!(mapX == torchCellX && mapY == torchCellY) && (!isTargetDiag || allowTargetCaster)) {
         vec4 cellDiag = fetchCell(mapX, mapY);
         // Corner-crossing rays can enter the diagonal cell directly; test it too.
-        if (cellOccludesSegment(cellDiag, mapX, mapY, vec2(0.0), startPos, endPos)) return 1.0;
+        shadow = accumulateShadowFromCell(
+          shadow,
+          cellDiag,
+          mapX,
+          mapY,
+          vec2(0.0),
+          startPos,
+          endPos,
+          hitXY,
+          hitZ,
+          torchPos,
+          torchZ,
+          rad,
+          intensity
+        );
+        if (shadow >= 0.995) return shadow;
       }
       if (mapX == targetX && mapY == targetY) break;
     }
@@ -1623,10 +1793,24 @@ float computeShadowForTorch(
 
   if (allowTargetCaster && inBounds(targetX, targetY)) {
     vec4 tCell = fetchCell(targetX, targetY);
-    if (cellOccludesSegment(tCell, targetX, targetY, vec2(0.0), startPos, endPos)) return 1.0;
+    shadow = accumulateShadowFromCell(
+      shadow,
+      tCell,
+      targetX,
+      targetY,
+      vec2(0.0),
+      startPos,
+      endPos,
+      hitXY,
+      hitZ,
+      torchPos,
+      torchZ,
+      rad,
+      intensity
+    );
   }
 
-  return 0.0;
+  return clamp(shadow, 0.0, 1.0);
 }
 
 // Normal-aware torch lighting (half-Lambert + ambient fill for multi-light look)
@@ -1670,30 +1854,26 @@ float accumulateTorchLit(
     float tailFalloff = exp(-2.6 * max(0.0, normDist - 1.0));
     float rangeGate = 1.0 - smoothstep(1.05, SHADOW_RADIUS_SCALE, normDist);
     float rawStrength = (coreFalloff * coreFalloff + 0.14 * tailFalloff) * rangeGate * u_torchIntensity[i];
+    if (rawStrength <= 0.001) continue;
     // Shadow casting uses a softer distance tail than direct light so multiple
     // torches can still project distinct occlusion wedges at medium range.
     float normDistShadow = distXY / max(lightRadius, 1e-4);
     float coreFalloffShadow = max(0.0, 1.0 - normDistShadow);
     float tailFalloffShadow = exp(-2.2 * max(0.0, normDistShadow - 1.0));
     float shadowDrive = (coreFalloffShadow * coreFalloffShadow + 0.22 * tailFalloffShadow) * u_torchIntensity[i];
-    float shadowFactor = 0.0;
-    float shadowWeight = 0.0;
-    if (shadowDrive > 0.002) {
-      shadowFactor = computeShadowForTorch(
-        worldPos.xy,
-        worldPos.z,
-        targetX,
-        targetY,
-        surfaceNormal2D,
-        u_torchPos[i].xy,
-        u_torchPos[i].z,
-        lightRadius * shadowRadiusScale,
-        u_torchIntensity[i]
-      );
-      shadowWeight = clamp(shadowDrive * 2.2, 0.0, 1.0);
-      shadowStack *= (1.0 - shadowFactor * shadowWeight);
-    }
-    if (rawStrength <= 0.001) continue;
+    float shadowFactor = computeShadowForTorch(
+      worldPos.xy,
+      worldPos.z,
+      targetX,
+      targetY,
+      surfaceNormal2D,
+      u_torchPos[i].xy,
+      u_torchPos[i].z,
+      lightRadius * shadowRadiusScale,
+      u_torchIntensity[i]
+    );
+    float shadowWeight = clamp(max(shadowDrive * 2.2, rawStrength * 1.8), 0.0, 1.0);
+    shadowStack *= (1.0 - shadowFactor * shadowWeight);
     float shadowMul = (shadowFactor > 0.98)
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
@@ -1737,9 +1917,7 @@ float globalDirectionalShade(vec3 normal) {
 }
 
 float viewShadowFade(float dist) {
-  float startD = max(8.0, u_depthFarDepth * SHADOW_VIEW_FADE_START);
-  float endD = max(startD + 4.0, u_depthFarDepth * SHADOW_VIEW_FADE_END);
-  return 1.0 - smoothstep(startD, endD, dist);
+  return 1.0;
 }
 
 void main() {
@@ -2397,13 +2575,13 @@ const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
 const float TORCH_FALLOFF = 0.6;
 const int SHADOW_DDA_STEPS = 64;
 const float SHADOW_RADIUS_SCALE = 1.6;
-const float SHADOW_DIFFUSION = 0.05;
+const float SHADOW_DIFFUSION = 0.03;
 const float SHADOW_REFRACTION = 0.012;
 const float SHADOW_REFRACTION_FREQ = 2.8;
 const float SHADOW_DARKEN = 0.75;
 const float TORCH_ONLY = 0.0;
-const float SHADOW_OCCLUSION_RADIUS_SCALE = 4.0;
-const float SHADOW_DECAY_SCALE = 2.8;
+const float SHADOW_OCCLUSION_RADIUS_SCALE = 2.4;
+const float SHADOW_DECAY_SCALE = 1.4;
 
 float saturate(float x) { return clamp(x, 0.0, 1.0); }
 
@@ -2434,21 +2612,22 @@ float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
   return max(0.006, diffused * ripple);
 }
 
-float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float rad) {
+float shadowStrengthFromCaster(vec2 hitXY, vec2 casterCenter, float casterRadius, vec2 torchPos, float shadowRad) {
   vec2 toHit = hitXY - torchPos;
   float distHit = length(toHit);
-  if (distHit < 0.05 || distHit > rad * SHADOW_OCCLUSION_RADIUS_SCALE) return 0.0;
+  if (distHit < 0.05 || distHit > shadowRad) return 0.0;
   vec2 lightDir = normalize(casterCenter - torchPos);
   vec2 v = hitXY - casterCenter;
   float proj = dot(v, lightDir);
   if (proj <= 0.0) return 0.0;
   float perp = length(v - lightDir * proj);
-  float penumbra = edgeDiffusion(proj, distHit, hitXY);
+  float penumbra = min(0.095, edgeDiffusion(proj, distHit, hitXY));
   float core = 1.0 - smoothstep(casterRadius, casterRadius + penumbra, perp);
   float front = smoothstep(0.0, 0.12, proj);
-  float decayLen = max(0.8, rad * SHADOW_DECAY_SCALE);
+  float radialGate = 1.0 - smoothstep(shadowRad * 0.65, shadowRad, distHit);
+  float decayLen = max(0.45, shadowRad * SHADOW_DECAY_SCALE);
   float back = exp(-max(0.0, proj) / decayLen);
-  float strength = core * front * back;
+  float strength = core * front * back * radialGate;
   return strength;
 }
 
@@ -2471,6 +2650,7 @@ float torchShadowFactor(vec2 hitXY, vec2 torchPos, float rad) {
   int stepY = dir.y < 0.0 ? -1 : 1;
   float sideDistX = (stepX == -1 ? (torchPos.x - float(mapX)) : (float(mapX + 1) - torchPos.x)) * invDx;
   float sideDistY = (stepY == -1 ? (torchPos.y - float(mapY)) : (float(mapY + 1) - torchPos.y)) * invDy;
+  float shadow = 0.0;
 
   for (int s = 0; s < SHADOW_DDA_STEPS; s++) {
     float nextT = min(sideDistX, sideDistY);
@@ -2494,9 +2674,11 @@ float torchShadowFactor(vec2 hitXY, vec2 torchPos, float rad) {
     float proj = dot(toCenter, dir);
     float perp = length(toCenter - dir * proj);
     if (perp > radius + 0.05) continue;
-    return clamp(shadowStrengthFromCaster(hitXY, center, radius, torchPos, shadowRad), 0.0, 1.0);
+    float localShadow = clamp(shadowStrengthFromCaster(hitXY, center, radius, torchPos, shadowRad), 0.0, 1.0);
+    shadow += localShadow * (1.0 - shadow);
+    if (shadow >= 0.995) return shadow;
   }
-  return 0.0;
+  return clamp(shadow, 0.0, 1.0);
 }
 
 // Half-Lambert torch lighting so attached walls / sides still receive light
@@ -2708,6 +2890,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         this.voxelMeshes = {};
         this.voxelPaletteKey = paletteKey;
         this._cancelVoxelPrewarmJob();
+        const webgpuRenderer = window.webgpuDungeonRenderer;
+        if (webgpuRenderer && typeof webgpuRenderer.clearVoxelMeshCache === 'function') {
+          webgpuRenderer.clearVoxelMeshCache();
+        }
       }
       if (
         this.dungeonKey === key &&
@@ -2789,7 +2975,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             tile === 'wall' ||
             tile === 'torch' ||
             isDoorClosed;
-          const isObstacle = tile === 'pillar' || (typeof tile === 'string' && tile.startsWith('custom_'));
+          const hasVoxelSpec = !!dungeon.tiles?.[tile]?.spriteSpec;
+          const isObstacle = tile === 'pillar'
+            || (typeof tile === 'string' && tile.startsWith('custom_'))
+            || hasVoxelSpec;
 
           // Torch uses wall art. Doors can also fall back to wall art if you don't have a door atlas entry.
           const tileName = (tile === 'torch' || tile === 'door') ? 'wall' : tile;
