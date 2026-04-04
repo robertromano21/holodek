@@ -205,11 +205,9 @@
     voxelAttribs: {},
     voxelUniforms: {},
     voxelMeshes: {},
-    voxelShadowSliceCache: {},
     voxelPaletteKey: null,
     haloTex: null,
     flameTex: null,
-    solidTex: null,
     customPadCache: {},
     _voxelPrewarmHandle: null,
     _voxelPrewarmQueue: [],
@@ -605,46 +603,6 @@
       }
 
       return voxels;
-    },
-
-    getVoxelShadowSlices(tileName, dungeon, size = 16) {
-      const dungeonKey = this.dungeonKey || dungeon?.geoKey || dungeon?._meta?.id || 'default';
-      const cacheKey = `${dungeonKey}:${tileName}:${size}`;
-      if (this.voxelShadowSliceCache[cacheKey]) {
-        return this.voxelShadowSliceCache[cacheKey];
-      }
-      const voxels = this.buildVoxelGrid(tileName, dungeon, size);
-      const slices = [];
-      let spanCount = 0;
-      for (let z = 0; z < size; z++) {
-        const spans = [];
-        const zOffset = z * size * size;
-        for (let y = 0; y < size; y++) {
-          let x = 0;
-          while (x < size) {
-            while (x < size && !voxels[x + y * size + zOffset]) x++;
-            if (x >= size) break;
-            const x0 = x;
-            while (x < size && voxels[x + y * size + zOffset]) x++;
-            spans.push({
-              x0: x0 / size,
-              x1: x / size,
-              y0: y / size,
-              y1: (y + 1) / size
-            });
-            spanCount++;
-          }
-        }
-        if (spans.length) {
-          slices.push({
-            zCenter: (z + 0.5) / size,
-            spans
-          });
-        }
-      }
-      const profile = { size, slices, spanCount };
-      this.voxelShadowSliceCache[cacheKey] = profile;
-      return profile;
     },
 
     meshVoxelsSimple(voxels, size, colorFn, opts = {}) {
@@ -2501,24 +2459,6 @@ void main() {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
 
-      this.solidTex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, this.solidTex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        1,
-        1,
-        0,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        new Uint8Array([255, 255, 255, 255])
-      );
-
       const spriteVs = [
         '#version 300 es',
         'in vec2 a_pos;',
@@ -4252,131 +4192,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const t = Math.max(0, Math.min(1, (x - edge0) / Math.max(1e-6, edge1 - edge0)));
         return t * t * (3 - 2 * t);
       };
-      const torchShadowFalloff = (normDist) => {
-        const body = Math.exp(-1.05 * normDist * normDist);
-        const fade = 1.0 - smoothstep(1.45, 2.7, normDist);
-        return body * fade;
-      };
-      const appendProjectedDisk = (verts, cx, cy, z, radius, segments) => {
-        const center = projectWorldPoint(cx, cy, z);
-        if (!center) return false;
-        const ring = [];
-        for (let i = 0; i <= segments; i++) {
-          const a = (i / segments) * Math.PI * 2;
-          const p = projectWorldPoint(cx + Math.cos(a) * radius, cy + Math.sin(a) * radius, z);
-          if (!p) return false;
-          ring.push(p);
-        }
-        const pushVert = (p, u, v) => {
-          verts.push(
-            (p.x / width) * 2 - 1,
-            1 - (p.y / height) * 2,
-            u,
-            v,
-            p.depth
-          );
-        };
-        for (let i = 0; i < segments; i++) {
-          pushVert(center, 0.5, 0.5);
-          pushVert(ring[i], 0.5, 0.5);
-          pushVert(ring[i + 1], 0.5, 0.5);
-        }
-        return true;
-      };
-      const appendProjectedQuad = (verts, ax, ay, bx, by, cx, cy, dx, dy, z) => {
-        const p0 = projectWorldPoint(ax, ay, z);
-        const p1 = projectWorldPoint(bx, by, z);
-        const p2 = projectWorldPoint(cx, cy, z);
-        const p3 = projectWorldPoint(dx, dy, z);
-        if (!p0 || !p1 || !p2 || !p3) return false;
-        verts.push(
-          (p0.x / width) * 2 - 1, 1 - (p0.y / height) * 2, 0.5, 0.5, p0.depth,
-          (p1.x / width) * 2 - 1, 1 - (p1.y / height) * 2, 0.5, 0.5, p1.depth,
-          (p2.x / width) * 2 - 1, 1 - (p2.y / height) * 2, 0.5, 0.5, p2.depth,
-          (p0.x / width) * 2 - 1, 1 - (p0.y / height) * 2, 0.5, 0.5, p0.depth,
-          (p2.x / width) * 2 - 1, 1 - (p2.y / height) * 2, 0.5, 0.5, p2.depth,
-          (p3.x / width) * 2 - 1, 1 - (p3.y / height) * 2, 0.5, 0.5, p3.depth
-        );
-        return true;
-      };
-      const drawShadowTriangles = (verts, alpha) => {
-        if (!this.solidTex || !verts.length || alpha <= 0.001) return;
-        if (this.spriteUniforms.haloMode) gl.uniform1f(this.spriteUniforms.haloMode, 0.0);
-        if (this.spriteUniforms.haloDepthSpan) gl.uniform1f(this.spriteUniforms.haloDepthSpan, 0.0);
-        if (this.spriteUniforms.haloCapMin) gl.uniform1f(this.spriteUniforms.haloCapMin, 0.0);
-        if (this.spriteUniforms.haloClipDir) gl.uniform2f(this.spriteUniforms.haloClipDir, 1.0, 0.0);
-        if (this.spriteUniforms.haloClipSpan) gl.uniform2f(this.spriteUniforms.haloClipSpan, 1.0, 1.0);
-        if (this.spriteUniforms.profile) gl.uniform1f(this.spriteUniforms.profile, 0.0);
-        if (this.spriteUniforms.depthAmount) gl.uniform1f(this.spriteUniforms.depthAmount, 0.0);
-        if (this.spriteUniforms.spritePos) gl.uniform3f(this.spriteUniforms.spritePos, 0.0, 0.0, 0.0);
-        if (this.spriteUniforms.spriteHeight) gl.uniform1f(this.spriteUniforms.spriteHeight, 1.0);
-        if (this.spriteUniforms.spriteVFlip) gl.uniform1f(this.spriteUniforms.spriteVFlip, 0.0);
-        if (this.spriteUniforms.depthShadeScale) gl.uniform1f(this.spriteUniforms.depthShadeScale, 0.0);
-        if (this.spriteUniforms.torchCount) gl.uniform1i(this.spriteUniforms.torchCount, 0);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, this.solidTex);
-        gl.uniform1i(this.spriteUniforms.tex, 0);
-        gl.uniform4f(this.spriteUniforms.tint, 0.0, 0.0, 0.0, alpha);
-        gl.depthMask(false);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STREAM_DRAW);
-        gl.drawArrays(gl.TRIANGLES, 0, verts.length / 5);
-        gl.depthMask(true);
-      };
-      if (voxelInstances.length > 0) {
-        const shadowFloorZBias = 0.02;
-        for (const inst of voxelInstances) {
-          const shadowShape = this.getVoxelShadowSlices(inst.tileName, dungeon, 16);
-          if (!shadowShape || !shadowShape.spanCount) continue;
-          const centerX = inst.modelPos.x + inst.modelScale.x * 0.5;
-          const centerY = inst.modelPos.y + inst.modelScale.y * 0.5;
-          const floorZ = inst.modelPos.z + shadowFloorZBias;
-          const torchData = getTorchUniformData(centerX, centerY, torchRadiusVoxelScaleClamped);
-          for (let i = 0; i < torchData.count; i++) {
-            const bi = i * 3;
-            const torchX = torchData.posArr[bi];
-            const torchY = torchData.posArr[bi + 1];
-            const torchZ = torchData.posArr[bi + 2];
-            const lightRadius = torchData.radiusArr[i] * torchRadiusVoxelScaleClamped;
-            const intensity = torchData.intensityArr[i];
-            const dx = centerX - torchX;
-            const dy = centerY - torchY;
-            const dz = (floorZ + inst.modelScale.z * 0.55) - torchZ;
-            const normDist = Math.hypot(dx, dy, dz) / Math.max(lightRadius, 1e-4);
-            const baseAlpha = Math.max(0.0, Math.min(0.28, torchShadowFalloff(normDist) * intensity * 0.22));
-            if (baseAlpha <= 0.005) continue;
-            const verts = [];
-            let contributingSlices = 0;
-            for (const slice of shadowShape.slices) {
-              const sliceZ = inst.modelPos.z + slice.zCenter * inst.modelScale.z;
-              if (torchZ <= sliceZ + 0.02) continue;
-              const projScale = (floorZ - torchZ) / (sliceZ - torchZ);
-              if (!Number.isFinite(projScale) || projScale <= 1.0) continue;
-              let sliceUsed = false;
-              for (const span of slice.spans) {
-                const x0 = inst.modelPos.x + span.x0 * inst.modelScale.x;
-                const x1 = inst.modelPos.x + span.x1 * inst.modelScale.x;
-                const y0 = inst.modelPos.y + span.y0 * inst.modelScale.y;
-                const y1 = inst.modelPos.y + span.y1 * inst.modelScale.y;
-                const ax = torchX + (x0 - torchX) * projScale;
-                const ay = torchY + (y0 - torchY) * projScale;
-                const bx = torchX + (x1 - torchX) * projScale;
-                const by = torchY + (y0 - torchY) * projScale;
-                const cx = torchX + (x1 - torchX) * projScale;
-                const cy = torchY + (y1 - torchY) * projScale;
-                const dx2 = torchX + (x0 - torchX) * projScale;
-                const dy2 = torchY + (y1 - torchY) * projScale;
-                if (appendProjectedQuad(verts, ax, ay, bx, by, cx, cy, dx2, dy2, floorZ)) {
-                  sliceUsed = true;
-                }
-              }
-              if (sliceUsed) contributingSlices++;
-            }
-            if (!contributingSlices || !verts.length) continue;
-            const sliceAlpha = baseAlpha / Math.max(1.0, Math.pow(contributingSlices, 0.82));
-            drawShadowTriangles(verts, sliceAlpha);
-          }
-        }
-      }
       for (const spr of sprites) {
         if (this.spriteUniforms.haloMode) {
           gl.uniform1f(this.spriteUniforms.haloMode, 0.0);
