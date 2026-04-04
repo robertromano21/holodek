@@ -559,7 +559,7 @@ struct MeshParams {
   size : u32,
   maxFaces : u32,
   seamPad : f32,
-  _pad0 : f32,
+  cylStrength : f32,
   color : vec4<f32>,
 };
 
@@ -593,14 +593,30 @@ fn applySeam(coord : f32, axisIsNormal : bool, sizeF : f32) -> f32 {
   return clamp(coord + delta, 0.0, sizeF);
 }
 
+fn blendCylindricalNormal(pos : vec3<f32>, normal : vec3<f32>, sizeF : f32) -> vec3<f32> {
+  let strength = clamp(params.cylStrength, 0.0, 1.0);
+  if (strength <= 0.0001 || abs(normal.z) > 0.5) {
+    return normal;
+  }
+  let center = vec2<f32>(0.5 * sizeF, 0.5 * sizeF);
+  let delta = pos.xy - center;
+  let r2 = dot(delta, delta);
+  if (r2 <= 1e-6) {
+    return normal;
+  }
+  let radial = normalize(vec3<f32>(delta.x, delta.y, 0.0));
+  return normalize(normal * (1.0 - strength) + radial * strength);
+}
+
 fn writeVertex(vertexIndex : u32, pos : vec3<f32>, normal : vec3<f32>, sizeF : f32) {
   let base = vertexIndex * 9u;
+  let blendedNormal = blendCylindricalNormal(pos, normal, sizeF);
   vertexOut[base + 0u] = pos.x / sizeF;
   vertexOut[base + 1u] = pos.y / sizeF;
   vertexOut[base + 2u] = pos.z / sizeF;
-  vertexOut[base + 3u] = normal.x;
-  vertexOut[base + 4u] = normal.y;
-  vertexOut[base + 5u] = normal.z;
+  vertexOut[base + 3u] = blendedNormal.x;
+  vertexOut[base + 4u] = blendedNormal.y;
+  vertexOut[base + 5u] = blendedNormal.z;
   vertexOut[base + 6u] = params.color.x;
   vertexOut[base + 7u] = params.color.y;
   vertexOut[base + 8u] = params.color.z;
@@ -1093,6 +1109,10 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         Number.isFinite(colorIn[1]) ? colorIn[1] : 1.0,
         Number.isFinite(colorIn[2]) ? colorIn[2] : 1.0
       ];
+      const cylindricalStrengthRaw = Number.isFinite(request.cylindricalStrength)
+        ? Number(request.cylindricalStrength)
+        : 0.0;
+      const cylindricalStrength = Math.max(0.0, Math.min(1.0, cylindricalStrengthRaw));
       const seamPad = Number.isFinite(request.seamPad) ? request.seamPad : 0.0;
       const job = {
         status: 'pending',
@@ -1107,6 +1127,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         size,
         voxels,
         seamPad,
+        cylindricalStrength,
         color
       }, job);
       return { status: 'pending' };
@@ -1137,7 +1158,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
       paramsView.setUint32(0, size >>> 0, true);
       paramsView.setUint32(4, maxFaces >>> 0, true);
       paramsView.setFloat32(8, request.seamPad, true);
-      paramsView.setFloat32(12, 0.0, true);
+      paramsView.setFloat32(12, request.cylindricalStrength || 0.0, true);
       paramsView.setFloat32(16, request.color[0], true);
       paramsView.setFloat32(20, request.color[1], true);
       paramsView.setFloat32(24, request.color[2], true);
