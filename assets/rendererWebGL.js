@@ -206,6 +206,12 @@
     voxelUniforms: {},
     voxelMeshes: {},
     voxelPaletteKey: null,
+    sceneResourceVersion: '',
+    sceneCellData: null,
+    sceneWallAtlasSource: null,
+    sceneFloorSource: null,
+    sceneWallFallback: null,
+    sceneFloorFallback: null,
     haloTex: null,
     flameTex: null,
     customPadCache: {},
@@ -224,6 +230,24 @@
       const type = this.getCustomTypeFromName(tileName);
       if (!type) return null;
       return dungeon.customTiles.find((t) => t && t.type === type) || null;
+    },
+
+    getSceneResourceSnapshot() {
+      if (!this.sceneCellData) return null;
+      return {
+        version: this.sceneResourceVersion || '',
+        gridW: this.gridW,
+        gridH: this.gridH,
+        heightMin: this.heightMin,
+        heightRange: this.heightRange,
+        atlasCols: this.atlasInfo?.cols || 1,
+        atlasRows: this.atlasInfo?.rows || 1,
+        cellData: this.sceneCellData,
+        wallAtlasSource: this.sceneWallAtlasSource,
+        floorSource: this.sceneFloorSource,
+        wallFallback: this.sceneWallFallback,
+        floorFallback: this.sceneFloorFallback
+      };
     },
 
     _requestGpuSimpleVoxelMesh(cacheKey, voxels, size, seamPadValue, color, cylindricalStrength = 0.0) {
@@ -3048,6 +3072,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
       const wallDefault = this.atlasInfo.map.wall ?? 0;
       const data = new Uint8Array(layoutW * layoutH * 4);
+      const wallFallback = new Uint8Array([60, 45, 30, 255]);
+      const floorFallback = new Uint8Array([34, 0, 0, 255]);
 
       for (let y = 0; y < layoutH; y++) {
         for (let x = 0; x < layoutW; x++) {
@@ -3106,9 +3132,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, this.atlasInfo.canvas);
       } else {
-        const fallback = new Uint8Array([60, 45, 30, 255]);
         gl.bindTexture(gl.TEXTURE_2D, this.wallAtlasTex);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, fallback);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, wallFallback);
       }
 
       const floorImg = textures.floor;
@@ -3117,15 +3142,26 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, floorImg);
       } else {
-        const fallback = new Uint8Array([34, 0, 0, 255]);
         gl.bindTexture(gl.TEXTURE_2D, this.floorTex);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, fallback);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, floorFallback);
       }
 
       this.dungeonKey = key;
       this.atlasReady = atlasReady;
       this.atlasKey = atlasKey;
       this.floorTexReady = floorReady;
+      this.sceneResourceVersion = [
+        key,
+        atlasKey,
+        floorReady ? 'floor:ready' : 'floor:fallback',
+        `${layoutW}x${layoutH}`,
+        `${minH}:${range}`
+      ].join('|');
+      this.sceneCellData = data;
+      this.sceneWallAtlasSource = this.atlasInfo.canvas || null;
+      this.sceneFloorSource = floorReady ? floorImg : null;
+      this.sceneWallFallback = wallFallback;
+      this.sceneFloorFallback = floorFallback;
       if (needsVoxelReset) {
         this._scheduleVoxelPrewarm(dungeon, key);
       }
@@ -3152,6 +3188,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (this.haloTex || !this.gl) return;
       const size = 64;
       const canvas = document.createElement('canvas');
+      canvas._webglKey = 'legacy-halo-fx';
       canvas.width = size;
       canvas.height = size;
       const ctx = canvas.getContext('2d');
@@ -3171,6 +3208,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+      this.haloTexSource = canvas;
     },
 
     buildFlameTexture() {
@@ -3178,6 +3216,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const w = 10;
       const h = 14;
       const canvas = document.createElement('canvas');
+      canvas._webglKey = 'legacy-flame-fx';
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext('2d');
@@ -3206,6 +3245,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+      this.flameTexSource = canvas;
     },
 
 
@@ -3779,6 +3819,49 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const voxelInstances = [];
       const webgpuSpriteVoxelRects = [];
       const webgpuTorchSprites = [];
+      const webgpuOverlaySprites = [];
+      const webgpuTorchFlameVerts = [];
+      const webgpuTorchFlameSprites = [];
+      const webgpuTorchHaloVerts = [];
+      const appendTorchFxMesh = (
+        target,
+        verts,
+        r,
+        g,
+        b,
+        a,
+        vertexCount = Math.floor((verts?.length || 0) / 5),
+        yOffsetPx = 0,
+        depthOffset = 0
+      ) => {
+        if (!Array.isArray(target) || !(verts && vertexCount > 0)) return;
+        const emitAt = (base) => {
+          const clipY = verts[base + 1];
+          const adjustedClipY = clipY + (yOffsetPx * 2) / Math.max(1, height);
+          const adjustedDepth = Math.max(0, Math.min(1, verts[base + 4] + depthOffset));
+          target.push(
+            verts[base],
+            adjustedClipY,
+            verts[base + 2],
+            verts[base + 3],
+            adjustedDepth,
+            r, g, b, a
+          );
+        };
+        if (vertexCount === 4) {
+          emitAt(0);
+          emitAt(5);
+          emitAt(10);
+          emitAt(10);
+          emitAt(5);
+          emitAt(15);
+          return;
+        }
+        for (let i = 0; i < vertexCount; i++) {
+          const base = i * 5;
+          emitAt(base);
+        }
+      };
       const pushSpriteVoxelRect = (x0, y0, x1, y1) => {
         if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return;
         const left = Math.max(0, Math.min(width, Math.min(x0, x1)));
@@ -3792,6 +3875,27 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           x1: right / width,
           y1: bottom / height
         });
+      };
+      const projectWorldPointForWebGPU = (wx, wy, wz) => {
+        const relX = wx - camX;
+        const relY = wy - camY;
+        const invDet = 1.0 / (planeX * dirY - dirX * planeY);
+        const tx = invDet * (dirY * relX - dirX * relY);
+        const ty = invDet * (-planeY * relX + planeX * relY);
+        if (ty <= 0.02) return null;
+        return {
+          x: (width * 0.5) * (1.0 + tx / ty),
+          y: (height * 0.5) + (eyeZ - wz) * focalLength / ty,
+          depth: Math.min(1.0, Math.max(0.0, ty / depthFarDepth)),
+          viewDist: ty
+        };
+      };
+      const encodeTorchFacing = (facing) => {
+        if (facing === 'N') return 1;
+        if (facing === 'S') return 2;
+        if (facing === 'W') return 3;
+        if (facing === 'E') return 4;
+        return 0;
       };
       const SPRITE_WORLD_HEIGHT = 1.8;
       const SPRITE_WIDTH_RATIO = 0.7;
@@ -3988,7 +4092,55 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             flickerSeed,
             torchFacing
           });
+          {
+            const rawH = Math.max(1, rawDrawEndY - rawDrawStartY);
+            const vAtY = (y) => (y - rawDrawStartY) / rawH;
+            const topV = Math.max(0, Math.min(1, vAtY(drawStartY)));
+            const bottomV = Math.max(0, Math.min(1, vAtY(drawEndY)));
+            const profile = meta?.profile || (tileName === 'pillar' ? 'cylinder' : 'flat');
+            const isProfiled = profile === 'cylinder' || profile === 'slab';
+            const baseDepthAmount = typeof meta?.depth === 'number' ? meta.depth : 0.65;
+            const flicker = isTorch ? torchFlicker(flickerSeed, now) : 1.0;
+            webgpuOverlaySprites.push({
+              texName: tileName,
+              texImg,
+              drawLeft,
+              drawRight,
+              drawStartY,
+              drawEndY,
+              topV,
+              bottomV,
+              depth: Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / depthFarDepth)),
+              lightX,
+              lightY,
+              baseZ: spriteBaseZ,
+              worldHeight: isTorch ? 0.0 : spriteWorldHeight,
+              profile: isTorch ? 0.0 : (isProfiled ? 1.0 : 0.0),
+              depthAmount: isTorch ? 0.0 : baseDepthAmount,
+              spriteVFlip: (tileName === 'pillar' || (tileName && tileName.startsWith('custom_'))) ? 1.0 : 0.0,
+              depthShadeScale: isTorch ? 0.0 : depthShadeScale,
+              tintR: isTorch ? flicker * 1.1 : 1.0,
+              tintG: isTorch ? flicker * 0.98 : 1.0,
+              tintB: isTorch ? flicker * 0.85 : 1.0,
+              tintA: 1.0
+            });
+          }
           if (isTorch) {
+            const flicker = torchFlicker(flickerSeed, now);
+            const rawHeight = Math.max(1, rawDrawEndY - rawDrawStartY);
+            const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
+            const haloSize = Math.min(600, glowRadius * 2);
+            const haloWorldRadius = (haloSize * 0.5) * Math.max(0.1, safeTransformY) / Math.max(1.0, focalLength);
+            const n = torchFacingToNormal(torchFacing);
+            const t = { x: -n.y, y: n.x };
+            const faceCenterX = wx + 0.5 + n.x * 0.5;
+            const faceCenterY = wy + 0.5 + n.y * 0.5;
+            const haloCenterZ = spriteBaseZ + (TORCH_ANCHOR_RATIO - TORCH_FLAME_RATIO) * Math.max(0.1, spriteWorldHeight || TORCH_WORLD_HEIGHT);
+            const haloCenter = projectWorldPointForWebGPU(faceCenterX, faceCenterY, haloCenterZ);
+            const haloUPos = projectWorldPointForWebGPU(faceCenterX + t.x * haloWorldRadius, faceCenterY + t.y * haloWorldRadius, haloCenterZ);
+            const haloUNeg = projectWorldPointForWebGPU(faceCenterX - t.x * haloWorldRadius, faceCenterY - t.y * haloWorldRadius, haloCenterZ);
+            const haloVPos = projectWorldPointForWebGPU(faceCenterX, faceCenterY, haloCenterZ + haloWorldRadius);
+            const haloVNeg = projectWorldPointForWebGPU(faceCenterX, faceCenterY, haloCenterZ - haloWorldRadius);
             webgpuTorchSprites.push({
               screenX: spriteScreenX,
               rawDrawStartY,
@@ -3996,7 +4148,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               depth: Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / depthFarDepth)),
               viewDist: safeTransformY,
               flickerSeed,
-              wallFacing: !!torchFacing
+              wallFacing: !!torchFacing,
+              wallFacingCode: encodeTorchFacing(torchFacing),
+              haloCenterX: haloCenter ? haloCenter.x : spriteScreenX,
+              haloCenterY: haloCenter ? haloCenter.y : (rawDrawStartY + rawDrawEndY) * 0.5,
+              haloBasisUX: (haloUPos && haloUNeg) ? (haloUPos.x - haloUNeg.x) * 0.5 : 0.0,
+              haloBasisUY: (haloUPos && haloUNeg) ? (haloUPos.y - haloUNeg.y) * 0.5 : 0.0,
+              haloBasisVX: (haloVPos && haloVNeg) ? (haloVPos.x - haloVNeg.x) * 0.5 : 0.0,
+              haloBasisVY: (haloVPos && haloVNeg) ? (haloVPos.y - haloVNeg.y) * 0.5 : 0.0,
+              haloDepth: haloCenter ? Math.min(1.0, Math.max(0.0, haloCenter.depth + TORCH_HALO_DEPTH_PUSH)) : Math.min(1.0, Math.max(0.0, (safeTransformY - depthBias) / depthFarDepth + TORCH_HALO_DEPTH_PUSH))
             });
           }
           if (collectSpriteTorchRectsForWebGPU && !isTorch) {
@@ -4011,25 +4171,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           }
         }
       }
-      if (webgpuRenderer && typeof webgpuRenderer.updateTorchFrame === 'function') {
-        webgpuRenderer.updateTorchFrame({
-          now,
-          width,
-          height,
-          focalLength,
-          camX,
-          camY,
-          dirX,
-          dirY,
-          planeX,
-          planeY,
-          eyeZ,
-          torchColor: TORCH_LIGHT_COLOR,
-          lights: torchLights,
-          spriteVoxelRects: webgpuSpriteVoxelRects,
-          torchSprites: webgpuTorchSprites
-        });
-      }
+      webgpuOverlaySprites.sort((a, b) => b.depth - a.depth);
+      webgpuTorchFlameSprites.sort((a, b) => b.depth - a.depth);
 
       // Voxel pass for pillars/custom tiles (depth-tested against raycast walls)
       if (this.voxelProgram && voxelInstances.length > 0) {
@@ -4288,7 +4431,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
 
         if (spr.type !== 'torch') continue;
-        if (driveHaloFlameFromWebGPU) continue;
 
         const flicker = torchFlicker(spr.flickerSeed, now);
         // Use the same flame sizing math as the canvas pass so it doesn't look huge at distance.
@@ -4301,6 +4443,276 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const flickerShift = Math.round((flicker - 0.8) * 2);
         const flameBottom = flameCenterY + flickerShift;
         const flameTop = flameBottom - flameH;
+
+        if (driveHaloFlameFromWebGPU) {
+          if (flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
+            const flameDepth = Math.max(0.0, spr.depth - TORCH_FLAME_DEPTH_BIAS);
+            webgpuTorchFlameVerts.push(
+              (flameLeft / width) * 2 - 1, 1 - (flameBottom / height) * 2, 0, 1, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker,
+              (flameRight / width) * 2 - 1, 1 - (flameBottom / height) * 2, 1, 1, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker,
+              (flameLeft / width) * 2 - 1, 1 - (flameTop / height) * 2, 0, 0, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker,
+              (flameRight / width) * 2 - 1, 1 - (flameBottom / height) * 2, 1, 1, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker,
+              (flameLeft / width) * 2 - 1, 1 - (flameTop / height) * 2, 0, 0, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker,
+              (flameRight / width) * 2 - 1, 1 - (flameTop / height) * 2, 1, 0, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker
+            );
+          }
+
+          if (this.haloTex) {
+            const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
+            const haloSize = Math.min(600, glowRadius * 2);
+            const haloCenterY = flameCenterY;
+            const haloWorldRadius = (haloSize * 0.5) * Math.max(0.1, spr.viewDist || 0.1) / Math.max(1.0, focalLength);
+            let haloDepthSpan = Math.min(0.04, Math.max(0.0002, haloWorldRadius / Math.max(1e-3, depthFarDepth)));
+            let haloCapMin = 0.75;
+            let haloVerts = null;
+            const haloFoldMeshes = [];
+            let haloVertexCount = 0;
+            const hasWallFacing = !!spr.torchFacing;
+            if (hasWallFacing) {
+              const n = torchFacingToNormal(spr.torchFacing);
+              const haloAnchorX = spr.lightX + n.x * 0.01;
+              const haloAnchorY = spr.lightY + n.y * 0.01;
+              if (torchOcclusion && !hasLineOfSight(camX, camY, haloAnchorX, haloAnchorY)) {
+                haloVerts = null;
+              } else {
+                const t = { x: -n.y, y: n.x };
+                const toCamX = camX - spr.lightX;
+                const toCamY = camY - spr.lightY;
+                const toCamLen = Math.hypot(toCamX, toCamY);
+                const facing = toCamLen > 1e-4
+                  ? Math.max(0.0, (n.x * toCamX + n.y * toCamY) / toCamLen)
+                  : 1.0;
+                const wallDepthBias = TORCH_HALO_DEPTH_PUSH * (0.55 + 0.45 * facing);
+                const torchCellX = Number.isFinite(spr.cellX) ? spr.cellX : Math.floor(spr.lightX);
+                const torchCellY = Number.isFinite(spr.cellY) ? spr.cellY : Math.floor(spr.lightY);
+                const frontCellX = torchCellX + n.x;
+                const frontCellY = torchCellY + n.y;
+                const faceCenterX = torchCellX + 0.5 + n.x * 0.5;
+                const faceCenterY = torchCellY + 0.5 + n.y * 0.5;
+                const faceHalfSpan = 0.5;
+                const cellAt = (x, y) => ({ x: Math.floor(x), y: Math.floor(y) });
+                const isSolidCellXY = (cx, cy) => {
+                  const ccell = dungeon.cells?.[`${cx},${cy}`];
+                  return isSolidCell(ccell);
+                };
+                const isSolidAt = (x, y) => {
+                  const cxy = cellAt(x, y);
+                  return isSolidCellXY(cxy.x, cxy.y);
+                };
+                const getFoldSide = (side) => {
+                  const cornerX = faceCenterX + t.x * faceHalfSpan * side;
+                  const cornerY = faceCenterY + t.y * faceHalfSpan * side;
+                  const edgeFrontX = frontCellX + t.x * side;
+                  const edgeFrontY = frontCellY + t.y * side;
+                  if (isSolidCellXY(edgeFrontX, edgeFrontY)) {
+                    return {
+                      cornerX,
+                      cornerY,
+                      tangentX: n.x * side,
+                      tangentY: n.y * side
+                    };
+                  }
+                  const mCandidates = [
+                    { x: t.x * side, y: t.y * side },
+                    { x: -t.x * side, y: -t.y * side }
+                  ];
+                  const eps = 0.08;
+                  for (const m of mCandidates) {
+                    const back = cellAt(cornerX - m.x * eps, cornerY - m.y * eps);
+                    const front = cellAt(cornerX + m.x * eps, cornerY + m.y * eps);
+                    const backSolid = isSolidAt(cornerX - m.x * eps, cornerY - m.y * eps);
+                    const frontOpen = !isSolidAt(cornerX + m.x * eps, cornerY + m.y * eps);
+                    const backIsTorchCell = (back.x === torchCellX && back.y === torchCellY);
+                    const frontIsTorchCell = (front.x === torchCellX && front.y === torchCellY);
+                    if (!(backSolid && frontOpen)) continue;
+                    if (backIsTorchCell || frontIsTorchCell) continue;
+                    return {
+                      cornerX,
+                      cornerY,
+                      tangentX: n.x * side,
+                      tangentY: n.y * side
+                    };
+                  }
+                  return null;
+                };
+                const foldPos = getFoldSide(1);
+                const foldNeg = getFoldSide(-1);
+                const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - TORCH_FLAME_RATIO) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
+                const c = projectWorldPoint(faceCenterX, faceCenterY, haloCenterZ);
+                haloDepthSpan = 0.0;
+                haloCapMin = 0.0;
+                const computeBasisScale = (radius) => {
+                  const refUPos = projectWorldPoint(
+                    faceCenterX + t.x * radius,
+                    faceCenterY + t.y * radius,
+                    haloCenterZ
+                  );
+                  const refUNeg = projectWorldPoint(
+                    faceCenterX - t.x * radius,
+                    faceCenterY - t.y * radius,
+                    haloCenterZ
+                  );
+                  const refVPos = projectWorldPoint(faceCenterX, faceCenterY, haloCenterZ + radius);
+                  const refVNeg = projectWorldPoint(faceCenterX, faceCenterY, haloCenterZ - radius);
+                  if (!(refUPos && refUNeg && refVPos && refVNeg)) return 1.0;
+                  const ux = 0.5 * (refUPos.x - refUNeg.x);
+                  const uy = 0.5 * (refUPos.y - refUNeg.y);
+                  const vx = 0.5 * (refVPos.x - refVNeg.x);
+                  const vy = 0.5 * (refVPos.y - refVNeg.y);
+                  const uLen = Math.hypot(ux, uy);
+                  const vLen = Math.hypot(vx, vy);
+                  if (uLen <= 1e-5 || vLen <= 1e-5) return 1.0;
+                  const ratio = Math.max(0.85, Math.min(1.45, vLen / uLen));
+                  const circularMix = Math.pow(Math.max(0.0, Math.min(1.0, facing)), 1.2);
+                  return 1.0 + (ratio - 1.0) * circularMix;
+                };
+                const buildWallHaloMesh = (radius, segments) => {
+                  if (!c) return null;
+                  const grid = Math.max(2, segments | 0);
+                  const row = grid + 1;
+                  const points = new Array(row * row);
+                  const basisScale = computeBasisScale(radius);
+                  const basisTx = t.x * basisScale;
+                  const basisTy = t.y * basisScale;
+                  for (let iy = 0; iy <= grid; iy++) {
+                    const vv = -1 + (2 * iy) / grid;
+                    for (let ix = 0; ix <= grid; ix++) {
+                      const uu = -1 + (2 * ix) / grid;
+                      const p = projectWorldPoint(
+                        faceCenterX + basisTx * radius * uu,
+                        faceCenterY + basisTy * radius * uu,
+                        haloCenterZ + radius * vv
+                      );
+                      if (!p) return null;
+                      points[iy * row + ix] = p;
+                    }
+                  }
+                  const vertCount = grid * grid * 6;
+                  const out = new Float32Array(vertCount * 5);
+                  let o = 0;
+                  const emit = (pt, u, v) => {
+                    out[o++] = (pt.x / width) * 2 - 1;
+                    out[o++] = 1 - (pt.y / height) * 2;
+                    out[o++] = u;
+                    out[o++] = v;
+                    out[o++] = Math.min(1.0, Math.max(0.0, pt.depth - wallDepthBias));
+                  };
+                  for (let iy = 0; iy < grid; iy++) {
+                    const v0 = iy / grid;
+                    const v1 = (iy + 1) / grid;
+                    for (let ix = 0; ix < grid; ix++) {
+                      const u0 = ix / grid;
+                      const u1 = (ix + 1) / grid;
+                      const p00 = points[iy * row + ix];
+                      const p10 = points[iy * row + ix + 1];
+                      const p01 = points[(iy + 1) * row + ix];
+                      const p11 = points[(iy + 1) * row + ix + 1];
+                      emit(p00, u0, v0);
+                      emit(p10, u1, v0);
+                      emit(p11, u1, v1);
+                      emit(p00, u0, v0);
+                      emit(p11, u1, v1);
+                      emit(p01, u0, v1);
+                    }
+                  }
+                  return { verts: out, count: vertCount, basisScale, radius };
+                };
+                const buildFoldHaloMesh = (fold, side, radius, segments, basisScale) => {
+                  if (!fold) return null;
+                  const scaledRadius = Math.max(1e-4, basisScale * radius);
+                  const uEdge = faceHalfSpan / scaledRadius;
+                  if (uEdge >= 1.0) return null;
+                  const grid = Math.max(2, segments | 0);
+                  const uSteps = Math.max(1, Math.round(grid * (1.0 - uEdge)));
+                  const vSteps = grid;
+                  const row = uSteps + 1;
+                  const points = new Array((vSteps + 1) * row);
+                  for (let iy = 0; iy <= vSteps; iy++) {
+                    const vv = -1 + (2 * iy) / vSteps;
+                    for (let ix = 0; ix <= uSteps; ix++) {
+                      const alpha = ix / uSteps;
+                      const uu = side > 0
+                        ? (uEdge + (1.0 - uEdge) * alpha)
+                        : (-uEdge - (1.0 - uEdge) * alpha);
+                      const over = Math.max(0.0, Math.abs(scaledRadius * uu) - faceHalfSpan);
+                      const p = projectWorldPoint(
+                        fold.cornerX + fold.tangentX * over,
+                        fold.cornerY + fold.tangentY * over,
+                        haloCenterZ + radius * vv
+                      );
+                      if (!p) return null;
+                      points[iy * row + ix] = { pt: p, uu, vv };
+                    }
+                  }
+                  const vertCount = uSteps * vSteps * 6;
+                  if (vertCount <= 0) return null;
+                  const out = new Float32Array(vertCount * 5);
+                  let o = 0;
+                  const emit = (node) => {
+                    out[o++] = (node.pt.x / width) * 2 - 1;
+                    out[o++] = 1 - (node.pt.y / height) * 2;
+                    out[o++] = (node.uu + 1.0) * 0.5;
+                    out[o++] = (node.vv + 1.0) * 0.5;
+                    out[o++] = Math.min(1.0, Math.max(0.0, node.pt.depth - wallDepthBias));
+                  };
+                  for (let iy = 0; iy < vSteps; iy++) {
+                    for (let ix = 0; ix < uSteps; ix++) {
+                      const p00 = points[iy * row + ix];
+                      const p10 = points[iy * row + ix + 1];
+                      const p01 = points[(iy + 1) * row + ix];
+                      const p11 = points[(iy + 1) * row + ix + 1];
+                      emit(p00);
+                      emit(p10);
+                      emit(p11);
+                      emit(p00);
+                      emit(p11);
+                      emit(p01);
+                    }
+                  }
+                  return { verts: out, count: vertCount };
+                };
+                let probeRadius = haloWorldRadius;
+                for (let i = 0; i < 6; i++) {
+                  const mesh = buildWallHaloMesh(probeRadius, 6);
+                  if (mesh) {
+                    haloVerts = mesh.verts;
+                    haloVertexCount = mesh.count;
+                    const posFoldMesh = buildFoldHaloMesh(foldPos, 1, mesh.radius, 6, mesh.basisScale);
+                    const negFoldMesh = buildFoldHaloMesh(foldNeg, -1, mesh.radius, 6, mesh.basisScale);
+                    if (posFoldMesh) haloFoldMeshes.push(posFoldMesh);
+                    if (negFoldMesh) haloFoldMeshes.push(negFoldMesh);
+                    break;
+                  }
+                  probeRadius *= 0.65;
+                }
+              }
+            }
+
+            if (!haloVerts && !hasWallFacing) {
+              const haloLeft = Math.floor(spr.screenX - haloSize / 2);
+              const haloRight = haloLeft + haloSize;
+              const haloTop = haloCenterY - haloSize / 2;
+              const haloBottom = haloCenterY + haloSize / 2;
+              const haloDepth = Math.min(1.0, spr.depth + TORCH_HALO_DEPTH_PUSH);
+              haloVerts = new Float32Array([
+                (haloLeft / width) * 2 - 1, 1 - (haloBottom / height) * 2, 0, 1, haloDepth,
+                (haloRight / width) * 2 - 1, 1 - (haloBottom / height) * 2, 1, 1, haloDepth,
+                (haloLeft / width) * 2 - 1, 1 - (haloTop / height) * 2, 0, 0, haloDepth,
+                (haloRight / width) * 2 - 1, 1 - (haloTop / height) * 2, 1, 0, haloDepth
+              ]);
+              haloVertexCount = 4;
+            }
+
+            if (haloVerts) {
+              const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
+              appendTorchFxMesh(webgpuTorchHaloVerts, haloVerts, 1.0, 0.9, 0.7, glowAlpha, haloVertexCount);
+              for (const foldMesh of haloFoldMeshes) {
+                appendTorchFxMesh(webgpuTorchHaloVerts, foldMesh.verts, 1.0, 0.9, 0.7, glowAlpha, foldMesh.count);
+              }
+            }
+          }
+          continue;
+        }
 
         if (flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
           const flameDepth = Math.max(0.0, spr.depth - TORCH_FLAME_DEPTH_BIAS);
@@ -4645,6 +5057,44 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             }
           }
         }
+      }
+
+      if (webgpuRenderer && typeof webgpuRenderer.updateTorchFrame === 'function') {
+        webgpuRenderer.updateTorchFrame({
+          now,
+          width,
+          height,
+          focalLength,
+          camX,
+          camY,
+          dirX,
+          dirY,
+          planeX,
+          planeY,
+          eyeZ,
+          depthFar: depthFarDepth,
+          minFloor,
+          wallUScale: 0.25,
+          lightDirX: lighting.dirX,
+          lightDirY: lighting.dirY,
+          lightElev: lighting.elevation,
+          lightIntensity: lighting.intensity,
+          skyTopRgb: [skyTopRgb.r, skyTopRgb.g, skyTopRgb.b],
+          skyBotRgb: [skyBotRgb.r, skyBotRgb.g, skyBotRgb.b],
+          shadowStrength: shadowStrengthClamped,
+          torchRadiusScale: torchRadiusVoxelScaleClamped,
+          playerTileX: playerX,
+          playerTileY: playerY,
+          maxSteps: isOutdoor ? outdoorMaxSteps : 64,
+          torchColor: TORCH_LIGHT_COLOR,
+          lights: torchLights,
+          spriteVoxelRects: webgpuSpriteVoxelRects,
+          torchSprites: webgpuTorchSprites,
+          torchFlameVerts: webgpuTorchFlameVerts,
+          torchFlameSprites: webgpuTorchFlameSprites,
+          torchHaloVerts: webgpuTorchHaloVerts,
+          overlaySprites: webgpuOverlaySprites
+        });
       }
 
       gl.disable(gl.BLEND);
