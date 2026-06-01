@@ -2099,8 +2099,8 @@ window.updateCombatScene = function(characters) {
                     img = dungeonTextures[tile] || dungeonTextures.pillar || dungeonTextures.column;
                 }
 
-                const localX = (dx - fracX) * cs;
-                const localY = (dy - fracY) * cs;
+                const localX = (dx + 0.5 - fracX) * cs;
+                const localY = (dy + 0.5 - fracY) * cs;
 
                 // Base square for every cell
                 baseGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
