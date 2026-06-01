@@ -50,6 +50,10 @@ document.addEventListener('DOMContentLoaded', () => {
     return;
   }
     
+    if (!event.data || !event.data.trim().startsWith('{')) {
+      // Ignore non-JSON messages like "connected ..." from the server
+      return;
+    }
     try {
       const data = JSON.parse(event.data);
       if (data.type === 'roomMusicUpdated' && data.isNew) {
@@ -57,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
         playRoomMusic();
       }
     } catch (err) {
-      console.error('SSE parse error:', err);
+      console.error('SSE parse error:', err, 'raw:', event.data);
     }
   };
   eventSource.onerror = function() {
@@ -222,7 +226,7 @@ function toggleCombatMode() {
             combatPopup.style.left = '5px';
 
             // Center the combat map on the PC when opening, using global character data
-            const combatScene = window.combatGame.scene.getScene('CombatScene');
+            const combatScene = window.combatGame && window.combatGame.scene ? window.combatGame.scene.getScene('CombatScene') : null;
             if (combatScene) {
                 const pc = window.combatCharacters?.find(c => c.type === 'pc');
                 if (pc) {
@@ -233,7 +237,24 @@ function toggleCombatMode() {
                     combatScene.centerCameraOn(Math.floor(10 / 2), Math.floor(10 / 2)); // Center at (15, 15)
                 }
             } else {
-                console.warn("CombatScene not found!");
+                console.warn("CombatScene not found! combatGame may have failed to initialize (check for JS errors in game.js).");
+                // Attempt to recreate combat game as last resort (simple fallback)
+                if (!window.combatGame && typeof CombatScene !== 'undefined') {
+                    try {
+                        window.combatGame = new Phaser.Game({
+                            type: Phaser.WEBGL,
+                            width: 375,
+                            height: 375,
+                            parent: 'combat-container',
+                            scene: CombatScene,
+                            backgroundColor: '#333333',
+                            pixelArt: true
+                        });
+                        console.log('Attempted to re-initialize combatGame as fallback');
+                    } catch (e) {
+                        console.error('Fallback combatGame creation failed:', e);
+                    }
+                }
             }
         }
     }

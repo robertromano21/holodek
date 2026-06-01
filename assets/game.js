@@ -203,7 +203,9 @@ async function switchDungeonForCoordinates(coordString) {
 
   if (window.combatGame) {
     const scene = window.combatGame.scene.getScene('CombatScene');
-    if (scene && scene.drawDungeonOverlay) {
+    if (scene && scene.redrawCombatRT) {
+      scene.redrawCombatRT();
+    } else if (scene && scene.drawDungeonOverlay) {
       scene.drawDungeonOverlay();
     }
   }
@@ -521,33 +523,28 @@ eventSource.onmessage = function(event) {
         updatePlayerHeightFromCell();
         renderDungeonView();
     
-        // Combat overlay sync (unchanged)
+        // Combat overlay sync - use the rotating RT version when available
         if (window.combatGame) {
           const scene = window.combatGame.scene.getScene('CombatScene');
-          if (scene && scene.drawDungeonOverlay) {
-            scene.drawDungeonOverlay();
+          if (scene) {
+            if (scene.redrawCombatRT) {
+              scene.redrawCombatRT();
+            } else if (scene.drawDungeonOverlay) {
+              scene.drawDungeonOverlay();
+            }
           }
         }
       })();
         
-    // Force player to center on first load too
-    if (combatScene) {
-      const pc = combatScene.characters[combatScene.pcName];
-      if (pc) {
-        pc.x = 7;
-        pc.y = 7;
-        pc.sprite.setPosition(7 * 25 + 12.5, 7 * 25 + 12.5);
-        pc.label.setPosition(7 * 25 + 12.5, 7 * 25 + 32.5);
-        combatScene.centerCameraOn(7, 7);
-        combatScene.drawDungeonOverlay();
-      }
-    }
-
-    // Also refresh the combat-map overlay if the scene is alive
+    // Refresh the combat-map overlay if the scene is alive (rotating version preferred)
     if (window.combatGame) {
       const scene = window.combatGame.scene.getScene('CombatScene');
-      if (scene && scene.drawDungeonOverlay) {
-        scene.drawDungeonOverlay();
+      if (scene) {
+        if (scene.redrawCombatRT) {
+          scene.redrawCombatRT();
+        } else if (scene.drawDungeonOverlay) {
+          scene.drawDungeonOverlay();
+        }
       }
     }
     return;
@@ -810,7 +807,10 @@ function movePlayerByDelta(dx, dy) {
   // 4) Redraw both views — dungeon shifts, combat overlay shifts, player stays put
   renderDungeonView();
   logDungeonCombatSync('sse');
-  if (combatScene.drawDungeonOverlay) {
+  // Prefer RT redraw for egocentric rotation (from the 5/31 log review of working changes).
+  if (combatScene.redrawCombatRT) {
+    combatScene.redrawCombatRT();
+  } else if (combatScene.drawDungeonOverlay) {
     combatScene.drawDungeonOverlay();
   }
 
@@ -1046,7 +1046,10 @@ function syncPlayerTileFromPos() {
   logDungeonCombatSync('move');
   if (window.combatGame) {
     const scene = window.combatGame.scene.getScene('CombatScene');
-    if (scene && scene.drawDungeonOverlay) {
+    // Prefer rotating RT redraw so tile changes + turns keep the world spinning egocentrically.
+    if (scene && scene.redrawCombatRT) {
+      scene.redrawCombatRT();
+    } else if (scene && scene.drawDungeonOverlay) {
       scene.drawDungeonOverlay();
     }
   }
@@ -1161,7 +1164,11 @@ function updateDungeonMovement(now) {
     const scene = window.combatGame.scene.getScene('CombatScene');
     if (scene && scene.sys && scene.sys.game && scene.sys.game.loop) {
       scene.sys.game.loop.wake();
-      if (scene.drawDungeonOverlay) {
+      // Prefer the rotating RT version (redrawCombatRT) for egocentric spin on turns/moves.
+      // This is the "fix we arrived at" so pure turns (A/D) actually rotate floor+sprites+grid around fixed player.
+      if (scene.redrawCombatRT) {
+        scene.redrawCombatRT();
+      } else if (scene.drawDungeonOverlay) {
         scene.drawDungeonOverlay();
       }
       if (scene._movementSleepTimer) {
@@ -1821,24 +1828,28 @@ ${adjacentRooms}
             // 🔁 SWITCH DUNGEON WHEN COORDINATES CHANGE
             switchDungeonForCoordinates(currentCoords);
             try {
-                // Clear existing characters in CombatScene
-                const combatScene = window.combatGame.scene.getScene('CombatScene');
-                if (combatScene) {
-                    // Destroy all existing character sprites and labels
-                    Object.values(combatScene.characters).forEach(({ sprite, label }) => {
-                        sprite?.destroy();
-                        label?.destroy();
-                    });
-                    // Reset the characters object
-                    combatScene.characters = {};
-                    // Reset global combatCharacters
-                    window.combatCharacters = [];
+                if (window.combatGame && window.combatGame.scene) {
+                    // Clear existing characters in CombatScene
+                    const combatScene = window.combatGame.scene.getScene('CombatScene');
+                    if (combatScene && combatScene.characters) {
+                        // Destroy all existing character sprites and labels
+                        Object.values(combatScene.characters).forEach(({ sprite, label }) => {
+                            sprite?.destroy();
+                            label?.destroy();
+                        });
+                        // Reset the characters object
+                        combatScene.characters = {};
+                        // Reset global combatCharacters
+                        window.combatCharacters = [];
+                    }
                 }
                 // Rebuild with new characters
-                window.updateCombatScene(characters);
+                if (typeof window.updateCombatScene === 'function') {
+                    window.updateCombatScene(characters);
+                }
                 this.currentCoordinates = currentCoords;
                 this.combatInitialized = true;
-                combatCharactersString = JSON.stringify(window.combatCharacters); // Ensure this is set
+                combatCharactersString = JSON.stringify(window.combatCharacters || []); // Ensure this is set
                 console.log("Reset and initialized CombatScene with default positions:", characters);
             } catch (e) {
                 console.error("Error initializing CombatScene:", e);
@@ -1855,6 +1866,11 @@ ${adjacentRooms}
     }
 }
 window.updateCombatScene = function(characters) {
+    if (!window.combatGame || !window.combatGame.scene) {
+        console.warn("Combat game not ready yet, queuing characters update");
+        // Optionally queue it, but for now just log
+        return;
+    }
     let combatScene = window.combatGame.scene.getScene('CombatScene');
     if (combatScene) {
         console.log("Updating CombatScene with characters:", characters);
@@ -2026,32 +2042,193 @@ window.updateCombatScene = function(characters) {
     
     redrawCombatRT() {
         if (!this.renderRT) return;
-    
-        const cs = this.RT_CELL;
-        const gs = this.gridSize;
-    
         this.renderRT.clear();
-    
-        // ── Grid
-        const gridG = this.make.graphics({ add: false });
-        gridG.lineStyle(1, 0xffffff, 0.5);
-        for (let i = 0; i <= gs; i++) {
-          gridG.moveTo(i * cs, 0);
-          gridG.lineTo(i * cs, gs * cs);
-          gridG.moveTo(0, i * cs);
-          gridG.lineTo(gs * cs, i * cs);
+
+        if (!currentDungeon || !currentDungeon.cells) {
+            this.forcePlayerToCenter();
+            return;
         }
-        gridG.strokePath();
-        this.renderRT.draw(gridG);
-        gridG.destroy();
-    
-        // ── Dungeon overlay
-        if (currentDungeon) {
-          const dg = this.make.graphics({ add: false });
-          this.drawDungeonOverlayInto(dg);
-          this.renderRT.draw(dg);
-          dg.destroy();
+
+        // Clean 2D rotating tactical map using the cute 2D generated sprites (the billboards)
+        // shrunk down for walls, pillars, customs etc. on the grid.
+        // Player-centered, rotates with facing, smooth frac movement, thick grid on top.
+        const pos = getPlayerPosForMap();
+        const combatAngle = -(playerAngle + Math.PI / 2);  // negated: turn right in 3D now makes the world (floor+walls+grid) spin LEFT around player (correct egocentric per 5/31 log + user report)
+        const cs = this.RT_CELL;
+        const half = Math.floor(this.gridSize / 2);
+        const centerX = (half + 0.5) * cs;
+        const centerY = (half + 0.5) * cs;
+        const fracX = pos.x - Math.floor(pos.x) - 0.5;
+        const fracY = pos.y - Math.floor(pos.y) - 0.5;
+        const viewRadius = 8;
+
+        // Base floor squares + reddish wall blocks (batched in local space, rotated together).
+        // Walls drawn AFTER the grid so they sit on top solid (no grid lines showing through).
+        // 20% transparency on walls as requested. Full cell fills = no gaps between wall "sprites".
+        // Torch and pillar markers added so they never go missing.
+        const baseGfx = this.make.graphics({ add: false });
+        baseGfx.fillStyle(0x222222, 0.95);
+
+        const wallGfx = this.make.graphics({ add: false });
+        wallGfx.fillStyle(0x550000, 0.7);   // walls on top of grid, strong enough to obscure lines (grid only faintly visible through walls when they are present)
+
+        const torchGfx = this.make.graphics({ add: false });
+        torchGfx.fillStyle(0xffdd44, 0.95); // bright for torches
+
+        const pillarGfx = this.make.graphics({ add: false });
+        pillarGfx.fillStyle(0x8844aa, 0.9);   // strong for real detected pillars (the ones the 3D is actually showing)
+
+        for (let dy = -viewRadius; dy <= viewRadius; dy++) {
+            for (let dx = -viewRadius; dx <= viewRadius; dx++) {
+                const wx = Math.floor(pos.x + dx);
+                const wy = Math.floor(pos.y + dy);
+                const k = `${wx},${wy}`;
+                const cell = currentDungeon.cells[k];
+                if (!cell) continue;
+
+                const tile = String(cell.tile || '');
+                const tileLower = tile.toLowerCase();
+                let img = null;
+
+                if (tile.startsWith('custom_') || tile === 'pillar') {
+                    img = dungeonTextures[tile];
+                } else if (tile === 'wall' || tile === 'door' || tile === 'torch') {
+                    img = dungeonTextures[tile] || dungeonTextures.wall || dungeonTextures.pillar;
+                } else if (tileLower.includes('pillar') || tileLower.includes('column')) {
+                    // Catch pillar/column variants used in some dungeons (texture key may differ from generic 'pillar')
+                    img = dungeonTextures[tile] || dungeonTextures.pillar || dungeonTextures.column;
+                }
+
+                const localX = (dx - fracX) * cs;
+                const localY = (dy - fracY) * cs;
+
+                // Base square for every cell
+                baseGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
+
+                const isWallCell = isBlockedDungeonCell(cell) || tileLower.includes('wall') || tile === 'door' || tile === 'torch' || tileLower.includes('brick') || tileLower.includes('stone');
+
+                if (isWallCell) {
+                    // Full cell size + drawn after grid = solid walls, no gaps or lines showing through
+                    wallGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
+                }
+
+                if (tileLower.includes('torch')) {
+                    const ts = cs * 0.28;
+                    torchGfx.fillRect(localX - ts/2, localY - ts/2, ts, ts);
+                }
+
+                // Robust pillar / obstacle detection - now also checks the spriteSpec profile the 3D renderer uses
+                // for actual cylindrical columns/pillars (even large architectural ones in halls).
+                const tileMeta = currentDungeon.tiles && currentDungeon.tiles[tile];
+                const spec = tileMeta?.spriteSpec || {};
+                const hasSpriteSpec = !!tileMeta?.spriteSpec;
+                const isCylinderPillar = spec.profile === 'cylinder' ||
+                                         (spec.type && String(spec.type).toLowerCase().includes('pillar')) ||
+                                         (spec.type && String(spec.type).toLowerCase().includes('column'));
+
+                const isPillarLike = isObstacleTile(tile) ||
+                                     tileLower.includes('pillar') ||
+                                     tileLower.includes('column') ||
+                                     tileLower.includes('obstacl') ||
+                                     hasSpriteSpec ||
+                                     isCylinderPillar;   // ← catches the big columns the 3D is actually rendering
+
+                if (isPillarLike) {
+                    // Always draw a clear purple marker for real pillars/columns the 3D view shows.
+                    // This goes on the rotated pillar layer so it spins correctly with the map.
+                    const ps = cs * 0.48;
+                    pillarGfx.fillRect(localX - ps/2, localY - ps/2, ps, ps);
+                }
+
+                // Rotation math for billboards (and any direct RT draws)
+                const rotX = localX * Math.cos(+combatAngle) - localY * Math.sin(+combatAngle);
+                const rotY = localX * Math.sin(+combatAngle) + localY * Math.cos(+combatAngle);
+                const dX = centerX + rotX;
+                const dY = centerY + rotY;
+                const s = cs * 0.9;
+
+                // Normal billboard draw (if a nice 2D art exists for this pillar/custom tile)
+                if (img && img.complete && img.naturalWidth > 0) {
+                    this.renderRT.draw(img, dX - s/2, dY - s/2, s, s);
+                }
+
+                if (img && img.complete && img.naturalWidth > 0) {
+                    this.renderRT.draw(img, dX - s/2, dY - s/2, s, s);
+                }
+            }
         }
+
+        // base under grid
+        baseGfx.setPosition(centerX, centerY);
+        baseGfx.setRotation(+combatAngle);
+        this.renderRT.draw(baseGfx);
+        baseGfx.destroy();
+
+        // grid (lines under walls)
+        // (grid code follows immediately)
+
+        // walls + torches + pillars drawn AFTER grid = solid, on top, 20% walls, bright markers visible
+        wallGfx.setPosition(centerX, centerY);
+        wallGfx.setRotation(+combatAngle);
+        this.renderRT.draw(wallGfx);
+        wallGfx.destroy();
+
+        torchGfx.setPosition(centerX, centerY);
+        torchGfx.setRotation(+combatAngle);
+        this.renderRT.draw(torchGfx);
+        torchGfx.destroy();
+
+        pillarGfx.setPosition(centerX, centerY);
+        pillarGfx.setRotation(+combatAngle);
+        this.renderRT.draw(pillarGfx);
+        pillarGfx.destroy();
+
+        // Draw the thick rotating grid lines (matching the good earlier 2D versions)
+        const gridGfx = this.make.graphics({ add: false });
+        gridGfx.lineStyle(1, 0x888888, 0.35);  // fainter grid so walls on top obscure it strongly (only faint lines visible through walls)
+        const tileGridMin = -viewRadius;
+        const tileGridMax = viewRadius + 1;
+        for (let i = tileGridMin; i <= tileGridMax; i++) {
+          const vx = (i - fracX) * cs;
+          gridGfx.moveTo(vx, (tileGridMin - fracY) * cs);
+          gridGfx.lineTo(vx, (tileGridMax - fracY) * cs);
+
+          const hy = (i - fracY) * cs;
+          gridGfx.moveTo((tileGridMin - fracX) * cs, hy);
+          gridGfx.lineTo((tileGridMax - fracX) * cs, hy);
+        }
+        gridGfx.strokePath();
+
+        // Rotate the grid to match the sprites/objects
+        // combatAngle is negated (see top of redrawCombatRT) so turning right in 3D makes the floor+walls+grid spin left (correct egocentric counter-rotation)
+        gridGfx.setPosition(centerX, centerY);
+        gridGfx.setRotation(+combatAngle);
+        this.renderRT.draw(gridGfx);
+        gridGfx.destroy();
+
+        // Fixed UI (arrow + yellow cross) - not rotated
+        const arrowColor = 0x00ff88;
+        const arrowLen = cs * 0.4;
+        const arrowW = cs * 0.16;
+
+        const arrowGfx = this.make.graphics({ add: false });
+        arrowGfx.fillStyle(arrowColor, 0.95);
+        arrowGfx.beginPath();
+        arrowGfx.moveTo(centerX, centerY - arrowLen);
+        arrowGfx.lineTo(centerX - arrowW, centerY);
+        arrowGfx.lineTo(centerX + arrowW, centerY);
+        arrowGfx.closePath();
+        arrowGfx.fillPath();
+
+        // Yellow debug cross at exact center
+        arrowGfx.fillStyle(0xffff00, 1);
+        arrowGfx.fillRect(centerX - 2, centerY - 1, 5, 2);
+        arrowGfx.fillRect(centerX - 1, centerY - 2, 2, 5);
+
+        this.renderRT.draw(arrowGfx);
+        arrowGfx.destroy();
+
+        this.forcePlayerToCenter();
     }
 
   drawDungeonOverlayInto(gfx) {
@@ -2086,11 +2263,23 @@ window.updateCombatScene = function(characters) {
           gfx.fillRect(gx, gy, cs, cs);
         }
 
+        // Use the cute 2D generated sprites (shrunk) for pillars and custom objects
         if (tile === 'pillar' || tile.startsWith('custom_')) {
-          const centerGx = gx + cs * 0.5;
-          const centerGy = gy + cs * 0.5;
-          gfx.fillStyle(customColor, 0.7);
-          gfx.fillRect(centerGx - cs * 0.2, centerGy - cs * 0.2, cs * 0.4, cs * 0.4);
+          const spriteImg = dungeonTextures[tile];
+          if (spriteImg && spriteImg.complete && spriteImg.naturalWidth > 0) {
+            const s = cs * 0.85;
+            const centerGx = gx + (cs - s) / 2;
+            const centerGy = gy + (cs - s) / 2;
+            // Note: Graphics can't draw images directly in this path easily; for full sprite support we use the RT path in redrawCombatRT.
+            // For now, keep the marker but prefer the RT sprite drawing for objects.
+            gfx.fillStyle(customColor, 0.7);
+            gfx.fillRect(centerGx, centerGy, s, s);
+          } else {
+            const centerGx = gx + cs * 0.5;
+            const centerGy = gy + cs * 0.5;
+            gfx.fillStyle(customColor, 0.7);
+            gfx.fillRect(centerGx - cs * 0.2, centerGy - cs * 0.2, cs * 0.4, cs * 0.4);
+          }
         }
       }
     }
@@ -2199,6 +2388,7 @@ window.updateCombatScene = function(characters) {
     }
     updateCharacters(characters) {
        // console.log("CombatScene.updateCharacters called with:", characters);
+        if (!this.characters) this.characters = {};
         this.sys.game.loop.wake();
         // Merge new characters with existing positions from window.combatCharacters
         characters.forEach(newChar => {
@@ -2228,10 +2418,12 @@ window.updateCombatScene = function(characters) {
      // console.log("Updated window.combatCharactersString:", window.combatCharactersString);
    
         // Destroy existing sprites and labels
-        Object.values(this.characters).forEach(({ sprite, label }) => {
-            sprite.destroy();
-            label.destroy();
-        });
+        if (this.characters) {
+            Object.values(this.characters).forEach(({ sprite, label }) => {
+                sprite.destroy();
+                label.destroy();
+            });
+        }
         this.characters = {};
    
         // Create sprites and labels for all characters with their current positions
@@ -2403,6 +2595,36 @@ window.updateCombatScene = function(characters) {
             this.domContainer.scrollTop = newScrollY;
      // console.log(`Centering on (${x}, ${y}), scrolling to (${newScrollX}, ${newScrollY})`);
         }
+    }
+
+    forcePlayerToCenter() {
+        if (!this.pcName || !this.characters[this.pcName]) return;
+
+        const cellSize = 25;
+        const CENTER_X = 7;
+        const CENTER_Y = 7;
+        const pcData = this.characters[this.pcName];
+
+        pcData.x = CENTER_X;
+        pcData.y = CENTER_Y;
+
+        // Small visual offset so the triangle sits perfectly in the middle of its cell
+        const visualOffsetX = 0;
+        const visualOffsetY = -2;
+
+        pcData.sprite.setPosition(
+            CENTER_X * cellSize + cellSize / 2 + visualOffsetX,
+            CENTER_Y * cellSize + cellSize / 2 + visualOffsetY
+        );
+        if (pcData.label) {
+            pcData.label.setPosition(
+                CENTER_X * cellSize + cellSize / 2 + visualOffsetX,
+                CENTER_Y * cellSize + cellSize / 2 + 18 + visualOffsetY
+            );
+        }
+
+        // Keep the viewport centered on the player
+        this.centerCameraOn(CENTER_X, CENTER_Y);
     }
 }
 
@@ -6978,9 +7200,8 @@ async function updateNpcsInParty(updatedGameConsole) {
 
 let gameMode = [];
 
-const retort = require('retort-js').retort;
-
-const run = require('retort-js').run;
+// const retort = require('retort-js').retort;
+// const run = require('retort-js').run;  // Server-side only, commented for browser
 
 // Function to handle the "Still Loading..." interval
 function startKeepAliveInterval(chatLog) {
@@ -12035,7 +12256,10 @@ function renderDungeonView() {
         window.webglDungeonRenderer.renderScene();
         if (window.combatGame) {
           const scene = window.combatGame.scene.getScene('CombatScene');
-          if (scene && scene.drawDungeonOverlay) {
+          // Route to redrawCombatRT on every render so turns always spin the RT world (floor planes + billboards + grid) around player.
+          if (scene && scene.redrawCombatRT) {
+            scene.redrawCombatRT();
+          } else if (scene && scene.drawDungeonOverlay) {
             scene.drawDungeonOverlay();
           }
         }
