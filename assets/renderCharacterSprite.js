@@ -523,9 +523,12 @@ function drawSkeletalWings(ctx, cx, cy, u, palette, torsoH, boneCount = 4, wingL
 }
 
 function resolveStarterVariant(seed, spriteSpec, variantCount) {
-  const explicit = Number(spriteSpec && spriteSpec.design && spriteSpec.design.starter_variant);
-  if (Number.isFinite(explicit)) return Math.abs(Math.floor(explicit)) % variantCount;
+  const explicitValue = spriteSpec && spriteSpec.design ? spriteSpec.design.starter_variant : undefined;
+  const explicit = Number(explicitValue);
+  if (explicitValue != null && Number.isFinite(explicit)) return Math.abs(Math.floor(explicit)) % variantCount;
   if (Number.isFinite(Number(seed))) {
+    const numericSeed = Math.abs(Math.floor(Number(seed) * 1000000));
+    if (numericSeed) return numericSeed % variantCount;
     const seedKey = String(seed);
     let seedHash = 0;
     for (let i = 0; i < seedKey.length; i++) seedHash = ((seedHash * 33) + seedKey.charCodeAt(i)) >>> 0;
@@ -540,6 +543,90 @@ function resolveStarterVariant(seed, spriteSpec, variantCount) {
   return Math.abs(Math.floor((seed || 0) * 1000)) % variantCount;
 }
 
+function getMortaciaStarterFamily(variant = 0) {
+  const families = [
+    {
+      exact: true,
+      parts: { head: 'human_hair', torso: 'bone_corset', legs: 'long_striders', weapon: 'sword_broad', accessory: 'skeletal_wings' },
+      pose: 'attack_slash_female',
+      design: { head_size: 3, head_width: 4, torso_width: 4, torso_height: 6, leg_thickness: 2, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: -3, weapon_length: 8, blade_size: 4, wing_bone_count: 5, wing_length: 2, robe_flare: 1, fold_density: 2 }
+    },
+    {
+      exact: true,
+      parts: { head: 'human_hair', torso: 'cinched_corset', legs: 'flowing_skirt', weapon: 'sword_broad', accessory: 'skeletal_wings' },
+      pose: 'attack_slash_female',
+      design: { head_size: 3, head_width: 4, torso_width: 4, torso_height: 6, leg_thickness: 2, leg_height: 11, stride_amount: 1, arm_length: 5, arm_swing: -3, weapon_length: 9, blade_size: 4, wing_bone_count: 5, wing_length: 2, robe_flare: 2, fold_density: 3 }
+    },
+    {
+      exact: true,
+      parts: { head: 'human_hair', torso: 'bone_corset', legs: 'striding_boots', weapon: 'sword_broad', accessory: 'skeletal_wings' },
+      pose: 'attack_slash_female',
+      design: { head_size: 3, head_width: 4, torso_width: 4, torso_height: 6, leg_thickness: 2, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: -2, weapon_length: 8, blade_size: 3, wing_bone_count: 4, wing_length: 2, robe_flare: 1, fold_density: 2 }
+    },
+    {
+      exact: false,
+      parts: { head: 'human_hair', torso: 'dress_robe', legs: 'flowing_skirt', weapon: 'sword_broad', accessory: 'skeletal_wings' },
+      pose: 'idle_stand_female',
+      design: { head_size: 3, head_width: 4, torso_width: 4, torso_height: 6, leg_thickness: 2, leg_height: 12, stride_amount: 1, arm_length: 5, arm_swing: -2, weapon_length: 9, blade_size: 4, wing_bone_count: 5, wing_length: 2, robe_flare: 3, fold_density: 4 }
+    },
+    {
+      exact: false,
+      parts: { head: 'human_hair', torso: 'tapered_robe', legs: 'long_striders', weapon: 'spear', accessory: 'skeletal_wings' },
+      pose: 'striding_elegant_female',
+      design: { head_size: 3, head_width: 4, torso_width: 4, torso_height: 5, leg_thickness: 2, leg_height: 13, stride_amount: 2, arm_length: 5, arm_swing: -2, weapon_length: 11, blade_size: 3, wing_bone_count: 5, wing_length: 2, robe_flare: 2, fold_density: 3 }
+    },
+    {
+      exact: false,
+      parts: { head: 'human_hair', torso: 'cinched_corset', legs: 'striding_boots', weapon: 'mace', accessory: 'skeletal_wings' },
+      pose: 'defend_dodge_female',
+      design: { head_size: 3, head_width: 4, torso_width: 4, torso_height: 5, leg_thickness: 2, leg_height: 12, stride_amount: 2, arm_length: 5, arm_swing: -2, weapon_length: 8, blade_size: 4, wing_bone_count: 4, wing_length: 2, robe_flare: 1, fold_density: 2 }
+    }
+  ];
+  return families[Math.abs(variant) % families.length];
+}
+
+function getSuzerainStarterFamily(variant = 0) {
+  const families = [
+    {
+      exact: true,
+      parts: { head: 'gallant_helm', torso: 'gallant_plate', legs: 'armored_greaves', weapon: 'sword_broad', accessory: 'flowing_cape' },
+      pose: 'attack_overhead_male',
+      design: { head_size: 4, head_width: 5, torso_width: 5, torso_height: 5, leg_thickness: 3, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: 1, weapon_length: 9, blade_size: 3, cape_width: 3, cape_flow: 3, crest_height: 3, crest_spikes: 2 }
+    },
+    {
+      exact: true,
+      parts: { head: 'gallant_helm', torso: 'gallant_plate', legs: 'armored_greaves', weapon: 'sword_broad', accessory: 'flowing_cape' },
+      pose: 'attack_overhead_male',
+      design: { head_size: 4, head_width: 5, torso_width: 5, torso_height: 5, leg_thickness: 3, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: 1, weapon_length: 10, blade_size: 3, cape_width: 3, cape_flow: 3, crest_height: 3, crest_spikes: 2 }
+    },
+    {
+      exact: true,
+      parts: { head: 'gallant_helm', torso: 'gallant_plate', legs: 'armored_greaves', weapon: 'sword_broad', accessory: 'flowing_cape' },
+      pose: 'attack_overhead_male',
+      design: { head_size: 4, head_width: 5, torso_width: 5, torso_height: 5, leg_thickness: 3, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: 0, weapon_length: 9, blade_size: 3, cape_width: 3, cape_flow: 3, crest_height: 2, crest_spikes: 2 }
+    },
+    {
+      exact: true,
+      parts: { head: 'gallant_helm', torso: 'gallant_plate', legs: 'armored_greaves', weapon: 'sword_broad', accessory: 'flowing_cape' },
+      pose: 'attack_overhead_male',
+      design: { head_size: 4, head_width: 5, torso_width: 5, torso_height: 5, leg_thickness: 3, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: 1, weapon_length: 9, blade_size: 3, cape_width: 3, cape_flow: 3, crest_height: 3, crest_spikes: 2 }
+    },
+    {
+      exact: true,
+      parts: { head: 'gallant_helm', torso: 'gallant_plate', legs: 'armored_greaves', weapon: 'sword_broad', accessory: 'flowing_cape' },
+      pose: 'attack_overhead_male',
+      design: { head_size: 4, head_width: 5, torso_width: 5, torso_height: 5, leg_thickness: 3, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: 0, weapon_length: 10, blade_size: 3, cape_width: 3, cape_flow: 3, crest_height: 2, crest_spikes: 2 }
+    },
+    {
+      exact: true,
+      parts: { head: 'gallant_helm', torso: 'gallant_plate', legs: 'armored_greaves', weapon: 'sword_broad', accessory: 'flowing_cape' },
+      pose: 'attack_overhead_male',
+      design: { head_size: 4, head_width: 5, torso_width: 5, torso_height: 5, leg_thickness: 3, leg_height: 10, stride_amount: 1, arm_length: 5, arm_swing: 1, weapon_length: 10, blade_size: 3, cape_width: 3, cape_flow: 3, crest_height: 3, crest_spikes: 2 }
+    }
+  ];
+  return families[Math.abs(variant) % families.length];
+}
+
 // EXACT MORTACIA REPLICATION (for the provided reference image #2).
 // Methodology: Meticulous visual analysis of the reference (side profile facing left, small head with light top + black eye bar + skin face, dark grey costume body with mid grey belt/waist accent, skin tone thighs and arm, grey boots, light tan vertical sword held upward from rib/hand level on left with skin hand at base, complex stepped grey wing-like structure on right/back with multiple segments/prongs).
 // We lock the pixel layout to exact rect clusters (base pixel positions chosen to match the ref's proportions, silhouette, attachments and "stacked" look when core body is centered at ~11-12,11-12).
@@ -551,9 +638,9 @@ function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   const s = seed || 0;
   const v = Math.floor(s * 1000) % 5; // 0-4 for color var
   const mortaciaVariants = [
-    { wingShift: 2, wingLift: 0, wingExtraReach: 0, handLift: 0, swordLift: 0, swordLen: 10, thighLift: 0, bootLift: 0, hairLen: 5, hairFront: 1 },
-    { wingShift: 3, wingLift: -1, wingExtraReach: 1, handLift: -1, swordLift: -1, swordLen: 11, thighLift: -1, bootLift: -1, hairLen: 6, hairFront: 1 },
-    { wingShift: 2, wingLift: 1, wingExtraReach: 1, handLift: 0, swordLift: 0, swordLen: 9, thighLift: 0, bootLift: 0, hairLen: 4, hairFront: 0 }
+    { wingShift: 4, wingLift: 0, wingExtraReach: 1, handLift: 0, swordLift: 0, swordLen: 10, thighLift: 0, bootLift: 0, hairLen: 5, hairFront: 1 },
+    { wingShift: 5, wingLift: -1, wingExtraReach: 2, handLift: -1, swordLift: -1, swordLen: 11, thighLift: -1, bootLift: -1, hairLen: 6, hairFront: 1 },
+    { wingShift: 4, wingLift: 1, wingExtraReach: 2, handLift: 0, swordLift: 0, swordLen: 9, thighLift: 0, bootLift: 0, hairLen: 4, hairFront: 0 }
   ];
   const cfg = mortaciaVariants[Math.abs(variant) % mortaciaVariants.length];
   const wingX = baseX + cfg.wingShift;
@@ -667,7 +754,7 @@ function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   const v = Math.floor(s * 1000) % 4; // color variations for rerolls while keeping exact layout
   const suzerainVariants = [
     { shoulderW: 6, swordLen: 15, swordLift: 0, capeFlow: 6, capeLift: 0, crestH: 2, legLift: 0, torsoLift: 0 },
-    { shoulderW: 6, swordLen: 16, swordLift: -1, capeFlow: 7, capeLift: -1, crestH: 3, legLift: -1, torsoLift: -1 },
+    { shoulderW: 7, swordLen: 16, swordLift: -1, capeFlow: 7, capeLift: -1, crestH: 3, legLift: -1, torsoLift: -1 },
     { shoulderW: 5, swordLen: 14, swordLift: 0, capeFlow: 8, capeLift: 0, crestH: 2, legLift: 0, torsoLift: 0 }
   ];
   const cfg = suzerainVariants[Math.abs(variant) % suzerainVariants.length];
@@ -777,8 +864,10 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
   const mod = Math.floor(seed * 1000) % 7;
   const mod2 = Math.floor(seed * 1000) % 5;
   const c = charClass.toLowerCase();
-  const isMortacia = (name || '').toLowerCase().includes('mortacia') || c.includes('goddess') || c.includes('necromancer');
+  const isMortacia = (name || '').toLowerCase().includes('mortacia');
   const isSuzerain = (name || '').toLowerCase().includes('suzerain');
+  const starterVariant = (isMortacia || isSuzerain) ? resolveStarterVariant(seed, spriteSpec, 6) : 0;
+  const starterFamily = isMortacia ? getMortaciaStarterFamily(starterVariant) : (isSuzerain ? getSuzerainStarterFamily(starterVariant) : null);
 
   let palette = paletteBase;
   // Grey costume for Mortacia to match latest ref [Image #1]: dark grey body/corset (primary), medium grey for boots/trim/legs base (secondary),
@@ -801,6 +890,9 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
   // This prevents "Assignment to constant variable" during reroll paths after Save.
   let pose = { ...((spriteSpec && (spriteSpec.pose || spriteSpec.proportions)) || {}) };
   let design = { ...((spriteSpec && spriteSpec.design) || {}) };
+  if (starterFamily && starterFamily.design) {
+    design = { ...starterFamily.design, ...design };
+  }
 
   // === Resolve to discrete catalog choices (LLM and deterministic fallback does too) ===
   let headType = parts.head || (c.includes('necromancer') || c.includes('goddess') ? 'skull_crest' : (c.includes('knight') ? (mod % 2 === 0 ? 'plumed_helmet' : 'gallant_helm') : (isFemale ? 'human_hair' : 'normal_human')));
@@ -814,7 +906,7 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
     headType = 'human_hair';  // for bigger head, more defined feminine hair + simple single-line cap per ref
   }
   if ((name || '').toLowerCase().includes('suzerain')) {
-    headType = 'gallant_helm';
+    headType = starterFamily.parts.head;
   }
   if (headType === 'normal' || headType === 'human') headType = isFemale ? 'human_hair' : 'normal_human';
   if (headType === 'hood') headType = 'hooded_skull';
@@ -832,16 +924,18 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
   let accType = parts.accessory || (c.includes('goddess') || c.includes('necromancer') ? 'flowing_cape' : 'none');
   // Force iconic for the two starters (do the prefabs the way the game aesthetic + descriptions + images demand)
   if (isMortacia) {
-    torsoType = (mod2 % 2 === 0 ? 'bone_corset' : 'cinched_corset');
-    legsType = (mod % 2 === 0 ? 'long_striders' : 'flowing_skirt');
-    weaponType = 'sword_broad';  // she uses a sword mostly (per latest ref image + "Mortacia ... she uses a sword mostly")
-    accType = 'skeletal_wings';
+    headType = starterFamily.parts.head;
+    torsoType = starterFamily.parts.torso;
+    legsType = starterFamily.parts.legs;
+    weaponType = starterFamily.parts.weapon;
+    accType = starterFamily.parts.accessory;
   }
   if ((name || '').toLowerCase().includes('suzerain')) {
-    torsoType = 'gallant_plate';  // fresh gallant full plate per ref image (straps/segments for heroic knight armor)
-    legsType = 'armored_greaves';
-    weaponType = 'sword_broad';
-    accType = 'flowing_cape';
+    headType = starterFamily.parts.head;
+    torsoType = starterFamily.parts.torso;
+    legsType = starterFamily.parts.legs;
+    weaponType = starterFamily.parts.weapon;
+    accType = starterFamily.parts.accessory;
   }
 
   // Safe number helper
@@ -899,9 +993,7 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
   let charPose = (typeof topPose === 'string' ? topPose : (design.pose || (pose && pose.pose) || 'striding'));
 
   // For Mortacia (pulpy goddess with sword): force a dynamic raised-sword attack pose so the blade is held up/overhead rather than sweeping horizontally across the body/wings.
-  if (isMortacia) {
-    charPose = 'attack_slash_female';
-  }
+  if (starterFamily && starterFamily.pose) charPose = starterFamily.pose;
 
   // Pose-specific adjustments for dozens of unique poses (male/female variants ensure variety, not just colors)
   let bodyLean = 0;
@@ -1069,6 +1161,7 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
   }
   weaponX = armBaseX + profileFacing * 2;
   capeX = masterCenterX - profileFacing * (Math.floor(p.torsoW / 2) + 2);
+  if (isMortacia) capeX += 2;
 
   // Snap core body center (the stacked head/torso/legs column) exactly to canvas center (12,12).
   // This makes the character perfectly centered on its alpha (the drawn parts of the body).
@@ -1131,7 +1224,7 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
   // Mortacia latest ref: holding the sword starting at her ribs with hands and the sword upwards on the left.
   // Place hand/grip exactly at rib height (upper torso) so sword blade starts there and extends upward on left.
   // (Combined with profileFacing=-1 + weaponDir this keeps sword left, wings right, no cover.)
-  if (isMortacia) {
+  if (isMortacia && starterFamily && starterFamily.exact) {
     // holding the sword starting at her ribs with hands: position the *hand* (grip) at upper-torso rib height (~torsoY+2)
     // so sword blade starts there and goes upwards on the left. (armBase higher up the torso for the raised pose)
     const ribY = torsoY + 2;
@@ -1172,7 +1265,7 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
     // The drawMortaciaExact was meticulously built from pixel analysis of the image (exact rect positions, widths, heights, stacking, and attachments for head/arm/sword/wing/legs/torso to reproduce the silhouette, skin exposure, light sword, dark grey costume, stepped right wing, etc.).
     // baseX/baseY = 10,2 chosen so the core body column + protrusions center correctly on the 24-grid (matches how the ref figure sits when centered).
     drawMortaciaExact(ctx, 8, 2, u, seed, palette, resolveStarterVariant(seed, spriteSpec, 3)); // adjusted base for better center match; curated variants keep the same ref language while giving rerolls actual pose/look variation
-  } else if (isSuzerain) {
+  } else if (isSuzerain && starterFamily && starterFamily.exact) {
     // EXACT replication of the reference image for Suzerain ("[Image #1] no like this" + prior refs).
     // Draws pixel-for-pixel match using the same 24-grid: distinctive light helm + dark cross/visor emblem, skin hands at each side (left gripping upright sword at ~rib, right empty at side), red cape prominent flowing on back/right with stepped lower, dark upright sword vertical left from above head to hand, dark armor torso + light lower plate/belt, light greaves + dark bands + dark feet.
     // Bypasses general prefabs/poses/design for locked identical layout every time. ONLY colors vary (seed % 4) for "similar result every time with color variations".
@@ -1257,6 +1350,10 @@ function createCharacterSpriteSpec(character) {
 
   const isFemale = (sex || '').toLowerCase() === 'female';
   const c = charClass.toLowerCase();
+  const isMortacia = name.toLowerCase().includes('mortacia');
+  const isSuzerain = name.toLowerCase().includes('suzerain');
+  const starterVariant = (isMortacia || isSuzerain) ? resolveStarterVariant(seed, null, 6) : 0;
+  const starterFamily = isMortacia ? getMortaciaStarterFamily(starterVariant) : (isSuzerain ? getSuzerainStarterFamily(starterVariant) : null);
 
   // === NEW PREFAB CATALOG CHOICES (LLM and deterministic use exact same discrete strings) ===
   // These map 1:1 to draw* prefabs. Side-profile, small head+feature, Epyx stride, bottom-heavy silhouette.
@@ -1269,11 +1366,11 @@ function createCharacterSpriteSpec(character) {
   if (seedMod % 5 === 0) head = headOptions[seedMod % headOptions.length];
   // Force iconic prefabs for starters (Mortacia: tall goddess grey dragon wings right back + longer hair + slender; Suzerain: gallant knight with helm/cape/sword/armor per ref image). 
   // Previous Suzerain shapes (plumed_helmet + plate_armor + armored_greaves + flowing_cape) now saved as reusable templates for knight monsters/NPCs in catalog (see monster variety).
-  if (name.toLowerCase().includes('mortacia')) {
+  if (isMortacia) {
     head = 'human_hair';  // bigger head, feminine hair, simple cap line (single line detail) per latest ref image
   }
-  if (name.toLowerCase().includes('suzerain')) {
-    head = 'gallant_helm';
+  if (isSuzerain) {
+    head = starterFamily.parts.head;
   }
 
   let torso = 'flowing_robe';
@@ -1303,23 +1400,21 @@ function createCharacterSpriteSpec(character) {
 
   let accessory = (c.includes('goddess') || c.includes('necromancer')) ? 'flowing_cape' : 'none';
   if (seedMod === 3 && c.includes('knight')) accessory = 'flowing_cape';
-  // occasional skeletal wings for variety on rerolls for goddess/necromancer (Mortacia)
-  if ((c.includes('necromancer') || c.includes('goddess')) && seedMod2 === 0) accessory = 'skeletal_wings';
   // Force iconic for Mortacia (always grey dragon wings on right back, slender tall, long hair implied via head/hair draws) and Suzerain (cool plumed helmet + sword)
-  if (name.toLowerCase().includes('mortacia')) {
-    head = 'human_hair';  // bigger head, feminine hair, simple cap line (single line detail) per latest ref image
-    torso = (seedMod2 % 2 === 0 ? 'bone_corset' : 'cinched_corset');
-    legs = (seedMod % 2 === 0 ? 'long_striders' : 'flowing_skirt');
-    weapon = 'sword_broad';  // she uses a sword mostly
-    accessory = 'skeletal_wings';
+  if (isMortacia) {
+    head = starterFamily.parts.head;
+    torso = starterFamily.parts.torso;
+    legs = starterFamily.parts.legs;
+    weapon = starterFamily.parts.weapon;
+    accessory = starterFamily.parts.accessory;
   }
-  if (name.toLowerCase().includes('suzerain')) {
+  if (isSuzerain) {
     // fresh gallant knight per ref image (helm, cape, sword, armor) - old shapes now monster templates
-    head = 'gallant_helm';
-    torso = 'gallant_plate';
-    legs = 'armored_greaves';
-    weapon = 'sword_broad';
-    accessory = 'flowing_cape';
+    head = starterFamily.parts.head;
+    torso = starterFamily.parts.torso;
+    legs = starterFamily.parts.legs;
+    weapon = starterFamily.parts.weapon;
+    accessory = starterFamily.parts.accessory;
   }
   // ensure gallant suzerain cape is flowing
   if (name.toLowerCase().includes('suzerain') && accessory === 'flowing_cape') {
@@ -1329,11 +1424,16 @@ function createCharacterSpriteSpec(character) {
   // Pose offsets for Epyx counter-pose (arm vs legs). Seed gives reroll variety.
   let legSpread = isFemale ? 1 : 0;
   let armSwing = c.includes('knight') ? (seedMod % 3 - 1) : (seedMod % 2 ? 0 : -1);
-  if (name.toLowerCase().includes('mortacia')) armSwing = -3; // bias for rib-level hand hold (higher arm, hand at ribs for upward sword)
+  if (isMortacia) armSwing = -3; // bias for rib-level hand hold (higher arm, hand at ribs for upward sword)
   let weaponH = (weapon.includes('scythe') ? 11 : 9);
   if (c.includes('knight')) weaponH = 8;
   if (c.includes('necromancer') || c.includes('goddess')) weaponH = 9;  // sword for Mortacia is shorter than old scythe
-  if (name.toLowerCase().includes('mortacia')) weaponH = 8; // sword mostly, raised pose
+  if (isMortacia) weaponH = 8; // sword mostly, raised pose
+  if (starterFamily && starterFamily.design) {
+    if (Number.isFinite(starterFamily.design.arm_swing)) armSwing = starterFamily.design.arm_swing;
+    if (Number.isFinite(starterFamily.design.weapon_length)) weaponH = starterFamily.design.weapon_length;
+    if (Number.isFinite(starterFamily.design.stride_amount)) legSpread = starterFamily.design.stride_amount;
+  }
 
   // Dozens of poses, sex affects choice and design (female thinner/more beautiful)
   const malePoses = ['idle_stand_male', 'striding_walk_male', 'run_dash_male', 'attack_thrust_male', 'attack_overhead_male', 'kneel_ready_male', 'bow_shot_male'];
@@ -1341,8 +1441,7 @@ function createCharacterSpriteSpec(character) {
   let chosenPose = isFemale ? femalePoses[seedMod % femalePoses.length] : malePoses[seedMod % malePoses.length];
   if (c.includes('necromancer') || c.includes('goddess')) chosenPose = isFemale ? 'cast_spell_female' : 'attack_overhead_male';
   // Iconic poses for starters
-  if (name.toLowerCase().includes('mortacia')) chosenPose = 'attack_slash_female';  // dynamic raised sword for pulpy goddess look (sword mostly)
-  if (name.toLowerCase().includes('suzerain')) chosenPose = 'attack_overhead_male'; // gallant raised sword pose emulating ref image knight (heroic, not just walk)
+  if (starterFamily && starterFamily.pose) chosenPose = starterFamily.pose;
 
   // legacy numeric proportions (kept for any client code that reads .proportions; new code prefers .pose)
   // Adjusted per user feedback: smaller body, longer legs, for better humanoid proportions
@@ -1355,14 +1454,14 @@ function createCharacterSpriteSpec(character) {
   let pArmH = 4;
   if (c.includes('dwarf')) { pLegH = 7; pTorsoW = 6; }
   if (c.includes('elf')) { pLegH = 12; pTorsoW = 4; pHeadW = 3; }
-  if (name.toLowerCase().includes('mortacia')) {
+  if (isMortacia) {
     pLegH = 13; pTorsoW = Math.max(3, Math.floor(pTorsoW * 0.70)); pLegW = Math.max(2, Math.floor(pLegW * 0.75)); pHeadW = Math.max(3, Math.floor(pHeadW * 0.8) + 1); pHeadH = Math.max(3, Math.floor(pHeadH * 0.8) + 1); // reduce 20% +1 for face wider/longer, thinner latest
   }
-  if (name.toLowerCase().includes('suzerain')) {
+  if (isSuzerain) {
     pTorsoW = Math.max(4, pTorsoW + 1); // gallant sturdy
   }
-  pLegSpread = Math.min(2, legSpread + (seedMod % 2));
-  pArmOffsetY = Math.max(-1, Math.min(1, armSwing + (seedMod % 3 - 1)));
+  let pLegSpread = Math.min(2, legSpread + (seedMod % 2));
+  let pArmOffsetY = Math.max(-1, Math.min(1, armSwing + (seedMod % 3 - 1)));
 
   // Female: thinner and more beautiful (changes prefabs/drawing scales)
   if (isFemale) {
@@ -1371,34 +1470,26 @@ function createCharacterSpriteSpec(character) {
     pHeadW = Math.max(3, Math.floor(pHeadW * 0.9));
   }
   // Mortacia tall slender goddess bias in deterministic design too (pulpy form per ref)
-  if (name.toLowerCase().includes('mortacia')) {
+  if (isMortacia) {
     pTorsoW = Math.max(3, Math.floor(pTorsoW * 0.70)); // thinner per latest ref
     pLegW = Math.max(2, Math.floor(pLegW * 0.75));
     pHeadW = Math.max(3, Math.floor(pHeadW * 0.8) + 1);
     pHeadH = Math.max(3, Math.floor(pHeadH * 0.8) + 1); // reduce 20% +1 pixel wider/longer for face
     pLegH = Math.min(13, pLegH + 2);
   }
-  if (name.toLowerCase().includes('suzerain')) {
+  if (isSuzerain) {
     pTorsoW = Math.max(4, pTorsoW + 1); // gallant sturdy knight build per ref
     pHeadW = Math.max(4, pHeadW );
   }
 
-  // For Mortacia: lock design numbers to the exact proportions that replicate the reference image [Image #2]
-  // (small head, narrow torso to expose thighs, specific leg/arm heights, low stride for legs together, rib-level sword).
-  // Combined with the exact draw path this guarantees similar result every time (shape fixed).
-  const starterVariant = (name.toLowerCase().includes('mortacia') || name.toLowerCase().includes('suzerain'))
-    ? (() => {
-        const seedKey = String(seed);
-        let seedHash = 0;
-        for (let i = 0; i < seedKey.length; i++) seedHash = ((seedHash * 33) + seedKey.charCodeAt(i)) >>> 0;
-        return seedHash % 3;
-      })()
-    : 0;
-  if (name.toLowerCase().includes('mortacia')) {
-    pHeadH = 3; pHeadW = 4;
-    pTorsoH = 6; pTorsoW = 4;
-    pLegH = (starterVariant === 1 ? 11 : 10); pLegW = 2;
-    pArmH = 5;
+  if (starterFamily && starterFamily.design) {
+    pHeadH = starterFamily.design.head_size || pHeadH;
+    pHeadW = starterFamily.design.head_width || pHeadW;
+    pTorsoH = starterFamily.design.torso_height || pTorsoH;
+    pTorsoW = starterFamily.design.torso_width || pTorsoW;
+    pLegH = starterFamily.design.leg_height || pLegH;
+    pLegW = starterFamily.design.leg_thickness || pLegW;
+    pArmH = starterFamily.design.arm_length || pArmH;
   }
 
   // For Mortacia exact ref: compute color variant in spec too so saved sprite carries the variation
@@ -1420,12 +1511,12 @@ function createCharacterSpriteSpec(character) {
 
   return {
     palette: {
-      primary: (name.toLowerCase().includes('mortacia') ? mortPrimary : basePrimary),
-      secondary: name.toLowerCase().includes('mortacia') ? mortSecondary : (isFemale ? '#8b5a2b' : '#5c4033'),
-      highlight: name.toLowerCase().includes('mortacia') ? mortHighlight : (race === 'elf' ? '#aaffcc' : (c.includes('knight') ? '#ffdd66' : '#aa3333')),
-      skin: name.toLowerCase().includes('mortacia') ? mortSkin : (race === 'dwarf' ? '#d2b48c' : (race === 'elf' ? '#e8d5b7' : '#e8c39e')),
-      accent: name.toLowerCase().includes('mortacia') ? mortAccent : variantAccent,
-      shadow: name.toLowerCase().includes('mortacia') ? mortShadow : '#22110a'
+      primary: (isMortacia ? mortPrimary : basePrimary),
+      secondary: isMortacia ? mortSecondary : (isFemale ? '#8b5a2b' : '#5c4033'),
+      highlight: isMortacia ? mortHighlight : (race === 'elf' ? '#aaffcc' : (c.includes('knight') ? '#ffdd66' : '#aa3333')),
+      skin: isMortacia ? mortSkin : (race === 'dwarf' ? '#d2b48c' : (race === 'elf' ? '#e8d5b7' : '#e8c39e')),
+      accent: isMortacia ? mortAccent : variantAccent,
+      shadow: isMortacia ? mortShadow : '#22110a'
     },
     parts: {
       head: head,
@@ -1440,12 +1531,12 @@ function createCharacterSpriteSpec(character) {
     design: {
       head_size: pHeadH,
       head_width: pHeadW,
-      crest_height: (head.includes('crest') || head.includes('skull') ? 2 : 1) + (seedMod % 2) + (name.toLowerCase().includes('suzerain') ? 1 : 0),
-      crest_spikes: (head.includes('crest') || head.includes('skull') ? 3 : 2),
+      crest_height: starterFamily?.design?.crest_height ?? ((head.includes('crest') || head.includes('skull') ? 2 : 1) + (seedMod % 2) + (isSuzerain ? 1 : 0)),
+      crest_spikes: starterFamily?.design?.crest_spikes ?? (head.includes('crest') || head.includes('skull') ? 3 : 2),
       torso_width: pTorsoW,
       torso_height: pTorsoH,
-      robe_flare: (torso.includes('robe') || torso.includes('flowing') ? 2 : 1) + (seedMod % 2),
-      fold_density: (torso.includes('robe') || torso.includes('flowing') ? 3 : 2) + (seedMod % 3 > 1 ? 1 : 0),
+      robe_flare: starterFamily?.design?.robe_flare ?? ((torso.includes('robe') || torso.includes('flowing') ? 2 : 1) + (seedMod % 2)),
+      fold_density: starterFamily?.design?.fold_density ?? ((torso.includes('robe') || torso.includes('flowing') ? 3 : 2) + (seedMod % 3 > 1 ? 1 : 0)),
       leg_thickness: pLegW,
       leg_height: pLegH,
       stride_amount: legSpread,
@@ -1453,12 +1544,12 @@ function createCharacterSpriteSpec(character) {
       arm_length: pArmH,
       arm_swing: armSwing,
       weapon_length: weaponH,
-      blade_size: (weapon.includes('scythe') ? 4 : 3) + (seedMod % 2),
+      blade_size: starterFamily?.design?.blade_size ?? ((weapon.includes('scythe') ? 4 : 3) + (seedMod % 2)),
       starter_variant: starterVariant,
-      cape_width: (accessory === 'flowing_cape' ? 3 : 2),
-      cape_flow: (name.toLowerCase().includes('suzerain') && accessory === 'flowing_cape' ? 3 : (accessory === 'flowing_cape' ? 2 : 1)) + (seedMod % 2),
-      wing_bone_count: (accessory === 'skeletal_wings' ? 4 : 0) + (seedMod % 2),
-      wing_length: (accessory === 'skeletal_wings' ? 2 : 0) + (seedMod % 2),
+      cape_width: starterFamily?.design?.cape_width ?? (accessory === 'flowing_cape' ? 3 : 2),
+      cape_flow: starterFamily?.design?.cape_flow ?? ((isSuzerain && accessory === 'flowing_cape' ? 3 : (accessory === 'flowing_cape' ? 2 : 1)) + (seedMod % 2)),
+      wing_bone_count: starterFamily?.design?.wing_bone_count ?? ((accessory === 'skeletal_wings' ? 4 : 0) + (seedMod % 2)),
+      wing_length: starterFamily?.design?.wing_length ?? ((accessory === 'skeletal_wings' ? 2 : 0) + (seedMod % 2)),
       pose: chosenPose
     },
     // kept for backward compat with any old paths that still read proportions
@@ -1492,6 +1583,17 @@ function createCharacterSpriteSheetCanvas(character, spriteSpec = null, frameCou
   const sheetCtx = sheet.getContext('2d');
 
   const baseSpec = spriteSpec || createCharacterSpriteSpec(character);
+  const name = (character && (character.name || character.Name || '')).toLowerCase();
+  if (name.includes('suzerain')) {
+    for (let f = 0; f < frameCount; f++) {
+      const frameChar = Object.assign({}, character, {
+        _rerollSeed: (character._rerollSeed || 0) + ((f + 1) * 0.137)
+      });
+      const oneFrame = createCharacterSpriteCanvas(frameChar, baseSpec);
+      sheetCtx.drawImage(oneFrame, f * frameW, 0);
+    }
+    return sheet;
+  }
   const basePose = baseSpec.pose || baseSpec.proportions || {};
   const baseDesign = baseSpec.design || {};
 

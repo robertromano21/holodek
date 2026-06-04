@@ -174,6 +174,8 @@ app.post('/startGameWithCharacter', async (req, res) => {
     try {
       const combatMode = sharedState.getCombatMode();
       const characterData = req.body.character; // The finalized PC with sprite.dataUrl etc.
+      const partyNpcData = Array.isArray(req.body.npcs) ? req.body.npcs : [];
+      const incomingCombatCharacters = Array.isArray(req.body.combatCharacters) ? req.body.combatCharacters : null;
 
       console.log(`[Server] Starting game with finalized character:`, characterData?.Name || characterData?.name);
 
@@ -183,6 +185,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
       // CRITICAL: clear the character generation phase guard so /processInput7 and normal flow unblock
       // (prevents "Blocked /processInput7 — still in character generation phase" after Save).
       sharedState.setCharacterGenerationInProgress(false);
+      sharedState.setPendingCharacterForReview(null);
 
       // Seed combatCharactersString (and thus per-room party/combat slots) from the saved PC right now.
       // Combat already supports sprite.dataUrl billboards (25px) + add/remove party functions; this
@@ -192,7 +195,17 @@ app.post('/startGameWithCharacter', async (req, res) => {
         type: 'pc',
         sprite: characterData.sprite || null
       };
-      sharedState.setCombatCharactersString(JSON.stringify([pcForCombat]));
+      const seededCombatRoster = incomingCombatCharacters && incomingCombatCharacters.length
+        ? incomingCombatCharacters
+        : [
+            pcForCombat,
+            ...partyNpcData.map(npc => ({
+              name: npc.Name || npc.name || 'Party NPC',
+              type: 'npc',
+              sprite: npc.sprite || null
+            }))
+          ];
+      sharedState.setCombatCharactersString(JSON.stringify(seededCombatRoster));
       console.log('[Server] Seeded combatCharactersString from saved starting character (prevents empty [] after Save)');
 
       // Broadcast that the character has been finalized (client can react if needed)
@@ -219,9 +232,33 @@ Armor: ${characterData.Armor || characterData.armor || 0}
 Magic: ${characterData.Magic || characterData.magic || 0}
 `;
 
+      const npcBlock = partyNpcData.length
+        ? `NPCs in Party:
+${partyNpcData.map(npc => {
+  const npcEq = npc.Equipped || { Weapon: null, Armor: null, Shield: null, Other: null };
+  const npcEquippedStr = `Weapon: ${npcEq.Weapon || 'None'}, Armor: ${npcEq.Armor || 'None'}, Shield: ${npcEq.Shield || 'None'}, Other: ${npcEq.Other || 'None'}`;
+  return `Name: ${npc.Name || npc.name}
+Sex: ${npc.Sex || npc.sex}
+Race: ${npc.Race || npc.race}
+Class: ${npc.Class || npc.class}
+Level: ${npc.Level || npc.level || 1}
+AC: ${npc.AC || npc.ac || 10}
+XP: ${npc.XP || npc.xp || 0}
+HP: ${npc.HP || npc.hp || 0}
+MaxHP: ${npc.MaxHP || npc.maxHP || npc.HP || npc.hp || 0}
+Equipped: ${npcEquippedStr}
+Attack: ${npc.Attack || npc.attack || 0}
+Damage: ${npc.Damage || npc.damage || 0}
+Armor: ${npc.Armor || npc.armor || 0}
+Magic: ${npc.Magic || npc.magic || 0}`;
+}).join('\n\n')}
+`
+        : `NPCs in Party: None
+`;
+
       // Seed the updatedGameConsole with the PC stats so the main console display (and the LLM prompt)
       // includes them above the prompt, exactly as the last-known-good 1/2 path in chatbotprocessinput did.
-      sharedState.setUpdatedGameConsole(pcBlock);
+      sharedState.setUpdatedGameConsole(`${pcBlock}${npcBlock}`);
 
       // We send a special internal command to retortWithUserInput so it knows to skip the normal start menu
       // and use the provided character directly, then begin dungeon generation.
@@ -362,6 +399,7 @@ app.post('/beginCharacterGeneration', async (req, res) => {
     } catch (err) {
       console.error('beginCharacterGeneration error:', err);
       sharedState.setCharacterGenerationInProgress(false);
+      sharedState.setPendingCharacterForReview(null);
       tasks.set(taskId, { status: 'error', result: err.message });
     }
   })();
@@ -394,6 +432,18 @@ app.post('/rerollCharacterSprite', async (req, res) => {
   } catch (err) {
     console.error('rerollCharacterSprite error:', err);
     res.status(500).json({ error: err.message || 'reroll failed' });
+  }
+});
+
+app.post('/clearCharacterGenerationPhase', (req, res) => {
+  try {
+    sharedState.setCharacterGenerationInProgress(false);
+    sharedState.setPendingCharacterForReview(null);
+    console.log('[Server] Cleared character generation phase by request.');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('clearCharacterGenerationPhase error:', err);
+    res.status(500).json({ ok: false, error: err.message || 'clear failed' });
   }
 });
 

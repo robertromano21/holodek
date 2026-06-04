@@ -904,11 +904,16 @@ function toggleCombatMode() {
     <div style="display:flex; gap:20px; align-items:flex-start;">
       <!-- Sprite Display -->
       <div style="flex:0 0 140px; text-align:center;">
-        <div style="font-size:10px; margin-bottom:4px; color:#aa8866;">YOUR SPRITE</div>
+        <div id="review-sprite-caption" style="font-size:10px; margin-bottom:4px; color:#aa8866;">YOUR SPRITE</div>
         <img id="review-sprite-img" src="" style="width:128px; height:128px; image-rendering: pixelated; border:2px solid #664422; background:#221100;" />
         <!-- Live animated preview using the prefab sheet (our internal "sprite editor" frames cycled) -->
         <canvas id="review-sprite-canvas" width="96" height="96" style="width:128px; height:128px; image-rendering: pixelated; border:2px solid #664422; background:#221100; display:none;"></canvas>
         <div id="review-sprite-status" style="font-size:9px; margin-top:4px; color:#aa8866; min-height:12px;"></div>
+        <div id="review-party-nav" style="display:none; margin-top:6px;">
+          <div id="review-party-position" style="font-size:10px; color:#ccaa77; margin-bottom:4px;"></div>
+          <button onclick="reviewPreviousPartySprite()" style="background:#223344; color:#cce0ff; border:1px solid #88aacc; padding:4px 8px; font-size:10px; cursor:pointer; margin-right:6px;">Prev</button>
+          <button onclick="reviewNextPartySprite()" style="background:#223344; color:#cce0ff; border:1px solid #88aacc; padding:4px 8px; font-size:10px; cursor:pointer;">Next</button>
+        </div>
         <div style="margin-top:6px;">
           <button onclick="rerollCharacterSpriteFromMenu()" style="background:#442200; color:#ffdd66; border:1px solid #ffdd66; padding:4px 12px; font-size:11px; cursor:pointer;">Reroll Sprite</button>
         </div>
@@ -922,11 +927,11 @@ function toggleCombatMode() {
     </div>
     
     <div style="margin-top:18px; text-align:center; border-top:1px solid #664422; padding-top:14px;">
-      <button onclick="saveCharacterAndProceed()" style="background:#224422; color:#aaffaa; border:2px solid #aaffaa; padding:8px 24px; font-size:14px; cursor:pointer; margin-right:12px;">SAVE &amp; CONTINUE</button>
+      <button id="review-save-button" onclick="saveCharacterAndProceed()" style="background:#224422; color:#aaffaa; border:2px solid #aaffaa; padding:8px 24px; font-size:14px; cursor:pointer; margin-right:12px;">SAVE &amp; CONTINUE</button>
       <button onclick="rerollCharacterSpriteFromMenu()" style="background:#442200; color:#ffdd66; border:1px solid #ffdd66; padding:8px 18px; font-size:13px; cursor:pointer;">Reroll Again</button>
     </div>
     
-    <div style="font-size:9px; color:#664422; text-align:center; margin-top:10px;">
+    <div id="review-footer-hint" style="font-size:9px; color:#664422; text-align:center; margin-top:10px;">
       Review your sprite and stats. Click Save when ready.
     </div>
   </div>
@@ -934,6 +939,54 @@ function toggleCombatMode() {
   <!-- Character Sprite Review UI logic (must be present for the review menu to appear "as surely as the game console") -->
   <script>
   (function () {
+    function getPendingPartyReviewState() {
+      const review = window._pendingPartyReview;
+      if (!review || !Array.isArray(review.roster) || !review.roster.length) return null;
+      if (!Number.isFinite(review.index)) review.index = 0;
+      review.index = Math.max(0, Math.min(review.roster.length - 1, review.index));
+      return review;
+    }
+
+    function getActiveReviewedCharacter() {
+      const partyReview = getPendingPartyReviewState();
+      if (partyReview) return partyReview.roster[partyReview.index] || null;
+      return window._pendingStartingCharacter || null;
+    }
+
+    function cloneCombatRosterFromParty(roster) {
+      return (roster || []).map((member, idx) => ({
+        name: member.Name || member.name || `PartyMember${idx + 1}`,
+        type: idx === 0 ? 'pc' : 'npc',
+        sprite: member.sprite || null,
+        x: idx === 0 ? 7 : 0,
+        y: idx === 0 ? 7 : 0
+      }));
+    }
+
+    function refreshReviewPartyUi(character) {
+      const partyReview = getPendingPartyReviewState();
+      const captionEl = document.getElementById('review-sprite-caption');
+      const navEl = document.getElementById('review-party-nav');
+      const posEl = document.getElementById('review-party-position');
+      const saveBtn = document.getElementById('review-save-button');
+      const hintEl = document.getElementById('review-footer-hint');
+      if (partyReview) {
+        const idx = partyReview.index;
+        const role = idx === 0 ? 'PLAYER CHARACTER' : 'PARTY MEMBER';
+        if (captionEl) captionEl.textContent = role;
+        if (navEl) navEl.style.display = 'block';
+        if (posEl) posEl.textContent = `${idx + 1} / ${partyReview.roster.length}`;
+        if (saveBtn) saveBtn.textContent = 'SAVE PARTY & CONTINUE';
+        if (hintEl) hintEl.textContent = 'Review each party sprite, reroll any member you want, then save the whole party.';
+      } else {
+        if (captionEl) captionEl.textContent = 'YOUR SPRITE';
+        if (navEl) navEl.style.display = 'none';
+        if (posEl) posEl.textContent = '';
+        if (saveBtn) saveBtn.textContent = 'SAVE & CONTINUE';
+        if (hintEl) hintEl.textContent = 'Review your sprite and stats. Click Save when ready.';
+      }
+    }
+
     function showCharacterSpriteReviewMenu(character) {
       const panel = document.getElementById('character-sprite-review');
       if (!panel) {
@@ -1006,6 +1059,7 @@ function toggleCombatMode() {
 
       const nm = character.Name || character.name || 'Adventurer';
       if (nameEl) nameEl.textContent = nm;
+      refreshReviewPartyUi(character);
 
       // Build a nice stats block (server objects use Name/Sex/Race/Class etc.)
       const stats = [
@@ -1040,8 +1094,33 @@ function toggleCombatMode() {
       console.log('%c[SpriteReview] Review menu shown for', 'color:#ffdd66', nm);
     }
 
+    function showPartySpriteReviewMenu(roster, index) {
+      if (!Array.isArray(roster) || !roster.length) return;
+      window._pendingPartyReview = {
+        roster,
+        index: Math.max(0, Math.min(roster.length - 1, Number.isFinite(index) ? index : 0))
+      };
+      window._pendingStartingCharacter = roster[0];
+      showCharacterSpriteReviewMenu(roster[window._pendingPartyReview.index]);
+    }
+
+    function reviewPreviousPartySprite() {
+      const partyReview = getPendingPartyReviewState();
+      if (!partyReview) return;
+      partyReview.index = (partyReview.index - 1 + partyReview.roster.length) % partyReview.roster.length;
+      showCharacterSpriteReviewMenu(partyReview.roster[partyReview.index]);
+    }
+
+    function reviewNextPartySprite() {
+      const partyReview = getPendingPartyReviewState();
+      if (!partyReview) return;
+      partyReview.index = (partyReview.index + 1) % partyReview.roster.length;
+      showCharacterSpriteReviewMenu(partyReview.roster[partyReview.index]);
+    }
+
     function rerollCharacterSpriteFromMenu() {
-      const character = window._pendingStartingCharacter;
+      const partyReview = getPendingPartyReviewState();
+      const character = getActiveReviewedCharacter();
       if (!character) return;
 
       if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
@@ -1056,7 +1135,12 @@ function toggleCombatMode() {
         .then(data => {
           if (data && data.character && data.character.sprite && data.character.sprite.dataUrl) {
             const updated = data.character;
-            window._pendingStartingCharacter = updated;
+            if (partyReview) {
+              partyReview.roster[partyReview.index] = updated;
+              if (partyReview.index === 0) window._pendingStartingCharacter = updated;
+            } else {
+              window._pendingStartingCharacter = updated;
+            }
 
             // Re-show the whole menu (this will restart the canvas animation preview using the new spec/sheet)
             if (typeof window.showCharacterSpriteReviewMenu === 'function') {
@@ -1121,9 +1205,58 @@ function toggleCombatMode() {
 
     function saveCharacterAndProceed() {
       const panel = document.getElementById('character-sprite-review');
-      const character = window._pendingStartingCharacter;
+      const partyReview = getPendingPartyReviewState();
+      const character = partyReview ? (partyReview.roster[0] || null) : window._pendingStartingCharacter;
       if (!character) {
         if (panel) panel.style.display = 'none';
+        return;
+      }
+
+      if (partyReview) {
+        const roster = partyReview.roster.slice();
+        const pcCharacter = roster[0];
+        const partyMembers = roster.slice(1);
+        roster.forEach(member => {
+          member.sprite = member.sprite || {};
+          member.sprite.saved = true;
+        });
+
+        window.characters = [pcCharacter];
+        window.npcs = partyMembers;
+        window._pendingStartingCharacter = pcCharacter;
+        window._selectedPCSprite = pcCharacter.sprite;
+
+        if (typeof window.seedPartyCombatRoster === 'function') {
+          window.seedPartyCombatRoster(pcCharacter, partyMembers);
+        } else {
+          window.combatCharacters = cloneCombatRosterFromParty(roster);
+        }
+        if (typeof window.syncPartyMazeToCombatPositions === 'function') {
+          window.syncPartyMazeToCombatPositions(true);
+        }
+        window.combatCharactersString = JSON.stringify(window.combatCharacters || cloneCombatRosterFromParty(roster));
+        window._awaitingSpriteSave = false;
+        window._pendingPartyReview = null;
+
+        if (panel) panel.style.display = 'none';
+        if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
+
+        window._skipStartMenu = true;
+        fetch('/startGameWithCharacter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            character: pcCharacter,
+            npcs: partyMembers,
+            combatCharacters: window.combatCharacters || cloneCombatRosterFromParty(roster)
+          })
+        }).then(r => r.json()).then(() => {
+          if (typeof window.forceProceedAfterCharacterSave === 'function') {
+            window.forceProceedAfterCharacterSave(pcCharacter);
+          } else if (typeof chatbotprocessinput === 'function') {
+            setTimeout(() => chatbotprocessinput(), 80);
+          }
+        }).catch(e => console.warn('[Save] party startGameWithCharacter post failed:', e));
         return;
       }
 
@@ -1187,6 +1320,9 @@ function toggleCombatMode() {
 
     // Expose globally so the onclick= handlers in the HTML and calls from game.js / SSE always work
     window.showCharacterSpriteReviewMenu = showCharacterSpriteReviewMenu;
+    window.showPartySpriteReviewMenu = showPartySpriteReviewMenu;
+    window.reviewPreviousPartySprite = reviewPreviousPartySprite;
+    window.reviewNextPartySprite = reviewNextPartySprite;
     window.rerollCharacterSpriteFromMenu = rerollCharacterSpriteFromMenu;
     window.saveCharacterAndProceed = saveCharacterAndProceed;
 

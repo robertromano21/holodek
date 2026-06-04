@@ -196,6 +196,9 @@ async function switchDungeonForCoordinates(coordString) {
   playerPosX = playerDungeonX + 0.5;
   playerPosY = playerDungeonY + 0.5;
 
+  syncPartyMazeToCombatPositions(true);
+  updatePartyMazeLocomotion(true);
+  ensurePartyMazeIdleInterval();
   preloadDungeonTextures();
   updatePlayerHeightFromCell();
   renderDungeonView();
@@ -518,6 +521,9 @@ eventSource.onmessage = function(event) {
         playerZInitialized = false;
         playerPosX = playerDungeonX + 0.5;
         playerPosY = playerDungeonY + 0.5;
+        syncPartyMazeToCombatPositions(true);
+        updatePartyMazeLocomotion(true);
+        ensurePartyMazeIdleInterval();
     
         preloadDungeonTextures();
         updatePlayerHeightFromCell();
@@ -569,8 +575,10 @@ eventSource.onmessage = function(event) {
             pcEntry.sprite = selectedSprite;
           }
         }
-        window.combatCharacters = newCombatCharacters;
-        ensurePCSpriteInCombatList(window.combatCharacters);
+                window.combatCharacters = newCombatCharacters;
+                ensureKnownSpritesInCombatList(window.combatCharacters);
+        syncPartyMazeToCombatPositions(false);
+        newCombatCharacters = window.combatCharacters;
         const combatScene = window.combatGame.scene.getScene('CombatScene');
         if (combatScene) combatScene.updatePositions(newCombatCharacters);
     } else if (data.type === 'target_prompt') {
@@ -676,14 +684,17 @@ function updateCharacterPosition(characterName, x, y) {
         if (charData) {
             charData.x = x;
             charData.y = y;
-           // charData.sprite.setPosition(x * 40 + 20, y * 40 + 20); // Adjust for grid cell size
-          //  charData.label.setPosition(x * 40 + 20, y * 40 + 40);  // Adjust label position
-            const cellSize = 25;
-
-            charData.sprite.setPosition(x * cellSize + cellSize / 2,
-                                        y * cellSize + cellSize / 2);
-            charData.label.setPosition(x * cellSize + cellSize / 2,
-                                       y * cellSize + cellSize / 2 + 20);
+            const character = Array.isArray(window.combatCharacters)
+              ? window.combatCharacters.find(entry => entry && entry.name === characterName)
+              : null;
+            if (character) {
+              character.x = x;
+              character.y = y;
+              applyCombatVisualFrame(charData.sprite, character);
+              moveCombatVisualTo(combatScene, charData, character, false);
+            } else {
+              moveCombatVisualTo(combatScene, charData, { x, y, type: 'npc' }, false);
+            }
         }
         
         combatScene.time.delayedCall(100, () => {
@@ -704,7 +715,6 @@ function movePlayerByDelta(dx, dy) {
     return;
   }
 
-  const cellSize = 25;
   const pcData = combatScene.characters[combatScene.pcName];
 
   // 1) Try to move in the DUNGEON (this is the source of truth)
@@ -734,8 +744,6 @@ function movePlayerByDelta(dx, dy) {
   const targetFloor  = typeof targetCell.floorHeight === 'number'
     ? targetCell.floorHeight : 0;
 
-  const MAX_STEP = 0.75; // max allowed height delta per move
-
   if (Math.abs(targetFloor - currentFloor) > MAX_STEP) {
     console.log('Too steep to move there');
     return;
@@ -753,6 +761,7 @@ function movePlayerByDelta(dx, dy) {
   playerPosX = playerDungeonX + 0.5;
   playerPosY = playerDungeonY + 0.5;
   updatePlayerHeightFromCell();
+  updatePartyMazeLocomotion(false);
 
 
 /*  const proposedDungeonX = playerDungeonX + dx;
@@ -783,15 +792,7 @@ function movePlayerByDelta(dx, dy) {
 
   pcData.x = CENTER_X;
   pcData.y = CENTER_Y;
-
-  pcData.sprite.setPosition(
-    CENTER_X * cellSize + cellSize / 2,
-    CENTER_Y * cellSize + cellSize / 2
-  );
-  pcData.label.setPosition(
-    CENTER_X * cellSize + cellSize / 2,
-    CENTER_Y * cellSize + cellSize / 2 + 20
-  );
+  moveCombatVisualTo(combatScene, pcData, { x: CENTER_X, y: CENTER_Y, type: 'pc' }, true);
 
   // Keep camera centered on player
   combatScene.centerCameraOn(CENTER_X, CENTER_Y);
@@ -801,6 +802,9 @@ function movePlayerByDelta(dx, dy) {
   if (pcGlobal) {
     pcGlobal.x = CENTER_X;
     pcGlobal.y = CENTER_Y;
+    pcGlobal.facing = deriveFacingFromDelta(dx, dy, pcGlobal.facing);
+    advanceWalkFrame(pcGlobal, Date.now(), PC_WALK_FRAME_MS);
+    applyCombatVisualFrame(pcData.sprite, pcGlobal);
   }
 
   // Optional: wake/sleep loop if you're using it for performance
@@ -845,19 +849,102 @@ const DUNGEON_MOVE = {
   }
 };
 
+function stopPartyMazeIdleInterval() {
+  if (window._partyMazeIdleInterval) {
+    clearInterval(window._partyMazeIdleInterval);
+    window._partyMazeIdleInterval = null;
+  }
+}
+
+function ensurePartyMazeIdleInterval() {
+  stopPartyMazeIdleInterval();
+  window._partyMazeIdleInterval = setInterval(() => {
+    if (!currentDungeon || !shouldUsePartyMazeAnchors()) return;
+    const moved = updatePartyMazeLocomotion(false);
+    if (!moved) return;
+    renderDungeonView();
+    if (window.combatGame) {
+      const scene = window.combatGame.scene.getScene('CombatScene');
+      if (scene && scene.redrawCombatRT) {
+        scene.redrawCombatRT();
+      } else if (scene && scene.drawDungeonOverlay) {
+        scene.drawDungeonOverlay();
+      }
+    }
+  }, PARTY_IDLE_INTERVAL_MS);
+}
+
 const MOVE_ACCEL = 6.0;
 const MOVE_MAX_SPEED = 3.2;
 const MOVE_FRICTION = 10.0;
 const TURN_SPEED = 2.6;
 const SNAP_SPEED = 6.0;
 const STOP_EPS = 0.01;
-const MAX_STEP = 0.75;
+const MAX_STEP = 1.5;
 const PLAYER_RADIUS = 0.2;
 const Z_SMOOTH = 8.0;
 const RUN_MULT = 1.6;
+const PC_WALK_FRAME_MS = 220;
+const NPC_WALK_FRAME_MS = 260;
+const NPC_MOVE_TWEEN_MS = 280;
+const NPC_MOVE_STEP_MS = 480;
+const PARTY_IDLE_INTERVAL_MS = 180;
+
+function deriveFacingFromDelta(dx, dy, fallback = 'left') {
+  const safeFallback = String(fallback || 'left').toLowerCase() === 'right' ? 'right' : 'left';
+  const absX = Math.abs(Number(dx) || 0);
+  const absY = Math.abs(Number(dy) || 0);
+  if (absX === 0 && absY === 0) return safeFallback;
+  if (absX >= absY) {
+    if (dx > 0) return 'right';
+    if (dx < 0) return 'left';
+  }
+  if (dy > 0) return 'right';
+  if (dy < 0) return 'left';
+  return safeFallback;
+}
+
+function advanceWalkFrame(character, now = Date.now(), minIntervalMs = PC_WALK_FRAME_MS) {
+  if (!character) return false;
+  const lastAt = Number.isFinite(character._lastWalkAnimAt) ? character._lastWalkAnimAt : 0;
+  if (!lastAt || now - lastAt >= minIntervalMs) {
+    const currentFrame = Number.isFinite(character.walkFrame) ? character.walkFrame : 0;
+    character.walkFrame = (Math.floor(currentFrame) + 1) % 4;
+    character._lastWalkAnimAt = now;
+    return true;
+  }
+  return false;
+}
+
+function resetWalkFrame(character) {
+  if (!character) return;
+  character.walkFrame = 0;
+  character._lastWalkAnimAt = 0;
+}
 
 function isObstacleTile(tile) {
   return tile === 'pillar' || (tile && tile.startsWith('custom_'));
+}
+
+function hashCharacterName(name) {
+  const text = String(name || '');
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash * 33) + text.charCodeAt(i)) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function getCurrentPartyNpcEntries() {
+  if (!Array.isArray(window.combatCharacters)) return [];
+  const roomKey = getCurrentCombatRoomKey();
+  return window.combatCharacters.filter(entry =>
+    entry
+    && entry.type === 'npc'
+    && Number.isFinite(entry.mazeX)
+    && Number.isFinite(entry.mazeY)
+    && (!entry.mazeRoomKey || entry.mazeRoomKey === roomKey)
+  );
 }
 
 function getObstacleRadiusForTile(tile) {
@@ -870,7 +957,7 @@ function getObstacleRadiusForTile(tile) {
   return Math.max(0.12, Math.min(0.48, radius));
 }
 
-function isObstacleAtPos(x, y) {
+function isObstacleAtPos(x, y, excludeName = null) {
   if (!currentDungeon || !currentDungeon.cells) return false;
   const cx = Math.floor(x);
   const cy = Math.floor(y);
@@ -909,7 +996,7 @@ function isSpawnBlockedCell(cell) {
   return false;
 }
 
-function canEnterTile(fromX, fromY, toX, toY) {
+function canEnterTile(fromX, fromY, toX, toY, excludeName = null) {
   if (!currentDungeon || !currentDungeon.cells) return false;
   if (fromX === toX && fromY === toY) return true;
   const targetCell = currentDungeon.cells[`${toX},${toY}`];
@@ -950,7 +1037,7 @@ function findNearestUnblockedTile(dungeon, start, maxRadius = 25) {
   return { x: sx, y: sy };
 }
 
-function canOccupyPos(nextX, nextY) {
+function canOccupyPos(nextX, nextY, excludeName = null) {
   const currX = playerPosX;
   const currY = playerPosY;
   const offsets = [
@@ -968,9 +1055,9 @@ function canOccupyPos(nextX, nextY) {
     const fromY = Math.floor(currY + oy);
     const toX = Math.floor(nextX + ox);
     const toY = Math.floor(nextY + oy);
-    if (!canEnterTile(fromX, fromY, toX, toY)) return false;
+    if (!canEnterTile(fromX, fromY, toX, toY, excludeName)) return false;
   }
-  if (isObstacleAtPos(nextX, nextY)) return false;
+  if (isObstacleAtPos(nextX, nextY, excludeName)) return false;
   return true;
 }
 
@@ -1014,20 +1101,27 @@ function syncCombatPlayerCenter() {
 
   pcData.x = CENTER_X;
   pcData.y = CENTER_Y;
-  pcData.sprite.setPosition(
-    CENTER_X * cellSize + cellSize / 2,
-    CENTER_Y * cellSize + cellSize / 2
-  );
-  pcData.label.setPosition(
-    CENTER_X * cellSize + cellSize / 2,
-    CENTER_Y * cellSize + cellSize / 2 + 20
-  );
+  moveCombatVisualTo(combatScene, pcData, { x: CENTER_X, y: CENTER_Y, type: 'pc' }, true);
   combatScene.centerCameraOn(CENTER_X, CENTER_Y);
 
   const pcGlobal = window.combatCharacters && window.combatCharacters.find(c => c.type === 'pc');
   if (pcGlobal) {
     pcGlobal.x = CENTER_X;
     pcGlobal.y = CENTER_Y;
+    applyCombatVisualFrame(pcData.sprite, pcGlobal);
+  }
+
+  syncPartyMazeToCombatPositions(false);
+  if (Array.isArray(window.combatCharacters)) {
+    window.combatCharacters.forEach(entry => {
+      if (!entry || entry.type !== 'npc') return;
+      const npcSceneData = combatScene.characters && combatScene.characters[entry.name];
+      if (!npcSceneData) return;
+      npcSceneData.x = entry.x;
+      npcSceneData.y = entry.y;
+      applyCombatVisualFrame(npcSceneData.sprite, entry);
+      moveCombatVisualTo(combatScene, npcSceneData, entry, false);
+    });
   }
 
   if (combatScene.domContainer) {
@@ -1053,6 +1147,7 @@ function syncPlayerTileFromPos() {
   playerDungeonX = nextTileX;
   playerDungeonY = nextTileY;
   updatePlayerHeightFromCell();
+  updatePartyMazeLocomotion(false);
   syncCombatPlayerCenter();
   logDungeonCombatSync('move');
   if (window.combatGame) {
@@ -1122,6 +1217,8 @@ function updateDungeonMovement(now) {
 
   let nextX = playerPosX;
   let nextY = playerPosY;
+  const prevX = playerPosX;
+  const prevY = playerPosY;
   if (Math.abs(DUNGEON_MOVE.velX) > 0) {
     const candX = playerPosX + DUNGEON_MOVE.velX * dt;
     if (canOccupyPos(candX, playerPosY)) {
@@ -1141,6 +1238,20 @@ function updateDungeonMovement(now) {
 
   playerPosX = nextX;
   playerPosY = nextY;
+  const movedThisFrame = Math.hypot(playerPosX - prevX, playerPosY - prevY) > 0.002;
+  const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
+  const pcGlobal = Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.type === 'pc') : null;
+  if (pcGlobal) {
+    if (movedThisFrame) {
+      pcGlobal.facing = deriveFacingFromDelta(playerPosX - prevX, playerPosY - prevY, pcGlobal.facing);
+      advanceWalkFrame(pcGlobal, now, PC_WALK_FRAME_MS);
+    } else {
+      resetWalkFrame(pcGlobal);
+    }
+    if (combatScene && combatScene.characters && combatScene.pcName && combatScene.characters[combatScene.pcName]) {
+      applyCombatVisualFrame(combatScene.characters[combatScene.pcName].sprite, pcGlobal);
+    }
+  }
 
   const speedAfter = Math.hypot(DUNGEON_MOVE.velX, DUNGEON_MOVE.velY);
   if (Number.isFinite(playerZTarget)) {
@@ -1166,13 +1277,14 @@ function updateDungeonMovement(now) {
   }*/
 
   syncPlayerTileFromPos();
+  updatePartyMazeLocomotion(false);
   window.playerAngle = playerAngle;
   window.playerPosX = playerPosX;
   window.playerPosY = playerPosY;
   window.playerZ = playerZ;
   renderDungeonView();
   if (window.combatGame) {
-    const scene = window.combatGame.scene.getScene('CombatScene');
+    const scene = combatScene || window.combatGame.scene.getScene('CombatScene');
     if (scene && scene.sys && scene.sys.game && scene.sys.game.loop) {
       scene.sys.game.loop.wake();
       // Prefer the rotating RT version (redrawCombatRT) for egocentric spin on turns/moves.
@@ -1834,7 +1946,10 @@ ${adjacentRooms}
             let npcNames = npcs.split('\n').filter(line => line.trim() !== '');
             for (let i = 0; i < npcNames.length; i += 14) {
                 let name = npcNames[i];
-                characters.push({ name, type: 'npc' });
+                const npcEntry = { name, type: 'npc' };
+                const npcSprite = resolveKnownCharacterSprite(name, 'npc');
+                if (npcSprite) npcEntry.sprite = npcSprite;
+                characters.push(npcEntry);
             }
         }
         if (monsters && monsters !== 'None') {
@@ -1894,17 +2009,142 @@ ${adjacentRooms}
     }
 }
 function ensurePCSpriteInCombatList(list) {
-  if (!list || !Array.isArray(list)) return list;
-  const selected = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
-  if (selected && selected.dataUrl) {
-    const pc = list.find(c => c.type === 'pc');
-    if (pc && (!pc.sprite || !pc.sprite.dataUrl)) {
-      pc.sprite = selected;
-    }
-  }
-  return list;
+  return ensureKnownSpritesInCombatList(list);
 }
 window.ensurePCSpriteInCombatList = ensurePCSpriteInCombatList;
+window.ensureKnownSpritesInCombatList = ensureKnownSpritesInCombatList;
+
+function ensureCombatTextureForCharacter(scene, character) {
+  if (!scene || !scene.textures || !character || !character.name) return null;
+  if ((!character.sprite || !character.sprite.dataUrl) && character.type !== 'monster') {
+    const known = resolveKnownCharacterSprite(character.name, character.type);
+    if (known) character.sprite = known;
+  }
+  if (!character.sprite || !character.sprite.dataUrl) return null;
+
+  const texKey = 'char-sprite-' + String(character.name).replace(/\s+/g, '_') + '-sheet';
+  if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteSheetCanvas === 'function') {
+    try {
+      const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
+      scene.textures.addCanvas(texKey, sheetCanvas);
+      const tex = scene.textures.get(texKey);
+      const fw = sheetCanvas.height;
+      for (let i = 0; i < 4; i++) {
+        tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+      }
+      if (tex.update) tex.update();
+      if (tex.refresh) tex.refresh();
+      if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    } catch (e) {
+      console.warn('[Sprite] sheet canvas registration failed', character.name, e);
+    }
+  }
+  if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteCanvas === 'function') {
+    try {
+      const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+      scene.textures.addCanvas(texKey, canvasEl);
+      const tex = scene.textures.get(texKey);
+      if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    } catch (e) {
+      console.warn('[Sprite] canvas registration failed', character.name, e);
+    }
+  }
+  if (!scene.textures.exists(texKey) && character.sprite.dataUrl && typeof character.sprite.dataUrl === 'string' && character.sprite.dataUrl.startsWith('data:')) {
+    try {
+      scene.textures.addBase64(texKey, character.sprite.dataUrl);
+    } catch (e) {
+      console.warn('[Sprite] base64 registration failed', character.name, e);
+    }
+  }
+  if (scene.textures.exists(texKey)) {
+    const tex = scene.textures.get(texKey);
+    if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+    return texKey;
+  }
+  return null;
+}
+
+function getCombatFrameName(character) {
+  const frameIndex = Math.abs(Math.floor(Number.isFinite(character && character.walkFrame) ? character.walkFrame : 0)) % 4;
+  return 'frame' + frameIndex;
+}
+
+function getCombatFacingFlip(character) {
+  return deriveFacingFromDelta(0, 0, character && character.facing) === 'right';
+}
+
+function applyCombatVisualFrame(sprite, character) {
+  if (!sprite) return;
+  const texture = sprite.texture;
+  const frameName = getCombatFrameName(character);
+  if (typeof sprite.setFrame === 'function' && texture && typeof texture.has === 'function' && texture.has(frameName)) {
+    sprite.setFrame(frameName);
+  }
+  if (typeof sprite.setFlipX === 'function') {
+    sprite.setFlipX(getCombatFacingFlip(character));
+  }
+}
+
+function moveCombatVisualTo(scene, charData, character, immediate = false) {
+  if (!scene || !charData || !character) return;
+  const cellSize = 25;
+  const targetX = character.x * cellSize + cellSize / 2;
+  const targetY = character.y * cellSize + cellSize / 2;
+  const targetLabelY = targetY + (character.type === 'pc' ? 20 : 29);
+  const duration = Math.max(140, Number.isFinite(character.moveTweenMs) ? character.moveTweenMs : NPC_MOVE_TWEEN_MS);
+  const isTweenable = !immediate
+    && character.type === 'npc'
+    && scene.tweens
+    && charData.sprite
+    && charData.label
+    && typeof charData.sprite.setPosition === 'function'
+    && typeof charData.label.setPosition === 'function';
+
+  if (!isTweenable) {
+    charData.sprite.setPosition(targetX, targetY);
+    charData.label.setPosition(targetX, targetLabelY);
+    return;
+  }
+
+  scene.tweens.killTweensOf(charData.sprite);
+  scene.tweens.killTweensOf(charData.label);
+  scene.tweens.add({
+    targets: charData.sprite,
+    x: targetX,
+    y: targetY,
+    duration,
+    ease: 'Sine.Out'
+  });
+  scene.tweens.add({
+    targets: charData.label,
+    x: targetX,
+    y: targetLabelY,
+    duration,
+    ease: 'Sine.Out'
+  });
+}
+
+function createCombatVisual(scene, character) {
+  const texKey = ensureCombatTextureForCharacter(scene, character);
+  if (texKey) {
+    const tex = scene.textures.get(texKey);
+    const frameKey = (tex && typeof tex.has === 'function' && tex.has('frame0')) ? 'frame0' : undefined;
+    const sprite = frameKey
+      ? scene.add.sprite(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey, frameKey)
+      : scene.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey);
+    sprite.setDisplaySize(31.875, 31.875);
+    sprite.setVisible(true);
+    applyCombatVisualFrame(sprite, character);
+    return sprite;
+  }
+  if (character.type === 'npc') {
+    return scene.add.circle(character.x * 25 + 12.5, character.y * 25 + 12.5, 6.25, 0x0000ff);
+  }
+  if (character.type === 'monster') {
+    return scene.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, 0xff0000);
+  }
+  return scene.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, 0x666666);
+}
 
 window.updateCombatScene = function(characters) {
     if (!window.combatGame || !window.combatGame.scene) {
@@ -2010,15 +2250,19 @@ window.updateCombatScene = function(characters) {
                 if (!this.isPositionOccupied(newX, newY, this.pcName)) {
                     pcData.x = newX;
                     pcData.y = newY;
-                    pcData.sprite.setPosition(newX * cellSize + cellSize / 2, newY * cellSize + cellSize / 2);
-                    pcData.label.setPosition(newX * cellSize + cellSize / 2, newY * cellSize + cellSize / 2 + 20);
                     this.centerCameraOn(pcData.x, pcData.y);
-       
+        
                     const pcInGlobal = window.combatCharacters.find(c => c.type === 'pc');
                     if (pcInGlobal) {
                         pcInGlobal.x = newX;
                         pcInGlobal.y = newY;
+                        pcInGlobal.facing = deriveFacingFromDelta(newX - pcData.x, newY - pcData.y, pcInGlobal.facing);
+                        advanceWalkFrame(pcInGlobal, Date.now(), PC_WALK_FRAME_MS);
+                        applyCombatVisualFrame(pcData.sprite, pcInGlobal);
+                        moveCombatVisualTo(this, pcData, pcInGlobal, true);
                         console.log(`Updated window.combatCharacters PC to (${newX}, ${newY})`);
+                    } else {
+                        moveCombatVisualTo(this, pcData, { x: newX, y: newY, type: 'pc' }, true);
                     }
                 }
        
@@ -2275,9 +2519,9 @@ window.updateCombatScene = function(characters) {
             let pcTex = (pcEntry.sprite && pcEntry.sprite.texture) || (window._selectedPCSprite && window._selectedPCSprite.texture);
             pcKey = pcTex && pcTex.key;
             const tKey = pcKey || ('pc-sprite-' + (pcNameForDraw || 'pc').replace(/\s+/g, '_') + '-sheet');
+            const fullChar = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw) || { name: pcNameForDraw, type: 'pc', sprite: (window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite)) };
             if (!pcKey || !this.textures.exists(tKey)) {
                 // Force ensure the custom selected sprite texture for PC draw in RT (get rid of any non-custom).
-                const fullChar = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw) || { name: pcNameForDraw, type: 'pc', sprite: (window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite)) };
                 const spriteDataUrl = fullChar.sprite && fullChar.sprite.dataUrl;
                 if (!this.textures.exists(tKey)) {
                     if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
@@ -2317,12 +2561,30 @@ window.updateCombatScene = function(characters) {
                 const tex = this.textures.get(pcKey);
                 let frameName = null;
                 if (tex && tex.has && tex.has('frame0')) {
-                    // 4-frame cycle for a little "breathing"/stride feel while the map rotates
-                    const phase = Math.floor((Date.now() / 250) % 4);
+                    const pcAnimState = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw)
+                      || (window.combatCharacters || []).find(c => c && c.type === 'pc')
+                      || fullChar;
+                    const phase = Math.abs(Math.floor(Number.isFinite(pcAnimState && pcAnimState.walkFrame) ? pcAnimState.walkFrame : 0)) % 4;
                     frameName = 'frame' + phase;
                 }
-                // Draw unrotated at the exact visual center
-                if (frameName) {
+                const pcAnimState = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw)
+                  || (window.combatCharacters || []).find(c => c && c.type === 'pc')
+                  || fullChar;
+                const facingRight = getCombatFacingFlip(pcAnimState);
+                if (facingRight && this.make && typeof this.make.sprite === 'function') {
+                    const tempSprite = this.make.sprite({
+                        x: centerX,
+                        y: centerY,
+                        key: pcKey,
+                        frame: frameName || undefined,
+                        add: false
+                    });
+                    tempSprite.setDisplaySize(pcSize, pcSize);
+                    tempSprite.setOrigin(0.5, 0.5);
+                    tempSprite.setFlipX(true);
+                    this.renderRT.draw(tempSprite);
+                    tempSprite.destroy();
+                } else if (frameName) {
                     this.renderRT.draw(pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcSize);
                 } else {
                     this.renderRT.draw(pcKey, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcSize);
@@ -2520,11 +2782,13 @@ window.updateCombatScene = function(characters) {
     updateCharacters(characters) {
        // console.log("CombatScene.updateCharacters called with:", characters);
         ensurePCSpriteInCombatList(characters);
+        window.combatCharacters = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
         if (!this.characters) this.characters = {};
         this.sys.game.loop.wake();
         // Merge new characters with existing positions from window.combatCharacters
         characters.forEach(newChar => {
             const existingChar = window.combatCharacters.find(c => c.name === newChar.name) || newChar;
+            copyCombatPersistentFields(newChar, existingChar);
             if (existingChar.x !== undefined && existingChar.y !== undefined) {
                 newChar.x = existingChar.x;
                 newChar.y = existingChar.y;
@@ -2547,8 +2811,26 @@ window.updateCombatScene = function(characters) {
                 y: char.y || 0
             };
             if (char.sprite) entry.sprite = char.sprite;
+            if (Number.isFinite(char.mazeX)) entry.mazeX = char.mazeX;
+            if (Number.isFinite(char.mazeY)) entry.mazeY = char.mazeY;
+            if (char.mazeRoomKey) entry.mazeRoomKey = char.mazeRoomKey;
+            if (Number.isFinite(char.walkFrame)) entry.walkFrame = char.walkFrame;
+            if (char.facing) entry.facing = char.facing;
             return entry;
         });
+        syncPartyMazeToCombatPositions(false);
+        characters.forEach(char => {
+            const synced = window.combatCharacters.find(c => c.name === char.name);
+                if (synced) {
+                    char.x = synced.x;
+                    char.y = synced.y;
+                    if (Number.isFinite(synced.mazeX)) char.mazeX = synced.mazeX;
+                    if (Number.isFinite(synced.mazeY)) char.mazeY = synced.mazeY;
+                    if (synced.mazeRoomKey) char.mazeRoomKey = synced.mazeRoomKey;
+                    if (Number.isFinite(synced.walkFrame)) char.walkFrame = synced.walkFrame;
+                    if (synced.facing) char.facing = synced.facing;
+                }
+            });
         ensurePCSpriteInCombatList(window.combatCharacters);
    
         // Update combatCharactersString globally for server communication
@@ -2567,110 +2849,10 @@ window.updateCombatScene = function(characters) {
         // Create sprites and labels for all characters with their current positions
         characters.forEach((character, index) => {
             let sprite, color;
-   
-            if (character.type === 'pc') {
-                this.pcName = character.name;
-
-                // Force the exact sprite from character creation / review menu to be used as the PC icon in Combat Mode.
-                // This replaces any default flare/cross/marker with the custom generated pixel art.
-                if (!character.sprite || !character.sprite.dataUrl) {
-                    const sel = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
-                    if (sel) {
-                        character.sprite = sel;
-                    }
-                }
-
-                const spriteDataUrl = character.sprite && character.sprite.dataUrl;
-                const texKey = 'pc-sprite-' + (character.name || 'pc').replace(/\s+/g, '_') + '-sheet';
-                if (!this.textures.exists(texKey)) {
-                    // Use the catalog-based "sprite editor" to produce a real multi-frame sheet
-                    // then register frames + (optional) anim. This is Phaser sprite/animation native.
-                    if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
-                        try {
-                            const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
-                            this.textures.addCanvas(texKey, sheetCanvas);
-                            const tex = this.textures.get(texKey);
-                            const fw = sheetCanvas.height; // frames are square
-                            for (let i = 0; i < 4; i++) {
-                                tex.add('frame' + i, 0, i * fw, 0, fw, fw);
-                            }
-                            if (tex.update) tex.update();
-                            if (tex.refresh) tex.refresh();
-                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                        } catch (e) {
-                            console.warn('[Sprite] sheet canvas failed, will try fallback', e);
-                        }
-                    }
-                    // Fallback single frame via canvas or dataUrl
-                    if (!this.textures.exists(texKey)) {
-                        if (typeof window.createCharacterSpriteCanvas === 'function') {
-                            try {
-                                const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
-                                this.textures.addCanvas(texKey, canvasEl);
-                            } catch (e) {}
-                        }
-                        if (!this.textures.exists(texKey) && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
-                            this.textures.addBase64(texKey, spriteDataUrl);
-                        }
-                    }
-                }
-                // Always use custom sprite for PC - no green triangle fallback.
-                // Registration above tries dataUrl/spec from selected review sprite.
-                // If still no tex (e.g. sprite data not yet on this character entry), force-generate using our renderer
-                // so the PC always shows the custom pixel art (the one selected in review, or equivalent from spec/character data).
-                if (!this.textures.exists(texKey)) {
-                    let generated = false;
-                    if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
-                        try {
-                            const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
-                            this.textures.addCanvas(texKey, sheetCanvas);
-                            const tex = this.textures.get(texKey);
-                            const fw = sheetCanvas.height;
-                            for (let i = 0; i < 4; i++) {
-                                tex.add('frame' + i, 0, i * fw, 0, fw, fw);
-                            }
-                            if (tex.update) tex.update();
-                            if (tex.refresh) tex.refresh();
-                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                            generated = true;
-                        } catch (e) {
-                            console.warn('[Sprite] forced sheet gen for PC failed', e);
-                        }
-                    }
-                    if (!generated && typeof window.createCharacterSpriteCanvas === 'function') {
-                        try {
-                            const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
-                            this.textures.addCanvas(texKey, canvasEl);
-                            const tex = this.textures.get(texKey);
-                            if (tex.update) tex.update();
-                            if (tex.refresh) tex.refresh();
-                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                            generated = true;
-                        } catch (e) {
-                            console.warn('[Sprite] forced canvas gen for PC failed', e);
-                        }
-                    }
-                    if (!generated && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
-                        try {
-                            this.textures.addBase64(texKey, spriteDataUrl);
-                            generated = true;
-                        } catch (e) {}
-                    }
-                }
-                if (this.textures.exists(texKey)) {
-                    const tex = this.textures.get(texKey);
-                    if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                    const s = 31.875;  // 15% shrink from previous 37.5 (27.5% larger than original 25px)
-                    sprite = this.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey, 'frame0');
-                    sprite.setDisplaySize(s, s);
-                    sprite.setVisible(true);
-                } else {
-                    // Last resort placeholder (custom sprite registration attempted above using selected review data or on-the-fly gen via renderer).
-                    sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, 0x666666);
-                }
-            } else if (character.type === 'npc') {
-                color = 0x0000ff;
-                sprite = this.add.circle(character.x * 25 + 12.5, character.y * 25 + 12.5, 6.25, color);
+    
+            if (character.type === 'pc' || character.type === 'npc') {
+                if (character.type === 'pc') this.pcName = character.name;
+                sprite = createCombatVisual(this, character);
             } else if (character.type === 'monster') {
                 color = 0xff0000;
                 sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, color);
@@ -2685,8 +2867,9 @@ window.updateCombatScene = function(characters) {
                 align: 'center'
             });
             label.setOrigin(0.5, 0.5);
-   
+    
             this.characters[character.name] = { sprite, label, x: character.x, y: character.y };
+            applyCombatVisualFrame(sprite, character);
         });
    
         // Center camera on PC if present
@@ -2753,103 +2936,24 @@ window.updateCombatScene = function(characters) {
     updatePositions(characters) {
     // console.log("Updating CombatScene positions with:", characters);
         ensurePCSpriteInCombatList(characters);
+        window.combatCharacters = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
+        characters.forEach(character => {
+            const existingChar = window.combatCharacters.find(c => c.name === character.name);
+            copyCombatPersistentFields(character, existingChar);
+        });
         characters.forEach(character => {
             const charData = this.characters[character.name];
             if (charData) {
                 charData.x = character.x;
                 charData.y = character.y;
-                charData.sprite.setPosition(character.x * 25 + 12.5, character.y * 25 + 12.5);
-                charData.label.setPosition(character.x * 25 + 12.5, character.y * 25 + 29);
+                applyCombatVisualFrame(charData.sprite, character);
+                moveCombatVisualTo(this, charData, character, false);
             } else {
                 // Add new character if not present
                 let sprite, color;
-                if (character.type === 'pc') {
-                    this.pcName = character.name;
-
-                    // Force the exact sprite from character creation / review menu to be used as the PC icon in Combat Mode.
-                    // This replaces any default flare/cross/marker with the custom generated pixel art.
-                    if (!character.sprite || !character.sprite.dataUrl) {
-                        const sel = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
-                        if (sel) {
-                            character.sprite = sel;
-                        }
-                    }
-
-                    const spriteDataUrl = character.sprite && character.sprite.dataUrl;
-                    const texKey = 'pc-sprite-' + (character.name || 'pc').replace(/\s+/g, '_') + '-sheet';
-                    if (!this.textures.exists(texKey)) {
-                        if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
-                            try {
-                                const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
-                                this.textures.addCanvas(texKey, sheetCanvas);
-                                const tex = this.textures.get(texKey);
-                                const fw = sheetCanvas.height;
-                                for (let i = 0; i < 4; i++) {
-                                    tex.add('frame' + i, 0, i * fw, 0, fw, fw);
-                                }
-                                if (tex.update) tex.update();
-                                if (tex.refresh) tex.refresh();
-                                if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                            } catch (e) {}
-                        }
-                        if (!this.textures.exists(texKey)) {
-                            if (typeof window.createCharacterSpriteCanvas === 'function') {
-                                try {
-                                    const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
-                                    this.textures.addCanvas(texKey, canvasEl);
-                                } catch (e) {}
-                            }
-                            if (!this.textures.exists(texKey) && spriteDataUrl && spriteDataUrl.startsWith('data:')) {
-                                this.textures.addBase64(texKey, spriteDataUrl);
-                            }
-                        }
-                    }
-                    // Always use custom sprite for PC - no green triangle fallback. (see comment in updateCharacters for details)
-                    if (!this.textures.exists(texKey)) {
-                        let generated = false;
-                        if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
-                            try {
-                                const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
-                                this.textures.addCanvas(texKey, sheetCanvas);
-                                const tex = this.textures.get(texKey);
-                                const fw = sheetCanvas.height;
-                                for (let i = 0; i < 4; i++) {
-                                    tex.add('frame' + i, 0, i * fw, 0, fw, fw);
-                                }
-                                if (tex.update) tex.update();
-                                if (tex.refresh) tex.refresh();
-                                if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                                generated = true;
-                            } catch (e) {}
-                        }
-                        if (!generated && typeof window.createCharacterSpriteCanvas === 'function') {
-                            try {
-                                const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
-                                this.textures.addCanvas(texKey, canvasEl);
-                                generated = true;
-                            } catch (e) {}
-                        }
-                        if (!generated && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
-                            try {
-                                this.textures.addBase64(texKey, spriteDataUrl);
-                                generated = true;
-                            } catch (e) {}
-                        }
-                    }
-                    if (this.textures.exists(texKey)) {
-                        const tex = this.textures.get(texKey);
-                        if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                        const s = 31.875;  // 15% shrink from previous 37.5 (27.5% larger than original 25px)
-                        sprite = this.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey, 'frame0');
-                        sprite.setDisplaySize(s, s);
-                        sprite.setVisible(true);
-                    } else {
-                        // Last resort placeholder (custom sprite registration attempted above using selected review data or on-the-fly gen via renderer).
-                        sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, 0x666666);
-                    }
-                } else if (character.type === 'npc') {
-                    color = 0x0000ff;
-                    sprite = this.add.circle(character.x * 25 + 12.5, character.y * 25 + 12.5, 6.25, color);
+                if (character.type === 'pc' || character.type === 'npc') {
+                    if (character.type === 'pc') this.pcName = character.name;
+                    sprite = createCombatVisual(this, character);
                 } else if (character.type === 'monster') {
                     color = 0xff0000;
                     sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, color);
@@ -2863,20 +2967,41 @@ window.updateCombatScene = function(characters) {
                 });
                 label.setOrigin(0.5, 0.5);
                 this.characters[character.name] = { sprite, label, x: character.x, y: character.y };
+                applyCombatVisualFrame(sprite, character);
             }
             // Update window.combatCharacters with the latest position
             const charInGlobal = window.combatCharacters.find(c => c.name === character.name);
             if (charInGlobal) {
                 charInGlobal.x = character.x;
                 charInGlobal.y = character.y;
+                if (Number.isFinite(character.mazeX)) charInGlobal.mazeX = character.mazeX;
+                if (Number.isFinite(character.mazeY)) charInGlobal.mazeY = character.mazeY;
+                if (character.mazeRoomKey) charInGlobal.mazeRoomKey = character.mazeRoomKey;
+                if (!charInGlobal.sprite && character.sprite) charInGlobal.sprite = character.sprite;
+                if (Number.isFinite(character.walkFrame)) charInGlobal.walkFrame = character.walkFrame;
+                if (character.facing) charInGlobal.facing = character.facing;
             } else {
                 const entry = { name: character.name, type: character.type, x: character.x, y: character.y };
                 if (character.sprite) entry.sprite = character.sprite;
+                if (Number.isFinite(character.mazeX)) entry.mazeX = character.mazeX;
+                if (Number.isFinite(character.mazeY)) entry.mazeY = character.mazeY;
+                if (character.mazeRoomKey) entry.mazeRoomKey = character.mazeRoomKey;
+                if (Number.isFinite(character.walkFrame)) entry.walkFrame = character.walkFrame;
+                if (character.facing) entry.facing = character.facing;
                 window.combatCharacters.push(entry);
             }
         });
         // Remove characters no longer present from window.combatCharacters
         window.combatCharacters = window.combatCharacters.filter(c => characters.some(ch => ch.name === c.name));
+        syncPartyMazeToCombatPositions(false);
+        window.combatCharacters.forEach(character => {
+            const charData = this.characters[character.name];
+            if (!charData) return;
+            charData.x = character.x;
+            charData.y = character.y;
+            applyCombatVisualFrame(charData.sprite, character);
+            moveCombatVisualTo(this, charData, character, false);
+        });
         ensurePCSpriteInCombatList(window.combatCharacters);
         // Update combatCharactersString globally
         window.combatCharactersString = JSON.stringify(window.combatCharacters);
@@ -7005,6 +7130,418 @@ function calculateCharacterRace(character, selectedRace, userInput) {
   character.Race = selectedRace.name;
 }
 
+function cloneSpritePayload(sprite) {
+  if (!sprite || typeof sprite !== 'object') return null;
+  const cloned = { ...sprite };
+  if (sprite.spec && typeof sprite.spec === 'object') {
+    try {
+      cloned.spec = JSON.parse(JSON.stringify(sprite.spec));
+    } catch (e) {
+      cloned.spec = sprite.spec;
+    }
+  }
+  return cloned;
+}
+
+function getPartySpriteRegistry() {
+  window._partySpriteRegistry = window._partySpriteRegistry || {};
+  return window._partySpriteRegistry;
+}
+
+function getPartyCharacterRegistry() {
+  window._partyCharacterRegistry = window._partyCharacterRegistry || {};
+  return window._partyCharacterRegistry;
+}
+
+function registerPartyCharacter(character, role = 'npc') {
+  if (!character) return;
+  const name = character.Name || character.name;
+  if (!name) return;
+  const characterRegistry = getPartyCharacterRegistry();
+  characterRegistry[name] = {
+    Name: name,
+    Sex: character.Sex || character.sex || '',
+    Race: character.Race || character.race || '',
+    Class: character.Class || character.class || '',
+    Level: character.Level || character.level || 1,
+    role: role
+  };
+  const sprite = cloneSpritePayload(character.sprite);
+  if (sprite && sprite.dataUrl) {
+    getPartySpriteRegistry()[name] = sprite;
+  }
+}
+
+function ensureCharacterSpriteData(character, options = {}) {
+  if (!character) return null;
+  const regenerate = !!options.regenerate;
+  if (!character._rerollSeed || regenerate) {
+    character._rerollSeed = Math.random();
+  }
+  if (!regenerate && character.sprite && character.sprite.dataUrl) {
+    registerPartyCharacter(character, options.role || 'npc');
+    return character.sprite;
+  }
+  if (typeof window.generateCharacterSprite !== 'function') return character.sprite || null;
+  try {
+    const spec = window.createCharacterSpriteSpec ? window.createCharacterSpriteSpec(character) : (character.sprite && character.sprite.spec) || null;
+    const dataUrl = window.generateCharacterSprite(character, spec);
+    if (dataUrl) {
+      character.sprite = {
+        ...(character.sprite || {}),
+        dataUrl,
+        spec,
+        generated: true,
+        saved: true,
+        clientOnly: true
+      };
+      registerPartyCharacter(character, options.role || 'npc');
+    }
+  } catch (e) {
+    console.error('[Sprite] character sprite generation failed', character, e);
+  }
+  return character.sprite || null;
+}
+
+function resolveKnownCharacterSprite(name, type = null) {
+  if (!name) return null;
+  const existingCombat = Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.name === name && (!type || c.type === type)) : null;
+  if (existingCombat && existingCombat.sprite && existingCombat.sprite.dataUrl) {
+    return cloneSpritePayload(existingCombat.sprite);
+  }
+  const registrySprite = getPartySpriteRegistry()[name];
+  if (registrySprite && registrySprite.dataUrl) {
+    return cloneSpritePayload(registrySprite);
+  }
+  const pending = window._pendingStartingCharacter;
+  if (pending && (pending.Name || pending.name) === name && pending.sprite && pending.sprite.dataUrl) {
+    return cloneSpritePayload(pending.sprite);
+  }
+  if (type === 'pc' && window._selectedPCSprite && window._selectedPCSprite.dataUrl) {
+    return cloneSpritePayload(window._selectedPCSprite);
+  }
+  return null;
+}
+
+function ensureKnownSpritesInCombatList(list) {
+  if (!Array.isArray(list)) return list;
+  list.forEach(entry => {
+    if (!entry || (entry.sprite && entry.sprite.dataUrl)) return;
+    const known = resolveKnownCharacterSprite(entry.name, entry.type);
+    if (known) entry.sprite = known;
+  });
+  return list;
+}
+
+function buildCombatEntryFromCharacter(character, type) {
+  const sprite = ensureCharacterSpriteData(character, { role: type });
+  const entry = {
+    name: character.Name || character.name,
+    type: type,
+    facing: 'left',
+    walkFrame: 0
+  };
+  if (sprite && sprite.dataUrl) entry.sprite = cloneSpritePayload(sprite);
+  return entry;
+}
+
+function copyCombatPersistentFields(target, source) {
+  if (!target || !source) return;
+  if (source.x !== undefined) target.x = source.x;
+  if (source.y !== undefined) target.y = source.y;
+  if (!target.sprite && source.sprite) target.sprite = cloneSpritePayload(source.sprite) || source.sprite;
+  if (Number.isFinite(source.mazeX)) target.mazeX = source.mazeX;
+  if (Number.isFinite(source.mazeY)) target.mazeY = source.mazeY;
+  if (source.mazeRoomKey) target.mazeRoomKey = source.mazeRoomKey;
+  if (Number.isFinite(source.walkFrame)) target.walkFrame = source.walkFrame;
+  if (source.facing) target.facing = source.facing;
+}
+
+function seedPartyCombatRoster(pcCharacter, partyMembers) {
+  const roster = [buildCombatEntryFromCharacter(pcCharacter, 'pc')];
+  (partyMembers || []).forEach(member => {
+    roster.push(buildCombatEntryFromCharacter(member, 'npc'));
+  });
+  window.combatCharacters = roster;
+  ensureKnownSpritesInCombatList(window.combatCharacters);
+  syncPartyMazeToCombatPositions(true);
+  window.combatCharactersString = JSON.stringify(window.combatCharacters);
+  return roster;
+}
+
+function clearServerCharacterGenerationPhase() {
+  return fetch('/clearCharacterGenerationPhase', { method: 'POST' })
+    .then(r => r.json())
+    .catch(err => {
+      console.warn('[CharacterGen] clearCharacterGenerationPhase request failed:', err);
+      return { ok: false, error: err && err.message ? err.message : 'request failed' };
+    });
+}
+
+function getCurrentCombatRoomKey() {
+  return (typeof window.currentCoordinates === 'string' && window.currentCoordinates)
+    ? window.currentCoordinates
+    : 'X: 0, Y: 0, Z: 0';
+}
+
+function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
+  if (!dungeon || !dungeon.cells) return [];
+  const start = findNearestUnblockedTile(dungeon, origin);
+  const key = (x, y) => `${x},${y}`;
+  const visited = new Set([key(start.x, start.y)]);
+  const queue = [{ x: start.x, y: start.y, dist: 0 }];
+  const tiles = [];
+
+  while (queue.length) {
+    const { x, y, dist } = queue.shift();
+    const cell = dungeon.cells[key(x, y)];
+    if (cell && !isSpawnBlockedCell(cell)) {
+      tiles.push({ x, y, dist });
+    }
+    if (dist >= maxRadius) continue;
+    const neighbors = [
+      { x: x + 1, y },
+      { x: x - 1, y },
+      { x, y: y + 1 },
+      { x, y: y - 1 }
+    ];
+    for (const next of neighbors) {
+      const k = key(next.x, next.y);
+      if (visited.has(k)) continue;
+      const nextCell = dungeon.cells[k];
+      if (!nextCell || isSpawnBlockedCell(nextCell)) continue;
+      visited.add(k);
+      queue.push({ x: next.x, y: next.y, dist: dist + 1 });
+    }
+  }
+
+  return tiles;
+}
+
+function shouldUsePartyMazeAnchors() {
+  if (!currentDungeon || !Array.isArray(window.combatCharacters)) return false;
+  return !window.combatCharacters.some(c => c && c.type === 'monster');
+}
+
+function ensurePartyMazeAnchors(forceReset = false) {
+  if (!shouldUsePartyMazeAnchors()) return;
+  const roomKey = getCurrentCombatRoomKey();
+  const origin = { x: playerDungeonX, y: playerDungeonY };
+  const tiles = collectNearbyWalkableTiles(currentDungeon, origin, 18)
+    .filter(tile => !(tile.x === origin.x && tile.y === origin.y));
+  const occupied = new Set([`${origin.x},${origin.y}`]);
+  const npcEntries = window.combatCharacters
+    .filter(c => c && c.type === 'npc')
+    .sort((a, b) => hashCharacterName(a.name) - hashCharacterName(b.name));
+
+  npcEntries.forEach(entry => {
+    const hasValidExistingTile = !forceReset
+      && entry.mazeRoomKey === roomKey
+      && Number.isFinite(entry.mazeX)
+      && Number.isFinite(entry.mazeY)
+      && currentDungeon.cells[`${entry.mazeX},${entry.mazeY}`]
+      && !isSpawnBlockedCell(currentDungeon.cells[`${entry.mazeX},${entry.mazeY}`])
+      && !occupied.has(`${entry.mazeX},${entry.mazeY}`);
+    if (hasValidExistingTile) {
+      occupied.add(`${entry.mazeX},${entry.mazeY}`);
+    } else {
+      delete entry.mazeX;
+      delete entry.mazeY;
+    }
+  });
+
+  let tileIndex = 0;
+  npcEntries.forEach(entry => {
+    if (Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
+      entry.mazeRoomKey = roomKey;
+      return;
+    }
+
+    while (tileIndex < tiles.length && occupied.has(`${tiles[tileIndex].x},${tiles[tileIndex].y}`)) {
+      tileIndex++;
+    }
+    const fallback = tiles[tileIndex] || findNearestUnblockedTile(currentDungeon, origin);
+    entry.mazeX = fallback.x;
+    entry.mazeY = fallback.y;
+    entry.mazeRoomKey = roomKey;
+    occupied.add(`${entry.mazeX},${entry.mazeY}`);
+    tileIndex++;
+  });
+}
+
+function syncPartyMazeToCombatPositions(forceReset = false) {
+  if (!shouldUsePartyMazeAnchors()) return;
+  ensurePartyMazeAnchors(forceReset);
+  const centerX = 7;
+  const centerY = 7;
+  const roomKey = getCurrentCombatRoomKey();
+
+  window.combatCharacters.forEach(entry => {
+    if (!entry) return;
+    if (entry.type === 'pc') {
+      entry.x = centerX;
+      entry.y = centerY;
+      entry.mazeX = playerDungeonX;
+      entry.mazeY = playerDungeonY;
+      entry.mazeRoomKey = roomKey;
+    } else if (entry.type === 'npc' && Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
+      entry.x = centerX + (entry.mazeX - playerDungeonX);
+      entry.y = centerY + (entry.mazeY - playerDungeonY);
+    }
+  });
+
+  window.combatCharactersString = JSON.stringify(window.combatCharacters);
+}
+
+let _partyMazeStepAt = 0;
+
+function buildPartyNpcGoalTile(entry, occupiedTiles, now) {
+  const current = { x: entry.mazeX, y: entry.mazeY };
+  const tiles = collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 8)
+    .filter(tile => tile.dist >= 1 && tile.dist <= 4);
+  if (!tiles.length) return current;
+
+  const hash = hashCharacterName(entry.name);
+  const farFromPc = Math.abs(entry.mazeX - playerDungeonX) + Math.abs(entry.mazeY - playerDungeonY) > 4;
+  const roamTick = Math.floor(now / (farFromPc ? 350 : 900));
+  const ringRadius = farFromPc ? (1 + (hash % 2)) : (1 + ((hash + roamTick) % 3));
+  const directions = [
+    { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }, { x: -1, y: 1 },
+    { x: -1, y: 0 }, { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 }
+  ];
+  const desiredDir = directions[(hash + roamTick) % directions.length];
+  const desired = {
+    x: playerDungeonX + desiredDir.x * ringRadius,
+    y: playerDungeonY + desiredDir.y * ringRadius
+  };
+
+  let bestTile = current;
+  let bestScore = Number.POSITIVE_INFINITY;
+  tiles.forEach(tile => {
+    const key = `${tile.x},${tile.y}`;
+    if (occupiedTiles.has(key) && !(tile.x === current.x && tile.y === current.y)) return;
+    const desiredDist = Math.abs(tile.x - desired.x) + Math.abs(tile.y - desired.y);
+    const currentDist = Math.abs(tile.x - current.x) + Math.abs(tile.y - current.y);
+    const score = (desiredDist * 4) + (Math.abs(tile.dist - ringRadius) * 2) + (currentDist * 0.5);
+    if (score < bestScore) {
+      bestScore = score;
+      bestTile = { x: tile.x, y: tile.y };
+    }
+  });
+  return bestTile;
+}
+
+function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
+  if (!goal || (start.x === goal.x && start.y === goal.y)) return start;
+  const key = (x, y) => `${x},${y}`;
+  const startKey = key(start.x, start.y);
+  const goalKey = key(goal.x, goal.y);
+  const queue = [{ x: start.x, y: start.y }];
+  const visited = new Set([startKey]);
+  const prev = new Map();
+
+  while (queue.length) {
+    const current = queue.shift();
+    const neighbors = [
+      { x: current.x + 1, y: current.y },
+      { x: current.x - 1, y: current.y },
+      { x: current.x, y: current.y + 1 },
+      { x: current.x, y: current.y - 1 }
+    ].sort((a, b) => {
+      const ad = Math.abs(a.x - goal.x) + Math.abs(a.y - goal.y);
+      const bd = Math.abs(b.x - goal.x) + Math.abs(b.y - goal.y);
+      return ad - bd;
+    });
+
+    for (const next of neighbors) {
+      const nextKey = key(next.x, next.y);
+      if (visited.has(nextKey)) continue;
+      if (blockedTiles.has(nextKey) && nextKey !== goalKey) continue;
+      if (!canEnterTile(current.x, current.y, next.x, next.y, excludeName)) continue;
+      if (isObstacleAtPos(next.x + 0.5, next.y + 0.5, excludeName)) continue;
+      visited.add(nextKey);
+      prev.set(nextKey, key(current.x, current.y));
+      if (nextKey === goalKey) {
+        let cursor = nextKey;
+        let parent = prev.get(cursor);
+        while (parent && parent !== startKey) {
+          cursor = parent;
+          parent = prev.get(cursor);
+        }
+        const [sx, sy] = cursor.split(',').map(Number);
+        return { x: sx, y: sy };
+      }
+      queue.push(next);
+    }
+  }
+
+  return start;
+}
+
+function updatePartyMazeLocomotion(force = false) {
+  if (!shouldUsePartyMazeAnchors()) return false;
+  const now = Date.now();
+  if (!force && now - _partyMazeStepAt < NPC_MOVE_STEP_MS) return false;
+  _partyMazeStepAt = now;
+
+  ensurePartyMazeAnchors(false);
+  const partyEntries = getCurrentPartyNpcEntries();
+  if (!partyEntries.length) return false;
+
+  const roomKey = getCurrentCombatRoomKey();
+  const orderedEntries = partyEntries.slice().sort((a, b) => {
+    const ah = hashCharacterName(a.name);
+    const bh = hashCharacterName(b.name);
+    return ah - bh;
+  });
+
+  const reservedTiles = new Set([`${playerDungeonX},${playerDungeonY}`]);
+  let anyMoved = false;
+
+  orderedEntries.forEach(entry => {
+    const blockedTiles = new Set(reservedTiles);
+    blockedTiles.delete(`${entry.mazeX},${entry.mazeY}`);
+
+    const goal = buildPartyNpcGoalTile(entry, blockedTiles, now);
+    const nextStep = findNextPartyMazeStep(
+      { x: entry.mazeX, y: entry.mazeY },
+      goal,
+      entry.name,
+      blockedTiles
+    );
+
+    const moved = nextStep.x !== entry.mazeX || nextStep.y !== entry.mazeY;
+    if (moved) {
+      entry.facing = deriveFacingFromDelta(nextStep.x - entry.mazeX, nextStep.y - entry.mazeY, entry.facing);
+      entry.mazeX = nextStep.x;
+      entry.mazeY = nextStep.y;
+      entry.mazeRoomKey = roomKey;
+      advanceWalkFrame(entry, now, NPC_WALK_FRAME_MS);
+      entry.moveTweenMs = NPC_MOVE_TWEEN_MS;
+      anyMoved = true;
+    } else {
+      resetWalkFrame(entry);
+    }
+
+    reservedTiles.add(`${entry.mazeX},${entry.mazeY}`);
+  });
+
+  if (anyMoved) {
+    syncPartyMazeToCombatPositions(false);
+    const combatScene = window.combatGame && window.combatGame.scene && window.combatGame.scene.getScene('CombatScene');
+    if (combatScene && typeof combatScene.updatePositions === 'function') {
+      combatScene.updatePositions(window.combatCharacters);
+    }
+  }
+  return anyMoved;
+}
+
+if (typeof window !== 'undefined') {
+  window.seedPartyCombatRoster = seedPartyCombatRoster;
+  window.syncPartyMazeToCombatPositions = syncPartyMazeToCombatPositions;
+  window.updatePartyMazeLocomotion = updatePartyMazeLocomotion;
+}
+
 // Function to create Mortacia character and add her to npcsString
 function createMortaciaNPC() {
  // Calculate the initial HP value
@@ -7412,8 +7949,8 @@ function getRandomName(sex) {
 
 // Function to create a random NPC character
 function createRandomNPC() {
-  const randomName = getRandomName(); // You need to define a function to generate random names
   const randomSex = getRandomSex(); // You need to define a function to generate random sexes
+  const randomName = getRandomName(randomSex);
   const randomRaceIndex = Math.floor(Math.random() * characterRaces.length);
   const randomClassIndex = Math.floor(Math.random() * characterClasses.length);
   const randomRace = characterRaces[randomRaceIndex];
@@ -7986,6 +8523,7 @@ Magic: ${char.Magic}`;
     }
 
     window._pendingStartingCharacter = character;
+    window._pendingPartyReview = null;
     window._awaitingSpriteSave = true;
 
     if (typeof window.showCharacterSpriteReviewMenu === 'function') {
@@ -8066,6 +8604,7 @@ Magic: ${char.Magic}`;
     }
 
     window._pendingStartingCharacter = character;
+    window._pendingPartyReview = null;
     window._awaitingSpriteSave = true;
 
     if (typeof window.showCharacterSpriteReviewMenu === 'function') {
@@ -8097,6 +8636,9 @@ Magic: ${char.Magic}`;
 
   } else if (userWords[0] === "3" && charactersString.length <= 0) {
     // Start character creation (extendable later to include sprite review at the end)
+    clearServerCharacterGenerationPhase();
+    window._pendingPartyReview = null;
+    window._awaitingSpriteSave = false;
     characterCreationStep = 1;
     displayMessage('Step 1: Enter character name'); 
     console.log('charactersString:', charactersString);
@@ -8215,8 +8757,8 @@ if (isCharacterCreationInProgress()) {
       }
 
       character.Class = selectedClass.name;
-      calculateCharacterHP(character, selectedClass); 
- // Character creation is complete, add the created character to the characters array
+      calculateCharacterHP(character, selectedClass);
+  // Character creation is complete, add the created character to the characters array
         characters.push(character);
         
 
@@ -8241,7 +8783,7 @@ if (isCharacterCreationInProgress()) {
             Magic: `;
         }).join('\n');
         
-               if (characters.length === 1) {
+       if (characters.length === 1) {
         // Player wants to add NPCs to the party
  //       const npcs = []; // Array to store NPCs
 
@@ -8256,6 +8798,13 @@ if (isCharacterCreationInProgress()) {
 
       // Call initializeNPCs once at the start of the game to populate the NPCs and Mortacia
 initializeNPCs();
+        clearServerCharacterGenerationPhase();
+        ensureCharacterSpriteData(character, { role: 'pc' });
+        window._pendingStartingCharacter = character;
+        window._selectedPCSprite = cloneSpritePayload(character.sprite);
+        registerPartyCharacter(character, 'pc');
+        npcs.forEach(npc => ensureCharacterSpriteData(npc, { role: 'npc' }));
+        seedPartyCombatRoster(character, npcs);
         
         const npcsString = npcs.map((char, index) => {
   return `
@@ -8301,10 +8850,17 @@ initializeNPCs();
         // Reset characterCreationStep to 0 to indicate that character creation is complete
         characterCreationStep = 0;
 
-        // Inform the user that character creation is complete
-        displayMessage('Character creation is complete. Press enter to begin the game in the Ruined Temple.');
-        userInput = "Begin game with chosen character."
-        break;
+        // Pause here for a full-party sprite review before starting the dungeon.
+        window._pendingPartyReview = { roster: [character, ...npcs], index: 0 };
+        window._awaitingSpriteSave = true;
+        window._statsRolled = false;
+        displayMessage('Character creation is complete. Review each party sprite, then click Save & Continue.');
+        if (typeof window.showPartySpriteReviewMenu === 'function') {
+          window.showPartySpriteReviewMenu(window._pendingPartyReview.roster, 0);
+        } else if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+          window.showCharacterSpriteReviewMenu(character);
+        }
+        return;
     }
     console.log('charactersString:', charactersString);
     console.log('character:', character);
@@ -10192,6 +10748,13 @@ $.ajax({
             // Task complete: Process the response with error handling
             try {
               const result = pollResponse.result || {};
+              if (result.characterGenerationPhase) {
+                console.warn('[Poll] Server reports character generation phase still active; skipping normal response parsing.');
+                if (result.response) {
+                  updateChatLog("<br><b>System:</b> " + result.response + "<br>");
+                }
+                return;
+              }
               if (result.characterConfirmed) {
                 window._statsRolled = true; // stats rolled via start, allow blank enter from now on
               }
@@ -10207,8 +10770,9 @@ $.ajax({
               let musicArrangement = result.musicArrangement;
               let isNewRoom = result.isNewRoom;
               
-              // Parse coords from serverGameConsole (already doing this nearby)
-                const m = serverGameConsole.match(/Coordinates:\s*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
+              // Parse coords from serverGameConsole only when present
+                const gameConsoleText = (typeof serverGameConsole === 'string') ? serverGameConsole : '';
+                const m = gameConsoleText.match(/Coordinates:\s*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
                 const cx = m ? parseInt(m[1]) : 0;
                 const cy = m ? parseInt(m[2]) : 0;
                 const cz = m ? parseInt(m[3]) : 0;
@@ -10404,7 +10968,7 @@ $.ajax({
     
             // Update CombatScene with new combatCharactersString
             if (newCombatCharactersString) {
-                const newCombatCharacters = JSON.parse(newCombatCharactersString);
+                let newCombatCharacters = JSON.parse(newCombatCharactersString);
                 // If the combat list from server lacks the sprite data (text PC block etc), restore the exact image
                 // the player selected in the review menu, so the in-game PC token (RT egocentric/combat billboard)
                 // is the chosen one, not a regenerated default.
@@ -10418,8 +10982,10 @@ $.ajax({
                     console.log('%c[Sprite] Restored player-selected sprite onto received combat PC entry.', 'color:#aaffaa');
                   }
                 }
-                window.combatCharacters = newCombatCharacters;
-                ensurePCSpriteInCombatList(window.combatCharacters);
+        window.combatCharacters = newCombatCharacters;
+        ensureKnownSpritesInCombatList(window.combatCharacters);
+        syncPartyMazeToCombatPositions(false);
+        newCombatCharacters = window.combatCharacters;
                 const combatScene = window.combatGame.scene.getScene('CombatScene');
                 if (combatScene) {
                     if (!combatScene.initialized) {
