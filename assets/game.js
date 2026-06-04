@@ -887,7 +887,9 @@ const RUN_MULT = 1.6;
 const PC_WALK_FRAME_MS = 220;
 const NPC_WALK_FRAME_MS = 260;
 const NPC_MOVE_TWEEN_MS = 280;
-const NPC_MOVE_STEP_MS = 480;
+const NPC_MOVE_THINK_MS = 120;
+const NPC_MOVE_STEP_MS = 420;
+const NPC_MOVE_VARIANCE_MS = 240;
 const PARTY_IDLE_INTERVAL_MS = 180;
 
 function deriveFacingFromDelta(dx, dy, fallback = 'left') {
@@ -1277,7 +1279,10 @@ function updateDungeonMovement(now) {
   }*/
 
   syncPlayerTileFromPos();
-  updatePartyMazeLocomotion(false);
+  const partyMoved = updatePartyMazeLocomotion(false);
+  if (shouldUsePartyMazeAnchors() && (turnInput !== 0 || movedThisFrame || partyMoved || speedAfter > STOP_EPS)) {
+    refreshPartyCombatProjection(true);
+  }
   window.playerAngle = playerAngle;
   window.playerPosX = playerPosX;
   window.playerPosY = playerPosY;
@@ -2091,37 +2096,34 @@ function moveCombatVisualTo(scene, charData, character, immediate = false) {
   const targetX = character.x * cellSize + cellSize / 2;
   const targetY = character.y * cellSize + cellSize / 2;
   const targetLabelY = targetY + (character.type === 'pc' ? 20 : 29);
-  const duration = Math.max(140, Number.isFinite(character.moveTweenMs) ? character.moveTweenMs : NPC_MOVE_TWEEN_MS);
-  const isTweenable = !immediate
+  const isSmoothNpc = !immediate
     && character.type === 'npc'
-    && scene.tweens
     && charData.sprite
     && charData.label
     && typeof charData.sprite.setPosition === 'function'
     && typeof charData.label.setPosition === 'function';
 
-  if (!isTweenable) {
+  if (!isSmoothNpc) {
     charData.sprite.setPosition(targetX, targetY);
     charData.label.setPosition(targetX, targetLabelY);
+    charData.targetPixelX = targetX;
+    charData.targetPixelY = targetY;
+    charData.targetLabelX = targetX;
+    charData.targetLabelY = targetLabelY;
     return;
   }
 
-  scene.tweens.killTweensOf(charData.sprite);
-  scene.tweens.killTweensOf(charData.label);
-  scene.tweens.add({
-    targets: charData.sprite,
-    x: targetX,
-    y: targetY,
-    duration,
-    ease: 'Sine.Out'
-  });
-  scene.tweens.add({
-    targets: charData.label,
-    x: targetX,
-    y: targetLabelY,
-    duration,
-    ease: 'Sine.Out'
-  });
+  charData.targetPixelX = targetX;
+  charData.targetPixelY = targetY;
+  charData.targetLabelX = targetX;
+  charData.targetLabelY = targetLabelY;
+  charData.visualSmoothingMs = Math.max(140, Number.isFinite(character.moveTweenMs) ? character.moveTweenMs : NPC_MOVE_TWEEN_MS);
+  if (!Number.isFinite(charData.sprite.x) || !Number.isFinite(charData.sprite.y)) {
+    charData.sprite.setPosition(targetX, targetY);
+  }
+  if (!Number.isFinite(charData.label.x) || !Number.isFinite(charData.label.y)) {
+    charData.label.setPosition(targetX, targetLabelY);
+  }
 }
 
 function createCombatVisual(scene, character) {
@@ -2162,7 +2164,7 @@ window.updateCombatScene = function(characters) {
     }
 };
 
-    class CombatScene extends Phaser.Scene {
+class CombatScene extends Phaser.Scene {
       constructor() {
         super({ key: 'CombatScene' });
         this.initialized = false;
@@ -2324,6 +2326,23 @@ window.updateCombatScene = function(characters) {
       startDungeonMovementLoop();
     });
 
+    }
+
+    update(time, delta) {
+        if (!this.characters) return;
+        const dt = Math.max(0.001, Math.min(0.05, (delta || 16) / 1000));
+        Object.values(this.characters).forEach(charData => {
+            if (!charData || charData.type !== 'npc' || !charData.sprite || !charData.label) return;
+            if (!Number.isFinite(charData.targetPixelX) || !Number.isFinite(charData.targetPixelY)) return;
+            const smoothingMs = Math.max(120, Number.isFinite(charData.visualSmoothingMs) ? charData.visualSmoothingMs : NPC_MOVE_TWEEN_MS);
+            const smoothing = 1 - Math.exp(-(1000 / smoothingMs) * dt * 8);
+            const nextSpriteX = charData.sprite.x + (charData.targetPixelX - charData.sprite.x) * smoothing;
+            const nextSpriteY = charData.sprite.y + (charData.targetPixelY - charData.sprite.y) * smoothing;
+            const nextLabelX = charData.label.x + (charData.targetLabelX - charData.label.x) * smoothing;
+            const nextLabelY = charData.label.y + (charData.targetLabelY - charData.label.y) * smoothing;
+            charData.sprite.setPosition(nextSpriteX, nextSpriteY);
+            charData.label.setPosition(nextLabelX, nextLabelY);
+        });
     }
     
     redrawCombatRT() {
@@ -2868,7 +2887,7 @@ window.updateCombatScene = function(characters) {
             });
             label.setOrigin(0.5, 0.5);
     
-            this.characters[character.name] = { sprite, label, x: character.x, y: character.y };
+            this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type };
             applyCombatVisualFrame(sprite, character);
         });
    
@@ -2935,6 +2954,9 @@ window.updateCombatScene = function(characters) {
    
     updatePositions(characters) {
     // console.log("Updating CombatScene positions with:", characters);
+        if (this.sys && this.sys.game && this.sys.game.loop) {
+            this.sys.game.loop.wake();
+        }
         ensurePCSpriteInCombatList(characters);
         window.combatCharacters = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
         characters.forEach(character => {
@@ -2946,6 +2968,7 @@ window.updateCombatScene = function(characters) {
             if (charData) {
                 charData.x = character.x;
                 charData.y = character.y;
+                charData.type = character.type;
                 applyCombatVisualFrame(charData.sprite, character);
                 moveCombatVisualTo(this, charData, character, false);
             } else {
@@ -2966,7 +2989,7 @@ window.updateCombatScene = function(characters) {
                     align: 'center'
                 });
                 label.setOrigin(0.5, 0.5);
-                this.characters[character.name] = { sprite, label, x: character.x, y: character.y };
+                this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type };
                 applyCombatVisualFrame(sprite, character);
             }
             // Update window.combatCharacters with the latest position
@@ -3014,6 +3037,14 @@ window.updateCombatScene = function(characters) {
                 charData.label.destroy();
                 delete this.characters[name];
             }
+        });
+        if (this._movementSleepTimer) {
+            this._movementSleepTimer.remove(false);
+            this._movementSleepTimer = null;
+        }
+        this._movementSleepTimer = this.time.delayedCall(260, () => {
+            this.sys.game.loop.sleep();
+            this._movementSleepTimer = null;
         });
     }
    
@@ -7284,6 +7315,32 @@ function getCurrentCombatRoomKey() {
     : 'X: 0, Y: 0, Z: 0';
 }
 
+function projectMazePointToCombatGrid(worldX, worldY) {
+  const centerX = 7;
+  const centerY = 7;
+  const pos = getPlayerPosForMap();
+  const combatAngle = -(playerAngle + Math.PI / 2);
+  const relX = Number(worldX) - pos.x;
+  const relY = Number(worldY) - pos.y;
+  const cosA = Math.cos(combatAngle);
+  const sinA = Math.sin(combatAngle);
+  return {
+    x: centerX + (relX * cosA - relY * sinA),
+    y: centerY + (relX * sinA + relY * cosA)
+  };
+}
+
+function refreshPartyCombatProjection(updateScene = true) {
+  if (!shouldUsePartyMazeAnchors()) return false;
+  syncPartyMazeToCombatPositions(false);
+  if (!updateScene) return true;
+  const combatScene = window.combatGame && window.combatGame.scene && window.combatGame.scene.getScene('CombatScene');
+  if (combatScene && typeof combatScene.updatePositions === 'function') {
+    combatScene.updatePositions(window.combatCharacters);
+  }
+  return true;
+}
+
 function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
   if (!dungeon || !dungeon.cells) return [];
   const start = findNearestUnblockedTile(dungeon, origin);
@@ -7372,21 +7429,20 @@ function ensurePartyMazeAnchors(forceReset = false) {
 function syncPartyMazeToCombatPositions(forceReset = false) {
   if (!shouldUsePartyMazeAnchors()) return;
   ensurePartyMazeAnchors(forceReset);
-  const centerX = 7;
-  const centerY = 7;
   const roomKey = getCurrentCombatRoomKey();
 
   window.combatCharacters.forEach(entry => {
     if (!entry) return;
     if (entry.type === 'pc') {
-      entry.x = centerX;
-      entry.y = centerY;
+      entry.x = 7;
+      entry.y = 7;
       entry.mazeX = playerDungeonX;
       entry.mazeY = playerDungeonY;
       entry.mazeRoomKey = roomKey;
     } else if (entry.type === 'npc' && Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
-      entry.x = centerX + (entry.mazeX - playerDungeonX);
-      entry.y = centerY + (entry.mazeY - playerDungeonY);
+      const projected = projectMazePointToCombatGrid(entry.mazeX + 0.5, entry.mazeY + 0.5);
+      entry.x = projected.x;
+      entry.y = projected.y;
     }
   });
 
@@ -7395,25 +7451,95 @@ function syncPartyMazeToCombatPositions(forceReset = false) {
 
 let _partyMazeStepAt = 0;
 
+function getPartyNpcCardinalVector(angle) {
+  const dx = Math.round(Math.cos(angle));
+  const dy = Math.round(Math.sin(angle));
+  if (dx === 0 && dy === 0) return { x: 0, y: -1 };
+  return { x: dx, y: dy };
+}
+
+function getPartyNpcBehavior(entry, now) {
+  const hash = hashCharacterName(entry.name);
+  const profiles = ['anchor', 'flank', 'scout', 'rear'];
+  const profile = profiles[hash % profiles.length];
+  if (!entry._behaviorUntil || now >= entry._behaviorUntil) {
+    const phaseCatalog = {
+      anchor: ['anchor_close', 'anchor_wide', 'sweep'],
+      flank: ['flank_left', 'flank_right', 'sweep'],
+      scout: ['scout_forward', 'sweep', 'anchor_wide'],
+      rear: ['rear_guard', 'anchor_wide', 'sweep']
+    };
+    const options = phaseCatalog[profile] || ['anchor_close'];
+    entry._behaviorPhase = options[Math.floor((hash + Math.floor(now / 1800)) % options.length)];
+    entry._behaviorUntil = now + 1800 + (hash % 2200);
+  }
+  return {
+    profile,
+    phase: entry._behaviorPhase || profile,
+    cadenceMs: NPC_MOVE_STEP_MS + (hash % NPC_MOVE_VARIANCE_MS)
+  };
+}
+
+function getPartyNpcDesiredPoint(entry, behavior, now) {
+  const forward = getPartyNpcCardinalVector(playerAngle);
+  const right = getPartyNpcCardinalVector(playerAngle + (Math.PI / 2));
+  const left = { x: -right.x, y: -right.y };
+  const back = { x: -forward.x, y: -forward.y };
+  const hash = hashCharacterName(entry.name);
+  const jitter = (((Math.floor(now / 600) + hash) % 3) - 1);
+  const escortSide = ((hash >> 1) % 2 === 0) ? left : right;
+  const sweepSide = ((Math.floor(now / 900) + hash) % 2 === 0) ? left : right;
+  switch (behavior.phase) {
+    case 'scout_forward':
+      return {
+        x: playerDungeonX + forward.x * (3 + (hash % 2)) + sweepSide.x,
+        y: playerDungeonY + forward.y * (3 + (hash % 2)) + sweepSide.y
+      };
+    case 'rear_guard':
+      return {
+        x: playerDungeonX + back.x * (2 + (hash % 2)) + escortSide.x,
+        y: playerDungeonY + back.y * (2 + (hash % 2)) + escortSide.y
+      };
+    case 'flank_left':
+      return {
+        x: playerDungeonX + left.x * (2 + (hash % 2)) + forward.x * jitter,
+        y: playerDungeonY + left.y * (2 + (hash % 2)) + forward.y * jitter
+      };
+    case 'flank_right':
+      return {
+        x: playerDungeonX + right.x * (2 + (hash % 2)) + forward.x * jitter,
+        y: playerDungeonY + right.y * (2 + (hash % 2)) + forward.y * jitter
+      };
+    case 'anchor_wide':
+      return {
+        x: playerDungeonX + escortSide.x * (2 + (hash % 2)) + back.x,
+        y: playerDungeonY + escortSide.y * (2 + (hash % 2)) + back.y
+      };
+    case 'sweep':
+      return {
+        x: playerDungeonX + sweepSide.x * (1 + (hash % 3)) + forward.x * (1 + (Math.floor(now / 1100) % 2)),
+        y: playerDungeonY + sweepSide.y * (1 + (hash % 3)) + forward.y * (1 + (Math.floor(now / 1100) % 2))
+      };
+    case 'anchor_close':
+    default:
+      return {
+        x: playerDungeonX + escortSide.x + back.x * (hash % 2),
+        y: playerDungeonY + escortSide.y + back.y * (hash % 2)
+      };
+  }
+}
+
 function buildPartyNpcGoalTile(entry, occupiedTiles, now) {
   const current = { x: entry.mazeX, y: entry.mazeY };
   const tiles = collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 8)
-    .filter(tile => tile.dist >= 1 && tile.dist <= 4);
+    .filter(tile => tile.dist >= 1 && tile.dist <= 5);
   if (!tiles.length) return current;
 
   const hash = hashCharacterName(entry.name);
+  const behavior = getPartyNpcBehavior(entry, now);
   const farFromPc = Math.abs(entry.mazeX - playerDungeonX) + Math.abs(entry.mazeY - playerDungeonY) > 4;
-  const roamTick = Math.floor(now / (farFromPc ? 350 : 900));
-  const ringRadius = farFromPc ? (1 + (hash % 2)) : (1 + ((hash + roamTick) % 3));
-  const directions = [
-    { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }, { x: -1, y: 1 },
-    { x: -1, y: 0 }, { x: -1, y: -1 }, { x: 0, y: -1 }, { x: 1, y: -1 }
-  ];
-  const desiredDir = directions[(hash + roamTick) % directions.length];
-  const desired = {
-    x: playerDungeonX + desiredDir.x * ringRadius,
-    y: playerDungeonY + desiredDir.y * ringRadius
-  };
+  const desired = getPartyNpcDesiredPoint(entry, behavior, now);
+  const desiredRadius = Math.abs(desired.x - playerDungeonX) + Math.abs(desired.y - playerDungeonY);
 
   let bestTile = current;
   let bestScore = Number.POSITIVE_INFINITY;
@@ -7422,7 +7548,9 @@ function buildPartyNpcGoalTile(entry, occupiedTiles, now) {
     if (occupiedTiles.has(key) && !(tile.x === current.x && tile.y === current.y)) return;
     const desiredDist = Math.abs(tile.x - desired.x) + Math.abs(tile.y - desired.y);
     const currentDist = Math.abs(tile.x - current.x) + Math.abs(tile.y - current.y);
-    const score = (desiredDist * 4) + (Math.abs(tile.dist - ringRadius) * 2) + (currentDist * 0.5);
+    const radiusPenalty = Math.abs(tile.dist - desiredRadius) * (behavior.profile === 'scout' ? 1.2 : 1.8);
+    const stayPenalty = farFromPc ? (currentDist * 0.35) : (currentDist * 0.65);
+    const score = (desiredDist * (behavior.profile === 'anchor' ? 5 : 3.5)) + radiusPenalty + stayPenalty;
     if (score < bestScore) {
       bestScore = score;
       bestTile = { x: tile.x, y: tile.y };
@@ -7481,7 +7609,7 @@ function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
 function updatePartyMazeLocomotion(force = false) {
   if (!shouldUsePartyMazeAnchors()) return false;
   const now = Date.now();
-  if (!force && now - _partyMazeStepAt < NPC_MOVE_STEP_MS) return false;
+  if (!force && now - _partyMazeStepAt < NPC_MOVE_THINK_MS) return false;
   _partyMazeStepAt = now;
 
   ensurePartyMazeAnchors(false);
@@ -7499,6 +7627,10 @@ function updatePartyMazeLocomotion(force = false) {
   let anyMoved = false;
 
   orderedEntries.forEach(entry => {
+    const behavior = getPartyNpcBehavior(entry, now);
+    if (!force && Number.isFinite(entry._nextMazeStepAt) && now < entry._nextMazeStepAt) {
+      return;
+    }
     const blockedTiles = new Set(reservedTiles);
     blockedTiles.delete(`${entry.mazeX},${entry.mazeY}`);
 
@@ -7519,8 +7651,10 @@ function updatePartyMazeLocomotion(force = false) {
       advanceWalkFrame(entry, now, NPC_WALK_FRAME_MS);
       entry.moveTweenMs = NPC_MOVE_TWEEN_MS;
       anyMoved = true;
+      entry._nextMazeStepAt = now + behavior.cadenceMs;
     } else {
       resetWalkFrame(entry);
+      entry._nextMazeStepAt = now + Math.max(180, Math.floor(behavior.cadenceMs * 0.55));
     }
 
     reservedTiles.add(`${entry.mazeX},${entry.mazeY}`);
