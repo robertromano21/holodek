@@ -7540,7 +7540,9 @@ async function chatbotprocessinput(textin) {
   document.getElementById("chatuserinput").value = "";
   
   if (!userInput) {
-    if (!window._statsRolled) {
+    if (window._skipStartMenu) {
+      window._skipStartMenu = false; // one-shot bypass for post-save auto-continue
+    } else if (!window._statsRolled) {
       updateChatLog("<br>Please enter a command.<br>");
       return;
     }
@@ -8330,7 +8332,7 @@ if (Array.isArray(objectsInRoomMatch) && objectsInRoomMatch.length > 1) {
   // Split by comma and trim each item
 }
 
-if (userWords[0] === "start") {
+if (userWords[0] === "start" && !window._skipStartMenu) {
   userInput = document.getElementById("chatuserinput").value;
   document.getElementById("chatuserinput").value = "";
   let character = null;

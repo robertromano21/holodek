@@ -1175,14 +1175,14 @@ function toggleCombatMode() {
         body: JSON.stringify({ character: character })
       }).then(r => r.json()).then(resp => {
         console.log('%c[CharacterGen] /startGameWithCharacter response task:', 'color:#aaffaa', resp && resp.taskId);
-        // The task result will be polled/handled by existing game flow (like other ajax tasks).
+        // Only proceed after the server has seeded the selected PC; otherwise the client can race back
+        // into the local start menu before the special start-with-character state exists.
+        if (typeof window.forceProceedAfterCharacterSave === 'function') {
+          window.forceProceedAfterCharacterSave(character);
+        } else if (typeof chatbotprocessinput === 'function') {
+          setTimeout(() => chatbotprocessinput(), 80);
+        }
       }).catch(e => console.warn('[Save] startGameWithCharacter post failed (may still proceed via chatbot reentry):', e));
-
-      if (typeof window.forceProceedAfterCharacterSave === 'function') {
-        window.forceProceedAfterCharacterSave(character);
-      } else if (typeof chatbotprocessinput === 'function') {
-        setTimeout(() => chatbotprocessinput(), 80);
-      }
     }
 
     // Expose globally so the onclick= handlers in the HTML and calls from game.js / SSE always work
@@ -1199,9 +1199,8 @@ function toggleCombatMode() {
       setTimeout(() => {
         const inputEl = document.getElementById('chatuserinput');
         if (inputEl) {
-          if (!inputEl.value || !inputEl.value.trim()) {
-            inputEl.value = 'start'; // ensure non-empty for the stats-load submit (avoids "please enter a command" before stats)
-          }
+          window._skipStartMenu = true;
+          inputEl.value = ''; // post-save continue should bypass the local start menu, not re-open it
           chatbotprocessinput();
         }
       }, 80);

@@ -522,6 +522,24 @@ function drawSkeletalWings(ctx, cx, cy, u, palette, torsoH, boneCount = 4, wingL
   ctx.fillRect((cx + wingDir * 2) * u, cy * u + 1, 1 * u, Math.floor(h * 0.7) * u - 2); // on main arm
 }
 
+function resolveStarterVariant(seed, spriteSpec, variantCount) {
+  const explicit = Number(spriteSpec && spriteSpec.design && spriteSpec.design.starter_variant);
+  if (Number.isFinite(explicit)) return Math.abs(Math.floor(explicit)) % variantCount;
+  if (Number.isFinite(Number(seed))) {
+    const seedKey = String(seed);
+    let seedHash = 0;
+    for (let i = 0; i < seedKey.length; i++) seedHash = ((seedHash * 33) + seedKey.charCodeAt(i)) >>> 0;
+    return seedHash % variantCount;
+  }
+  const poseKey = (spriteSpec && (spriteSpec.pose || (spriteSpec.design && spriteSpec.design.pose))) || '';
+  if (typeof poseKey === 'string' && poseKey) {
+    let hash = 0;
+    for (let i = 0; i < poseKey.length; i++) hash = ((hash * 31) + poseKey.charCodeAt(i)) >>> 0;
+    return hash % variantCount;
+  }
+  return Math.abs(Math.floor((seed || 0) * 1000)) % variantCount;
+}
+
 // EXACT MORTACIA REPLICATION (for the provided reference image #2).
 // Methodology: Meticulous visual analysis of the reference (side profile facing left, small head with light top + black eye bar + skin face, dark grey costume body with mid grey belt/waist accent, skin tone thighs and arm, grey boots, light tan vertical sword held upward from rib/hand level on left with skin hand at base, complex stepped grey wing-like structure on right/back with multiple segments/prongs).
 // We lock the pixel layout to exact rect clusters (base pixel positions chosen to match the ref's proportions, silhouette, attachments and "stacked" look when core body is centered at ~11-12,11-12).
@@ -529,9 +547,24 @@ function drawSkeletalWings(ctx, cx, cy, u, palette, torsoH, boneCount = 4, wingL
 // This bypasses the general prefab/draw* for Mortacia to guarantee pixel-perfect match to the ref (while other characters use the catalog system).
 // Draw order: wing (back), legs, torso (costume), head, arm+hand, sword (front), details/outlines.
 // All positions in base pixels; *u at draw time. Center chosen so the figure sits plumb and centered like the ref.
-function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette) {
+function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   const s = seed || 0;
   const v = Math.floor(s * 1000) % 5; // 0-4 for color var
+  const mortaciaVariants = [
+    { wingShift: 2, wingLift: 0, wingExtraReach: 0, handLift: 0, swordLift: 0, swordLen: 10, thighLift: 0, bootLift: 0, hairLen: 5, hairFront: 1 },
+    { wingShift: 3, wingLift: -1, wingExtraReach: 1, handLift: -1, swordLift: -1, swordLen: 11, thighLift: -1, bootLift: -1, hairLen: 6, hairFront: 1 },
+    { wingShift: 2, wingLift: 1, wingExtraReach: 1, handLift: 0, swordLift: 0, swordLen: 9, thighLift: 0, bootLift: 0, hairLen: 4, hairFront: 0 }
+  ];
+  const cfg = mortaciaVariants[Math.abs(variant) % mortaciaVariants.length];
+  const wingX = baseX + cfg.wingShift;
+  const wingY = baseY + cfg.wingLift;
+  const thighY = baseY + 11 + cfg.thighLift;
+  const bootY = baseY + 16 + cfg.bootLift;
+  const torsoY = baseY + 5;
+  const armY = baseY + 6 + cfg.handLift;
+  const forearmY = baseY + 3 + cfg.handLift;
+  const handY = baseY + 7 + cfg.handLift;
+  const swordY = baseY - 1 + cfg.swordLift;
 
   // Color variations (greys for costume/wing/boot, light tan for sword, skin tones)
   const bodyDark = ['#1f1f1f', '#222222', '#252525', '#1c1c1c', '#282828'][v];
@@ -546,51 +579,51 @@ function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette) {
   // === WING / back right structure (exact jagged grey on right of ref) ===
   // Built from overlapping rects to match the stepped, multi-prong silhouette in the image (top hook, main vertical, 3 descending right prongs). Adjusted for exact visual match to Image #2 - tall right blade-like part.
   ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX + 2) * u, (baseY + 0) * u, 2 * u, 2 * u); // top upper
-  ctx.fillRect((baseX + 3) * u, (baseY + 1) * u, 2 * u, 2 * u);
+  ctx.fillRect((wingX + 0) * u, (wingY + 0) * u, 2 * u, 2 * u); // top upper
+  ctx.fillRect((wingX + 1) * u, (wingY + 1) * u, 2 * u, 2 * u);
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX + 4) * u, (baseY + 0) * u, 2 * u, 3 * u); // extension
-  ctx.fillRect((baseX + 3) * u, (baseY + 3) * u, 3 * u, 5 * u); // main
+  ctx.fillRect((wingX + 2) * u, (wingY + 0) * u, 2 * u, 3 * u); // extension
+  ctx.fillRect((wingX + 1) * u, (wingY + 3) * u, 3 * u, 5 * u); // main
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 5) * u, (baseY + 2) * u, 2 * u, 3 * u); // upper prong right
-  ctx.fillRect((baseX + 5) * u, (baseY + 5) * u, 2 * u, 2 * u);
+  ctx.fillRect((wingX + 3) * u, (wingY + 2) * u, 2 * u, 3 * u); // upper prong right
+  ctx.fillRect((wingX + 3) * u, (wingY + 5) * u, 2 * u, 2 * u);
   // Tall right vertical for the wing "blade" to match ref Image #2 (thicker for presence)
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX + 6) * u, (baseY + 2) * u, 2 * u, 14 * u); // tall right part (2px for exact match)
+  ctx.fillRect((wingX + 4) * u, (wingY + 2) * u, 2 * u, (14 + cfg.wingExtraReach) * u); // tall right part with more standoff
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 5) * u, (baseY + 7) * u, 2 * u, 3 * u); // middle prong
-  ctx.fillRect((baseX + 5) * u, (baseY + 9) * u, 2 * u, 3 * u);
+  ctx.fillRect((wingX + 3) * u, (wingY + 7) * u, 2 * u, 3 * u); // middle prong
+  ctx.fillRect((wingX + 3) * u, (wingY + 9) * u, 2 * u, 3 * u);
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 4) * u, (baseY + 11) * u, 3 * u, 2 * u); // lower prong
+  ctx.fillRect((wingX + 2) * u, (wingY + 11) * u, 3 * u, 2 * u); // lower prong
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX + 5) * u, (baseY + 12) * u, 2 * u, 3 * u);
+  ctx.fillRect((wingX + 3) * u, (wingY + 12) * u, 2 * u, 3 * u);
   ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX + 3) * u, (baseY + 14) * u, 2 * u, 4 * u); // bottom
-  ctx.fillRect((baseX + 4) * u, (baseY + 16) * u, 2 * u, 2 * u);
+  ctx.fillRect((wingX + 1) * u, (wingY + 14) * u, 2 * u, 4 * u); // bottom
+  ctx.fillRect((wingX + 2) * u, (wingY + 16) * u, 2 * u, 2 * u);
 
   // === LEGS (skin thighs visible, grey boots together underneath, exact to ref) ===
   ctx.fillStyle = skinTone;
-  ctx.fillRect((baseX + 1) * u, (baseY + 11) * u, 3 * u, 5 * u); // thighs skin (under short costume)
+  ctx.fillRect((baseX + 1) * u, thighY * u, 3 * u, 5 * u); // thighs skin (under short costume)
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX ) * u, (baseY + 16) * u, 4 * u, 5 * u); // boots
+  ctx.fillRect((baseX ) * u, bootY * u, 4 * u, 5 * u); // boots
   ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX ) * u, (baseY + 16) * u, 1 * u, 5 * u); // left edge
+  ctx.fillRect((baseX ) * u, bootY * u, 1 * u, 5 * u); // left edge
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 3) * u, (baseY + 16) * u, 1 * u, 4 * u); // right volume
+  ctx.fillRect((baseX + 3) * u, bootY * u, 1 * u, 4 * u); // right volume
   ctx.fillStyle = bodyDark;
-  ctx.fillRect((baseX ) * u, (baseY + 19) * u, 4 * u, 2 * u); // foot bottom
+  ctx.fillRect((baseX ) * u, (bootY + 3) * u, 4 * u, 2 * u); // foot bottom
 
   // === TORSO (dark grey costume body, exact proportions + belt/waist from ref) ===
   ctx.fillStyle = bodyDark;
-  ctx.fillRect((baseX ) * u, (baseY + 5) * u, 4 * u, 7 * u); // narrower for ref
+  ctx.fillRect((baseX ) * u, torsoY * u, 4 * u, 7 * u); // narrower for ref
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX ) * u, (baseY + 9) * u, 4 * u, 1 * u); // belt
+  ctx.fillRect((baseX ) * u, (torsoY + 4) * u, 4 * u, 1 * u); // belt
   ctx.fillStyle = waistDetail;
-  ctx.fillRect((baseX + 1) * u, (baseY + 10) * u, 2 * u, 1 * u); // small accent (purple in ref)
+  ctx.fillRect((baseX + 1) * u, (torsoY + 5) * u, 2 * u, 1 * u); // small accent (purple in ref)
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 3) * u, (baseY + 5) * u, 1 * u, 4 * u); // edge
+  ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 4 * u); // edge
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX + 3) * u, (baseY + 5) * u, 1 * u, 7 * u); // side layer for grey costume depth like ref
+  ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 7 * u); // side layer for grey costume depth like ref
 
   // === HEAD (small, light top, skin, black bar eye, exact to ref) ===
   ctx.fillStyle = swordTan;
@@ -601,31 +634,49 @@ function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette) {
   ctx.fillRect((baseX + 1) * u, (baseY + 4) * u, 2 * u, 1 * u); // black eye/mask bar
   ctx.fillStyle = bodyDark;
   ctx.fillRect((baseX + 1) * u, (baseY + 6) * u, 2 * u, 1 * u); // neck join
+  ctx.fillStyle = swordTan;
+  ctx.fillRect((baseX + 3) * u, (baseY + 2) * u, 1 * u, cfg.hairLen * u); // long back hair strand
+  ctx.fillRect((baseX + 4) * u, (baseY + 3) * u, 1 * u, Math.max(2, cfg.hairLen - 1) * u); // longer outer strand
+  if (cfg.hairFront) {
+    ctx.fillRect((baseX + 0) * u, (baseY + 2) * u, 1 * u, 3 * u); // front fringe
+  }
 
   // === ARM + HAND (skin, raised on left/front holding sword at rib level, exact) ===
   ctx.fillStyle = skinTone;
-  ctx.fillRect((baseX ) * u, (baseY + 6) * u, 2 * u, 3 * u); // upper arm
-  ctx.fillRect((baseX - 2) * u, (baseY + 3) * u, 2 * u, 4 * u); // forearm up
-  ctx.fillRect((baseX - 2) * u, (baseY + 7) * u, 2 * u, 2 * u); // hand at sword base (rib height)
+  ctx.fillRect((baseX ) * u, armY * u, 2 * u, 3 * u); // upper arm
+  ctx.fillRect((baseX - 2) * u, forearmY * u, 2 * u, 4 * u); // forearm up
+  ctx.fillRect((baseX - 2) * u, handY * u, 2 * u, 2 * u); // hand at sword base (rib height)
 
   // === SWORD (light tan vertical upward on left, thick, from high above head to hand, exact to ref) ===
   ctx.fillStyle = swordTan;
-  ctx.fillRect((baseX - 3) * u, (baseY - 1) * u, 2 * u, 10 * u); // main blade (further left, starts higher)
-  ctx.fillRect((baseX - 2) * u, (baseY + 0) * u, 1 * u, 8 * u); // thickness
+  ctx.fillRect((baseX - 3) * u, swordY * u, 2 * u, cfg.swordLen * u); // main blade (further left, starts higher)
+  ctx.fillRect((baseX - 2) * u, (swordY + 1) * u, 1 * u, Math.max(6, cfg.swordLen - 2) * u); // thickness
   ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX - 3) * u, (baseY + 8) * u, 2 * u, 1 * u); // subtle base/hilt near hand
+  ctx.fillRect((baseX - 3) * u, (handY + 1) * u, 2 * u, 1 * u); // subtle base/hilt near hand
 
   // === Final retro outlines / definition (thin dark edges for readability, matching ref crispness) ===
   ctx.fillStyle = '#111';
   ctx.fillRect((baseX - 1) * u, (baseY + 2) * u, 1 * u, 6 * u); // head left
   ctx.fillRect((baseX - 1) * u, (baseY + 7) * u, 1 * u, 7 * u); // torso left
   ctx.fillRect((baseX - 1) * u, (baseY + 13) * u, 1 * u, 9 * u); // leg left
-  ctx.fillRect((baseX - 4) * u, (baseY + 0) * u, 1 * u, 11 * u); // sword left edge
+  ctx.fillRect((baseX - 4) * u, swordY * u, 1 * u, (cfg.swordLen + 1) * u); // sword left edge
 }
 
-function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette) {
+function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   const s = seed || 0;
   const v = Math.floor(s * 1000) % 4; // color variations for rerolls while keeping exact layout
+  const suzerainVariants = [
+    { shoulderW: 6, swordLen: 15, swordLift: 0, capeFlow: 6, capeLift: 0, crestH: 2, legLift: 0, torsoLift: 0 },
+    { shoulderW: 6, swordLen: 16, swordLift: -1, capeFlow: 7, capeLift: -1, crestH: 3, legLift: -1, torsoLift: -1 },
+    { shoulderW: 5, swordLen: 14, swordLift: 0, capeFlow: 8, capeLift: 0, crestH: 2, legLift: 0, torsoLift: 0 }
+  ];
+  const cfg = suzerainVariants[Math.abs(variant) % suzerainVariants.length];
+  const headY = baseY + 3 + cfg.torsoLift;
+  const neckY = baseY + 7 + cfg.torsoLift;
+  const torsoY = baseY + 8 + cfg.torsoLift;
+  const capeY = baseY + 5 + cfg.capeLift;
+  const swordY = baseY - 2 + cfg.swordLift;
+  const legY = baseY + 11 + cfg.legLift;
 
   // Colors matched to the reference image(s) provided for Suzerain, with slight var (v=seed%4) for "similar result every time with color variations" while layout/pose/rects 100% locked identical.
   const helmLight = ['#f5d8a8', '#e8c898', '#f0d0a0', '#d8b080'][v];
@@ -640,59 +691,65 @@ function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette) {
 
   // === DISTINCTIVE HELM (width reduced ~15-20% to 4px; left-biased visor/cross for facing left per image) ===
   ctx.fillStyle = helmLight;
-  ctx.fillRect((baseX + 1) * u, (baseY + 3) * u, 4 * u, 4 * u); // head width reduced (was 5), y+2 moved down w/ body
+  ctx.fillRect((baseX + 1) * u, headY * u, 4 * u, 4 * u); // head width reduced (was 5), y+2 moved down w/ body
   ctx.fillStyle = helmDark;
-  ctx.fillRect((baseX + 1) * u, (baseY + 3) * u, 1 * u, 4 * u); // vertical left-biased (facing left)
-  ctx.fillRect((baseX + 1) * u, (baseY + 4) * u, 2 * u, 1 * u); // horiz crossbar left side
+  ctx.fillRect((baseX + 1) * u, headY * u, 1 * u, 4 * u); // vertical left-biased (facing left)
+  ctx.fillRect((baseX + 1) * u, (headY + 1) * u, 2 * u, 1 * u); // horiz crossbar left side
+  ctx.fillStyle = capeRed;
+  ctx.fillRect((baseX + 3) * u, (headY - cfg.crestH) * u, 1 * u, cfg.crestH * u); // knightly plume
+  ctx.fillRect((baseX + 2) * u, (headY - cfg.crestH) * u, 2 * u, 1 * u);
 
   // === NECK / UPPER TORSO JOIN (body moved down) ===
   ctx.fillStyle = armorDark;
-  ctx.fillRect((baseX + 2) * u, (baseY + 7) * u, 2 * u, 1 * u);
+  ctx.fillRect((baseX + 2) * u, neckY * u, 2 * u, 1 * u);
 
   // === TORSO ARMOR (slightly expanded shoulder width at upper; main body wider w=5 for shoulders; y+2) ===
   ctx.fillStyle = armorDark;
-  ctx.fillRect((baseX + 0) * u, (baseY + 8) * u, 5 * u, 3 * u); // w=5 for expanded shoulder width (was 4), start shifted for center
+  ctx.fillRect((baseX + 0) * u, torsoY * u, cfg.shoulderW * u, 3 * u); // wider shoulder silhouette for more knight presence
   ctx.fillStyle = belt;
-  ctx.fillRect((baseX + 0) * u, (baseY + 10) * u, 5 * u, 1 * u); // belt (wider)
+  ctx.fillRect((baseX + 0) * u, (torsoY + 2) * u, Math.min(cfg.shoulderW, 5) * u, 1 * u); // belt
   ctx.fillStyle = armorLight;
-  ctx.fillRect((baseX + 0) * u, (baseY + 11) * u, 3 * u, 1 * u); // lower plate accent
+  ctx.fillRect((baseX + 0) * u, (torsoY + 3) * u, 3 * u, 1 * u); // lower plate accent
+  ctx.fillStyle = helmLight;
+  ctx.fillRect((baseX + 0) * u, (torsoY + 0) * u, 1 * u, 1 * u); // left pauldron highlight
+  ctx.fillRect((baseX + cfg.shoulderW - 1) * u, (torsoY + 0) * u, 1 * u, 1 * u); // right pauldron highlight
 
   // === RED CAPE (separated from body +1-2px gap; flows to bottom right via right-shifted lower segments; y+2 with body) ===
   ctx.fillStyle = capeRed;
-  ctx.fillRect((baseX + 6) * u, (baseY + 5) * u, 1 * u, 5 * u); // upper (gap from body at x+5)
-  ctx.fillRect((baseX + 5) * u, (baseY + 9) * u, 2 * u, 3 * u); // mid
-  ctx.fillRect((baseX + 6) * u, (baseY + 11) * u, 2 * u, 6 * u); // lower shifted right, longer flow to bottom right (detached)
+  ctx.fillRect((baseX + 6) * u, capeY * u, 1 * u, 5 * u); // upper (gap from body at x+5)
+  ctx.fillRect((baseX + 5) * u, (capeY + 4) * u, 2 * u, 3 * u); // mid
+  ctx.fillRect((baseX + 6) * u, (capeY + 6) * u, 2 * u, cfg.capeFlow * u); // lower shifted right, longer flow to bottom right (detached)
 
   // === LEFT HAND/ARM (grip; y moved with body) ===
   ctx.fillStyle = skin;
-  ctx.fillRect((baseX - 1) * u, (baseY + 8) * u, 1 * u, 2 * u); // arm
-  ctx.fillRect((baseX - 2) * u, (baseY + 8) * u, 2 * u, 2 * u); // hand grip (right of sword)
+  ctx.fillRect((baseX - 1) * u, torsoY * u, 1 * u, 2 * u); // arm
+  ctx.fillRect((baseX - 2) * u, torsoY * u, 2 * u, 2 * u); // hand grip (right of sword)
 
   // === SWORD (longer/taller look: body+2 down makes it protrude more above head; h+1, start higher rel) ===
   ctx.fillStyle = swordDark;
-  ctx.fillRect((baseX - 4) * u, (baseY - 2) * u, 2 * u, 15 * u); // start higher (y-2), h=15 for longer sword
-  ctx.fillRect((baseX - 4) * u, (baseY + 11) * u, 2 * u, 2 * u); // hilt (moved w/ grip hand)
+  ctx.fillRect((baseX - 4) * u, swordY * u, 2 * u, cfg.swordLen * u); // start higher for more knightly blade presence
+  ctx.fillRect((baseX - 4) * u, legY * u, 2 * u, 2 * u); // hilt (moved w/ grip hand)
 
   // === RIGHT HAND AT SIDE (second set; y+2, x adjusted for wider shoulder) ===
   ctx.fillStyle = skin;
-  ctx.fillRect((baseX + 4) * u, (baseY + 10) * u, 2 * u, 2 * u); // right hand at side (gap to cape)
+  ctx.fillRect((baseX + cfg.shoulderW - 1) * u, (torsoY + 2) * u, 2 * u, 2 * u); // right hand at side (gap to cape)
 
   // === LEGS / GREAVES (y+2 for body down; keep taller h, shorter than Mortacia) ===
   ctx.fillStyle = armorLight;
-  ctx.fillRect((baseX + 1) * u, (baseY + 11) * u, 3 * u, 8 * u); // greaves (y+2)
+  ctx.fillRect((baseX + 1) * u, legY * u, 3 * u, 8 * u); // greaves (y+2)
   ctx.fillStyle = helmDark;
-  ctx.fillRect((baseX + 1) * u, (baseY + 12) * u, 3 * u, 1 * u); // band
-  ctx.fillRect((baseX + 1) * u, (baseY + 16) * u, 3 * u, 1 * u); // ankle band
+  ctx.fillRect((baseX + 1) * u, (legY + 1) * u, 3 * u, 1 * u); // band
+  ctx.fillRect((baseX + 1) * u, (legY + 5) * u, 3 * u, 1 * u); // ankle band
   ctx.fillStyle = footDark;
-  ctx.fillRect((baseX + 0) * u, (baseY + 18) * u, 4 * u, 2 * u); // feet (y+2)
+  ctx.fillRect((baseX + 0) * u, (legY + 7) * u, 4 * u, 2 * u); // feet (y+2)
 
   // === Crisp outlines (all y/x adjusted for head narrow, body down, cape separate, sword longer) ===
   ctx.fillStyle = '#111';
-  ctx.fillRect((baseX - 1) * u, (baseY + 3) * u, 1 * u, 4 * u); // helm left
-  ctx.fillRect((baseX + 5) * u, (baseY + 8) * u, 1 * u, 4 * u); // torso right (w=5)
-  ctx.fillRect((baseX + 0) * u, (baseY + 11) * u, 1 * u, 10 * u); // leg/greave left
-  ctx.fillRect((baseX - 4) * u, (baseY - 2) * u, 1 * u, 15 * u); // sword left
-  ctx.fillRect((baseX + 7) * u, (baseY + 5) * u, 1 * u, 13 * u); // cape right edge (further for separation + flow)
+  ctx.fillRect((baseX - 1) * u, headY * u, 1 * u, 4 * u); // helm left
+  ctx.fillRect((baseX + cfg.shoulderW) * u, torsoY * u, 1 * u, 4 * u); // torso right
+  ctx.fillRect((baseX + 0) * u, legY * u, 1 * u, 10 * u); // leg/greave left
+  ctx.fillRect((baseX - 4) * u, swordY * u, 1 * u, cfg.swordLen * u); // sword left
+  ctx.fillRect((baseX + 7) * u, capeY * u, 1 * u, (cfg.capeFlow + 7) * u); // cape right edge (further for separation + flow)
 }
 
 // Main drawing routine that builds the sprite into a canvas using our prefab catalog.
@@ -1114,13 +1171,13 @@ function createCharacterSpriteCanvas(character, spriteSpec = null) {
     // Bypasses general prefabs/poses/attachments for pixel-perfect match to the provided ref.
     // The drawMortaciaExact was meticulously built from pixel analysis of the image (exact rect positions, widths, heights, stacking, and attachments for head/arm/sword/wing/legs/torso to reproduce the silhouette, skin exposure, light sword, dark grey costume, stepped right wing, etc.).
     // baseX/baseY = 10,2 chosen so the core body column + protrusions center correctly on the 24-grid (matches how the ref figure sits when centered).
-    drawMortaciaExact(ctx, 8, 2, u, seed, palette); // adjusted base for better center match to how ref sits when body column plumb at canvas center, room for right wing
+    drawMortaciaExact(ctx, 8, 2, u, seed, palette, resolveStarterVariant(seed, spriteSpec, 3)); // adjusted base for better center match; curated variants keep the same ref language while giving rerolls actual pose/look variation
   } else if (isSuzerain) {
     // EXACT replication of the reference image for Suzerain ("[Image #1] no like this" + prior refs).
     // Draws pixel-for-pixel match using the same 24-grid: distinctive light helm + dark cross/visor emblem, skin hands at each side (left gripping upright sword at ~rib, right empty at side), red cape prominent flowing on back/right with stepped lower, dark upright sword vertical left from above head to hand, dark armor torso + light lower plate/belt, light greaves + dark bands + dark feet.
     // Bypasses general prefabs/poses/design for locked identical layout every time. ONLY colors vary (seed % 4) for "similar result every time with color variations".
     // baseX/baseY + internal rects meticulously adjusted to center core plumb + match latest ref grid exactly.
-    drawSuzerainExact(ctx, 10, 2, u, seed, palette); // head w-15% (4px), shoulder expanded w=5, body y+2 (sword protrudes longer/taller above), cape separated + flows bottom-right; core ~13 centered; left visor; left sword/right cape; 2 hands; still slightly shorter than Mortacia.
+    drawSuzerainExact(ctx, 10, 2, u, seed, palette, resolveStarterVariant(seed, spriteSpec, 3)); // curated knight variants preserve the icon while making rerolls meaningfully distinct.
   } else {
     // Compose in classic back-to-front order using the prefab components.
     // Pass design params so LLM "drawing" controls (sizes, densities, blade, folds, flow) actually affect pixels.
@@ -1329,10 +1386,18 @@ function createCharacterSpriteSpec(character) {
   // For Mortacia: lock design numbers to the exact proportions that replicate the reference image [Image #2]
   // (small head, narrow torso to expose thighs, specific leg/arm heights, low stride for legs together, rib-level sword).
   // Combined with the exact draw path this guarantees similar result every time (shape fixed).
+  const starterVariant = (name.toLowerCase().includes('mortacia') || name.toLowerCase().includes('suzerain'))
+    ? (() => {
+        const seedKey = String(seed);
+        let seedHash = 0;
+        for (let i = 0; i < seedKey.length; i++) seedHash = ((seedHash * 33) + seedKey.charCodeAt(i)) >>> 0;
+        return seedHash % 3;
+      })()
+    : 0;
   if (name.toLowerCase().includes('mortacia')) {
     pHeadH = 3; pHeadW = 4;
     pTorsoH = 6; pTorsoW = 4;
-    pLegH = 10; pLegW = 2;
+    pLegH = (starterVariant === 1 ? 11 : 10); pLegW = 2;
     pArmH = 5;
   }
 
@@ -1389,6 +1454,7 @@ function createCharacterSpriteSpec(character) {
       arm_swing: armSwing,
       weapon_length: weaponH,
       blade_size: (weapon.includes('scythe') ? 4 : 3) + (seedMod % 2),
+      starter_variant: starterVariant,
       cape_width: (accessory === 'flowing_cape' ? 3 : 2),
       cape_flow: (name.toLowerCase().includes('suzerain') && accessory === 'flowing_cape' ? 3 : (accessory === 'flowing_cape' ? 2 : 1)) + (seedMod % 2),
       wing_bone_count: (accessory === 'skeletal_wings' ? 4 : 0) + (seedMod % 2),
