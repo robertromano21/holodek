@@ -18,6 +18,12 @@ let roomDungeonDatabase = {};   // ← NEW: 3D dungeon per geo-room
 
 let lastCoords = { x: 0, y: 0, z: 0 };
 
+let currentPC = null;   // The finalized player character (with sprite) chosen at the start menu
+
+// Character generation phase (separate from main dungeon Retort flow)
+let characterGenerationInProgress = false;
+let pendingCharacterForReview = null;
+
 module.exports = {
   // --- existing getters/setters ---
   getPersonalNarrative: () => personalNarrative,
@@ -48,6 +54,16 @@ module.exports = {
     sharedStateEmitter.emit('quest:currentQuest', quest);
   },
   getCurrentTasks: () => currentTasks,
+
+  // Character customization phase support
+  getCurrentPC: () => currentPC,
+  setCurrentPC: (pc) => { currentPC = pc; },
+
+  // Separate character generation phase (before main Retort dungeon flow)
+  isCharacterGenerationInProgress: () => characterGenerationInProgress,
+  setCharacterGenerationInProgress: (val) => { characterGenerationInProgress = !!val; },
+  getPendingCharacterForReview: () => pendingCharacterForReview,
+  setPendingCharacterForReview: (char) => { pendingCharacterForReview = char; },
   setCurrentTasks: (tasks) => {
     console.log('Setting currentTasks to:', tasks);
     currentTasks = tasks;

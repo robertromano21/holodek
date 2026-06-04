@@ -9,7 +9,8 @@
  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
  <script src="/node_modules/phaser/dist/phaser.min.js"></script>
 <audio id="room-music" src="/sid/current_room.wav" loop autoplay></audio>
- <script src="/assets/game.js"></script>
+ <script src="/assets/renderCharacterSprite.js"></script>
+<script src="/assets/game.js"></script>
  <script src="/assets/rendererWebGL.js"></script>
  <script src="/assets/rendererWebGPU.js"></script>
    <script>
@@ -59,6 +60,17 @@ document.addEventListener('DOMContentLoaded', () => {
       if (data.type === 'roomMusicUpdated' && data.isNew) {
         console.log('New room music detected for coords:', data.coords);
         playRoomMusic();
+      }
+
+      // Character generation phase started via dedicated endpoint (separate from main dungeon Retort)
+      // The server rolls stats first, then uses a focused Retort call to generate a creative spriteSpec + rendered dataUrl.
+      if (data.type === 'characterGenerationStarted' && data.character) {
+        console.log('%c[CharacterGen] SSE: character + sprite ready for review', 'color:#ffdd66', data.character);
+        window._pendingStartingCharacter = data.character;
+        if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+          window._statsRolled = false; // reset so after next stats load, blank enter allowed to auto-proceed dungeon
+          window.showCharacterSpriteReviewMenu(data.character);
+        }
       }
     } catch (err) {
       console.error('SSE parse error:', err, 'raw:', event.data);
@@ -228,10 +240,25 @@ function toggleCombatMode() {
             // Center the combat map on the PC when opening, using global character data
             const combatScene = window.combatGame && window.combatGame.scene ? window.combatGame.scene.getScene('CombatScene') : null;
             if (combatScene) {
+                // Make sure the global list has the selected sprite attached (in case stripped)
+                if (typeof window.ensurePCSpriteInCombatList === 'function') {
+                    window.ensurePCSpriteInCombatList(window.combatCharacters);
+                }
                 const pc = window.combatCharacters?.find(c => c.type === 'pc');
                 if (pc) {
                     combatScene.centerCameraOn(pc.x, pc.y);
                     console.log(`Centering on PC at (${pc.x}, ${pc.y}) from toggleCombatPopup`);
+                    // Ensure the CombatScene has the PC entry created (with custom sprite tex registered from selected data)
+                    // so that redrawCombatRT will draw the generated icon instead of default cross/marker.
+                    if (!combatScene.characters || !combatScene.characters[pc.name]) {
+                        if (typeof window.updateCombatScene === 'function' && window.combatCharacters && window.combatCharacters.length > 0) {
+                            window.updateCombatScene(window.combatCharacters);
+                        }
+                    }
+                    // Force redraw so the custom sprite (from beginning review) is composited into the RT for combat view.
+                    if (typeof combatScene.redrawCombatRT === 'function') {
+                        combatScene.redrawCombatRT();
+                    }
                 } else {
                     console.log("No PC found in combatCharacters, centering on grid center");
                     combatScene.centerCameraOn(Math.floor(10 / 2), Math.floor(10 / 2)); // Center at (15, 15)
@@ -812,7 +839,7 @@ function toggleCombatMode() {
 
   <table class="character-table" style="width: 100%; border-collapse: collapse;">
     <tr>
-      <td class="character-column" style="width: 14%; font-size: 8pt; color: white;">
+      <td class="character-column" style="width: 14%; font-size: 7pt; color: white;">
         <script>displayPCData(charactersString);</script>
       </td>
       <td class="character-column" style="width: 14%; font-size: 8pt; color: white;">
@@ -869,5 +896,320 @@ function toggleCombatMode() {
 <button id="play-music-btn" style="display: none; position: fixed; top: 130px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;" onclick="playRoomMusic()">Play Music</button>
 
   <div style="display: none;"><b>Your API key (remains hidden to me): </b><input id="userapikey" value=""/></div>
+
+  <!-- Character Sprite Review Menu - Appears after choosing 1, 2, or 3 at start -->
+  <div id="character-sprite-review" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background-color: #1a140f; border: 3px solid #ffdd66; padding: 20px; z-index: 1200; min-width: 420px; max-width: 520px; color: #ffdd66; font-family: monospace; box-shadow: 0 0 20px rgba(0,0,0,0.8);">
+    <h3 style="margin-top:0; color:#ffdd66; text-align:center; border-bottom:1px solid #ffdd66; padding-bottom:8px;">Character Creation</h3>
+    
+    <div style="display:flex; gap:20px; align-items:flex-start;">
+      <!-- Sprite Display -->
+      <div style="flex:0 0 140px; text-align:center;">
+        <div style="font-size:10px; margin-bottom:4px; color:#aa8866;">YOUR SPRITE</div>
+        <img id="review-sprite-img" src="" style="width:128px; height:128px; image-rendering: pixelated; border:2px solid #664422; background:#221100;" />
+        <!-- Live animated preview using the prefab sheet (our internal "sprite editor" frames cycled) -->
+        <canvas id="review-sprite-canvas" width="96" height="96" style="width:128px; height:128px; image-rendering: pixelated; border:2px solid #664422; background:#221100; display:none;"></canvas>
+        <div id="review-sprite-status" style="font-size:9px; margin-top:4px; color:#aa8866; min-height:12px;"></div>
+        <div style="margin-top:6px;">
+          <button onclick="rerollCharacterSpriteFromMenu()" style="background:#442200; color:#ffdd66; border:1px solid #ffdd66; padding:4px 12px; font-size:11px; cursor:pointer;">Reroll Sprite</button>
+        </div>
+      </div>
+      
+      <!-- Stats Summary -->
+      <div style="flex:1; font-size:12px; line-height:1.35;">
+        <div id="review-character-name" style="font-size:16px; font-weight:bold; color:#ffdd66; margin-bottom:6px;"></div>
+        <div id="review-character-details" style="color:#ccaa77; white-space:pre-line;"></div>
+      </div>
+    </div>
+    
+    <div style="margin-top:18px; text-align:center; border-top:1px solid #664422; padding-top:14px;">
+      <button onclick="saveCharacterAndProceed()" style="background:#224422; color:#aaffaa; border:2px solid #aaffaa; padding:8px 24px; font-size:14px; cursor:pointer; margin-right:12px;">SAVE &amp; CONTINUE</button>
+      <button onclick="rerollCharacterSpriteFromMenu()" style="background:#442200; color:#ffdd66; border:1px solid #ffdd66; padding:8px 18px; font-size:13px; cursor:pointer;">Reroll Again</button>
+    </div>
+    
+    <div style="font-size:9px; color:#664422; text-align:center; margin-top:10px;">
+      Review your sprite and stats. Click Save when ready.
+    </div>
+  </div>
+
+  <!-- Character Sprite Review UI logic (must be present for the review menu to appear "as surely as the game console") -->
+  <script>
+  (function () {
+    function showCharacterSpriteReviewMenu(character) {
+      const panel = document.getElementById('character-sprite-review');
+      if (!panel) {
+        console.warn('[SpriteReview] #character-sprite-review div not found in DOM');
+        return;
+      }
+      const img = document.getElementById('review-sprite-img');
+      const nameEl = document.getElementById('review-character-name');
+      const detailsEl = document.getElementById('review-character-details');
+
+      // Prefer the generated sprite (dataUrl from server LLM + renderer)
+      const spriteUrl = (character && character.sprite && character.sprite.dataUrl) ? character.sprite.dataUrl : '';
+      const canvas = document.getElementById('review-sprite-canvas');
+      // Stop any previous animation loop
+      if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
+
+      const hasSheetGen = typeof window.createCharacterSpriteSheetCanvas === 'function';
+
+      if (hasSheetGen) {
+        // Sprite editor style live preview: generate the 4-frame sheet from catalog and cycle the frames
+        try {
+          const spec = (character.sprite && character.sprite.spec) || (window.createCharacterSpriteSpec ? window.createCharacterSpriteSpec(character) : null);
+          const sheet = window.createCharacterSpriteSheetCanvas(character, spec, 4);
+          const ctx = canvas.getContext('2d', { alpha: true });
+          const fw = sheet.height;
+          let frame = 0;
+          const drawFrame = () => {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(sheet, frame * fw, 0, fw, fw, 0, 0, canvas.width, canvas.height);
+            // Slowed down: advance frame only every ~250ms for ~4fps cycle (retro feel, was too fast at full RAF ~60fps)
+            const now = Date.now();
+            if (!window._lastReviewFrameTime) window._lastReviewFrameTime = 0;
+            if (now - window._lastReviewFrameTime > 250) {
+              frame = (frame + 1) % 4;
+              window._lastReviewFrameTime = now;
+            }
+            window._reviewAnimRaf = requestAnimationFrame(drawFrame);
+          };
+          canvas.style.display = 'block';
+          if (img) img.style.display = 'none';
+          drawFrame();
+        } catch (e) {
+          // fall back to static
+          if (canvas) canvas.style.display = 'none';
+          if (img) {
+            let u = spriteUrl || '';
+            if (u) u = u + (u.includes('?') ? '&' : '?') + 't=' + Date.now();
+            img.src = u;
+            img.style.display = u ? 'block' : 'none';
+          }
+        }
+      } else if (img) {
+        let u = spriteUrl || '';
+        if (u) u = u + (u.includes('?') ? '&' : '?') + 't=' + Date.now();
+        img.src = u;
+        img.style.display = u ? 'block' : 'none';
+        if (canvas) canvas.style.display = 'none';
+        // if still no visible sprite (blank), trigger a client side one as safety
+        if (!spriteUrl && typeof window.generateCharacterSprite === 'function' && typeof window.createCharacterSpriteSpec === 'function') {
+          try {
+            const s = window.createCharacterSpriteSpec(character);
+            const d = window.generateCharacterSprite(character, s);
+            if (d) {
+              img.src = d + (d.includes('?') ? '&' : '?') + 't=' + Date.now();
+              img.style.display = 'block';
+            }
+          } catch(e) {}
+        }
+      }
+
+      const nm = character.Name || character.name || 'Adventurer';
+      if (nameEl) nameEl.textContent = nm;
+
+      // Build a nice stats block (server objects use Name/Sex/Race/Class etc.)
+      const stats = [
+        `Sex: ${character.Sex || character.sex || '?'}`,
+        `Race: ${character.Race || character.race || '?'}`,
+        `Class: ${character.Class || character.class || '?'}`,
+        `Level: ${character.Level || character.level || 1}`,
+        `HP: ${character.HP || character.hp || 0} / ${character.MaxHP || character.maxHP || character.HP || 0}`,
+        `AC: ${character.AC || character.ac || 10}`,
+        `Attack: ${character.Attack || character.attack || 1}`,
+        `Damage: ${character.Damage || character.damage || '1d4'}`,
+        `Magic: ${character.Magic || character.magic || 0}`
+      ].join('\n');
+
+      if (detailsEl) detailsEl.textContent = stats;
+
+      panel.style.display = 'block';
+      window._awaitingSpriteSave = true; // ensure the guard stays on
+
+      // Status for client vs LLM artist
+      const statusEl = document.getElementById('review-sprite-status');
+      if (statusEl) {
+        if (character.sprite && character.sprite.clientOnly) {
+          statusEl.textContent = 'Fast client preview. Retort LLM artist started on "1" — will auto-refresh with creative sprite shortly (no need to click Reroll).';
+          statusEl.style.color = '#ffaa66';
+        } else {
+          statusEl.textContent = 'Creative sprite from Retort pixel artist (LLM catalog choice).';
+          statusEl.style.color = '#aaffaa';
+        }
+      }
+
+      console.log('%c[SpriteReview] Review menu shown for', 'color:#ffdd66', nm);
+    }
+
+    function rerollCharacterSpriteFromMenu() {
+      const character = window._pendingStartingCharacter;
+      if (!character) return;
+
+      if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
+
+      // Prefer a real server-side LLM reroll for fresh creative spriteSpec (same stats, new art direction)
+      fetch('/rerollCharacterSprite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ character: character })
+      })
+        .then(r => r.json())
+        .then(data => {
+          if (data && data.character && data.character.sprite && data.character.sprite.dataUrl) {
+            const updated = data.character;
+            window._pendingStartingCharacter = updated;
+
+            // Re-show the whole menu (this will restart the canvas animation preview using the new spec/sheet)
+            if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+              window.showCharacterSpriteReviewMenu(updated);
+            } else {
+              const img = document.getElementById('review-sprite-img');
+              if (img) {
+                img.src = updated.sprite.dataUrl + (updated.sprite.dataUrl.includes('?') ? '&' : '?') + 't=' + Date.now();
+              }
+            }
+
+            console.log('%c[SpriteReview] Rerolled via server LLM artist', 'color:#aaffaa');
+            return;
+          }
+          // fall through to client if server didn't give a sprite
+          doClientReroll();
+        })
+        .catch(() => {
+          // Network or server error -> client fallback so user isn't stuck
+          doClientReroll();
+        });
+
+      function doClientReroll() {
+        try {
+          if (typeof window.generateCharacterSprite === 'function') {
+            let spec = null;
+            if (typeof window.createCharacterSpriteSpec === 'function') {
+              const charForSpec = Object.assign({}, character, {
+                _rerollSeed: Date.now() + Math.random()
+              });
+              spec = window.createCharacterSpriteSpec(charForSpec);
+              if (character.sprite && character.sprite.spec && character.sprite.spec.palette) {
+                spec.palette = Object.assign({}, character.sprite.spec.palette, spec.palette);
+              }
+            }
+            const newDataUrl = window.generateCharacterSprite(character, spec);
+            if (newDataUrl) {
+              character.sprite = character.sprite || {};
+              character.sprite.dataUrl = newDataUrl;
+              character.sprite.spec = spec;
+              character.sprite.generated = true;
+              character.sprite.rerolled = true;
+
+              // Prefer re-invoking the review show so the animated sheet canvas preview kicks in
+              if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+                window.showCharacterSpriteReviewMenu(character);
+              } else {
+                const img = document.getElementById('review-sprite-img');
+                if (img) {
+                  img.src = newDataUrl + (newDataUrl.includes('?') ? '&' : '?') + 't=' + Date.now();
+                }
+              }
+
+              console.log('%c[SpriteReview] Rerolled sprite (client-side + variation fallback)', 'color:#ffdd66');
+            }
+          }
+        } catch (e) {
+          console.error('Client reroll failed', e);
+        }
+      }
+    }
+
+    function saveCharacterAndProceed() {
+      const panel = document.getElementById('character-sprite-review');
+      const character = window._pendingStartingCharacter;
+      if (!character) {
+        if (panel) panel.style.display = 'none';
+        return;
+      }
+
+      // Mark as saved
+      if (!character.sprite) character.sprite = {};
+      character.sprite.saved = true;
+
+      window._awaitingSpriteSave = false;
+
+      if (panel) panel.style.display = 'none';
+      if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
+
+      console.log('%c[CharacterGen] SAVE clicked — posting finalized character to server...', 'color:#aaffaa', character.Name || character.name);
+
+      // Seed so the original charactersString / PC: block building (from the reference last-known-good flow)
+      // puts the stats into the game console text above the prompt.
+      window.characters = window.characters || [];
+      window.characters = [character];
+
+      // Keep explicit ref to the selected sprite so PC visuals (in combat RT, billboards, etc) use exactly
+      // the image the player chose in review, even if later syncs strip sprite from combat lists.
+      window._selectedPCSprite = character.sprite;
+
+      // Seed client combat slot + combatCharactersString immediately (combat + party add/remove already work;
+      // per-room storage uses these; prevents "Updated combatCharactersString: []" and ensures 25px sprite
+      // billboards appear with the correct dataUrl on first Combat).
+      window.combatCharacters = [{
+        name: character.Name || character.name,
+        type: 'pc',
+        x: 0, y: 0,
+        sprite: character.sprite || null
+      }];
+      window.combatCharactersString = JSON.stringify(window.combatCharacters);
+      console.log('%c[CharacterGen] SAVE seeded client combatCharacters + combatCharactersString for immediate combat readiness.', 'color:#aaffaa');
+
+      // Unblock using original paths: no new server methods for data transport.
+      // The character (stats from createMortacia etc + sprite) is in the data system.
+      // Re-enter chatbotprocessinput (with skip) so it builds console via updateGameConsole etc as before.
+      window._skipStartMenu = true;
+
+      // Post to the dedicated /startGameWithCharacter so server:
+      // - seeds updatedGameConsole with the exact PC: block (for console + LLM prompt)
+      // - seeds combatCharactersString from the char (per-room/party slots)
+      // - clears characterGenerationInProgress (unblocks processInput7 and normal flow)
+      // - calls retortWith __START_WITH_CHARACTER__ special to begin dungeon without re-showing menu.
+      fetch('/startGameWithCharacter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ character: character })
+      }).then(r => r.json()).then(resp => {
+        console.log('%c[CharacterGen] /startGameWithCharacter response task:', 'color:#aaffaa', resp && resp.taskId);
+        // The task result will be polled/handled by existing game flow (like other ajax tasks).
+      }).catch(e => console.warn('[Save] startGameWithCharacter post failed (may still proceed via chatbot reentry):', e));
+
+      if (typeof window.forceProceedAfterCharacterSave === 'function') {
+        window.forceProceedAfterCharacterSave(character);
+      } else if (typeof chatbotprocessinput === 'function') {
+        setTimeout(() => chatbotprocessinput(), 80);
+      }
+    }
+
+    // Expose globally so the onclick= handlers in the HTML and calls from game.js / SSE always work
+    window.showCharacterSpriteReviewMenu = showCharacterSpriteReviewMenu;
+    window.rerollCharacterSpriteFromMenu = rerollCharacterSpriteFromMenu;
+    window.saveCharacterAndProceed = saveCharacterAndProceed;
+
+    // Provide the forceProceed so the save path can explicitly mimic space+enter after stats load
+    // to correctly launch without manual input.
+    window.forceProceedAfterCharacterSave = function(character) {
+      // Trigger the process (like old path) so the seeded PC stats / updatedGameConsole from /startGameWithCharacter
+      // get pulled into the UI (character stats load). The response handler will set _statsRolled and
+      // auto-submit blank (which is now allowed) to proceed to roll dungeon automatically.
+      setTimeout(() => {
+        const inputEl = document.getElementById('chatuserinput');
+        if (inputEl) {
+          if (!inputEl.value || !inputEl.value.trim()) {
+            inputEl.value = 'start'; // ensure non-empty for the stats-load submit (avoids "please enter a command" before stats)
+          }
+          chatbotprocessinput();
+        }
+      }, 80);
+    };
+
+    console.log('%c[SpriteReview] Review menu functions installed (Save/Reroll will now appear reliably)', 'color:#aaffaa');
+  })();
+  </script>
+
 </body>
 </html>

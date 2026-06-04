@@ -21,6 +21,48 @@ const ROOT       = path.join(__dirname, '..');
 const RETORT_DIR = path.join(ROOT, 'retort');
 const SID_DIR    = path.join(ROOT, 'sid');
 const RENDER_JS  = path.join(ROOT, 'assets', 'renderSid_poke.js');
+const { generateCharacterSprite, createCharacterSpriteSpec } = require('../assets/renderCharacterSprite.js');
+
+// Helper to attach a generated sprite to a character object (used for initial PCs and rerolls)
+function attachGeneratedSpriteToCharacter(character) {
+  if (!character || character.sprite?.dataUrl) return character;
+
+  try {
+    const spec = createCharacterSpriteSpec(character);
+    const dataUrl = generateCharacterSprite(character, spec);
+    if (dataUrl) {
+      character.sprite = {
+        dataUrl,
+        spec,
+        generated: true,
+        saved: false
+      };
+      console.log(`[SpriteGen] Generated sprite for ${character.Name || character.name}`);
+    }
+  } catch (e) {
+    console.error('[SpriteGen] Failed to generate sprite:', e);
+  }
+  return character;
+}
+
+// Helper to ensure we use the exact sprite image the player selected/saved in the review menu
+// (the "PC image be the image that is selected"), instead of auto-regenerating a different one
+// from the text-parsed PC block (which never carries the dataUrl/spec).
+function ensureSelectedPCSprite(pc) {
+  if (!pc) return;
+  try {
+    const savedPC = (sharedState && typeof sharedState.getCurrentPC === 'function') ? sharedState.getCurrentPC() : null;
+    if (savedPC && savedPC.sprite && savedPC.sprite.dataUrl &&
+        (savedPC.Name || savedPC.name) === (pc.Name || pc.name)) {
+      if (!pc.sprite || !pc.sprite.dataUrl) {
+        pc.sprite = savedPC.sprite;
+        console.log(`[Sprite] Using the player-selected sprite (from review/Save) for PC "${pc.Name || pc.name}" — skipping regeneration.`);
+      }
+    }
+  } catch (e) {
+    console.warn('[Sprite] ensureSelectedPCSprite error:', e && e.message);
+  }
+}
 
 //const client = new OpenAI();
 
@@ -593,6 +635,33 @@ function mapToPlainObject(map) {
 // This function encapsulates your Retort-JS logic, now accepting dynamic input
 async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode()) {
   console.log('Received combatMode in retortWithUserInput:', combatMode);
+
+  // === Special handling for finalized character from client Save button ===
+  // When the client clicks "Save & Continue" on the sprite review menu, it calls /startGameWithCharacter
+  // which sends a special input starting with __START_WITH_CHARACTER__ containing the full PC object (with sprite).
+  // This lets us skip the normal 1/2/3 menu and start the dungeon with the exact character the player approved.
+  if (typeof userInput === 'string' && userInput.startsWith('__START_WITH_CHARACTER__')) {
+    try {
+      const jsonPart = userInput.replace('__START_WITH_CHARACTER__', '');
+      const finalizedCharacter = JSON.parse(jsonPart);
+
+      console.log('[Retort] Received finalized starting character from client:', finalizedCharacter.Name || finalizedCharacter.name);
+
+      // Store the *full* character (with sprite.dataUrl if present from the review Save) so the game init
+      // and combat sprite logic can use the exact chosen image for the PC token.
+      sharedState.setCurrentPC(finalizedCharacter);
+
+      // NOTE: Do not return a tiny/separate retort here. We intentionally fall through so the main
+      // game retort block below executes the full initialization (initial room/temple, combat setup,
+      // returnObj with content, side effects to shared combatCharactersString etc).
+      // The main block will see the pre-set currentPC and inject the "selected, do not re-offer" message
+      // into *this* retort session's history so the model starts directly without showing the 1/2/3 menu.
+    } catch (e) {
+      console.error('Failed to parse finalized character:', e);
+      // Fall through; normal flow may show start menu as fallback.
+    }
+  }
+
   const dungeonTestingMode = sharedState.getDungeonTestingMode && sharedState.getDungeonTestingMode();
   let personalNarrative = '';
   if (!dungeonTestingMode) {
@@ -1907,6 +1976,14 @@ if (currentCoordinatesMatch) {
         console.error("No PC found.");
         return; // Exit the function if no PC is found
     }
+
+    // Use the selected sprite (from character review Save) if available, so the in-game PC token
+    // (25px RT billboard etc) is exactly "the image that is selected" rather than a fresh regen.
+    ensureSelectedPCSprite(pc);
+
+    // === Generate sprite early, before dungeon generation ===
+    // This ensures the PC is "fully created" (with sprite) before the first room.
+    attachGeneratedSpriteToCharacter(pc);
 
     const pcName = pc.Name;
     const pcLevel = pc.Level;
@@ -4601,6 +4678,13 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
         console.error("No PC found.");
         return updatedGameConsole; // Exit the function if no PC is found
     }
+
+    // Use the selected sprite (from character review Save) if available, so the in-game PC token
+    // is exactly the one the player chose.
+    ensureSelectedPCSprite(pc);
+
+    // === Generate sprite early, before dungeon generation ===
+    attachGeneratedSpriteToCharacter(pc);
 
     const pcName = pc.Name;
     const pcLevel = pc.Level;
@@ -7310,6 +7394,9 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     let npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
     let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(m => m.hp > 0) : [];
 
+    // Preserve selected sprite on parsed PC (the one from review) so later map includes it in string for client.
+    ensureSelectedPCSprite(pc);
+
     // combatLog.push(`Combatants initialized - PC: ${pc ? pc.name : 'None'}, NPCs: ${npcs.map(n => n.name).join(', ')}, Monsters: ${aliveMonsters.map(m => m.name).join(', ')}`);
 
     const monsterOpponents = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0)];
@@ -7819,7 +7906,11 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     const monsters = combatCharacters.filter(c => c.type === 'monster');
     pcsAndNpcs.forEach(c => placeCharacter(c, 7, 7, 2));
     monsters.forEach(c => placeCharacter(c, 11, 7, 2));
-    combatCharacters = allCombatants.map(c => ({ name: c.name, type: c === pc ? 'pc' : npcs.some(n => n.name === c.name) ? 'npc' : 'monster', x: c.x, y: c.y }));
+    combatCharacters = allCombatants.map(c => {
+      const entry = { name: c.name, type: c === pc ? 'pc' : npcs.some(n => n.name === c.name) ? 'npc' : 'monster', x: c.x, y: c.y };
+      if (c === pc && pc && pc.sprite) entry.sprite = pc.sprite;
+      return entry;
+    });
     sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
     combatLog.push(`Combatants positioned: ${combatCharacters.map(c => `${c.name} at (${c.x}, ${c.y})`).join(', ')}`);
 
@@ -10074,8 +10165,20 @@ async function logThreadMessages() {
     $.temperature = 1.2;
 //    await $.run($ => generateMissingRoomDetails($)); 
     await $.run($ => generateQuest($));
-            $.model = "gpt-4.1-mini";
-            $.temperature = 1.2;
+
+            // If the player arrived via the sprite review "Save & Continue" (special __START_WITH_CHARACTER__ path),
+            // a full character (with chosen sprite) was set via setCurrentPC. Inject the selection fact here
+            // (in the *same* retort session that will generate the first room response) so the model knows
+            // to start directly in the Ruined Temple Entrance and does *not* re-offer the 1/2/3 start menu.
+            const preSelected = sharedState.getCurrentPC && sharedState.getCurrentPC();
+            if (preSelected && (preSelected.Name || preSelected.name)) {
+              const slimForLLM = { ...preSelected };
+              if (slimForLLM.sprite && slimForLLM.sprite.dataUrl) {
+                slimForLLM.sprite = { hasCustomSprite: true, spec: slimForLLM.sprite.spec || null };
+              }
+              await $.assistant`The player has selected and confirmed their starting character: ${JSON.stringify(slimForLLM)}. Begin the game in the Ruined Temple Entrance with this exact character. Do not re-offer the start menu.`;
+            }
+
             $.user`Instructions for the Grave Master:
             
             Hereafter, 'You' refers to you, who is adminstering this chat, which hereafter you shall refer to as the Grave Master. 'Me' and 'I' refers to the user, the player and me, the person writing this. You must store the following words into memory: Using all of the real-time game information from Current Game Console and the die rolls, write an AI-generated fantasy roleplaying interactive fiction game wherein Assistant is the Grave Master, the user is the player, and let's play in ChatGPT. Make up the story as you go including imagining the names and histories of people, places and things encountered, but you must allow me, the player, to type the commands, allowing for potential failure. Make it strange, unusual and as thought-provoking as possible. The Grave Master must always obey the player's commands and selections without improvisation and must not make any decisions or take any actions on behalf the player, however the Grave Master must describe and control the actions of all NPCs and monsters in the Current Game Console in the assistant prompt. The Grave Master must always do its best and follow the instructions as written herein without improvisation no matter what and is responsible for overseeing the game and describing the game world, but the player is responsible for making all choices and taking all actions within the game, while the Grave Master controls monsters and NPCs. Do not display the game console, but be sure to include the actions being taken by NPCs and monsters in the room. The Grave Master should not discuss rules with the player unless the player asks the rules. The Grave Master's job is the keep the illusion of the role playing game, or RPG, intact, by using this interactive fiction game format to create the story based on my commands. If any later instruction conflicts with this block, the later instruction overrides. In the background, the game uses javascript that constructs and maintains the 1000 navigable rooms with X: Y: Z: coordinates, exits, npcs, monsters and objects that are automatically stored in the system prompt to ensure they are connected starting with the Ruined Temple in Tartarus and leading either outdoors into the wastelands of Tartarus or deeper into the temple, ultimately leading to the 1000th room, the Throne Room in Hades, with north (n), south (s), east (e), west (w), northwest (nw), southwest (sw), northeast (ne), southeast (se), up (u) and down (d) exits for each room. The exits in the room description should be written based on the exits and connected rooms provided in the assistant prompt from the game console. This means that the exits in the room description should match the exits listed in the game console and lead to the connected rooms listed in the game console, and include npcs, monsters and objects. When the user enters a direction, the game's javascript automatically produces the next room's coordinates, exits, npcs, monsters and objects in the system prompt, thereby keeping the map of the 1000 rooms in memory so that the maze is persistent, with every room having at least one visible exit, always remembering your location in the map. Your job is to provide the room's descriptions and game responses, including exits, npcs, monsters and objects and the 21 artifacts (often guarded by monsters) and 15 quests needed to win the game into many of the locations of the 1000 rooms, allocating XP and score for the player along the way and telling the story of the Children of the Grave, utilizing the game's current, updated console below and using unique characters, plots, conflicts and battles to compose the adventure, and utilizing roleplaying game elements, combat and magic systems of your own design in describing the interactive fiction story. Do not change the exits and objects provided in the system prompt. The 15 quests must be of your own design and either advance the central narrative or are side quests, and should include defeating monsters and discovering the 21 artifacts, with the game beginning with the first quest, and each quest leading to the final quest to confront Arithus in Hades after all 21 artifacts have been discovered. Never forget the player's location in the maze by referring to the game's current, updated console, and always plan 10 rooms ahead, including any NPCs, objects, artifacts, quest hooks and game progress, the score, puzzles and encounters so that gameplay is consistent. NPCs in Party: who accompany the player and Monsters in Room: encountered listed in the game console are not the same, they are distinct. The monsters and NPCs encountered by the player could be hostile, friendly or neutral, whether monsters like undead or dragons or others suitable for a fantasy setting, and possibly be potential allies who may seed or assist in quests depending on the player's actions and choices. You, the Grave Master, must control NPCs and monsters and determine their courses of action every turn. The Grave Master should use this as inspiration: 'You have died and find yourself standing in the the first room in the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.'After the start menu is completed and all characters have been chosen and created, you must refer to the current, updated console below for the current room's Room Description:, Exits: NPCs, Monsters and Objects in Room: in writing the room's description to keep 1000 rooms connected. Proceed with the game when I have made my selections from the start menu of either Mortacia, goddess of death, Mortacia is (an 8 1/2 tall human-looking female with long blonde hair, large grey dragon wings that look slightly decayed with many holes and openings and can fly but not too far, and is on a quest to reclaim the Sepulchra to reclaim her throne in Hades, Suzerain, Knight of Atinus, the recurring hero of the Children of the Grave campaign setting who keeps having to save the world, die and go to the afterlife, raise an army of the dead souls to save the underworld plane of Hades from Arithus, and then be reborn again, who has just died and finds himself in the first room of the afterlife, or an adventuring party of seven adventurers named the Children of the Grave who have died and find themselves in the first room of the afterlife and been summoned by Mortacia, but who are unaware of their circumstances at first: 1 PC whom I direct, 5 NPCs you control and also Mortacia, who is also an NPC you control and joins the party, described herein, all the characters described herein have been created and I am in the Ruined Temple in Tartarus described herein and issued the command to proceed. Begin play when any of the following options from the start menu have been selected in the PC: portion of the game console: 1) Play as Mortacia, the goddess of death, the Bonedrake, the White Lady, level 50 assassin/fighter/necromancer/goddess, 750,000 XP, HP = 120 hit points + 1d20 hitpoints. 2) Play as Suzerain, a human male level 25 Knight of Atinus the God of War (Atinus is the god of war, the Wardrake, and has several holy orders of knights who serve him), 250,000 XP, HP = 80 hit points + 1d20 hit points. 3) Create character and play as party of 7 adventurers: 1 PC who I control and 5 NPCs, plus Mortacia, the goddess of death, level 50 assassin/fighter/necromancer/goddess, who is also an NPC and is the most powerful character in the party in the party, then you must wait for the player's command.  Assistant is the Grave Master and the user is the player in the interactive fantasy roleplaying interactive fiction game, called Children of the Grave. The Grave Master administers the game. The user is the player, an intrepid adventurer depending on which character the player selects. The game is played by the user typing commands and receiving responses in the form of text descriptions. The player will type the commands, and the Grave Master issues the responses. The Grave Master is not allowed to play or defeat the game on behalf of the player. The player can move around the game world by typing commands such as 'n' for north, 's' for south, 'e' for east, 'w' for west, 'ne' for northeast, 'se' for southeast, 'nw' for northwest, 'sw' for southwest, 'u' for up and 'd' for down, and can interact with objects in the game by using commands such as 'look', 'take', 'drop', and 'use', and 'i' to check the player's inventory which can include up to 25 items or groups of bundled items like arrows. The player starts out the game with no weapons (they must be acquired). Many of the rooms in the labyrinth will contain objects that the user may put into his inventory, and some of those will be useful in solving puzzles, opening doors or other objects, casting magic spells, performing rituals and so forth, but must never contain a map of the game. But if the player carries more than 25 items, it gets too heavy and he has to drop something. Objects can sometimes get damaged and no longer be useful, and if an object was crucial to solving a puzzle, that could make completing the game impossible. The Grave Master must remember the player's location in the labyrinth, inventory, how many turns have been taken and the objects in every room that is visited them whether the player picks them up or not and any NPCs in every room the player visits every single turn no matter what by referring the game's current, updated console in the assistant prompt. Regardless of the game mode chosen, each room, object, NPC (who may include some of the deities of Danae), puzzle, etc. encountered should endeavor to offer some clues and insight to uncover how Mortacia lost her power to judge the dead, the undead rose thanks to Dantuea, Hades fell to Arithus and how the balance between life and death might be restored by the heroes in the game, developing a rich narrative and story whose details you must create. The player in the chosen game mode assumes the role of a courageous hero who embarks on a perilous journey to fulfill a great destiny and save the realm from impending doom by uncovering why the underworld has fallen. The game's labyrinth starting from the Ruined Temple in Tartarus to the Throne Room in Hades contains 1000 interconnected rooms with n, s, e, w, nw, sw, ne, se, up and/or down exits using X, Y, Z Cartesian coordinates starting with X: 0, Y: 0, Z: 0. To ensure there are 1000 interconnected rooms leading from Tartarus to Hades, the Grave Master must always refer to the game's current, updated game console located in the assistant prompt which contains the current coordinates and room exits in order create a carefully designed labyrinthine structure where each room has unique exits that connect to other rooms in the sequence. This will provide a sense of progression and direction within the game while maintaining the desired number of rooms. Every new room must include the exits and objects displayed in the assistant prompt writing in the room's description. Each new room has a unique name, always use the exits and objects from the assistant prompt in writing the room's description, and describes the environment, objects and NPCs in each room. Every room should have a unique purpose and often contain useful objects and interesting NPCs. You have to remember where I am in the labyrinth and remember all the rooms I've already visited by referring to coordinates and exits in the assistant prompt. Some rooms will contain hints about how to find the end of the labyrinth, or hints on solutions to puzzles along the way, including useful descriptions of features in the room, including objects, the history of the room, including its construction whether natural or artificial, and the processes that were used to create the room, who is depicted in the scenes if there are paintings or frescoes including characters. NPCs should often talk to the player and to other NPCs. Some characters might only fight when they are attacked, while other monsters will be hostile no matter what. The road from Tartarus to Hades should include numerous NPCs, including animals, persons (living or dead), restless souls, monsters including undead and even the deities of Danae. The Grave Master must ensure NPCs are unique individuals with biases/emotions/backstories, creating a varied and dynamic gameplay experience. NPCs can range from friendly, neutral, to hostile, adding depth and unpredictability to the interactions with the player character. NPCs have unique motivations as the afterlife is populated by all of the souls who have ever lived, and who have had eternity to create communities and pursue their own objectives. The end of the labyrinth must be the 1000th room furthest away, the throne room in Hades, with some rooms indoors and others outdoors in the fantastic, otherworldly environment whether it is above ground or below ground, of Tartarus, which eventually, after a series of quests, leads to Hades, where Arithus awaits the player in Mortacia's old throne room and it has gone from being the City of the Dead under Mortacia to the Realm of the Damned under Arithus. Each room has a unique name that corresponds to the room's environment. The game can only be won after all of the dungeon's 15 puzzles have been solved, all of the 21 artifacts (the Sepulchra is the 21st artifact to be discovered) have been discovered and the 1000th room is reached, Arithus is defeated and Hades liberated and the game ends. The game must keep a score out of 1000 possible points. For every puzzle solved, which can include opening specific doors, the player must receive a set amount of points. A player can only get to 1000 by getting to the 1000th room and winning the game, therefore, you must decide how to proportionally divide the points assigned to puzzles and treasures and winning the game across the 1000 rooms. In addition, characters must accumulate XP as you decide for finding treasures and artifacts, solving puzzles and opening secret or locked doors and defeating enemies, as the characters progress through the game up to level 30, except for Mortacia who starts out at level 50. ...  
@@ -11237,4 +11340,307 @@ return returnObj;
   
 }
 
-module.exports = { retortWithUserInput };
+// Focused, lightweight Retort helper for the character generation phase.
+// This can be called in isolation from /beginCharacterGeneration (server.js)
+// so we get LLM creative input for the spriteSpec without triggering full dungeon logic.
+async function generateCharacterSpriteSpecWithRetort(baseCharacter) {
+  // baseCharacter already has the rolled stats (Name, Sex, Race, Class, Level, HP, etc.)
+
+  // This is a small, dedicated Retort session whose only job is artistic direction for the sprite.
+  // In a full implementation you would use a separate .rt.js file or a focused prompt here.
+  return run(retort(async ($) => {
+    const prompt = `
+You are an expert retro pixel artist specializing in OLD-SCHOOL COMPONENT-BASED pixel art (exactly how C64/Epyx/Mario/Mega Man artists actually worked in the 80s on graph paper).
+
+You NEVER design freeform pixel grids or ascii art. You design by choosing component TYPES from the catalog + providing NUMERIC DESIGN PARAMETERS that control the actual pixel placement, sizes, densities, and details. The JS engine enforces the safe structure (side profile, attachment points, layer order, retro fillRect only, strong silhouette, no gobblygook) while you creatively "draw" by specifying the measurements and variations for each part.
+
+The engine (Retort-JS + Canvas fillRect only, 24x24 base upscaled x4) assembles using your design params at fixed attachment points:
+- head attaches on top of torso (small head + prominent feature ON TOP is the identifier)
+- arm attaches at shoulder
+- weapon emerges from the END of the swung lower arm (natural hand hold)
+- legs attach at pelvis with Epyx-style running stride (front leg forward, back leg trailing, upper/lower segments)
+- cape/accessory flows behind on the left
+
+Result must be a HIGHLY DISCERNIBLE side-profile humanoid (facing right) readable even at 25px Combat billboard size and 128px review size. Strong silhouette first. Small head (never bigger than torso). Legs dominate lower half for classic bottom-heavy readability (like Impossible Mission running man, Mario, Mega Man). Fluid "painterly" line quality via thin stacked rect offsets for folds/pleats/hem flow. Top-left lighting, edge highlights on every mass, 1px outlines, dither checker only on large robe areas. No isolated pixels, no pillow shading, every pixel serves silhouette or joint definition.
+
+Character:
+- Name: ${baseCharacter.Name}
+- Sex: ${baseCharacter.Sex}
+- Race: ${baseCharacter.Race}
+- Class: ${baseCharacter.Class}
+- Level: ${baseCharacter.Level}
+
+VISUAL GROUND TRUTH (from images + explicit user direction + descriptions in the files):
+- Mortacia: tall goddess with grey dragon wings. Wings on right coming out of back (good), sword and hand on left (good). Reduce the head by 20%. Move hands and weapon to left and higher like the ref. The weapon and hand were upside down: hand at bottom of arm, weapon facing up (hilt at hand, blade up). Make the face +1 pixel wider and +1 longer to see the face. It's ok to show Mortacia's thighs (shorten robe hem, extend thigh pixels). Use 20% smaller head size in design, more defined feminine hair, a cap that is just a single line (simple thin line on top of head, no complex crest), simple details overall. Long flowing hair, raised sword in dynamic pose (not horizontal sweeping across), powerful feminine pulpy curves (athletic + form via corset/flare, not ultra stick thin). ALWAYS skeletal_wings + human_hair (for cap + hair) + sword_broad, attack_slash_female pose for raised sword. Weapon MUST stay on the LEFT (front) side, wings on RIGHT; blade offsets must not cross body and cover wings. Slender tall but pulpy (some hip/chest form suggestion). Head size reduced 20% in design.
+- LATEST REFINEMENT: Mortacia should be thinner and her legs more underneath her and holding the sword starting at her ribs with hands and the sword upwards on the left, and the wings on the right and her hair long and lets see skin color on her thighs like this [Image #1] (emulate this as close as possible). Design: even smaller torso_width/leg_thickness, leg attach higher under torso (more tuck), armBase/hand at torso rib height so grip starts at ribs and sword blade points straight up from there on left side, skin tone pixels on upper thighs (shorten torso hem more, draw skin rects above leg top). Long hair strands + single line cap. Emulate ref closely with simple rect details.
+- EXACT REF [Image #2]: make it exactly like this. Use the same grid (24x24 base pixels) to replicate the exact pixel placement from the reference image. The renderer has drawMortaciaExact that uses hardcoded fillRect on integer base grid positions (meticulously counted from the image to match every block: sword light vertical exact height/width/position on left, head exact with light hair top + skin + black bar eyes, grey layered costume body exact with belt and purple waist accent, skin exact on thighs and arm, grey boots exact, the wing exact stepped tall structure on right with the prominent vertical and prongs). Output fixed parts and design numbers that align with the ref grid (head 3-4, torso narrow 4x6-7, leg 2x10-11, etc). Vary ONLY palette greys/tans/skins for color variations across seeds. The shape and pixel grid is identical every time for the ref pose/aesthetic (Mortacia babe: slender feminine form, skin showing attractively, elegant pose). Emulate the exact details in Image #2, not approximations.
+- Suzerain: EXACT match to provided ref image [Image #1]. Distinctive helm (light top with dark cross/visor emblem), hands at each side (left/front gripping upright dark sword, right/back hand empty at side), red cape flowing on back/right, sword held upright vertical on left (blade up from hand), dark armor torso with light belt, light greaves with dark bands + dark feet, skin on hands/arms. Renderer uses drawSuzerainExact with hardcoded grid rects (meticulously matched to image pixels for exact layout/pose). Output fixed parts (gallant_helm or equivalent, gallant_plate, armored_greaves, sword_broad, flowing_cape) + design aligning to ref proportions (head ~4x5, torso narrow, leg ~3x5+, etc), attack pose for upright sword. Vary ONLY palette colors slightly (red cape shades, helm light, skin, armor dark) for color variations on rerolls while shape identical every time. Emulate the image exactly (gallant knight aesthetic). Old Suzerain shapes saved for monsters.
+Think about what these characters should look like given the aesthetic of the game (retro C64/Epyx Impossible Mission side-profile pixel art: bold readable pixels, strong silhouette, assembled connections, transparent, centered body column, 4fps anims, variety via pose/seed but iconic locked look for these two starters). Do the prefabs that way. Simple details.
+
+OUTPUT ONLY raw valid JSON (double quotes, no trailing commas, no markdown fences, no explanations). Exactly this shape (use the catalog types + "pose" from the dozens listed + vary the numeric design params creatively for fresh looks on rerolls):
+
+{
+  "palette": { "primary": "#2a2a2a", "secondary": "#5a5a5a", "highlight": "#c8b48a", "shadow": "#1a1a1a", "skin": "#e8d0b0", "accent": "#707070" },
+  "parts": {
+    "head": "gallant_helm",
+    "torso": "gallant_plate",
+    "legs": "armored_greaves",
+    "arm": "swinging_upper_lower",
+    "weapon": "sword_broad",
+    "accessory": "flowing_cape"
+  },
+  "pose": "attack_overhead_male",
+  "design": {
+    "head_size": 4,
+    "head_width": 5,
+    "crest_height": 3,
+    "crest_spikes": 2,
+    "torso_width": 5,
+    "torso_height": 5,
+    "robe_flare": 1,
+    "fold_density": 2,
+    "leg_thickness": 3,
+    "leg_height": 11,
+    "stride_amount": 1,
+    "arm_thickness": 3,
+    "arm_length": 5,
+    "arm_swing": 1,
+    "weapon_length": 9,
+    "blade_size": 3,
+    "cape_width": 3,
+    "cape_flow": 3,
+    "wing_bone_count": 0,
+    "wing_length": 0
+  },
+  "notes": "short artistic note describing the creative choices"
+}
+
+PRE-FAB CATALOG TYPES (use these exact strings for parts.* to select the high-level style and features; the engine will interpret your design numbers within that style):
+
+HEAD (always with a clear distinguishing feature ON TOP of the head oval - you control size/width/crest details via design):
+- "skull_crest" : bony skull with horns/crest on top (necromancer, goddess, dark dramatic)
+- "plumed_helmet" : knight helmet with plume or crest on top (cool tall flowing plume; saved as monster/knight NPC template from prior Suzerain)
+- "gallant_helm" : gallant knight helm (fuller crested/ noble helm with side protrusions + comb + flowing plume, emulating classic gallant knight ref image for Suzerain fresh)
+- "hooded_skull" : deep hood over skull-like face, bone motif
+- "crowned" : small crown or circlet with points on top of head
+- "elf_ears" : pointed ears + slender face (elf or fey)
+- "human_hair" : feminine or flowing hair on top (female or goddess); for Mortacia use with simple single-line cap on top (thin rect detail)
+- "normal_human" : plain short hair or bare head with brow line
+- "wide_helm" : broader helmet or hat for heavier armored look
+- "pointed_cowl" : tall pointed hood or wizard hat for mystical
+- "beaked_mask" : skull with bird-like beak or mask for assassin vibe
+
+TORSO / BODY (use Sex for silhouette: broader shoulders male, waist/hip curve female; you control width/height/flare/folds via design):
+- "flowing_robe" : long loose robe with flare at bottom + fold lines (necromancer/goddess classic)
+- "plate_armor" : segmented plate with trim and belt (knight/fighter; saved shapes for monster templates)
+- "gallant_plate" : gallant/ornate full plate with extra straps, rivets and heroic segments (emulate ref image knight armor for Suzerain)
+- "leather_tunic" : fitted leather or studded with belt
+- "bone_corset" : tight bone-laced corset or ribcage motif over robe (goddess/necromancer)
+- "dress_robe" : more waisted feminine flowing dress silhouette
+- "tapered_robe" : slim at shoulders/waist, strong flare at hem for elegant silhouette
+- "broad_tunic" : wider chest and shoulders, straight cut (masculine or armored look)
+- "cinched_corset" : very narrow waist, pronounced hips/shoulders for dramatic female form
+- "chain_shirt" : flexible chainmail look with slight bulk
+
+LEGS (bottom-heavy for readability; slender unified - legs always drawn together as single centered sprite/column, no separate back leg, you control thickness/height via design; slender for female/Mortacia):
+- "striding_boots" : unified slender leg column + boot, centered (no front/back split)
+- "armored_greaves" : plate shin guards + boots (knight)
+- "flowing_skirt" : robe hem continues into flowing skirt with more width at bottom (female/goddess)
+- "clawed_hooves" : bestial or demonic feet (rare monster flavor)
+- "long_striders" : elongated legs for tall elegant look, pronounced stride
+- "stout_greaves" : thicker shorter legs for stocky/dwarven build
+- "bowed_legs" : slightly curved legs for rugged or bestial feel
+- "wide_pants" : loose baggy lower with more width for thief or casual
+
+ARM (always two-segment upper+lower for swing/joint readability - you control thickness/length/swing via design):
+- "swinging_upper_lower" : natural counter-pose swing (use with negative arm_swing when legs stride forward)
+
+WEAPON (must emerge from the hand at end of lower arm, never floating - you control length and blade size/curve via design):
+- "sword_broad" : knightly blade with crossguard (Mortacia primary - she uses a sword mostly; raised in dynamic pose)
+- "scythe_long" : long pole + curved blade with hooks (rare for Mortacia now)
+- "staff_crook" : crooked or runed staff, orb on top
+- "dagger" : short blade (assassin/thief)
+- "axe" : polearm with wide side blade
+- "mace" : flanged head or orb on shaft
+- "spear" : long shaft with point
+- "wand" : short rod or scepter
+- "bow" : curved bow shape (rare, still from hand)
+
+ACCESSORY (flows behind on left side for depth - you control width/flow via design):
+- "flowing_cape" : long cape or mantle with fold lines (goddess/necromancer/knight)
+- "skeletal_wings" or "bone_wings" : dragon-style skeletal wings with clear visible bones (thick main arm bone + 3-5 long fanned finger bones with joints/knuckles, bony structure - MANDATORY for Mortacia, must read as distinct bones not thin lines). Grey dragon. Positioned to come out on the right side of the back for Mortacia (face left, wings right).
+- "none" : no accessory
+
+POSES (choose "pose" string from dozens below for base stance - this changes limb placement, body lean, head angle, weapon hold for huge variety. Male/female specific for sex differences. Renderer will adjust offsets, swings, leans based on chosen pose. Pick different one every reroll!):
+
+Male poses:
+- "idle_stand_male": upright relaxed, legs together, arm down
+- "striding_walk_male": moderate Epyx stride, arm swing
+- "run_dash_male": extreme stride, forward lean, arm back
+- "attack_thrust_male": front leg forward, arm extended with weapon forward
+- "attack_overhead_male": braced legs, arm raised high overhead
+- "defend_shield_male": legs wide, arm forward with shield pose (if weapon allows)
+- "kneel_ready_male": one knee down, upright torso, weapon ready
+- "bow_shot_male": legs apart, arm drawn back as if archery
+
+Female poses (thinner, more elegant/graceful/"beautiful" - narrower proportions, flowing lines, graceful curves):
+- "idle_stand_female": elegant upright, slight hip curve, arm graceful down
+- "striding_elegant_female": light stride, arm flowing, head high
+- "run_graceful_female": dynamic but feminine stride, arm counter
+- "cast_spell_female": one leg advanced, arm raised elegantly casting
+- "attack_slash_female": light step, arm swinging blade with poise
+- "defend_dodge_female": weight on back leg, arm raised defensively, lean
+- "kneel_graceful_female": kneeling with back straight, head tilted beautifully
+- "dance_pose_female": balanced, one leg lifted slightly, arms expressive
+
+Add more as needed: "jump_leap", "turn_pivot", "taunt_flex_male", "curtsey_female", "climb_step", etc. Sex changes prefabs used (female thinner/more beautiful flowing vs male sturdy).
+
+DESIGN PARAMETERS (these are your creative drawing controls - integers in the ranges below. Vary them significantly for rerolls to get fresh artistic interpretations. The engine clamps and uses them to modulate rect sizes, offsets, densities, number of elements, etc. for variety while guaranteeing a readable humanoid):
+
+- head_size: 3-5 (height of head oval)
+- head_width: 4-6 
+- crest_height: 1-3 (how tall the top feature stands)
+- crest_spikes: 1-4 (number/detail of horns/crests/spikes)
+- torso_width: 4-7
+- torso_height: 4-6 (slightly smaller/shorter per preferred proportions for better humanoid read)
+- robe_flare: 1-3 (extra width at bottom for flowing robes)
+- fold_density: 1-4 (how many pleat/fold lines and dither clusters)
+- leg_thickness: 2-4 
+- leg_height: 10-13 (longer legs per preferred proportions; legs should dominate lower half)
+- stride_amount: 1-3 (how far front leg forward / back leg back for Epyx stride)
+- arm_thickness: 2-4
+- arm_length: 4-6
+- arm_swing: -3 to +2 (negative = arm back for counter-pose)
+- weapon_length: 8-13
+- blade_size: 2-5 (how big/prominent the scythe blade or sword crossguard is)
+- cape_width: 2-4
+- cape_flow: 1-3 (how much the cape flares or has extra fold lines)
+- wing_bone_count: 3-5 (number of long finger bones visible in skeletal/dragon wings for Mortacia)
+- wing_length: 1-2 (how extended the wing bones fan, for span)
+
+RULES:
+- Mortacia (tall goddess with grey dragon wings): ALWAYS choose head:"human_hair" (reduce head by 20% +1 wider/longer for visible face + more defined feminine hair + simple single-line cap as thin rect on top, NO skull_crest), accessory:"skeletal_wings" (or bone_wings), weapon:"sword_broad" (she uses a sword mostly per ref), legs one of long_striders/flowing_skirt/striding_boots (slender unified, ok to show thighs by shortening robe), torso "cinched_corset" or "bone_corset" (pulpy curves, shortened hem). Use design for tall (leg_height:12-13), pulpy slender body (torso_width/leg_thickness ~2-3 for thinner, some form not ultra-thin), head_size/head_width reduced 20% +1 (smaller but visible face), wing_bone_count:4-5, wing_length:2. Give longer more defined feminine hair. Pose MUST be "attack_slash_female" (raised sword dynamic like ref, arm up, blade not horizontal sweep across). Fix weapon: hand at bottom of arm, weapon facing up (wy = handY - len, draw down from top; guard near bottom for sword). Sword grip/hand MUST start at ribs: use low arm_swing or explicit so handY is at upper-torso/rib level (torsoY+~2), sword extends upward from there on left. Wings on the RIGHT side coming out of the back + weapon on LEFT: face left so back right, and blade must NOT cross body to cover wings (use outward direction for blade offsets). Grey dragon bones (thick + fanned + large span for pulpy wings). Read the descriptions in the files + pulpy goddess ref (reduce head 20%, +1 face, single line cap, more defined feminine hair, long hair, raised sword, large wings, powerful feminine form, simple details, hands/weapon left and higher, show thighs).
+- LATEST: thinner (aggressive torsoW/legW reduce), legs more underneath her (tighter legY tuck under hem, use high leg attach), skin color on thighs (visible skin tone rects above leg top under shortened hem), sword starting at ribs (hand/grip at rib height on left, blade up), wings right, long hair. Emulate [Image #1] ref as close as possible with the simple rects. Use design.arm_swing negative + pose to achieve rib hold.
+- Suzerain (gallant knight with helm, cape, sword and armor per ref image [Image #1]): MUST produce EXACT layout via the renderer's drawSuzerainExact (distinctive helm light top + dark cross/visor, skin hands at each side with left gripping upright sword, red cape on right/back, dark upright sword on left, dark armor w/ belt, light greaves w/ dark bands, dark feet). head:"gallant_helm", torso:"gallant_plate", legs:"armored_greaves", accessory:"flowing_cape", weapon:"sword_broad". Design numbers to align proportions (head 4-5w, torso ~4-5, legs shortish, etc). Pose with sword upright. Vary only colors (reds, creams, greys, skins) for var while grid exact. Old plumed/plate shapes are now monster templates.
+- For Mortacia etc.: prefer human_hair (bigger head, feminine flowing hair + simple single line cap), flowing_robe or bone_corset, single slender legs together (no separate back leg, just main centered leg column, use 'striding_boots' but slender unified), sword_broad as main (raised), skeletal_wings (bone_wings with clear dragon bones: main arm + fanned fingers). Use darker palette. Give defined feminine hair (longer flowing + more strands per ref), thinner arms, slender overall but pulpy via corset. Wings on back/right, weapon left, no overlap. Mortacia specifically: bigger head, more defined feminine hair, cap as single line, tall (long legH), more slender body (thinner), longer hair, grey dragon wings on the right side coming out of the back. Legs more underneath, skin thighs visible, sword hand starts at ribs with blade up on left (emulate ref as close as possible). Suzerain: gallant_helm + gallant_plate + armored_greaves + flowing_cape + sword_broad for fresh gallant knight (per image). plumed_helmet/plate_armor etc saved for monsters.
+- Vary the design numbers on every reroll for different feels (taller crest, wider robe, stronger stride, longer blade, more folds, etc.) while keeping it recognizable.
+- Always produce clear humanoid silhouette at tiny size: head clearly on top with feature + defined hair (face +1 wider +1 longer to see face), neck join, solid slender torso (shortened hem for mort to show thighs), single slender legs together (unified centered column, ok show thighs), two arms/hands on each side (hand at bottom of arm, one with sword raised facing up, main with sword_broad), skeletal wings on back for Mortacia with visible dragon wing bones (main + fanned fingers) positioned on the right side coming out of the back, weapon from hand position (on left, blade not crossing right to wings; wy=handY-len so extends up from hand at bottom). No separate back leg. Mortacia: head reduced by 20% +1 face + more defined feminine hair + single line cap (simple thin rect on top) + longer hair + pulpy slender body (thinner) + tall + raised sword starting at ribs (hand/grip at rib height, blade up on left), legs more underneath her, skin color on thighs visible, wings right (per latest ref [Image #1], emulate as close as possible, think simple details). Suzerain: EXACT pixel grid match to ref image [Image #1] via drawSuzerainExact (distinctive light helm w/ dark cross detail, hands each side, red cape right/back, upright dark sword left, armored look). Fixed layout, color var only. Emulate image exactly (gallant knight). Old shapes for monsters.
+- CENTERING EVERY HORIZONTAL LINE OF PIXELS: the renderer will force master vertical plumb line from head center. Every horizontal mass/band/hem/fold/crest/leg segment must read as centered on that line (legs directly under head mid even with stride lean). Provide design numbers (stride, legH, torsoW etc) that reinforce perfect stack alignment so the figure is instantly recognizable instead of disassembled.
+- Preferred proportions (for good read): head centered over torso, slightly smaller/shorter torso, longer legs, feet centered under body. Head and feet should feel balanced and centered in the overall figure. Legs MUST be centered directly under the head/torso center.
+- Use Sex/Race/Class to inspire choices: female = thinner more beautiful elegant flowing prefabs (narrower torso/legs/arms, graceful pose, hair/curves), male = sturdier. Sex changes the prefabs and drawing scales used.
+- WEAPON VARIETY IS MANDATORY on every generation/reroll for generic characters: choose a DIFFERENT weapon each time from the full list. For Mortacia specifically lock to sword_broad (she uses a sword mostly) with variety only in length/blade_size/pose hold. Use widely varying weapon_length + blade_size + pose hold so the weapon silhouette itself changes the whole figure look (user reports "always same weapon throws off generation").
+- For rerolls and variety: pick different catalog types AND different "pose" from the dozens listed (e.g. idle vs run vs cast vs attack) when possible. Vary design numbers widely but within ranges. Dozens of poses ensure every pass looks unique, not just color changes.
+
+Respond ONLY with the raw JSON object. No grid, no ascii, no freeform procedure.
+`;
+
+    // Tell retort which model to use for this focused artistic task (cheap + creative enough)
+    $.model = "gpt-4o-mini";
+    $.temperature = 0.85;
+
+    await $.system`You are a focused pixel-art director. Output ONLY raw valid JSON. Never use markdown code fences. Never use single quotes for keys. Never add explanations.`;
+
+    // Send the request as the user message
+    await $.user`${prompt}`;
+
+    // CRITICAL FIX: We must solicit an *assistant* generation to actually invoke the LLM API and get a reply.
+    // Awaiting $.user only "sends" our prompt (the log you see) and returns the user message itself.
+    // Using $.assistant.generation() is what triggers the real API call and populates the reply.
+    const reply = await $.assistant.generation();
+    const raw = (reply && reply.content) ? reply.content : '';
+
+    console.log('[SpriteArtist] Received reply from LLM, raw length:', raw ? raw.length : 0);
+
+    // Robust extraction + repair for LLM JSON output (very common for artistic prompts)
+    const spriteSpec = extractAndParseJson(raw);
+    return spriteSpec;
+  }));
+}
+
+/**
+ * Extracts and repairs JSON from LLM responses.
+ * LLMs frequently return markdown fences, single-quoted keys, trailing commas, or extra text.
+ */
+function extractAndParseJson(text) {
+  if (!text || typeof text !== 'string') {
+    throw new Error('No text to parse as JSON');
+  }
+
+  let candidate = text.trim();
+
+  // 1. Strip markdown code fences (```json ... ``` or ``` ... ```)
+  candidate = candidate
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+
+  // 2. Try to grab the outermost {...} block (greedy but safe after fence stripping)
+  const jsonMatch = candidate.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    candidate = jsonMatch[0];
+  }
+
+  // 3. Repair common LLM JSON crimes
+  let repaired = candidate;
+
+  // Replace single-quoted keys with double-quoted keys: 'foo':  -> "foo":
+  repaired = repaired.replace(/'([^']+?)'\s*:/g, '"$1":');
+
+  // Replace single-quoted string values (conservative): : 'bar'  -> : "bar"
+  repaired = repaired.replace(/:\s*'([^']*?)'/g, ': "$1"');
+
+  // Remove trailing commas before } or ]
+  repaired = repaired.replace(/,\s*([}\]])/g, '$1');
+
+  // Remove any accidental // or /* */ comments inside the JSON block
+  repaired = repaired.replace(/\/\/.*$/gm, '');
+  repaired = repaired.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // Final trim
+  repaired = repaired.trim();
+
+  // 4. Try parsing (original, then repaired)
+  try {
+    return JSON.parse(candidate);
+  } catch (e1) {
+    try {
+      return JSON.parse(repaired);
+    } catch (e2) {
+      console.warn('[SpriteSpec] JSON repair failed. Raw snippet:', candidate.slice(0, 300));
+      throw new Error(`Failed to parse LLM JSON after repairs: ${e2.message}`);
+    }
+  }
+}
+
+// Helper that the server can call from /beginCharacterGeneration
+async function generateFullCharacterWithRetortSprite(baseCharacter) {
+  const { generateCharacterSprite } = require('../assets/renderCharacterSprite.js');
+
+  let spriteSpec;
+  try {
+    spriteSpec = await generateCharacterSpriteSpecWithRetort(baseCharacter);
+  } catch (e) {
+    console.warn('[CharacterGen] Retort spriteSpec generation failed, falling back to deterministic spec:', e.message);
+    const { createCharacterSpriteSpec } = require('../assets/renderCharacterSprite.js');
+    spriteSpec = createCharacterSpriteSpec(baseCharacter);
+  }
+
+  const dataUrl = generateCharacterSprite(baseCharacter, spriteSpec);
+
+  return {
+    ...baseCharacter,
+    sprite: {
+      dataUrl,
+      spec: spriteSpec,
+      generated: true,
+      saved: false
+    }
+  };
+}
+
+// Export everything the rest of the app needs
+module.exports = {
+  retortWithUserInput,
+  generateCharacterSpriteSpecWithRetort,
+  generateFullCharacterWithRetortSprite
+};

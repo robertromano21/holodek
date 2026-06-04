@@ -559,7 +559,18 @@ eventSource.onmessage = function(event) {
   } else if (data.type === 'final') {
         const { combatCharactersString } = data;
         const newCombatCharacters = JSON.parse(combatCharactersString);
+        // Restore selected sprite on PC if the update stripped it, to keep the reviewed image as the PC visual.
+        const pending = window._pendingStartingCharacter;
+        const selectedSprite = (pending && pending.sprite && pending.sprite.dataUrl ? pending.sprite : (window._selectedPCSprite && window._selectedPCSprite.dataUrl ? window._selectedPCSprite : null));
+        if (selectedSprite) {
+          const pcName = (pending && (pending.Name || pending.name)) || null;
+          const pcEntry = newCombatCharacters.find(c => c.type === 'pc' || (pcName && c.name === pcName));
+          if (pcEntry && (!pcEntry.sprite || !pcEntry.sprite.dataUrl)) {
+            pcEntry.sprite = selectedSprite;
+          }
+        }
         window.combatCharacters = newCombatCharacters;
+        ensurePCSpriteInCombatList(window.combatCharacters);
         const combatScene = window.combatGame.scene.getScene('CombatScene');
         if (combatScene) combatScene.updatePositions(newCombatCharacters);
     } else if (data.type === 'target_prompt') {
@@ -1804,7 +1815,19 @@ ${adjacentRooms}
         }*/
         if (pc && pc !== 'No PC data') {
             const pcName = pc.split('\n')[0];
-            characters.push({ name: pcName, type: 'pc' });
+            let pcEntry = { name: pcName, type: 'pc' };
+            // Ensure the PC in combat mode uses the exact selected/generated sprite from the character review.
+            // This build path (from console text parse on room/coordinate change) was stripping sprite data,
+            // Attach selected custom sprite so PC in combat always uses the review-generated image (no green triangle).
+            const selected = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
+            if (selected && selected.dataUrl) {
+                pcEntry.sprite = selected;
+            } else {
+                // fallback to any full entry already in global
+                const existingPc = (window.combatCharacters || []).find(c => c.name === pcName && c.type === 'pc');
+                if (existingPc && existingPc.sprite) pcEntry.sprite = existingPc.sprite;
+            }
+            characters.push(pcEntry);
             window.cotgPCName = pcName;   // <-- remember PC name for dungeon sync
         }
         if (npcs && npcs !== 'None') {
@@ -1847,6 +1870,11 @@ ${adjacentRooms}
                 if (typeof window.updateCombatScene === 'function') {
                     window.updateCombatScene(characters);
                 }
+                // Ensure the PC image (selected sprite) is drawn immediately in combat RT view.
+                const cs = window.combatGame && window.combatGame.scene.getScene('CombatScene');
+                if (cs && typeof cs.redrawCombatRT === 'function') {
+                    cs.redrawCombatRT();
+                }
                 this.currentCoordinates = currentCoords;
                 this.combatInitialized = true;
                 combatCharactersString = JSON.stringify(window.combatCharacters || []); // Ensure this is set
@@ -1865,6 +1893,19 @@ ${adjacentRooms}
         };
     }
 }
+function ensurePCSpriteInCombatList(list) {
+  if (!list || !Array.isArray(list)) return list;
+  const selected = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
+  if (selected && selected.dataUrl) {
+    const pc = list.find(c => c.type === 'pc');
+    if (pc && (!pc.sprite || !pc.sprite.dataUrl)) {
+      pc.sprite = selected;
+    }
+  }
+  return list;
+}
+window.ensurePCSpriteInCombatList = ensurePCSpriteInCombatList;
+
 window.updateCombatScene = function(characters) {
     if (!window.combatGame || !window.combatGame.scene) {
         console.warn("Combat game not ready yet, queuing characters update");
@@ -1935,6 +1976,7 @@ window.updateCombatScene = function(characters) {
         const characters = data.characters || [];
         this.data.set('characters', characters);
         window.combatCharacters = characters; // Expose to global scope for game.php
+        ensurePCSpriteInCombatList(window.combatCharacters);
         // Get the DOM container for syncing
         this.domContainer = document.getElementById('combat-container');
         if (!this.domContainer) {
@@ -2044,6 +2086,12 @@ window.updateCombatScene = function(characters) {
         if (!this.renderRT) return;
         this.renderRT.clear();
 
+        // Ensure any selected PC sprite from creation/review is attached to the combat list before we try to draw it.
+        // Prevents timing issues in init / early redraw calls (MainScene.create etc).
+        if (typeof window.ensurePCSpriteInCombatList === 'function') {
+            try { window.ensurePCSpriteInCombatList(window.combatCharacters); } catch (e) {}
+        }
+
         if (!currentDungeon || !currentDungeon.cells) {
             this.forcePlayerToCenter();
             return;
@@ -2151,10 +2199,6 @@ window.updateCombatScene = function(characters) {
                 if (img && img.complete && img.naturalWidth > 0) {
                     this.renderRT.draw(img, dX - s/2, dY - s/2, s, s);
                 }
-
-                if (img && img.complete && img.naturalWidth > 0) {
-                    this.renderRT.draw(img, dX - s/2, dY - s/2, s, s);
-                }
             }
         }
 
@@ -2206,27 +2250,114 @@ window.updateCombatScene = function(characters) {
         this.renderRT.draw(gridGfx);
         gridGfx.destroy();
 
+        // Draw the PC's custom generated pixel art (the Retort-directed prefab catalog sprite)
+        // directly into the low-res NEAREST RT as a fixed central token.
+        // This makes the character art participate in the same "chunky retro pixel" presentation
+        // as the rest of the rotating tactical map (while the world spins around the player).
+        //
+        // Because we now generate proper sprite *sheets* (our catalog acts as the sprite editor / parts bin),
+        // we can pick frames here. We do a cheap time-based cycle so the token has subtle life (stride/idle)
+        // even inside the static-per-frame RT composite. Phaser's NEAREST + RT scale does the rest.
+        let pcKey = null;
+        // Determine PC name robustly: prefer scene's, else scan global combat list for the 'pc' type entry.
+        // This prevents cases where redrawCombatRT is called before this.characters/this.pcName fully populated in init paths.
+        let pcNameForDraw = this.pcName;
+        if (!pcNameForDraw && Array.isArray(window.combatCharacters)) {
+            const pcEntryGlobal = window.combatCharacters.find(c => c && c.type === 'pc');
+            if (pcEntryGlobal) pcNameForDraw = pcEntryGlobal.name;
+        }
+        if (!pcNameForDraw && window._selectedPCSprite) {
+            // Fallback if only the sprite ref exists (pre-name)
+            pcNameForDraw = 'pc';
+        }
+        if (pcNameForDraw) {
+            const pcEntry = (this.characters && this.characters[pcNameForDraw]) || (Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.name === pcNameForDraw) : null) || {};
+            let pcTex = (pcEntry.sprite && pcEntry.sprite.texture) || (window._selectedPCSprite && window._selectedPCSprite.texture);
+            pcKey = pcTex && pcTex.key;
+            const tKey = pcKey || ('pc-sprite-' + (pcNameForDraw || 'pc').replace(/\s+/g, '_') + '-sheet');
+            if (!pcKey || !this.textures.exists(tKey)) {
+                // Force ensure the custom selected sprite texture for PC draw in RT (get rid of any non-custom).
+                const fullChar = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw) || { name: pcNameForDraw, type: 'pc', sprite: (window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite)) };
+                const spriteDataUrl = fullChar.sprite && fullChar.sprite.dataUrl;
+                if (!this.textures.exists(tKey)) {
+                    if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
+                        try {
+                            const sheetCanvas = window.createCharacterSpriteSheetCanvas(fullChar, fullChar.sprite && fullChar.sprite.spec, 4);
+                            this.textures.addCanvas(tKey, sheetCanvas);
+                            const tex = this.textures.get(tKey);
+                            const fw = sheetCanvas.height;
+                            for (let i = 0; i < 4; i++) {
+                                tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+                            }
+                            if (tex.update) tex.update();
+                            if (tex.refresh) tex.refresh();
+                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                        } catch (e) {}
+                    }
+                    if (!this.textures.exists(tKey) && typeof window.createCharacterSpriteCanvas === 'function') {
+                        try {
+                            const canvasEl = window.createCharacterSpriteCanvas(fullChar, fullChar.sprite && fullChar.sprite.spec);
+                            this.textures.addCanvas(tKey, canvasEl);
+                        } catch (e) {}
+                    }
+                    if (!this.textures.exists(tKey) && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
+                        try {
+                            this.textures.addBase64(tKey, spriteDataUrl);
+                        } catch (e) {}
+                    }
+                }
+                pcKey = tKey;
+            }
+            if (pcKey && this.textures.exists(pcKey)) {
+                // Custom sprite icon size (user request: shrink by 15% from the 1.5x enlargement).
+                // Base: 25px on screen. Now ~31.875px (1.275x). Use ~15.9375 in RT space (PIXEL_SCALE=2) for final ~31.875px.
+                // NEAREST keeps pixels crisp.
+                const pcSize = (this.cellSize / this.PIXEL_SCALE) * 1.275;  // 12.5 * 1.275 = 15.9375 -> ~31.875px final (15% shrink from previous 1.5x)
+                // Try to use a frame from the sheet if present (Phaser sprite editor style output)
+                const tex = this.textures.get(pcKey);
+                let frameName = null;
+                if (tex && tex.has && tex.has('frame0')) {
+                    // 4-frame cycle for a little "breathing"/stride feel while the map rotates
+                    const phase = Math.floor((Date.now() / 250) % 4);
+                    frameName = 'frame' + phase;
+                }
+                // Draw unrotated at the exact visual center
+                if (frameName) {
+                    this.renderRT.draw(pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcSize);
+                } else {
+                    this.renderRT.draw(pcKey, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcSize);
+                }
+            }
+        }
+
         // Fixed UI (arrow + yellow cross) - not rotated
-        const arrowColor = 0x00ff88;
-        const arrowLen = cs * 0.4;
-        const arrowW = cs * 0.16;
+        // Only draw the green facing arrow (old green triangle remnant) when NO custom PC sprite is present.
+        // When the custom generated sprite (Mortacia etc.) is drawn as the central token, we skip the green triangle
+        // so it does not appear under/around the character sprite in Combat Mode.
+        // The yellow cross is the fallback center marker only for no-sprite case too.
+        if (!(pcKey && this.textures.exists(pcKey))) {
+            const arrowColor = 0x00ff88;
+            const arrowLen = cs * 0.4;
+            const arrowW = cs * 0.16;
 
-        const arrowGfx = this.make.graphics({ add: false });
-        arrowGfx.fillStyle(arrowColor, 0.95);
-        arrowGfx.beginPath();
-        arrowGfx.moveTo(centerX, centerY - arrowLen);
-        arrowGfx.lineTo(centerX - arrowW, centerY);
-        arrowGfx.lineTo(centerX + arrowW, centerY);
-        arrowGfx.closePath();
-        arrowGfx.fillPath();
+            const arrowGfx = this.make.graphics({ add: false });
+            arrowGfx.fillStyle(arrowColor, 0.95);
+            arrowGfx.beginPath();
+            arrowGfx.moveTo(centerX, centerY - arrowLen);
+            arrowGfx.lineTo(centerX - arrowW, centerY);
+            arrowGfx.lineTo(centerX + arrowW, centerY);
+            arrowGfx.closePath();
+            arrowGfx.fillPath();
 
-        // Yellow debug cross at exact center
-        arrowGfx.fillStyle(0xffff00, 1);
-        arrowGfx.fillRect(centerX - 2, centerY - 1, 5, 2);
-        arrowGfx.fillRect(centerX - 1, centerY - 2, 2, 5);
+            // Yellow debug cross at exact center -- only if no custom PC sprite drawn, so the generated character icon replaces the flare/cross.
+            // (pcKey is hoisted so this is always safe; cross only as fallback when no valid custom sprite texture for the PC.)
+            arrowGfx.fillStyle(0xffff00, 1);
+            arrowGfx.fillRect(centerX - 2, centerY - 1, 5, 2);
+            arrowGfx.fillRect(centerX - 1, centerY - 2, 2, 5);
 
-        this.renderRT.draw(arrowGfx);
-        arrowGfx.destroy();
+            this.renderRT.draw(arrowGfx);
+            arrowGfx.destroy();
+        }
 
         this.forcePlayerToCenter();
     }
@@ -2388,6 +2519,7 @@ window.updateCombatScene = function(characters) {
     }
     updateCharacters(characters) {
        // console.log("CombatScene.updateCharacters called with:", characters);
+        ensurePCSpriteInCombatList(characters);
         if (!this.characters) this.characters = {};
         this.sys.game.loop.wake();
         // Merge new characters with existing positions from window.combatCharacters
@@ -2406,12 +2538,18 @@ window.updateCombatScene = function(characters) {
         });
    
         // Update window.combatCharacters with the merged character data, ensuring all positions are included
-        window.combatCharacters = characters.map(char => ({
-            name: char.name,
-            type: char.type,
-            x: char.x || 0, // Default to 0 if undefined
-            y: char.y || 0 // Default to 0 if undefined
-        }));
+        // Preserve sprite (for the selected PC image) so it doesn't get stripped for CombatScene redraws.
+        window.combatCharacters = characters.map(char => {
+            const entry = {
+                name: char.name,
+                type: char.type,
+                x: char.x || 0,
+                y: char.y || 0
+            };
+            if (char.sprite) entry.sprite = char.sprite;
+            return entry;
+        });
+        ensurePCSpriteInCombatList(window.combatCharacters);
    
         // Update combatCharactersString globally for server communication
         window.combatCharactersString = JSON.stringify(window.combatCharacters);
@@ -2431,9 +2569,105 @@ window.updateCombatScene = function(characters) {
             let sprite, color;
    
             if (character.type === 'pc') {
-                color = 0x00ff00;
-                sprite = this.add.triangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 0, -6.25, -6.25, 6.25, 6.25, 6.25, color);
                 this.pcName = character.name;
+
+                // Force the exact sprite from character creation / review menu to be used as the PC icon in Combat Mode.
+                // This replaces any default flare/cross/marker with the custom generated pixel art.
+                if (!character.sprite || !character.sprite.dataUrl) {
+                    const sel = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
+                    if (sel) {
+                        character.sprite = sel;
+                    }
+                }
+
+                const spriteDataUrl = character.sprite && character.sprite.dataUrl;
+                const texKey = 'pc-sprite-' + (character.name || 'pc').replace(/\s+/g, '_') + '-sheet';
+                if (!this.textures.exists(texKey)) {
+                    // Use the catalog-based "sprite editor" to produce a real multi-frame sheet
+                    // then register frames + (optional) anim. This is Phaser sprite/animation native.
+                    if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
+                        try {
+                            const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
+                            this.textures.addCanvas(texKey, sheetCanvas);
+                            const tex = this.textures.get(texKey);
+                            const fw = sheetCanvas.height; // frames are square
+                            for (let i = 0; i < 4; i++) {
+                                tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+                            }
+                            if (tex.update) tex.update();
+                            if (tex.refresh) tex.refresh();
+                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                        } catch (e) {
+                            console.warn('[Sprite] sheet canvas failed, will try fallback', e);
+                        }
+                    }
+                    // Fallback single frame via canvas or dataUrl
+                    if (!this.textures.exists(texKey)) {
+                        if (typeof window.createCharacterSpriteCanvas === 'function') {
+                            try {
+                                const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+                                this.textures.addCanvas(texKey, canvasEl);
+                            } catch (e) {}
+                        }
+                        if (!this.textures.exists(texKey) && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
+                            this.textures.addBase64(texKey, spriteDataUrl);
+                        }
+                    }
+                }
+                // Always use custom sprite for PC - no green triangle fallback.
+                // Registration above tries dataUrl/spec from selected review sprite.
+                // If still no tex (e.g. sprite data not yet on this character entry), force-generate using our renderer
+                // so the PC always shows the custom pixel art (the one selected in review, or equivalent from spec/character data).
+                if (!this.textures.exists(texKey)) {
+                    let generated = false;
+                    if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
+                        try {
+                            const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
+                            this.textures.addCanvas(texKey, sheetCanvas);
+                            const tex = this.textures.get(texKey);
+                            const fw = sheetCanvas.height;
+                            for (let i = 0; i < 4; i++) {
+                                tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+                            }
+                            if (tex.update) tex.update();
+                            if (tex.refresh) tex.refresh();
+                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                            generated = true;
+                        } catch (e) {
+                            console.warn('[Sprite] forced sheet gen for PC failed', e);
+                        }
+                    }
+                    if (!generated && typeof window.createCharacterSpriteCanvas === 'function') {
+                        try {
+                            const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+                            this.textures.addCanvas(texKey, canvasEl);
+                            const tex = this.textures.get(texKey);
+                            if (tex.update) tex.update();
+                            if (tex.refresh) tex.refresh();
+                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                            generated = true;
+                        } catch (e) {
+                            console.warn('[Sprite] forced canvas gen for PC failed', e);
+                        }
+                    }
+                    if (!generated && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
+                        try {
+                            this.textures.addBase64(texKey, spriteDataUrl);
+                            generated = true;
+                        } catch (e) {}
+                    }
+                }
+                if (this.textures.exists(texKey)) {
+                    const tex = this.textures.get(texKey);
+                    if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                    const s = 31.875;  // 15% shrink from previous 37.5 (27.5% larger than original 25px)
+                    sprite = this.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey, 'frame0');
+                    sprite.setDisplaySize(s, s);
+                    sprite.setVisible(true);
+                } else {
+                    // Last resort placeholder (custom sprite registration attempted above using selected review data or on-the-fly gen via renderer).
+                    sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, 0x666666);
+                }
             } else if (character.type === 'npc') {
                 color = 0x0000ff;
                 sprite = this.add.circle(character.x * 25 + 12.5, character.y * 25 + 12.5, 6.25, color);
@@ -2444,8 +2678,9 @@ window.updateCombatScene = function(characters) {
    
             sprite.setOrigin(0.5, 0.5);
    
-            let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 25, character.name, {
-                fontSize: '12px',
+            const pcFontSize = (character.type === 'pc') ? '10px' : '11px';
+            let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, character.name, {
+                fontSize: pcFontSize,
                 color: '#ffffff',
                 align: 'center'
             });
@@ -2517,20 +2752,101 @@ window.updateCombatScene = function(characters) {
    
     updatePositions(characters) {
     // console.log("Updating CombatScene positions with:", characters);
+        ensurePCSpriteInCombatList(characters);
         characters.forEach(character => {
             const charData = this.characters[character.name];
             if (charData) {
                 charData.x = character.x;
                 charData.y = character.y;
                 charData.sprite.setPosition(character.x * 25 + 12.5, character.y * 25 + 12.5);
-                charData.label.setPosition(character.x * 25 + 12.5, character.y * 25 + 25);
+                charData.label.setPosition(character.x * 25 + 12.5, character.y * 25 + 29);
             } else {
                 // Add new character if not present
                 let sprite, color;
                 if (character.type === 'pc') {
-                    color = 0x00ff00;
-                    sprite = this.add.triangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 0, -6.25, -6.25, 6.25, 6.25, 6.25, color);
                     this.pcName = character.name;
+
+                    // Force the exact sprite from character creation / review menu to be used as the PC icon in Combat Mode.
+                    // This replaces any default flare/cross/marker with the custom generated pixel art.
+                    if (!character.sprite || !character.sprite.dataUrl) {
+                        const sel = window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite);
+                        if (sel) {
+                            character.sprite = sel;
+                        }
+                    }
+
+                    const spriteDataUrl = character.sprite && character.sprite.dataUrl;
+                    const texKey = 'pc-sprite-' + (character.name || 'pc').replace(/\s+/g, '_') + '-sheet';
+                    if (!this.textures.exists(texKey)) {
+                        if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
+                            try {
+                                const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
+                                this.textures.addCanvas(texKey, sheetCanvas);
+                                const tex = this.textures.get(texKey);
+                                const fw = sheetCanvas.height;
+                                for (let i = 0; i < 4; i++) {
+                                    tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+                                }
+                                if (tex.update) tex.update();
+                                if (tex.refresh) tex.refresh();
+                                if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                            } catch (e) {}
+                        }
+                        if (!this.textures.exists(texKey)) {
+                            if (typeof window.createCharacterSpriteCanvas === 'function') {
+                                try {
+                                    const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+                                    this.textures.addCanvas(texKey, canvasEl);
+                                } catch (e) {}
+                            }
+                            if (!this.textures.exists(texKey) && spriteDataUrl && spriteDataUrl.startsWith('data:')) {
+                                this.textures.addBase64(texKey, spriteDataUrl);
+                            }
+                        }
+                    }
+                    // Always use custom sprite for PC - no green triangle fallback. (see comment in updateCharacters for details)
+                    if (!this.textures.exists(texKey)) {
+                        let generated = false;
+                        if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
+                            try {
+                                const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
+                                this.textures.addCanvas(texKey, sheetCanvas);
+                                const tex = this.textures.get(texKey);
+                                const fw = sheetCanvas.height;
+                                for (let i = 0; i < 4; i++) {
+                                    tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+                                }
+                                if (tex.update) tex.update();
+                                if (tex.refresh) tex.refresh();
+                                if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                                generated = true;
+                            } catch (e) {}
+                        }
+                        if (!generated && typeof window.createCharacterSpriteCanvas === 'function') {
+                            try {
+                                const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+                                this.textures.addCanvas(texKey, canvasEl);
+                                generated = true;
+                            } catch (e) {}
+                        }
+                        if (!generated && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
+                            try {
+                                this.textures.addBase64(texKey, spriteDataUrl);
+                                generated = true;
+                            } catch (e) {}
+                        }
+                    }
+                    if (this.textures.exists(texKey)) {
+                        const tex = this.textures.get(texKey);
+                        if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+                        const s = 31.875;  // 15% shrink from previous 37.5 (27.5% larger than original 25px)
+                        sprite = this.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey, 'frame0');
+                        sprite.setDisplaySize(s, s);
+                        sprite.setVisible(true);
+                    } else {
+                        // Last resort placeholder (custom sprite registration attempted above using selected review data or on-the-fly gen via renderer).
+                        sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, 0x666666);
+                    }
                 } else if (character.type === 'npc') {
                     color = 0x0000ff;
                     sprite = this.add.circle(character.x * 25 + 12.5, character.y * 25 + 12.5, 6.25, color);
@@ -2539,8 +2855,9 @@ window.updateCombatScene = function(characters) {
                     sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, color);
                 }
                 sprite.setOrigin(0.5, 0.5);
-                let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 25, character.name, {
-                    fontSize: '12px',
+                const pcFontSize = (character.type === 'pc') ? '10px' : '11px';
+                let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, character.name, {
+                    fontSize: pcFontSize,
                     color: '#ffffff',
                     align: 'center'
                 });
@@ -2553,11 +2870,14 @@ window.updateCombatScene = function(characters) {
                 charInGlobal.x = character.x;
                 charInGlobal.y = character.y;
             } else {
-                window.combatCharacters.push({ name: character.name, type: character.type, x: character.x, y: character.y });
+                const entry = { name: character.name, type: character.type, x: character.x, y: character.y };
+                if (character.sprite) entry.sprite = character.sprite;
+                window.combatCharacters.push(entry);
             }
         });
         // Remove characters no longer present from window.combatCharacters
         window.combatCharacters = window.combatCharacters.filter(c => characters.some(ch => ch.name === c.name));
+        ensurePCSpriteInCombatList(window.combatCharacters);
         // Update combatCharactersString globally
         window.combatCharactersString = JSON.stringify(window.combatCharacters);
     // console.log("Updated window.combatCharactersString in updatePositions:", window.combatCharactersString);
@@ -2608,7 +2928,7 @@ window.updateCombatScene = function(characters) {
         pcData.x = CENTER_X;
         pcData.y = CENTER_Y;
 
-        // Small visual offset so the triangle sits perfectly in the middle of its cell
+        // Small visual offset so the PC sprite sits perfectly in the middle of its cell
         const visualOffsetX = 0;
         const visualOffsetY = -2;
 
@@ -4850,17 +5170,14 @@ let charactersString = characters.map((char, index) => {
       Magic: ${char.Magic}`;
 }).join("\n");
 
-if (userInput === '1' && charactersString.length <= 0) {
-  userInput = document.getElementById("chatuserinput").value;
-  document.getElementById("chatuserinput").value = "";
-  userWords = "";
-  character = createMortaciaCharacter();
-} else if (userInput === '2' && charactersString.length <= 0) {
-  userInput = document.getElementById("chatuserinput").value;
-  document.getElementById("chatuserinput").value = "";
-  userWords = "";
-  character = createSuzerainCharacter();
-} else if (userInput === '3' && charactersString.length <= 0) {
+// Duplicate old start-menu block neutralized to avoid conflict with the primary
+// userWords-based handling (which now uses the original create* functions as requested).
+// The active 1/2 logic lives in the userWords[0] === '1' block above, using createMortaciaCharacter etc.
+// if (userInput === '1' && charactersString.length <= 0) {
+//   ...
+//   character = createMortaciaCharacter();
+// } ...
+if (userInput === '3' && charactersString.length <= 0) {
     userInput = document.getElementById("chatuserinput").value;
   document.getElementById("chatuserinput").value = "";
   userWords = "";
@@ -6810,7 +7127,6 @@ function createSuzerainCharacter() {
   characters.push(character);
 
   return character;
-  return;
 }
 
 function equipItem(itemName, targetCharacterName = null) {
@@ -7224,8 +7540,11 @@ async function chatbotprocessinput(textin) {
   document.getElementById("chatuserinput").value = "";
   
   if (!userInput) {
-    updateChatLog("<br>Please enter a command.<br>");
-    return;
+    if (!window._statsRolled) {
+      updateChatLog("<br>Please enter a command.<br>");
+      return;
+    }
+    // when stats rolled, allow blank reply (empty input) to proceed to roll dungeon automatically
   }
 
   const movementCommands = ["n", "s", "e", "w", "north", "south", "east", "west", "ne", "nw", "se", "sw", "u", "d", "up", "down"];
@@ -7611,28 +7930,188 @@ let selectedClass = characterClasses[classIndex];
 
 if (!isCharacterCreationInProgress() && userWords[0] !== "start") { 
   if (userWords[0] === '1' && charactersString.length <= 0) {
+    // Original last-known-good method: use createMortaciaCharacter() to generate stats,
+    // push to characters array, so data is transported via existing chatbotprocessinput
+    // and updateGameConsole paths into the game console (stats appear above prompt).
     userInput = document.getElementById("chatuserinput").value;
     document.getElementById("chatuserinput").value = "";
     userWords = "";
     character = createMortaciaCharacter();
+
+    // IMMEDIATE stats in game console: rebuild charactersString from the verbatim createMortacia result
+    // (user: "it should fire as soon as I press 1 ... game information appears immediately and then can be rerolled").
+    // This uses the exact builder pattern so updateGameConsole / PC:(.*?) parsing and displayPCData all stay happy.
+    charactersString = characters.map((char, index) => {
+      if (!char.Equipped) {
+        char.Equipped = { Weapon: null, Armor: null, Shield: null, Other: null };
+      }
+      const equippedItemsString = Object.entries(char.Equipped)
+        .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+        .join(", ");
+      const totalAC = (char.AC || 0) + (char.Armor || 0);
+      return `${char.Name}
+${char.Sex}
+${char.Race}
+${char.Class}
+Level: ${char.Level}
+AC: ${totalAC}
+XP: ${char.XP || 0}
+HP: ${char.HP}
+MaxHP: ${char.MaxHP}
+Equipped: ${equippedItemsString}
+Attack: ${char.Attack}
+Damage: ${char.Damage}
+Armor: ${char.Armor}
+Magic: ${char.Magic}`;
+    }).join("\n");
+    if (typeof displayPCData === 'function') {
+      displayPCData(charactersString);
+    }
+    console.log('%c[CharacterGen] 1/Mortacia create* fired immediately — stats in console via charactersString.', 'color:#aaffaa');
+
+    // Now do sprite review (using existing renderer, no new data methods) so user can reroll sprite
+    // before proceeding. The character (with stats) is already in the data system.
+    try {
+      if (typeof window.generateCharacterSprite === 'function') {
+        const spec = window.createCharacterSpriteSpec ? window.createCharacterSpriteSpec(character) : null;
+        const dataUrl = window.generateCharacterSprite(character, spec);
+        if (dataUrl) {
+          character.sprite = { dataUrl, spec, generated: true, saved: false, clientOnly: true };
+        }
+      }
+    } catch (e) {
+      console.error('[Sprite] client gen for review failed', e);
+    }
+
+    window._pendingStartingCharacter = character;
+    window._awaitingSpriteSave = true;
+
+    if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+      window._statsRolled = false; // reset so after next stats load, blank enter is allowed to auto-proceed
+      window.showCharacterSpriteReviewMenu(character);
+    }
+
+    // Fire the server dedicated LLM Retort artist path *immediately* when 1 is pressed.
+    // This makes the creative spriteSpec (from the focused assistant) appear in the review
+    // (via pollForCharacterGenResult or SSE characterGenerationStarted) instead of requiring
+    // a manual "Reroll Sprite" click. The initial show uses a fast client deterministic sprite
+    // as placeholder; the poller will call show again with the real LLM version when ready.
+    $.ajax({
+      url: '/beginCharacterGeneration',
+      type: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ choice: '1', character: character }),
+      success: function (resp) {
+        if (resp && resp.taskId && typeof pollForCharacterGenResult === 'function') {
+          pollForCharacterGenResult(resp.taskId);
+        }
+      },
+      error: function () {
+        console.warn('[CharacterGen] Could not start server Retort artist for choice 1 (will stay with client sprite until manual reroll)');
+      }
+    });
+
+    // Also broadcast a local event in case SSE is not the primary, but the poll handles the update.
+
+    console.log('%c[CharacterGen] 1 pressed — using original createMortacia + sprite review (Save to proceed). Server LLM artist kicked off.', 'color:#ffdd66');
+    return;  // Block until Save; character data already in system via create*
+
   } else if (userWords[0] === '2' && charactersString.length <= 0) {
     userInput = document.getElementById("chatuserinput").value;
     document.getElementById("chatuserinput").value = "";
     userWords = "";
     character = createSuzerainCharacter();
+
+    // IMMEDIATE stats in game console for Suzerain (symmetric to Mortacia path)
+    charactersString = characters.map((char, index) => {
+      if (!char.Equipped) {
+        char.Equipped = { Weapon: null, Armor: null, Shield: null, Other: null };
+      }
+      const equippedItemsString = Object.entries(char.Equipped)
+        .map(([slot, item]) => `${slot}: ${item ? item.name : 'None'}`)
+        .join(", ");
+      const totalAC = (char.AC || 0) + (char.Armor || 0);
+      return `${char.Name}
+${char.Sex}
+${char.Race}
+${char.Class}
+Level: ${char.Level}
+AC: ${totalAC}
+XP: ${char.XP || 0}
+HP: ${char.HP}
+MaxHP: ${char.MaxHP}
+Equipped: ${equippedItemsString}
+Attack: ${char.Attack}
+Damage: ${char.Damage}
+Armor: ${char.Armor}
+Magic: ${char.Magic}`;
+    }).join("\n");
+    if (typeof displayPCData === 'function') {
+      displayPCData(charactersString);
+    }
+    console.log('%c[CharacterGen] 2/Suzerain create* fired immediately — stats in console via charactersString.', 'color:#aaffaa');
+
+    try {
+      if (typeof window.generateCharacterSprite === 'function') {
+        const spec = window.createCharacterSpriteSpec ? window.createCharacterSpriteSpec(character) : null;
+        const dataUrl = window.generateCharacterSprite(character, spec);
+        if (dataUrl) {
+          character.sprite = { dataUrl, spec, generated: true, saved: false, clientOnly: true };
+        }
+      }
+    } catch (e) {
+      console.error('[Sprite] client gen for review failed', e);
+    }
+
+    window._pendingStartingCharacter = character;
+    window._awaitingSpriteSave = true;
+
+    if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+      window._statsRolled = false; // reset so after next stats load, blank enter is allowed to auto-proceed
+      window.showCharacterSpriteReviewMenu(character);
+    }
+
+    // Fire the server dedicated LLM Retort artist path *immediately* when 2 is pressed.
+    // This makes the creative spriteSpec (from the focused assistant) appear in the review
+    // (via pollForCharacterGenResult or SSE characterGenerationStarted) instead of requiring
+    // a manual "Reroll Sprite" click.
+    $.ajax({
+      url: '/beginCharacterGeneration',
+      type: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ choice: '2', character: character }),
+      success: function (resp) {
+        if (resp && resp.taskId && typeof pollForCharacterGenResult === 'function') {
+          pollForCharacterGenResult(resp.taskId);
+        }
+      },
+      error: function () {
+        console.warn('[CharacterGen] Could not start server Retort artist for choice 2 (will stay with client sprite until manual reroll)');
+      }
+    });
+
+    console.log('%c[CharacterGen] 2 pressed — using original createSuzerain + sprite review (Save to proceed). Server LLM artist kicked off.', 'color:#ffdd66');
+    return;  // Hard stop until Save
+
   } else if (userWords[0] === "3" && charactersString.length <= 0) {
-    // Start character creation
+    // Start character creation (extendable later to include sprite review at the end)
     characterCreationStep = 1;
     displayMessage('Step 1: Enter character name'); 
     console.log('charactersString:', charactersString);
-    console.log('character:', character);
     return;
   } else if (charactersString.length <= 0){
-    // If the input is invalid, notify the user and re-display the start menu
     displayMessage('Invalid option. Please enter 1, 2, or 3.');
     displayMessage('Start Menu: \n \n 1) Play as Mortacia, goddess of death. \n 2) Play as Suzerain, knight of Atinus. \n 3) Create character and play as a party of 7 adventurers.');
     return;
   }
+}
+
+// Critical guard for the new dedicated character sprite generation phase.
+// When the user presses 1 or 2 we set this flag + hard return above. Nothing below this point
+// (including the rest of chatbotprocessinput or retort dungeon creation) may run until Save is clicked.
+if (typeof window !== 'undefined' && window._awaitingSpriteSave) {
+  console.log('%c[CharacterGen] Guard: _awaitingSpriteSave is true — blocking all further processing until SAVE.', 'color:#ffdd66');
+  return;
 }
 
 gameConsoleData = null;
@@ -7862,24 +8341,10 @@ if (userWords[0] === "start") {
 
   // Handle the player's choice from the start menu
   switch (userInput) {
-    case '1':
-        userInput = document.getElementById("chatuserinput").value;
-  document.getElementById("chatuserinput").value = "";
-      startMenuOption = 'Mortacia';
-      character = await createCharacter('1'); // Handle Mortacia character creation
-        userWords = "";
-  userInput = "";
-      break;
-      return;
-    case '2':
-        userInput = document.getElementById("chatuserinput").value;
-  document.getElementById("chatuserinput").value = "";
-      startMenuOption = 'Suzerain';
-      character = await createCharacter('2'); // Handle Suzerain character creation
-        userWords = "";
-  userInput = "";
-      break;
-      return;
+    // 1/2 cases neutralized: primary handling is in the userWords numeric block which calls the
+    // original createMortaciaCharacter / createSuzerainCharacter and integrates sprite review.
+    // case '1': ... character = await createCharacter('1'); ...
+    // case '2': ...
     case '3':
         userInput = document.getElementById("chatuserinput").value;
   document.getElementById("chatuserinput").value = "";
@@ -9725,6 +10190,9 @@ $.ajax({
             // Task complete: Process the response with error handling
             try {
               const result = pollResponse.result || {};
+              if (result.characterConfirmed) {
+                window._statsRolled = true; // stats rolled via start, allow blank enter from now on
+              }
               let content = result.response;
               let imageUrl = result.imageUrl;
               let serverGameConsole = result.updatedGameConsole;
@@ -9935,7 +10403,21 @@ $.ajax({
             // Update CombatScene with new combatCharactersString
             if (newCombatCharactersString) {
                 const newCombatCharacters = JSON.parse(newCombatCharactersString);
+                // If the combat list from server lacks the sprite data (text PC block etc), restore the exact image
+                // the player selected in the review menu, so the in-game PC token (RT egocentric/combat billboard)
+                // is the chosen one, not a regenerated default.
+                const pending = window._pendingStartingCharacter;
+                const selectedSprite = (pending && pending.sprite && pending.sprite.dataUrl ? pending.sprite : (window._selectedPCSprite && window._selectedPCSprite.dataUrl ? window._selectedPCSprite : null));
+                if (selectedSprite) {
+                  const pcName = (pending && (pending.Name || pending.name)) || null;
+                  const pcEntry = newCombatCharacters.find(c => c.type === 'pc' || (pcName && c.name === pcName));
+                  if (pcEntry && (!pcEntry.sprite || !pcEntry.sprite.dataUrl)) {
+                    pcEntry.sprite = selectedSprite;
+                    console.log('%c[Sprite] Restored player-selected sprite onto received combat PC entry.', 'color:#aaffaa');
+                  }
+                }
                 window.combatCharacters = newCombatCharacters;
+                ensurePCSpriteInCombatList(window.combatCharacters);
                 const combatScene = window.combatGame.scene.getScene('CombatScene');
                 if (combatScene) {
                     if (!combatScene.initialized) {
@@ -9981,6 +10463,22 @@ $.ajax({
             }
     
             document.getElementById("chatuserinput").value = "";
+
+            // When the character stats are rolled/loaded (PC block with Level etc in the response),
+            // set flag to remove the blank-reply block (so blank "enter" will be allowed and proceed
+            // to roll up the dungeon automatically).
+            // Auto-submit a blank (value='') to trigger it immediately after stats load.
+            // Leave initial start-menu blank-enter behavior as "please enter a command".
+            if (serverGameConsole && /PC:/.test(serverGameConsole) && /Level:/.test(serverGameConsole) && window._pendingStartingCharacter && !window._statsRolled) {
+              window._statsRolled = true;
+              setTimeout(() => {
+                const inputEl = document.getElementById('chatuserinput');
+                if (inputEl) {
+                  inputEl.value = ''; // blank reply
+                  chatbotprocessinput(); // submit "enter" on blank to auto-proceed
+                }
+              }, 180);
+            }
             } catch (error) {
               console.error('Error processing poll response:', error);
               updateChatLog("<br><b>Error:</b> Failed to process server response. Check console for details.<br>");
@@ -10028,8 +10526,7 @@ $.ajax({
 
 attachMusicSSE();
 
-module.exports = { chatbotprocessinput };
-// Export any other functions or variables as needed
+// Note: browser-only file. module.exports removed to prevent "module is not defined" in <script> load.
 
 // Helper: Resolve custom tile URL from tile spec (geoKey from dungeon/currentCoords)
 function resolveCustomTileURL(tile, index = 0) {
@@ -12275,5 +12772,77 @@ function renderDungeonView() {
     renderDungeonViewCanvas(false);
     logDungeonCombatSync('render-canvas');
   }
+
+// --- Poller for the dedicated character generation task (used by the 1/2 start menu choices) ---
+// This uses $.ajax (the pattern the rest of the app uses for tasks) so we receive the
+// fully rendered character (with LLM spriteSpec + dataUrl) when the server finishes.
+function pollForCharacterGenResult(taskId, attempts = 0) {
+  if (!taskId) return;
+
+  const maxAttempts = 30; // ~30-60s
+
+  setTimeout(() => {
+    $.ajax({
+      url: `/poll-task2/${taskId}`,
+      type: 'GET',
+      timeout: 15000,
+      success: function (pollResponse) {
+        console.log('[CharacterGen] poll response for sprite task:', pollResponse && pollResponse.status);
+        if (pollResponse && pollResponse.status === 'complete' && pollResponse.result && pollResponse.result.character) {
+          const char = pollResponse.result.character;
+          window._pendingStartingCharacter = char;
+          window._awaitingSpriteSave = true;
+
+          // Seed the global characters array so the old console-building logic in chatbotprocessinput
+          // and updateGameConsole picks up the PC stats and puts them into the displayed game console
+          // (above the prompt) exactly like the last-known-good 1/2 flow in the reference.
+          if (typeof characters !== 'undefined') {
+            characters = [char];
+          } else {
+            window.characters = [char];
+          }
+          if (typeof character !== 'undefined') {
+            character = char;
+          }
+
+          // Rebuild charactersString + display so stats are live in console even on the poll refresh of review
+          try {
+            charactersString = (typeof characters !== 'undefined' ? characters : (window.characters||[])).map((c, index) => {
+              if (!c.Equipped) c.Equipped = {Weapon:null,Armor:null,Shield:null,Other:null};
+              const es = Object.entries(c.Equipped).map(([k,v]) => k+': '+(v?v.name:'None')).join(', ');
+              const tac = (c.AC||0)+(c.Armor||0);
+              return c.Name + '\n' + c.Sex + '\n' + c.Race + '\n' + c.Class + '\nLevel: ' + c.Level + '\nAC: ' + tac + '\nXP: ' + (c.XP||0) + '\nHP: ' + c.HP + '\nMaxHP: ' + c.MaxHP + '\nEquipped: ' + es + '\nAttack: ' + (c.Attack||0) + '\nDamage: ' + (c.Damage||0) + '\nArmor: ' + (c.Armor||0) + '\nMagic: ' + (c.Magic||0);
+            }).join('\n');
+            if (typeof displayPCData === 'function') displayPCData(charactersString);
+          } catch(e){}
+
+          if (typeof window.showCharacterSpriteReviewMenu === 'function') {
+            window._statsRolled = false; // reset so after next stats load, blank enter is allowed to auto-proceed
+            window.showCharacterSpriteReviewMenu(char);
+          } else {
+            console.warn('[CharacterGen] showCharacterSpriteReviewMenu not ready yet');
+          }
+        } else if (pollResponse && pollResponse.status === 'processing') {
+          if (attempts < maxAttempts) {
+            pollForCharacterGenResult(taskId, attempts + 1);
+          }
+        } else if (pollResponse && pollResponse.status === 'error') {
+          console.error('[CharacterGen] task error', pollResponse);
+          // Fall back to allowing normal flow? Or show message. For now just clear flag so user isn't stuck.
+          window._awaitingSpriteSave = false;
+        }
+      },
+      error: function (err) {
+        console.warn('[CharacterGen] poll error, will retry', err);
+        if (attempts < maxAttempts) {
+          pollForCharacterGenResult(taskId, attempts + 1);
+        }
+      }
+    });
+  }, attempts === 0 ? 800 : 1500); // initial delay then poll every 1.5s
+}
+
+// Make the poller reachable from the start menu handlers (and anywhere)
+window.pollForCharacterGenResult = pollForCharacterGenResult;
 
 
