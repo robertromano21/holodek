@@ -550,7 +550,12 @@ console.log(`Wrote ${prgAsmOut}`);
 console.log(`Wrote ${sidAsmOut}`);
 
 // ---------- Assemble + wrap ----------
-function haveCmd(cmd){ return spawnSync('bash',['-lc',`command -v ${cmd}`]).status===0; }
+function haveCmd(cmd) {
+  const probe = process.platform === 'win32'
+    ? spawnSync('where.exe', [cmd], { stdio: 'ignore' })
+    : spawnSync('sh', ['-lc', `command -v "${cmd}" >/dev/null 2>&1`], { stdio: 'ignore' });
+  return probe.status === 0;
+}
 if (!haveCmd('xa')) {
   console.error('WARN: xa not found in PATH; skipping .sid build.');
   process.exit(0);

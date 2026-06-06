@@ -62,6 +62,16 @@ document.addEventListener('DOMContentLoaded', () => {
         playRoomMusic();
       }
 
+      if (data.type === 'npcAutonomyUpdate' && data.update) {
+        console.log('[NPC Autonomy] Feed update', data.update);
+        if (typeof window.applyNpcAutonomyRoutines === 'function') {
+          window.applyNpcAutonomyRoutines(data.update.routines || []);
+        }
+        if (typeof window.appendNpcAutonomyFeedLog === 'function') {
+          window.appendNpcAutonomyFeedLog(data.update);
+        }
+      }
+
       // Character generation phase started via dedicated endpoint (separate from main dungeon Retort)
       // The server rolls stats first, then uses a focused Retort call to generate a creative spriteSpec + rendered dataUrl.
       if (data.type === 'characterGenerationStarted' && data.character) {
@@ -186,38 +196,106 @@ function toggleCombatMode() {
         combatIsDragging = false;
         combatHeader.style.cursor = 'grab';
       });
-      
-            // Dungeon popup dragging
-      const dungeonPopup = document.getElementById('dungeon-popup');
-      const dungeonHeader = document.getElementById('dungeon-header');
-      let dungeonIsDragging = false;
-      let dungeonOffsetX = 0;
-      let dungeonOffsetY = 0;
 
-      dungeonHeader.addEventListener('mousedown', (e) => {
-        dungeonIsDragging = true;
-        dungeonOffsetX = e.clientX - dungeonPopup.offsetLeft;
-        dungeonOffsetY = e.clientY - dungeonPopup.offsetTop;
-        dungeonHeader.style.cursor = 'grabbing';
+      // Game log popup dragging
+      const gameLogPopup = document.getElementById('game-log-popup');
+      const gameLogHeader = document.getElementById('game-log-header');
+      let gameLogIsDragging = false;
+      let gameLogOffsetX = 0;
+      let gameLogOffsetY = 0;
+
+      gameLogHeader.addEventListener('mousedown', (e) => {
+        gameLogIsDragging = true;
+        gameLogOffsetX = e.clientX - gameLogPopup.offsetLeft;
+        gameLogOffsetY = e.clientY - gameLogPopup.offsetTop;
+        gameLogHeader.style.cursor = 'grabbing';
       });
 
       document.addEventListener('mousemove', (e) => {
-        if (!dungeonIsDragging) return;
-        const newX = e.clientX - dungeonOffsetX;
-        const newY = e.clientY - dungeonOffsetY;
-        const maxX = window.innerWidth - dungeonPopup.offsetWidth;
-        const maxY = window.innerHeight - dungeonPopup.offsetHeight;
-        dungeonPopup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
-        dungeonPopup.style.top  = `${Math.min(Math.max(0, newY), maxY)}px`;
-        dungeonPopup.style.right = 'auto'; // once dragged, we control left
+        if (!gameLogIsDragging) return;
+        const newX = e.clientX - gameLogOffsetX;
+        const newY = e.clientY - gameLogOffsetY;
+        const maxX = window.innerWidth - gameLogPopup.offsetWidth;
+        const maxY = window.innerHeight - gameLogPopup.offsetHeight;
+        gameLogPopup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
+        gameLogPopup.style.top = `${Math.min(Math.max(0, newY), maxY)}px`;
       });
 
       document.addEventListener('mouseup', () => {
-        dungeonIsDragging = false;
-        dungeonHeader.style.cursor = 'grab';
+        gameLogIsDragging = false;
+        gameLogHeader.style.cursor = 'grab';
       });
 
+      const partyPopup = document.getElementById('party-popup');
+      const partyPopupHeader = document.getElementById('party-popup-header');
+      let partyPopupDragging = false;
+      let partyPopupOffsetX = 0;
+      let partyPopupOffsetY = 0;
+
+      partyPopupHeader.addEventListener('mousedown', (e) => {
+        partyPopupDragging = true;
+        partyPopupOffsetX = e.clientX - partyPopup.offsetLeft;
+        partyPopupOffsetY = e.clientY - partyPopup.offsetTop;
+        partyPopupHeader.style.cursor = 'grabbing';
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!partyPopupDragging) return;
+        const newX = e.clientX - partyPopupOffsetX;
+        const newY = e.clientY - partyPopupOffsetY;
+        const maxX = window.innerWidth - partyPopup.offsetWidth;
+        const maxY = window.innerHeight - partyPopup.offsetHeight;
+        partyPopup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
+        partyPopup.style.top = `${Math.min(Math.max(0, newY), maxY)}px`;
+        partyPopup.style.bottom = 'auto';
+      });
+
+      document.addEventListener('mouseup', () => {
+        partyPopupDragging = false;
+        partyPopupHeader.style.cursor = 'grab';
+      });
+
+      const chatLog = document.getElementById('chatlog');
+      if (chatLog && window.MutationObserver) {
+        syncGameLogTranscript();
+        syncBackgroundChatLog();
+        const gameLogObserver = new MutationObserver(() => {
+          syncGameLogTranscript();
+          syncBackgroundChatLog();
+        });
+        gameLogObserver.observe(chatLog, {
+          childList: true,
+          subtree: true,
+          characterData: true
+        });
+      }
+
+      renderPartyIconDock();
+      renderPartyInfoPopup();
+
       initDungeonTestingMode();
+
+      // ensure sim advance (45s chatbotprocessinput for story + positions) is running
+      // DISABLED per request: the periodic "space weather"/dungeon reports were respawning objects in room
+      // (even after guards). Re-enable the call only if background narrative updates are desired again.
+      // if (typeof startSimulationAdvanceInterval === 'function') {
+      //   startSimulationAdvanceInterval();
+      // }
+
+      // Auto-sync dungeon fullscreen UI state (hides main chat log transcript) whenever the dungeon popup visibility changes
+      const dungeonPopupEl = document.getElementById('dungeon-popup');
+      if (dungeonPopupEl && window.MutationObserver) {
+        const dungeonObserver = new MutationObserver(() => {
+          const isOpen = dungeonPopupEl.style.display === 'block';
+          if (typeof setDungeonFullscreenUiState === 'function') {
+            setDungeonFullscreenUiState(isOpen);
+          }
+        });
+        dungeonObserver.observe(dungeonPopupEl, {
+          attributes: true,
+          attributeFilter: ['style']
+        });
+      }
 
     });
 
@@ -240,21 +318,22 @@ function toggleCombatMode() {
             // Center the combat map on the PC when opening, using global character data
             const combatScene = window.combatGame && window.combatGame.scene ? window.combatGame.scene.getScene('CombatScene') : null;
             if (combatScene) {
+                const combatRoster = getCombatRosterForUi();
+                if (combatRoster.length) {
+                    window.combatCharacters = combatRoster;
+                    window.combatCharactersString = JSON.stringify(combatRoster);
+                }
                 // Make sure the global list has the selected sprite attached (in case stripped)
                 if (typeof window.ensurePCSpriteInCombatList === 'function') {
                     window.ensurePCSpriteInCombatList(window.combatCharacters);
+                }
+                if (typeof window.updateCombatScene === 'function' && window.combatCharacters && window.combatCharacters.length > 0) {
+                    window.updateCombatScene(window.combatCharacters);
                 }
                 const pc = window.combatCharacters?.find(c => c.type === 'pc');
                 if (pc) {
                     combatScene.centerCameraOn(pc.x, pc.y);
                     console.log(`Centering on PC at (${pc.x}, ${pc.y}) from toggleCombatPopup`);
-                    // Ensure the CombatScene has the PC entry created (with custom sprite tex registered from selected data)
-                    // so that redrawCombatRT will draw the generated icon instead of default cross/marker.
-                    if (!combatScene.characters || !combatScene.characters[pc.name]) {
-                        if (typeof window.updateCombatScene === 'function' && window.combatCharacters && window.combatCharacters.length > 0) {
-                            window.updateCombatScene(window.combatCharacters);
-                        }
-                    }
                     // Force redraw so the custom sprite (from beginning review) is composited into the RT for combat view.
                     if (typeof combatScene.redrawCombatRT === 'function') {
                         combatScene.redrawCombatRT();
@@ -291,17 +370,354 @@ function toggleCombatMode() {
         if (!dungeonPopup) return;
 
         dungeonPopup.style.display = dungeonPopup.style.display === 'block' ? 'none' : 'block';
+        const isOpen = dungeonPopup.style.display === 'block';
+        setDungeonFullscreenUiState(isOpen);
 
-        if (dungeonPopup.style.display === 'block') {
-            dungeonPopup.style.top = '105px';
-            dungeonPopup.style.right = '5px';
-            dungeonPopup.style.left = 'auto';
-
-            // Draw/refresh the view when it opens
+        if (isOpen) {
             if (typeof renderDungeonView === 'function') {
               renderDungeonView();
             }
         }
+    }
+
+    function closeDungeonPopup() {
+      const dungeonPopup = document.getElementById('dungeon-popup');
+      if (!dungeonPopup) return;
+      dungeonPopup.style.display = 'none';
+      setDungeonFullscreenUiState(false);
+    }
+
+    function toggleGameLogPopup() {
+      const popup = document.getElementById('game-log-popup');
+      if (!popup) return;
+      popup.style.display = popup.style.display === 'block' ? 'none' : 'block';
+      if (popup.style.display === 'block') {
+        popup.style.top = '5px';
+        popup.style.left = '220px';
+        syncGameLogTranscript();
+      }
+    }
+
+    function togglePartyPopup() {
+      const popup = document.getElementById('party-popup');
+      if (!popup) return;
+      popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
+      if (popup.style.display === 'block') {
+        renderPartyInfoPopup();
+      }
+    }
+
+    function setDungeonFullscreenUiState(active) {
+      const isActive = !!active;
+      document.body.classList.toggle('dungeon-fullscreen-active', isActive);
+      const panel = document.getElementById('chatlog-background-panel');
+      if (panel) {
+        panel.style.display = isActive ? 'none' : 'block';
+        panel.style.opacity = isActive ? '0' : '1';
+        panel.style.pointerEvents = isActive ? 'none' : 'auto';
+      }
+    }
+
+    function getCombatRosterForUi() {
+      const baseRoster = Array.isArray(window.combatCharacters)
+        ? window.combatCharacters.filter(entry => entry && (entry.type === 'pc' || entry.type === 'npc'))
+        : [];
+      if (baseRoster.length) {
+        return baseRoster.map((entry, index) => ({
+          ...entry,
+          name: entry.name || entry.Name || `PartyMember${index + 1}`,
+          type: index === 0 ? 'pc' : 'npc'
+        }));
+      }
+      const entries = typeof getPartyInfoEntries === 'function' ? getPartyInfoEntries() : [];
+      if (!entries.length) return [];
+      return entries.map((entry, index) => {
+        const source = entry && entry.source ? entry.source : {};
+        return {
+          name: source.name || source.Name || entry.label || `PartyMember${index + 1}`,
+          type: index === 0 ? 'pc' : 'npc',
+          sprite: entry.sprite || source.sprite || null,
+          x: index === 0 ? 7 : 0,
+          y: index === 0 ? 7 : 0,
+          Name: source.Name || source.name || entry.label || `PartyMember${index + 1}`,
+          Sex: source.Sex || source.sex || '',
+          Race: source.Race || source.race || '',
+          Class: source.Class || source.class || '',
+          HP: source.HP || source.hp || '',
+          MaxHP: source.MaxHP || source.maxHP || ''
+        };
+      });
+    }
+
+    function updatePartyInfoSource(kind, value) {
+      if (kind === 'pc') {
+        window._partyInfoPCString = value || '';
+      } else if (kind === 'npcs') {
+        window._partyInfoNPCString = value || '';
+      }
+      renderPartyIconDock();
+      renderPartyInfoPopup();
+    }
+
+    function getPartyInfoSpriteLookup() {
+      const lookup = new Map();
+      const addEntry = (entry) => {
+        if (!entry || !entry.Name) return;
+        lookup.set(String(entry.Name).toLowerCase(), entry);
+      };
+
+      if (Array.isArray(window.combatCharacters)) {
+        window.combatCharacters.forEach(entry => addEntry({
+          Name: entry.name || entry.Name,
+          sprite: entry.sprite || null,
+          source: entry
+        }));
+      }
+
+      if (window._pendingStartingCharacter) {
+        addEntry({
+          Name: window._pendingStartingCharacter.Name,
+          sprite: window._pendingStartingCharacter.sprite || null,
+          source: window._pendingStartingCharacter
+        });
+      }
+
+      if (window._pendingPartyReview && Array.isArray(window._pendingPartyReview.roster)) {
+        window._pendingPartyReview.roster.forEach(entry => addEntry({
+          Name: entry.Name,
+          sprite: entry.sprite || null,
+          source: entry
+        }));
+      }
+
+      if (typeof window.getPartySpriteRegistry === 'function') {
+        const spriteRegistry = window.getPartySpriteRegistry() || {};
+        const characterRegistry = typeof window.getPartyCharacterRegistry === 'function'
+          ? (window.getPartyCharacterRegistry() || {})
+          : {};
+        Object.keys(spriteRegistry).forEach((name) => addEntry({
+          Name: name,
+          sprite: spriteRegistry[name] || null,
+          source: {
+            Name: name,
+            ...(characterRegistry[name] || {}),
+            sprite: spriteRegistry[name] || null
+          }
+        }));
+      }
+
+      return lookup;
+    }
+
+    function getPartyInfoEntries() {
+      const columns = Array.from(document.querySelectorAll('.character-column'));
+      const spriteLookup = getPartyInfoSpriteLookup();
+      const isPlaceholderLabel = (label) => {
+        const normalized = String(label || '').trim();
+        return !normalized || /^PC$/i.test(normalized) || /^NPC\s*\d+$/i.test(normalized);
+      };
+      const columnEntries = columns.map((column, index) => {
+        const html = String(column && column.innerHTML ? column.innerHTML : '').trim();
+        if (!html) return null;
+        const text = String(column.textContent || '').replace(/\s+/g, ' ').trim();
+        let label = index === 0 ? 'PC' : `NPC ${index}`;
+        const nameMatch = text.match(/Name:\s*([^:]+?)(?=\s+(Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic):|$)/i);
+        if (nameMatch && nameMatch[1]) {
+          label = nameMatch[1].trim();
+        }
+        const hpMatch = text.match(/HP:\s*([^\s]+).*?MaxHP:\s*([^\s]+)/i);
+        const supplemental = spriteLookup.get(String(label).toLowerCase());
+        return {
+          label,
+          html,
+          hp: hpMatch ? `${hpMatch[1]}/${hpMatch[2]}` : '',
+          sprite: supplemental && supplemental.sprite ? supplemental.sprite : null,
+          source: supplemental && supplemental.source ? supplemental.source : null
+        };
+      }).filter(Boolean);
+
+      const textByName = new Map();
+      columnEntries.forEach((entry, index) => {
+        textByName.set(String(entry.label || `member-${index}`).toLowerCase(), entry);
+      });
+
+      const rosterEntries = Array.isArray(window.combatCharacters)
+        ? window.combatCharacters.filter(entry => entry && (entry.type === 'pc' || entry.type === 'npc'))
+        : [];
+
+      const ordered = [];
+      const usedNames = new Set();
+      rosterEntries.forEach((entry, index) => {
+        const label = String(entry.name || entry.Name || `Member ${index + 1}`).trim();
+        const key = label.toLowerCase();
+        const textEntry = textByName.get(key) || columnEntries[index] || null;
+        const supplemental = spriteLookup.get(key) || null;
+        const source = {
+          ...(supplemental && supplemental.source ? supplemental.source : {}),
+          ...(entry || {})
+        };
+        ordered.push({
+          label,
+          html: textEntry && textEntry.html ? textEntry.html : '',
+          hp: (textEntry && textEntry.hp)
+            || ((source.HP || source.hp) && (source.MaxHP || source.maxHP) ? `${source.HP || source.hp}/${source.MaxHP || source.maxHP}` : ''),
+          sprite: (entry.sprite && entry.sprite.dataUrl ? entry.sprite : null)
+            || (supplemental && supplemental.sprite ? supplemental.sprite : null),
+          source
+        });
+        usedNames.add(key);
+      });
+
+      columnEntries.forEach((entry) => {
+        const key = String(entry.label || '').toLowerCase();
+        if (isPlaceholderLabel(entry.label)) return;
+        if (usedNames.has(key)) return;
+        ordered.push(entry);
+      });
+
+      return ordered.length ? ordered : columnEntries.filter((entry) => !isPlaceholderLabel(entry && entry.label));
+    }
+
+    function formatPartySheetHtml(entry) {
+      const rawHtml = String(entry && entry.html ? entry.html : '');
+      if (!rawHtml) return '';
+      return rawHtml
+        .replace(/<div class="npc-data">/gi, '<div class="party-sheet-content">')
+        .replace(/<b>\s*PC:\s*<\/b>\s*<br\s*\/?>/gi, '')
+        .replace(/<b>\s*NPCs:\s*<\/b>\s*<br\s*\/?>/gi, '')
+        .replace(/<br\s*\/?>\s*<br\s*\/?>/gi, '<br>')
+        .trim();
+    }
+
+    function setPartyPanelIndex(nextIndex) {
+      const entries = getPartyInfoEntries();
+      if (!entries.length) {
+        window._partyPanelIndex = 0;
+        renderPartyInfoPopup();
+        return;
+      }
+      const total = entries.length;
+      window._partyPanelIndex = ((nextIndex % total) + total) % total;
+      renderPartyInfoPopup();
+    }
+
+    function showPreviousPartyPanelMember() {
+      setPartyPanelIndex((window._partyPanelIndex || 0) - 1);
+    }
+
+    function showNextPartyPanelMember() {
+      setPartyPanelIndex((window._partyPanelIndex || 0) + 1);
+    }
+
+    function openPartySheet(index) {
+      setPartyPanelIndex(index);
+      const popup = document.getElementById('party-popup');
+      if (popup) popup.style.display = 'block';
+    }
+
+    function drawPartySpriteCanvas(canvas, entry) {
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = false;
+      if (!entry) return;
+
+      const renderCanvas = (sourceCanvas) => {
+        if (!sourceCanvas) return false;
+        const scale = Math.max(1, Math.floor(Math.min(canvas.width / sourceCanvas.width, canvas.height / sourceCanvas.height)));
+        const drawW = sourceCanvas.width * scale;
+        const drawH = sourceCanvas.height * scale;
+        const x = Math.floor((canvas.width - drawW) / 2);
+        const y = Math.floor((canvas.height - drawH) / 2);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(sourceCanvas, x, y, drawW, drawH);
+        return true;
+      };
+
+      if (entry.sprite && entry.sprite.dataUrl) {
+        const img = new Image();
+        img.onload = () => {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        };
+        img.src = entry.sprite.dataUrl;
+        return;
+      }
+
+      if (typeof window.createCharacterSpriteCanvas === 'function') {
+        const source = entry.source || { Name: entry.label };
+        const normalizedCharacter = {
+          Name: source.Name || source.name || entry.label || 'Unknown',
+          Sex: source.Sex || source.sex || '',
+          Race: source.Race || source.race || '',
+          Class: source.Class || source.class || '',
+          Level: source.Level || source.level || '',
+          AC: source.AC || source.ac || '',
+          XP: source.XP || source.xp || '',
+          HP: source.HP || source.hp || '',
+          MaxHP: source.MaxHP || source.maxHP || ''
+        };
+        const generated = window.createCharacterSpriteCanvas(normalizedCharacter, entry.sprite && entry.sprite.spec ? entry.sprite.spec : null);
+        if (renderCanvas(generated)) return;
+      }
+
+      ctx.fillStyle = '#222222';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#c8c8c8';
+      ctx.font = '8px monospace';
+      ctx.fillText(String(entry.label || '?').slice(0, 4), 4, Math.floor(canvas.height / 2));
+    }
+
+    function renderPartyIconDock() {
+      const dock = document.getElementById('party-icon-dock');
+      if (!dock) return;
+      const entries = getPartyInfoEntries();
+      if (!entries.length) {
+        dock.innerHTML = '';
+        return;
+      }
+      const activeIndex = Math.max(0, Math.min(entries.length - 1, window._partyPanelIndex || 0));
+      dock.innerHTML = entries.map((entry, index) => {
+        const safeLabel = String(entry.label || `Member ${index + 1}`)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        return `<button class="party-icon-button${index === activeIndex ? ' active' : ''}" onclick="openPartySheet(${index})" title="${safeLabel}">
+          <canvas class="party-icon-canvas" id="party-icon-canvas-${index}" width="28" height="28"></canvas>
+          <span class="party-icon-name">${safeLabel.slice(0, 8)}</span>
+          <span class="party-icon-hp">${entry.hp || '--/--'}</span>
+        </button>`;
+      }).join('');
+      entries.forEach((entry, index) => {
+        drawPartySpriteCanvas(document.getElementById(`party-icon-canvas-${index}`), entry);
+      });
+    }
+
+    function renderPartyInfoPopup() {
+      const nameEl = document.getElementById('party-popup-name');
+      const spriteCanvas = document.getElementById('party-popup-preview-canvas');
+      const sheetEl = document.getElementById('party-popup-sheet');
+      const emptyEl = document.getElementById('party-popup-empty');
+      if (!nameEl || !spriteCanvas || !sheetEl || !emptyEl) return;
+
+      const entries = getPartyInfoEntries();
+      renderPartyIconDock();
+      if (!entries.length) {
+        nameEl.textContent = 'No party data';
+        sheetEl.innerHTML = '';
+        emptyEl.style.display = 'block';
+        drawPartySpriteCanvas(spriteCanvas, null);
+        return;
+      }
+
+      emptyEl.style.display = 'none';
+      const activeIndex = Math.max(0, Math.min(entries.length - 1, window._partyPanelIndex || 0));
+      window._partyPanelIndex = activeIndex;
+      const activeEntry = entries[activeIndex];
+      nameEl.textContent = activeEntry.label || 'Unknown';
+      sheetEl.innerHTML = formatPartySheetHtml(activeEntry);
+      drawPartySpriteCanvas(spriteCanvas, activeEntry);
     }
 
     function updateDungeonTestingButton(enabled) {
@@ -346,7 +762,28 @@ function toggleCombatMode() {
     function updateChatLog(newContent) {
       var chatLog = document.getElementById("chatlog");
       chatLog.innerHTML += newContent;
+      syncGameLogTranscript();
+      syncBackgroundChatLog();
       scrollToBottom();
+    }
+
+    function syncGameLogTranscript() {
+      const chatLog = document.getElementById('chatlog');
+      const gameLog = document.getElementById('game-log-container');
+      if (!chatLog || !gameLog) return;
+      gameLog.innerHTML = chatLog.innerHTML;
+      gameLog.scrollTop = gameLog.scrollHeight;
+    }
+
+    function syncBackgroundChatLog() {
+      const chatLog = document.getElementById('chatlog');
+      const backgroundLog = document.getElementById('chatlog-background-content');
+      if (!chatLog || !backgroundLog) return;
+      backgroundLog.innerHTML = chatLog.innerHTML;
+      const panel = document.getElementById('chatlog-background-panel');
+      if (panel) {
+        panel.scrollTop = panel.scrollHeight;
+      }
     }
   </script>
  <title></title>
@@ -358,53 +795,135 @@ function toggleCombatMode() {
     body {
       background-color: black !important;
       zoom: 175%;
+      overflow: hidden;
     }
     
     #divchatbot {
+      position: fixed;
+      inset: 0;
       width: 100%;
       text-align: center;
-      padding: 10px 0;
-      background-color: #000000;
+      padding: 0;
+      background-color: transparent;
+      z-index: 1200;
+      pointer-events: none;
     }
     
     #chatbotcontainer {
-      border-style: solid;
       position: fixed;
-      bottom: 10px;
-      left: 20%;
-      right: 20%;
+      bottom: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(440px, 42vw);
+      min-width: 280px;
       text-align: center;
-      z-index: 1000;
-      background-color: #000000;
+      z-index: 1210;
+      background-color: rgba(0, 0, 0, 0.86);
+      border: 1px solid #8f8f8f;
+      border-radius: 6px;
+      box-shadow: 0 0 0 1px rgba(210, 210, 210, 0.12) inset, 0 2px 8px rgba(0, 0, 0, 0.55);
       visibility: visible;
-      height: 100%;
-      overflow-y: scroll;
+      height: auto;
+      overflow: hidden;
+      padding: 4px 6px 6px;
+      pointer-events: auto;
+      backdrop-filter: none;
+    }
+
+    #command-popup-header {
+      display: none;
+    }
+
+    #command-popup-title {
+      font-weight: bold;
+    }
+
+    #command-popup-subtitle {
+      font-size: 9px;
+      color: #caa96d;
     }
     
     #chatlog {
+      display: none;
       width: 95%;
       color: #ffffff;
       word-wrap: break-word;
     }
+
+    #chatlog-background-panel {
+      position: fixed;
+      top: 0;
+      left: 20%;
+      right: 20%;
+      bottom: 0;
+      padding: 10px 0 150px;
+      background-color: #000000;
+      color: #ffffff;
+      overflow-y: auto;
+      z-index: 840;
+      box-sizing: border-box;
+      pointer-events: auto;
+    }
+
+    body.dungeon-fullscreen-active #chatlog-background-panel {
+      display: none !important;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #chatlog-background-content {
+      width: 95%;
+      margin: 0 auto;
+      color: #ffffff;
+      word-wrap: break-word;
+    }
+
+    #chatlog-background-content img {
+      max-width: 100%;
+    }
+
+    #game-console {
+      display: none;
+    }
+
+    .character-table {
+      display: none;
+    }
     
     #chatuserinput {
-      font-size: 20px;
-      width: 90%;
+      font-size: 15px;
+      width: 100%;
       word-wrap: break-word;
       height: auto;
-      max-height: 500px;
+      min-height: 24px;
+      max-height: 64px;
       overflow-y: auto;
       resize: vertical;
+      box-sizing: border-box;
+      background: rgba(255, 255, 255, 0.96);
+      color: #000000;
+      border: 1px solid #7f7f7f;
+      border-radius: 0;
+      padding: 4px 6px;
+      font-family: inherit;
     }
     
     #chatbuttons {
-      justify-content: space-around;
-      margin-bottom: 10px;
+      display: block;
+      margin: 0;
+      padding: 4px 0 0;
+      background: transparent;
     }
     
     #chatbotbutton {
-      font-size: 14px;
-      padding: 5px 10px;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 0;
+      border: 1px solid #8f8f8f;
+      background: #f2f2f2;
+      color: #000000;
+      cursor: pointer;
+      box-shadow: none;
     }
     
     #phaser-popup {
@@ -481,6 +1000,254 @@ function toggleCombatMode() {
     
     #phaser-container::-webkit-scrollbar-thumb:hover {
         background-color: lightgrey; /* Lighter grey on hover */
+    }
+
+    #game-log-popup {
+        display: none;
+        position: absolute;
+        top: 5px;
+        left: 220px;
+        width: 260px;
+        height: 300px;
+        background-color: black;
+        color: white;
+        border: 1px solid white;
+        border-radius: 8px;
+        z-index: 1500;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        resize: both;
+        overflow: hidden;
+        padding: 0;
+        margin: 0;
+        box-sizing: border-box;
+        pointer-events: auto;
+    }
+
+    #game-log-header {
+        background-color: #333;
+        color: white;
+        padding: 10px;
+        cursor: grab;
+        font-family: Arial, sans-serif;
+        font-size: 13px;
+        font-weight: bold;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid white;
+    }
+
+    #game-log-container {
+        width: 100%;
+        height: calc(100% - 40px);
+        overflow-y: auto;
+        padding: 10px;
+        font-family: monospace;
+        font-size: 8px;
+        color: white;
+        background-color: black;
+        white-space: normal;
+        box-sizing: border-box;
+        word-wrap: break-word;
+    }
+
+    #game-log-container img {
+        max-width: 100%;
+    }
+
+    #party-icon-dock {
+        position: fixed;
+        left: 8px;
+        bottom: 6px;
+        width: 236px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        z-index: 1135;
+        pointer-events: auto;
+    }
+
+    .party-icon-button {
+        width: 56px;
+        min-height: 54px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: flex-start;
+        gap: 1px;
+        padding: 3px 2px 2px;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+        color: #ededed;
+        box-shadow: none;
+        cursor: pointer;
+    }
+
+    .party-icon-button.active {
+        box-shadow: 0 0 8px rgba(240, 240, 240, 0.18);
+    }
+
+    .party-icon-canvas {
+        width: 28px;
+        height: 28px;
+        image-rendering: pixelated;
+        background: transparent;
+        border: none;
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.75));
+    }
+
+    .party-icon-name,
+    .party-icon-hp {
+        display: block;
+        width: 100%;
+        text-align: center;
+        font-family: monospace;
+        font-size: 7px;
+        line-height: 1.05;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+    }
+
+    .party-icon-hp {
+        color: #d0d0d0;
+    }
+
+    #party-popup {
+        position: fixed;
+        left: 8px;
+        bottom: 120px;
+        width: 260px;
+        min-height: 165px;
+        height: auto;
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+        color: #e7e7e7;
+        z-index: 1145;
+        overflow: visible;
+        pointer-events: auto;
+        backdrop-filter: none;
+    }
+
+    #party-popup-header {
+        position: absolute;
+        top: -12px;
+        right: 0;
+        width: auto;
+        padding: 0;
+        background: transparent;
+        border: none;
+        box-shadow: none;
+        cursor: default;
+        font-family: Arial, sans-serif;
+        pointer-events: none;
+    }
+
+    #party-popup-title,
+    #party-popup-subtitle {
+        display: none;
+    }
+
+    #party-popup-close {
+        background: transparent;
+        color: #f0f0f0;
+        border: none;
+        font-size: 14px;
+        cursor: pointer;
+        padding: 0 2px;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+        pointer-events: auto;
+    }
+
+    #party-popup-body {
+        padding: 0;
+        height: auto;
+        box-sizing: border-box;
+    }
+
+    #party-popup-preview-frame {
+        width: 100%;
+        height: 74px;
+        margin-bottom: 1px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        border: none;
+    }
+
+    #party-popup-preview-canvas {
+        width: 64px;
+        height: 64px;
+        image-rendering: pixelated;
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+    }
+
+    #party-popup-name {
+        font-family: monospace;
+        font-size: 11pt;
+        line-height: 1.05;
+        color: #f0f0f0;
+        text-align: center;
+        margin-bottom: 1px;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+    }
+
+    #party-popup-sheet {
+        max-height: 190px;
+        overflow-y: auto;
+        font-size: 11pt;
+        line-height: 1.08;
+        color: #dcdcdc;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+        padding: 0;
+    }
+
+    #party-popup-empty {
+        font-size: 11pt;
+        color: #d0d0d0;
+        padding: 0;
+        text-align: left;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
+    }
+
+    #party-popup-sheet .npc-data,
+    #party-popup-sheet .party-sheet-content {
+        margin: 0;
+        padding: 0;
+    }
+
+    #party-popup-sheet b {
+        font-weight: bold;
+    }
+
+    #phaser-popup,
+    #game-log-popup,
+    #combat-popup {
+        border: 1px solid #919191;
+        border-radius: 6px;
+        box-shadow: 0 0 0 1px rgba(214, 214, 214, 0.12) inset, 0 2px 6px rgba(0, 0, 0, 0.42);
+        background-image:
+          linear-gradient(135deg, rgba(210, 210, 210, 0.08) 0%, rgba(0, 0, 0, 0) 38%),
+          linear-gradient(315deg, rgba(255, 255, 255, 0.04) 0%, rgba(0, 0, 0, 0) 32%),
+          linear-gradient(180deg, rgba(18, 18, 18, 0.98), rgba(2, 2, 2, 0.98));
+    }
+
+    #phaser-header,
+    #game-log-header,
+    #combat-header {
+        background-image:
+          linear-gradient(135deg, rgba(212, 212, 212, 0.18) 0%, rgba(120, 120, 120, 0.08) 22%, rgba(70, 70, 70, 0.14) 48%, rgba(35, 35, 35, 0.2) 100%),
+          linear-gradient(180deg, #676767, #3f3f3f 58%, #292929);
+        color: #f1f1f1;
+        border-bottom: 1px solid #848484;
+        box-shadow: inset 0 1px 0 rgba(240, 240, 240, 0.18);
+        padding: 8px;
+        font-size: 12px;
     }
     
     .clickable-object {
@@ -751,20 +1518,14 @@ function toggleCombatMode() {
 /* Dungeon first-person viewport popup */
 #dungeon-popup {
   display: none;
-  position: absolute;
-  top: 105px;
-  right: 5px;
-
-  /* New larger viewport */
-  width: 640px;
-  height: 520px;
-
+  position: fixed;
+  inset: 0;
   background-color: black;
   color: white;
   border: 1px solid white;
-  border-radius: 8px;
-  box-shadow: 0 0 20px #400;
-  z-index: 1200;
+  border-radius: 0;
+  box-shadow: none;
+  z-index: 900;
 
   /* Prevent smoothing if browser tries */
   image-rendering: pixelated;
@@ -772,30 +1533,41 @@ function toggleCombatMode() {
 }
 
   #dungeon-header {
-    background-color: #333;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    background: transparent;
     color: white;
-    padding: 8px 10px;
-    cursor: grab;
+    padding: 0;
+    cursor: default;
     font-family: Arial, sans-serif;
     font-size: 13px;
     font-weight: bold;
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-end;
     align-items: center;
-    border-bottom: 1px solid white;
+    border-bottom: none;
+  }
+
+  #dungeon-header span {
+    display: none;
   }
 
   #dungeon-container {
     width: 100%;
-    height: calc(100% - 40px);
+    height: 100%;
     background-color: black;
     overflow: hidden;
   }
   
   #dungeon-container canvas {
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
-}
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
 </style>
 
 </head>
@@ -813,6 +1585,33 @@ function toggleCombatMode() {
     </div>
     <div id="phaser-container"></div>
   </div>
+  <div id="game-log-popup">
+    <div id="game-log-header">
+      Game Log
+      <button onclick="document.getElementById('game-log-popup').style.display = 'none';" style="
+          background: none;
+          color: white;
+          border: none;
+          font-size: 16px;
+          cursor: pointer;">X</button>
+    </div>
+    <div id="game-log-container"></div>
+  </div>
+  <div id="party-popup">
+    <div id="party-popup-header">
+      <div>
+        <div id="party-popup-title">Party Codex</div>
+        <div id="party-popup-subtitle">Selected character sheet</div>
+      </div>
+      <button id="party-popup-close" onclick="togglePartyPopup()">X</button>
+    </div>
+    <div id="party-popup-body">
+      <div id="party-popup-preview-frame"><canvas id="party-popup-preview-canvas" width="56" height="56"></canvas></div>
+      <div id="party-popup-name">No party data</div>
+      <div id="party-popup-sheet"></div>
+      <div id="party-popup-empty">Party members will appear here as soon as the roster is available.</div>
+    </div>
+  </div>
 <div id="combat-popup">
     <div id="combat-header">
         <span>Combat Mode</span>
@@ -823,7 +1622,7 @@ function toggleCombatMode() {
 <div id="dungeon-popup">
   <div id="dungeon-header">
     <span>Dungeon View</span>
-    <button onclick="document.getElementById('dungeon-popup').style.display = 'none';"
+    <button onclick="closeDungeonPopup();"
       style="background:none;color:white;border:none;font-size:16px;cursor:pointer;">
       X
     </button>
@@ -831,7 +1630,12 @@ function toggleCombatMode() {
   <div id="dungeon-container"></div>
 </div>
   <div id="divchatbot">
+    <div id="chatlog-background-panel"><div id="chatlog-background-content"></div></div>
     <div id="chatbotcontainer">
+      <div id="command-popup-header">
+        <div id="command-popup-title">Command</div>
+        <div id="command-popup-subtitle">Direct the party and the dungeon</div>
+      </div>
       <p id="chatlog" align="left"><br><img src="./children-of-the-grave-logo.png" style="width:50%; text-align:center;"><br><img src="./SceneBreak.png" style="width:50%; text-align:center;"><br><br>CHILDREN OF THE GRAVE: Version 1.0<br><br><img src="https://childrenofthegrave.com/test22/Tartarus.png" style="max-width: 100%;"><br><br>You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...<br><br>The game begins in the Ruined Temple. Good luck, adventurer! Type 'Start' with nothing else in the sentence and then choose a game mode from the start menu.</p>
       <div id="game-console">
 </script>
@@ -863,17 +1667,20 @@ function toggleCombatMode() {
     </tr>
   </table>
 </div>
-      <p align="left" style="width: 95%; word-wrap: break-word;"><textarea id="chatuserinput" align="left" placeholder="Type a command" onkeydown="if (event.keyCode == 13) { event.preventDefault(); chatbotprocessinput(); }  ;  if (event.keyCode == 38) { repeatuser(); }" style="width: 100%; min-height: 30px; max-height: 120px; resize: vertical;">start</textarea>
+      <p align="left" style="width: calc(100% - 28px); word-wrap: break-word; margin: 0; padding: 12px 14px 0;"><textarea id="chatuserinput" align="left" placeholder="Type a command" onkeydown="if (event.keyCode == 13) { event.preventDefault(); chatbotprocessinput(); }  ;  if (event.keyCode == 38) { repeatuser(); }" style="width: 100%; min-height: 30px; max-height: 120px; resize: vertical;">start</textarea>
       </p>
-      <div id="chatbuttons"><p align="left">
-        <button type="button" onclick="chatbotprocessinput()" id="chatbotbutton">Command</button></p>
-          <button type="button" onclick="document.getElementById('divchatbot').style.visibility = 'hidden' ; document.getElementById('divchatbotoff').style.visibility = 'visible'" title="" style="visibility:hidden;" id="chatbotbutton"><font size=4>Close</font></button></p>
-
+      <div id="chatbuttons">
+        <p align="left" style="margin:0;">
+          <button type="button" onclick="chatbotprocessinput()" id="chatbotbutton">Command</button>
+        </p>
       </div>
     </div>
   </div>
+  <div id="party-icon-dock"></div>
   
     <button id="open-popup-button" onclick="togglePopup()" style="position: fixed; top: 10px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Game Console</button>
+    <button id="open-game-log-button" onclick="toggleGameLogPopup()" style="position: fixed; top: 10px; left: 105px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Game Log</button>
+    <button id="open-party-button" onclick="togglePartyPopup()" style="position: fixed; top: 10px; left: 187px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Party</button>
     <!-- Physically placed combat mode toggle -->
     
     <div id="combat-mode-toggle" style="position: fixed; top: 40px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 4.75px 6px; border: none; cursor: pointer;">
@@ -885,11 +1692,11 @@ function toggleCombatMode() {
     </div>
     <button id="open-combat-button" onclick="toggleCombatPopup()" style="position: fixed; top: 70px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Combat Map</button>
     <button id="open-dungeon-button" onclick="toggleDungeonPopup()"
-  style="position: fixed; top: 75px; right: 5px; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
+  style="position: fixed; top: 75px; right: 5px; z-index: 1100; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
   Dungeon View
 </button>
     <button id="dungeon-test-button" onclick="toggleDungeonTestingMode()"
-  style="position: fixed; top: 105px; right: 5px; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
+  style="position: fixed; top: 105px; right: 5px; z-index: 1100; background-color: #333; color: white; padding: 5px 10px; border: none; cursor: pointer;">
   Dungeon Test: OFF
 </button>
     <!-- Music control button (hidden until needed) -->

@@ -1634,6 +1634,470 @@ function createCharacterSpriteSheetCanvas(character, spriteSpec = null, frameCou
   return sheet;
 }
 
+function extractCharacterFrameCanvases(character, spriteSpec = null, frameCount = 4) {
+  const sheet = createCharacterSpriteSheetCanvas(character, spriteSpec, frameCount);
+  const frameW = Math.max(1, Math.floor(sheet.height || BASE_SIZE * UPSCALE));
+  const frameH = Math.max(1, Math.floor(sheet.height || BASE_SIZE * UPSCALE));
+  const frames = [];
+  for (let i = 0; i < frameCount; i++) {
+    const frame = createCanvas(frameW, frameH);
+    const ctx = frame.getContext('2d');
+    if (ctx && typeof ctx.drawImage === 'function') {
+      ctx.drawImage(sheet, i * frameW, 0, frameW, frameH, 0, 0, frameW, frameH);
+    }
+    frames.push(frame);
+  }
+  return frames;
+}
+
+function clampVoxelNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function hexToVoxelColor(value, fallback) {
+  const paletteHex = String(value || fallback || '#777777');
+  const m = paletteHex.match(/^#?([0-9a-fA-F]{6})$/);
+  const v = m ? parseInt(m[1], 16) : 0x777777;
+  return [
+    ((v >> 16) & 255) / 255,
+    ((v >> 8) & 255) / 255,
+    (v & 255) / 255
+  ];
+}
+
+function mixVoxelColor(a, b, t) {
+  return [
+    a[0] + (b[0] - a[0]) * t,
+    a[1] + (b[1] - a[1]) * t,
+    a[2] + (b[2] - a[2]) * t
+  ];
+}
+
+function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options = {}) {
+  const spec = spriteSpec || createCharacterSpriteSpec(character);
+  const palette = normalizePalette(spec.palette || {});
+  const parts = spec.parts || {};
+  const design = spec.design || {};
+  const poseName = String(spec.pose || design.pose || '').toLowerCase();
+  const size = Math.max(16, Math.min(32, Math.floor(options.voxelSize || 24)));
+  const baseDepth = Math.max(10, Math.min(16, Math.floor(options.depth || 12)));
+  const mirror = !!options.mirror;
+  const frontDir = mirror ? 1 : -1;
+  const backDir = -frontDir;
+  const voxels = new Uint8Array(size * size * size);
+  const colors = new Float32Array(voxels.length * 3);
+  const indexOf = (x, y, z) => x + y * size + z * size * size;
+
+  const setVoxel = (x, y, z, color) => {
+    const xi = Math.round(x);
+    const yi = Math.round(y);
+    const zi = Math.round(z);
+    if (xi < 0 || yi < 0 || zi < 0 || xi >= size || yi >= size || zi >= size) return;
+    const idx = indexOf(xi, yi, zi);
+    voxels[idx] = 1;
+    colors[idx * 3] = color[0];
+    colors[idx * 3 + 1] = color[1];
+    colors[idx * 3 + 2] = color[2];
+  };
+
+  const fillBox = (x0, x1, y0, y1, z0, z1, color) => {
+    const minX = Math.round(Math.min(x0, x1));
+    const maxX = Math.round(Math.max(x0, x1));
+    const minY = Math.round(Math.min(y0, y1));
+    const maxY = Math.round(Math.max(y0, y1));
+    const minZ = Math.round(Math.min(z0, z1));
+    const maxZ = Math.round(Math.max(z0, z1));
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          setVoxel(x, y, z, color);
+        }
+      }
+    }
+  };
+
+  const drawLine = (x0, y0, z0, x1, y1, z1, thickness, color) => {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const dz = z1 - z0;
+    const steps = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz), 1);
+    const radius = Math.max(0, Math.floor(thickness / 2));
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const px = x0 + dx * t;
+      const py = y0 + dy * t;
+      const pz = z0 + dz * t;
+      fillBox(px - radius, px + radius, py - radius, py + radius, pz - radius, pz + radius, color);
+    }
+  };
+
+  const primary = hexToVoxelColor(palette.primary, '#4a3c2f');
+  const secondary = hexToVoxelColor(palette.secondary, '#8b5a2b');
+  const highlight = hexToVoxelColor(palette.highlight, '#ffdd66');
+  const shadow = hexToVoxelColor(palette.shadow, '#22110a');
+  const skin = hexToVoxelColor(palette.skin, '#e8c39e');
+  const accent = hexToVoxelColor(palette.accent, '#aa3333');
+  const armor = mixVoxelColor(secondary, shadow, 0.12);
+  const cloth = mixVoxelColor(primary, accent, 0.1);
+  const wingBone = mixVoxelColor(secondary, highlight, 0.18);
+  const darkMetal = mixVoxelColor(shadow, secondary, 0.28);
+  const hairColor = mixVoxelColor(highlight, skin, 0.32);
+
+  const headType = String(parts.head || '').toLowerCase();
+  const torsoType = String(parts.torso || '').toLowerCase();
+  const legsType = String(parts.legs || '').toLowerCase();
+  const weaponType = String(parts.weapon || '').toLowerCase();
+  const accessoryType = String(parts.accessory || '').toLowerCase();
+
+  const armorLike = torsoType.includes('plate') || torsoType.includes('gallant') || torsoType.includes('chain');
+  const robeLike = torsoType.includes('robe') || torsoType.includes('dress') || torsoType.includes('flowing') || legsType.includes('flowing');
+  const corsetLike = torsoType.includes('corset');
+  const helmetLike = headType.includes('helm') || headType.includes('helmet') || headType.includes('cowl') || headType.includes('mask');
+  const hairLike = headType.includes('hair') || (!helmetLike && !headType.includes('skull'));
+  const wingLike = accessoryType.includes('wing');
+  const capeLike = accessoryType.includes('cape');
+
+  const targetHeight = Math.floor(size * 0.82);
+  const rawHeadH = clampVoxelNumber(design.head_size, 3, 6, 4);
+  const rawHeadW = clampVoxelNumber(design.head_width, 4, 7, helmetLike ? 6 : 5);
+  const rawTorsoH = clampVoxelNumber(design.torso_height, 4, 7, robeLike ? 5 : 4);
+  const rawTorsoW = clampVoxelNumber(design.torso_width, 4, 8, armorLike ? 6 : 5);
+  const rawLegH = clampVoxelNumber(design.leg_height, 8, 13, 10);
+  const rawLegW = clampVoxelNumber(design.leg_thickness, 2, 4, 3);
+  const rawArmH = clampVoxelNumber(design.arm_length, 4, 7, 5);
+  const rawWeaponLen = clampVoxelNumber(design.weapon_length, 5, 14, 9);
+  const rawStride = clampVoxelNumber(design.stride_amount, 0, 4, 1);
+  const rawArmSwing = clampVoxelNumber(design.arm_swing, -4, 4, 0);
+  const rawCrestH = clampVoxelNumber(design.crest_height, 1, 4, helmetLike ? 2 : 1);
+  const rawRobeFlare = clampVoxelNumber(design.robe_flare, 1, 4, robeLike ? 2 : 1);
+  const rawWingLen = clampVoxelNumber(design.wing_length, 1, 3, wingLike ? 2 : 1);
+  const rawWingBones = clampVoxelNumber(design.wing_bone_count, 3, 6, wingLike ? 4 : 3);
+  const rawCapeFlow = clampVoxelNumber(design.cape_flow, 1, 4, capeLike ? 2 : 1);
+  const scale = Math.min(1.15, Math.max(0.85, targetHeight / Math.max(12, rawHeadH + rawTorsoH + rawLegH + rawCrestH + 1)));
+  const scaleDim = (value, min, max) => Math.max(min, Math.min(max, Math.round(value * scale)));
+
+  let headH = scaleDim(rawHeadH, 3, 6);
+  let headW = scaleDim(rawHeadW, 4, 7);
+  let torsoH = scaleDim(rawTorsoH, 4, 7);
+  let torsoW = scaleDim(rawTorsoW, 4, 8);
+  let legH = scaleDim(rawLegH, 8, 13);
+  let legW = scaleDim(rawLegW, 2, 4);
+  let armH = scaleDim(rawArmH, 4, 7);
+  let weaponLen = scaleDim(rawWeaponLen, 5, 14);
+  let crestH = scaleDim(rawCrestH, 1, 4);
+  const robeFlare = scaleDim(rawRobeFlare, 1, 4);
+  const wingLen = scaleDim(rawWingLen, 1, 4);
+  const wingBones = scaleDim(rawWingBones, 3, 6);
+  const capeFlow = scaleDim(rawCapeFlow, 1, 4);
+
+  if (poseName.includes('idle') || poseName.includes('stand')) {
+    armH = Math.max(4, armH - 1);
+  } else if (poseName.includes('run') || poseName.includes('dash')) {
+    legH = Math.max(8, legH - 1);
+    weaponLen = Math.max(5, weaponLen - 1);
+  } else if (poseName.includes('kneel')) {
+    legH = Math.max(7, legH - 2);
+  }
+
+  const stride = Math.max(0, Math.min(3, Math.round(rawStride)));
+  const armSwing = Math.max(-4, Math.min(4, Math.round(rawArmSwing)));
+  const torsoDepth = Math.max(6, Math.min(10, baseDepth - (robeLike ? 1 : 0) + (armorLike ? 1 : 0)));
+  const limbDepth = Math.max(4, torsoDepth - 1);
+  const headDepth = Math.max(4, torsoDepth - 1);
+  const centerX = Math.floor(size / 2);
+  const centerY = Math.floor(size / 2);
+
+  let legZ0 = 1;
+  let legZ1 = legZ0 + legH - 1;
+  let torsoZ0 = legZ1 - (robeLike ? 1 : 0);
+  let torsoZ1 = torsoZ0 + torsoH - 1;
+  let headZ0 = torsoZ1;
+  let headZ1 = headZ0 + headH - 1;
+  const overflow = headZ1 + crestH + 1 - (size - 2);
+  if (overflow > 0) {
+    legZ0 = Math.max(1, legZ0 - overflow);
+    legZ1 = legZ0 + legH - 1;
+    torsoZ0 = legZ1 - (robeLike ? 1 : 0);
+    torsoZ1 = torsoZ0 + torsoH - 1;
+    headZ0 = torsoZ1;
+    headZ1 = headZ0 + headH - 1;
+  }
+
+  const torsoX0 = centerX - Math.floor(torsoW / 2);
+  const torsoX1 = torsoX0 + torsoW - 1;
+  const torsoY0 = centerY - Math.floor(torsoDepth / 2);
+  const torsoY1 = torsoY0 + torsoDepth - 1;
+
+  fillBox(torsoX0, torsoX1, torsoY0, torsoY1, torsoZ0, torsoZ1, robeLike ? cloth : primary);
+  if (armorLike) {
+    fillBox(torsoX0 - 1, torsoX1 + 1, torsoY0, torsoY1, torsoZ1 - 1, torsoZ1, armor);
+    fillBox(torsoX0, torsoX1, centerY - 1, centerY + 1, torsoZ0 + 1, torsoZ0 + 1, highlight);
+  }
+  if (corsetLike) {
+    fillBox(centerX - 1, centerX + 1, torsoY0, torsoY1, torsoZ0 + 1, torsoZ1 - 1, shadow);
+    fillBox(centerX - 2, centerX + 2, torsoY0, torsoY1, torsoZ0 + 1, torsoZ0 + 1, accent);
+  }
+  if (robeLike) {
+    fillBox(torsoX0 - robeFlare, torsoX1 + robeFlare, torsoY0, torsoY1, legZ0 + Math.max(1, Math.floor(legH * 0.25)), torsoZ0 + 1, cloth);
+    fillBox(torsoX0 - robeFlare + 1, torsoX1 + robeFlare - 1, torsoY0 + 1, torsoY1 - 1, legZ0 + 1, legZ0 + Math.max(2, Math.floor(legH * 0.28)), accent);
+  }
+
+  const shoulderPad = armorLike ? 1 : 0;
+  fillBox(torsoX0 - shoulderPad, torsoX1 + shoulderPad, torsoY0, torsoY1, torsoZ1, torsoZ1, mixVoxelColor(primary, highlight, 0.2));
+
+  const headX0 = centerX - Math.floor(headW / 2);
+  const headX1 = headX0 + headW - 1;
+  const headY0 = centerY - Math.floor(headDepth / 2);
+  const headY1 = headY0 + headDepth - 1;
+  fillBox(headX0, headX1, headY0, headY1, headZ0, headZ1, helmetLike ? armor : skin);
+  if (helmetLike) {
+    fillBox(headX0, headX1, headY0, headY1, headZ1, headZ1, highlight);
+    fillBox(headX0 + Math.max(1, Math.floor(headW * 0.2)), headX1 - Math.max(1, Math.floor(headW * 0.2)), centerY - 1, centerY + 1, headZ0 + 1, headZ0 + 1, shadow);
+    if (headType.includes('gallant') || headType.includes('plumed') || headType.includes('crest')) {
+      fillBox(centerX - 1, centerX + 1, centerY - 1, centerY + 1, headZ1 + 1, Math.min(size - 2, headZ1 + crestH), accent);
+      if (headType.includes('gallant') || headType.includes('plumed')) {
+        drawLine(centerX, centerY, headZ1 + 1, centerX + backDir * 2, centerY, Math.min(size - 2, headZ1 + crestH + 1), 2, highlight);
+      }
+    }
+  } else {
+    const eyeX = frontDir < 0 ? (headX0 + 1) : (headX1 - 1);
+    fillBox(eyeX, eyeX, centerY, centerY, headZ0 + Math.max(1, Math.floor(headH * 0.45)), headZ0 + Math.max(1, Math.floor(headH * 0.45)), shadow);
+    if (hairLike) {
+      fillBox(headX0 - (frontDir < 0 ? 1 : 0), headX1 + (frontDir > 0 ? 1 : 0), headY0, headY1, headZ0 + Math.max(1, Math.floor(headH * 0.55)), headZ1 + (headType.includes('crowned') ? 1 : 0), hairColor);
+      drawLine(headX0 + backDir, centerY, headZ1 - 1, headX0 + backDir * 2, centerY, headZ0 - 1, 1, hairColor);
+    }
+    if (headType.includes('skull') || headType.includes('crowned')) {
+      fillBox(centerX - 1, centerX + 1, centerY - 1, centerY + 1, headZ1 + 1, Math.min(size - 2, headZ1 + crestH), headType.includes('crowned') ? highlight : shadow);
+    }
+  }
+
+  const footColor = armorLike ? darkMetal : secondary;
+  const legColor = armorLike ? armor : secondary;
+  if (legsType.includes('flowing') || robeLike) {
+    fillBox(centerX - Math.floor((torsoW + robeFlare) / 2), centerX + Math.floor((torsoW + robeFlare) / 2), centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, torsoZ0 + 1, cloth);
+    fillBox(centerX - Math.floor((torsoW + robeFlare + 1) / 2), centerX + Math.floor((torsoW + robeFlare + 1) / 2), centerY - Math.floor((limbDepth - 1) / 2), centerY + Math.floor((limbDepth - 1) / 2), legZ0, legZ0 + 1, footColor);
+  } else {
+    const legGap = stride > 0 ? 1 : 0;
+    const legLead = Math.min(2, stride);
+    const frontLegX0 = centerX - legGap - legW;
+    const frontLegX1 = frontLegX0 + legW - 1;
+    const backLegX0 = centerX + legGap;
+    const backLegX1 = backLegX0 + legW - 1;
+    fillBox(frontDir < 0 ? frontLegX0 - legLead : frontLegX0 + legLead, frontDir < 0 ? frontLegX1 - legLead : frontLegX1 + legLead, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ1, legColor);
+    fillBox(backDir < 0 ? backLegX0 - Math.max(0, stride - 1) : backLegX0 + Math.max(0, stride - 1), backDir < 0 ? backLegX1 - Math.max(0, stride - 1) : backLegX1 + Math.max(0, stride - 1), centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ1 - 1, mixVoxelColor(legColor, shadow, 0.14));
+    fillBox(frontDir < 0 ? frontLegX0 - legLead - 1 : frontLegX0 + legLead - 1, frontDir < 0 ? frontLegX1 - legLead + 1 : frontLegX1 + legLead + 1, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ0 + 1, footColor);
+    fillBox(backDir < 0 ? backLegX0 - Math.max(0, stride - 1) - 1 : backLegX0 + Math.max(0, stride - 1) - 1, backDir < 0 ? backLegX1 - Math.max(0, stride - 1) + 1 : backLegX1 + Math.max(0, stride - 1) + 1, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ0 + 1, footColor);
+  }
+
+  const shoulderX = centerX + frontDir * Math.floor((torsoW + 1) / 2);
+  const shoulderZ = torsoZ1 - Math.max(1, Math.floor(torsoH * 0.25));
+  const elbowX = shoulderX + frontDir * Math.max(1, Math.floor(Math.abs(armSwing) * 0.5));
+  const elbowZ = shoulderZ - Math.max(0, armSwing);
+  const handX = shoulderX + frontDir * Math.max(2, Math.floor(torsoW * 0.5) + Math.max(0, stride));
+  const handZ = Math.max(legZ0 + 3, torsoZ0 + Math.floor(torsoH * 0.42) - armSwing);
+  const armColor = armorLike ? armor : secondary;
+  drawLine(shoulderX, centerY + 1, shoulderZ, elbowX, centerY + 1, elbowZ, 2, armColor);
+  drawLine(elbowX, centerY + 1, elbowZ, handX, centerY + 1, handZ, 2, armColor);
+  fillBox(handX - 1, handX, centerY, centerY + 1, handZ - 1, handZ, skin);
+
+  const backShoulderX = centerX + backDir * Math.floor((torsoW + 1) / 2);
+  drawLine(backShoulderX, centerY - 1, shoulderZ, backShoulderX + backDir, centerY - 1, shoulderZ - 3, 1, mixVoxelColor(armColor, shadow, 0.2));
+
+  if (capeLike) {
+    const capeTopX = centerX + backDir * Math.floor((torsoW + 1) / 2);
+    const capeFront = capeTopX + backDir * 2;
+    fillBox(Math.min(capeTopX, capeFront), Math.max(capeTopX, capeFront), centerY - Math.floor((torsoDepth - 2) / 2), centerY + Math.floor((torsoDepth - 2) / 2), torsoZ0 + 1, legZ0 + Math.floor(legH * 0.7), accent);
+    fillBox(Math.min(capeFront, capeFront + backDir * (1 + capeFlow)), Math.max(capeFront, capeFront + backDir * (1 + capeFlow)), centerY - Math.floor((torsoDepth - 3) / 2), centerY + Math.floor((torsoDepth - 3) / 2), legZ0 + Math.floor(legH * 0.2), legZ0 + 1, mixVoxelColor(accent, shadow, 0.16));
+    fillBox(Math.min(capeTopX, capeFront), Math.max(capeTopX, capeFront), centerY - Math.floor((torsoDepth + 1) / 2), centerY - Math.floor((torsoDepth - 1) / 2), torsoZ0 + 2, legZ0 + Math.floor(legH * 0.55), mixVoxelColor(accent, highlight, 0.08));
+  }
+
+  if (wingLike) {
+    const wingBaseX = centerX + backDir * (Math.floor(torsoW / 2) + 1);
+    const wingBaseZ = torsoZ1 - 1;
+    drawLine(wingBaseX, centerY - 1, wingBaseZ, wingBaseX + backDir * (2 + wingLen), centerY - 1, wingBaseZ + Math.max(3, wingLen + 2), 2, wingBone);
+    drawLine(wingBaseX, centerY + 1, wingBaseZ - 1, wingBaseX + backDir * (2 + wingLen), centerY + 1, wingBaseZ + Math.max(2, wingLen + 1), 2, mixVoxelColor(wingBone, shadow, 0.08));
+    for (let i = 0; i < wingBones; i++) {
+      const fanZ = wingBaseZ + 1 + i;
+      const fanX = wingBaseX + backDir * (3 + Math.floor(i * 0.6));
+      drawLine(wingBaseX + backDir, centerY - 1, wingBaseZ + 1, fanX, centerY - 1, fanZ + wingLen, 1, mixVoxelColor(wingBone, highlight, 0.1));
+      drawLine(wingBaseX + backDir, centerY + 1, wingBaseZ, fanX, centerY + 1, fanZ + Math.max(1, wingLen - 1), 1, mixVoxelColor(wingBone, shadow, 0.04));
+    }
+    fillBox(wingBaseX + backDir * 2, wingBaseX + backDir * 2 + 1, centerY - 1, centerY, wingBaseZ - 1, wingBaseZ + 1, mixVoxelColor(wingBone, shadow, 0.1));
+  }
+
+  const weaponY0 = centerY;
+  const weaponY1 = centerY + 1;
+  const haftColor = mixVoxelColor(accent, shadow, 0.22);
+  const bladeColor = mixVoxelColor(highlight, secondary, 0.12);
+  if (weaponType.includes('spear') || weaponType.includes('staff') || weaponType.includes('wand') || weaponType.includes('bow')) {
+    drawLine(handX + frontDir, centerY, handZ, handX + frontDir, centerY, Math.min(size - 2, handZ + weaponLen), 1, haftColor);
+    fillBox(handX + frontDir - 1, handX + frontDir + 1, centerY, centerY, Math.min(size - 2, handZ + weaponLen - 1), Math.min(size - 2, handZ + weaponLen), weaponType.includes('wand') ? highlight : bladeColor);
+  } else if (weaponType.includes('dagger') || weaponType.includes('sword')) {
+    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + Math.max(3, weaponLen - 2)), bladeColor);
+    fillBox(handX + frontDir * 2, handX + frontDir * 2, weaponY0, weaponY1, handZ + 1, Math.min(size - 2, handZ + Math.max(2, weaponLen - 4)), mixVoxelColor(bladeColor, highlight, 0.2));
+    fillBox(handX - 1, handX + 1, weaponY0, weaponY1, handZ - 1, handZ - 1, haftColor);
+  } else if (weaponType.includes('axe')) {
+    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + weaponLen - 2), haftColor);
+    fillBox(handX + frontDir * 2, handX + frontDir * 4, weaponY0, weaponY1, Math.min(size - 2, handZ + weaponLen - 3), Math.min(size - 2, handZ + weaponLen), bladeColor);
+  } else if (weaponType.includes('mace')) {
+    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + weaponLen - 2), haftColor);
+    fillBox(handX + frontDir - 1, handX + frontDir + 1, weaponY0, weaponY1, Math.min(size - 2, handZ + weaponLen - 1), Math.min(size - 2, handZ + weaponLen + 1), secondary);
+  } else if (weaponType.includes('scythe')) {
+    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + weaponLen), haftColor);
+    drawLine(handX + frontDir, centerY, Math.min(size - 2, handZ + weaponLen - 1), handX + frontDir * 4, centerY, Math.min(size - 2, handZ + weaponLen - 3), 1, bladeColor);
+  }
+
+  return {
+    size,
+    voxels,
+    colors
+  };
+}
+
+function voxelizeCharacterFrameCanvas(canvas, options = {}) {
+  const voxelSize = Math.max(12, Math.min(32, Math.floor(options.voxelSize || 24)));
+  const baseDepth = Math.max(4, Math.min(14, Math.floor(options.depth || 10)));
+  const mirror = !!options.mirror;
+  const sourceW = Math.max(1, canvas && canvas.width ? canvas.width : BASE_SIZE * UPSCALE);
+  const sourceH = Math.max(1, canvas && canvas.height ? canvas.height : BASE_SIZE * UPSCALE);
+  const sourcePixelGridW = Math.max(1, Math.min(BASE_SIZE, Math.floor(options.sourcePixelGridW || BASE_SIZE)));
+  const sourcePixelGridH = Math.max(1, Math.min(BASE_SIZE, Math.floor(options.sourcePixelGridH || BASE_SIZE)));
+  const sampleW = sourceW / sourcePixelGridW;
+  const sampleH = sourceH / sourcePixelGridH;
+  const voxels = new Uint8Array(voxelSize * voxelSize * voxelSize);
+  const colors = new Float32Array(voxels.length * 3);
+  const ctx = canvas && typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
+  const imageData = (ctx && typeof ctx.getImageData === 'function')
+    ? ctx.getImageData(0, 0, sourceW, sourceH).data
+    : null;
+  const readPixel = (px, py) => {
+    if (!imageData) return [0, 0, 0, 0];
+    const x = Math.max(0, Math.min(sourceW - 1, px | 0));
+    const y = Math.max(0, Math.min(sourceH - 1, py | 0));
+    const idx = (y * sourceW + x) * 4;
+    return [
+      imageData[idx],
+      imageData[idx + 1],
+      imageData[idx + 2],
+      imageData[idx + 3]
+    ];
+  };
+  const indexOf = (x, y, z) => x + y * voxelSize + z * voxelSize * voxelSize;
+  const spriteGrid = new Uint8Array(sourcePixelGridW * sourcePixelGridH);
+  const spriteColors = new Float32Array(sourcePixelGridW * sourcePixelGridH * 3);
+
+  for (let sy = 0; sy < sourcePixelGridH; sy++) {
+    for (let sx = 0; sx < sourcePixelGridW; sx++) {
+      const srcSX = mirror ? (sourcePixelGridW - 1 - sx) : sx;
+      const x0 = Math.floor(srcSX * sampleW);
+      const x1 = Math.max(x0 + 1, Math.floor((srcSX + 1) * sampleW));
+      const y0 = Math.floor(sy * sampleH);
+      const y1 = Math.max(y0 + 1, Math.floor((sy + 1) * sampleH));
+      let alphaSum = 0;
+      let sampleCount = 0;
+      let rSum = 0;
+      let gSum = 0;
+      let bSum = 0;
+      let opaqueCount = 0;
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          const [r, g, b, a] = readPixel(px, py);
+          alphaSum += a;
+          sampleCount++;
+          if (a > 24) {
+            rSum += r;
+            gSum += g;
+            bSum += b;
+            opaqueCount++;
+          }
+        }
+      }
+      if (!sampleCount || !opaqueCount) continue;
+      const alphaAvg = alphaSum / sampleCount;
+      if (alphaAvg <= 24) continue;
+      const cellIndex = sx + sy * sourcePixelGridW;
+      spriteGrid[cellIndex] = 1;
+      spriteColors[cellIndex * 3] = Math.min(1, Math.max(0, (rSum / opaqueCount) / 255));
+      spriteColors[cellIndex * 3 + 1] = Math.min(1, Math.max(0, (gSum / opaqueCount) / 255));
+      spriteColors[cellIndex * 3 + 2] = Math.min(1, Math.max(0, (bSum / opaqueCount) / 255));
+    }
+  }
+
+  const depthStart = Math.max(0, Math.floor((voxelSize - baseDepth) * 0.5));
+  const depthEnd = Math.min(voxelSize, depthStart + baseDepth);
+  for (let gz = 0; gz < voxelSize; gz++) {
+    const sy = Math.max(0, Math.min(sourcePixelGridH - 1, Math.floor((gz / voxelSize) * sourcePixelGridH)));
+    for (let gx = 0; gx < voxelSize; gx++) {
+      const sx = Math.max(0, Math.min(sourcePixelGridW - 1, Math.floor((gx / voxelSize) * sourcePixelGridW)));
+      const cellIndex = sx + sy * sourcePixelGridW;
+      if (!spriteGrid[cellIndex]) continue;
+      const baseColor = [
+        spriteColors[cellIndex * 3],
+        spriteColors[cellIndex * 3 + 1],
+        spriteColors[cellIndex * 3 + 2]
+      ];
+      const z = voxelSize - 1 - gz;
+      for (let gy = depthStart; gy < depthEnd; gy++) {
+        const voxelIndex = indexOf(gx, gy, z);
+        voxels[voxelIndex] = 1;
+        const depthT = baseDepth > 1 ? (gy - depthStart) / (baseDepth - 1) : 0.5;
+        const shade = 0.98 + (0.04 * (0.5 - Math.abs(depthT - 0.5)));
+        colors[voxelIndex * 3] = Math.min(1, baseColor[0] * shade);
+        colors[voxelIndex * 3 + 1] = Math.min(1, baseColor[1] * shade);
+        colors[voxelIndex * 3 + 2] = Math.min(1, baseColor[2] * shade);
+      }
+    }
+  }
+
+  return {
+    size: voxelSize,
+    voxels,
+    colors
+  };
+}
+
+function createCharacterVoxelFrames(character, spriteSpec = null, options = {}) {
+  const frameCount = Math.max(1, Math.min(8, Math.floor(options.frameCount || 4)));
+  const mode = String(options.mode || 'semantic').toLowerCase();
+  if (mode === 'projected' || mode === 'sprite') {
+    const frames = extractCharacterFrameCanvases(character, spriteSpec, frameCount);
+    return frames.map((frameCanvas) => voxelizeCharacterFrameCanvas(frameCanvas, options));
+  }
+  const baseSpec = spriteSpec || createCharacterSpriteSpec(character);
+  const baseDesign = baseSpec.design || {};
+  const basePose = String(baseSpec.pose || baseDesign.pose || '').toLowerCase();
+  const name = String(character && (character.name || character.Name || '')).toLowerCase();
+  const frames = [];
+  for (let f = 0; f < frameCount; f++) {
+    const t = frameCount > 1 ? f / (frameCount - 1) : 0;
+    const swingWave = Math.cos(t * Math.PI * 2);
+    const strideWave = Math.sin(t * Math.PI * 2);
+    const frameChar = Object.assign({}, character, {
+      _rerollSeed: (character && character._rerollSeed ? character._rerollSeed : 0) + (f * 0.19)
+    });
+    const frameDesign = {
+      ...baseDesign,
+      stride_amount: clampVoxelNumber((baseDesign.stride_amount || 1) + strideWave * (basePose.includes('idle') ? 0.25 : 0.85), 0, 4, 1),
+      arm_swing: clampVoxelNumber((baseDesign.arm_swing || 0) + swingWave * (basePose.includes('cast') ? 0.6 : 1.2), -4, 4, 0),
+      weapon_length: clampVoxelNumber((baseDesign.weapon_length || 9) + (basePose.includes('attack') ? (swingWave > 0 ? 1 : 0) : 0), 5, 14, 9),
+      blade_size: clampVoxelNumber((baseDesign.blade_size || 3) + (swingWave > 0.35 ? 1 : 0), 2, 6, 3)
+    };
+    const frameSpec = {
+      ...baseSpec,
+      pose: baseSpec.pose,
+      design: frameDesign
+    };
+    if (name.includes('suzerain')) {
+      frameSpec.design.arm_swing = clampVoxelNumber((baseDesign.arm_swing || 0) + (swingWave * 0.5), -3, 3, 0);
+      frameSpec.design.stride_amount = clampVoxelNumber((baseDesign.stride_amount || 1) + (strideWave * 0.4), 0, 3, 1);
+    }
+    frames.push(createSemanticCharacterVoxelFrame(frameChar, frameSpec, options));
+  }
+  return frames;
+}
+
 /**
  * Helper for Phaser scenes: registers a generated character as a proper spritesheet texture
  * with named frames + a basic looping animation.
@@ -1715,6 +2179,8 @@ if (typeof module !== 'undefined' && module && module.exports) {
     generateCharacterSprite,
     createCharacterSpriteCanvas,
     createCharacterSpriteSheetCanvas,
+    extractCharacterFrameCanvases,
+    createCharacterVoxelFrames,
     registerAnimatedCharacterSprite,
     createCharacterSpriteSpec,
     _createCanvas: createCanvas
@@ -1725,6 +2191,8 @@ if (typeof window !== 'undefined') {
   window.generateCharacterSprite = generateCharacterSprite;
   window.createCharacterSpriteCanvas = createCharacterSpriteCanvas;
   window.createCharacterSpriteSheetCanvas = createCharacterSpriteSheetCanvas;
+  window.extractCharacterFrameCanvases = extractCharacterFrameCanvases;
+  window.createCharacterVoxelFrames = createCharacterVoxelFrames;
   window.registerAnimatedCharacterSprite = registerAnimatedCharacterSprite;
   window.createCharacterSpriteSpec = createCharacterSpriteSpec;
 }

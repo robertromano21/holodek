@@ -2058,7 +2058,12 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
     },
 
     shouldUseNativeWorld() {
-      return this.mode === 'webgpu' && isNativeWorldEnabled();
+      const legacyHasDynamicActors = !!(
+        this.legacyRenderer
+        && typeof this.legacyRenderer.hasDynamicCharacterVoxels === 'function'
+        && this.legacyRenderer.hasDynamicCharacterVoxels()
+      );
+      return this.mode === 'webgpu' && isNativeWorldEnabled() && !legacyHasDynamicActors;
     },
 
     _ensureTorchBuffers() {

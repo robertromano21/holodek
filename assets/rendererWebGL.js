@@ -205,6 +205,8 @@
     voxelAttribs: {},
     voxelUniforms: {},
     voxelMeshes: {},
+    characterVoxelFrames: {},
+    characterVoxelMeshes: {},
     voxelPaletteKey: null,
     sceneResourceVersion: '',
     sceneCellData: null,
@@ -248,6 +250,187 @@
         wallFallback: this.sceneWallFallback,
         floorFallback: this.sceneFloorFallback
       };
+    },
+
+    _getCharacterVoxelCacheKey(character, facing, frameIndex, opts = {}) {
+      const spec = character && character.sprite && character.sprite.spec ? character.sprite.spec : null;
+      const spriteKey = character && character.sprite && character.sprite.dataUrl ? character.sprite.dataUrl.length : 0;
+      const seed = Number.isFinite(character && character._rerollSeed) ? character._rerollSeed : 0;
+      const specKey = spec ? JSON.stringify(spec) : '';
+      const meshRev = Number.isFinite(window.CHARACTER_VOXEL_MESH_REV) ? window.CHARACTER_VOXEL_MESH_REV : 0;
+      return [
+        character && character.name ? character.name : 'actor',
+        facing || 'left',
+        frameIndex | 0,
+        opts.voxelSize || 24,
+        opts.depth || 8,
+        spriteKey,
+        seed,
+        meshRev,
+        specKey
+      ].join('|');
+    },
+
+    _getCurrentRoomKey() {
+      return (typeof window.currentCoordinates === 'string' && window.currentCoordinates)
+        ? window.currentCoordinates
+        : 'X: 0, Y: 0, Z: 0';
+    },
+
+    _getVisibleCharacterVoxelActors() {
+      const list = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
+      if (typeof window.ensureKnownSpritesInCombatList === 'function' && list.length) {
+        try {
+          window.ensureKnownSpritesInCombatList(list);
+        } catch (e) {}
+      }
+      const roomKey = this._getCurrentRoomKey();
+      return list.filter((entry) => (
+        entry
+        && entry.type !== 'pc'
+        && entry.sprite
+        && entry.sprite.spec
+        && Number.isFinite(entry.mazeX)
+        && Number.isFinite(entry.mazeY)
+        && (!entry.mazeRoomKey || entry.mazeRoomKey === roomKey)
+      ));
+    },
+
+    _getCharacterMazeRenderPosition(actor, now = Date.now()) {
+      if (!actor) return null;
+      if (typeof window.getPartyEntryRenderMazePosition === 'function') {
+        const pos = window.getPartyEntryRenderMazePosition(actor, now);
+        if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) return pos;
+      }
+      if (Number.isFinite(actor.renderMazeX) && Number.isFinite(actor.renderMazeY)) {
+        return { x: actor.renderMazeX, y: actor.renderMazeY };
+      }
+      if (Number.isFinite(actor.mazeX) && Number.isFinite(actor.mazeY)) {
+        return { x: actor.mazeX, y: actor.mazeY };
+      }
+      return null;
+    },
+
+    hasDynamicCharacterVoxels() {
+      return this._getVisibleCharacterVoxelActors().length > 0;
+    },
+
+    _getCharacterVoxelFrameSet(character, facing, opts = {}) {
+      if (typeof window.createCharacterVoxelFrames !== 'function' || !character) return null;
+      const spec = character.sprite && character.sprite.spec ? character.sprite.spec : null;
+      const frameSetKey = this._getCharacterVoxelCacheKey(character, facing, -1, opts);
+      if (!this.characterVoxelFrames[frameSetKey]) {
+        const frames = window.createCharacterVoxelFrames(character, spec, {
+          frameCount: Math.max(1, Math.min(8, Math.floor(opts.frameCount || 4))),
+          voxelSize: opts.voxelSize || 24,
+          depth: opts.depth || 8,
+          mirror: String(facing || 'left').toLowerCase() === 'right'
+        });
+        this.characterVoxelFrames[frameSetKey] = Array.isArray(frames) ? frames : null;
+      }
+      return this.characterVoxelFrames[frameSetKey];
+    },
+
+    _createCharacterGpuMeshRecord(mesh, toneShadow, toneMid, toneHighlight, hints = {}) {
+      const gl = this.gl;
+      const vbo = gl.createBuffer();
+      const ibo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(mesh.vertices), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(mesh.indices), gl.STATIC_DRAW);
+      return {
+        vbo,
+        ibo,
+        count: mesh.indices.length,
+        toneShadow,
+        toneMid,
+        toneHighlight,
+        unlit: hints && Number.isFinite(hints.unlit) ? hints.unlit : 0,
+        toonSteps: hints && Number.isFinite(hints.toonSteps) ? hints.toonSteps : 4,
+        depthOnly: !!(hints && hints.depthOnly),
+        depthTestOnly: !!(hints && hints.depthTestOnly),
+        depthBias: hints && Number.isFinite(hints.depthBias) ? hints.depthBias : 0.0
+      };
+    },
+
+    getCharacterVoxelMesh(character, frameIndex = 0, facing = 'left', opts = {}) {
+      if (!character || !character.sprite || !character.sprite.spec || !this.gl) return null;
+      const cacheKey = this._getCharacterVoxelCacheKey(character, facing, frameIndex, opts);
+      if (this.characterVoxelMeshes[cacheKey]) return this.characterVoxelMeshes[cacheKey];
+      const frames = this._getCharacterVoxelFrameSet(character, facing, opts);
+      if (!frames || frames.length < 1) return null;
+      const frame = frames[Math.abs(frameIndex | 0) % frames.length];
+      if (!frame || !frame.voxels || !frame.colors) return null;
+      const size = frame.size || 24;
+      const palette = character.sprite.spec.palette || {};
+      const parseHexColor = (value, fallback) => {
+        const m = String(value || fallback).match(/^#?([0-9a-fA-F]{6})$/);
+        const v = m ? parseInt(m[1], 16) : fallback;
+        return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
+      };
+      const mixColor = (a, b, t) => [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t
+      ];
+      const shadowBase = parseHexColor(palette.shadow, 0x181818);
+      const primaryBase = parseHexColor(palette.primary, 0x666666);
+      const secondaryBase = parseHexColor(palette.secondary, 0x7d7d7d);
+      const highlightBase = parseHexColor(palette.highlight, 0xcccccc);
+      const skinBase = parseHexColor(palette.skin, 0xd9bf98);
+      const accentBase = parseHexColor(palette.accent, 0xa07050);
+      const toneShadow = mixColor(shadowBase, primaryBase, 0.24);
+      const toneMid = mixColor(primaryBase, secondaryBase, 0.26);
+      const toneHighlight = mixColor(
+        highlightBase,
+        mixColor(skinBase, accentBase, 0.28),
+        0.14
+      );
+      const livelyMid = mixColor(toneMid, accentBase, 0.1);
+      const colorFn = (x, y, z, normal) => {
+        const idx = x + y * size + z * size * size;
+        const base = idx * 3;
+        let r = frame.colors[base] || 0.35;
+        let g = frame.colors[base + 1] || 0.35;
+        let b = frame.colors[base + 2] || 0.35;
+        r = r * 0.95 + livelyMid[0] * 0.05;
+        g = g * 0.95 + livelyMid[1] * 0.05;
+        b = b * 0.95 + livelyMid[2] * 0.05;
+        if (normal[2] > 0.5) {
+          r = Math.min(1, r * 1.08 + toneHighlight[0] * 0.03);
+          g = Math.min(1, g * 1.08 + toneHighlight[1] * 0.03);
+          b = Math.min(1, b * 1.08 + toneHighlight[2] * 0.03);
+        } else if (normal[2] < -0.5) {
+          r = Math.max(0, r * 0.9 + toneShadow[0] * 0.04);
+          g = Math.max(0, g * 0.9 + toneShadow[1] * 0.04);
+          b = Math.max(0, b * 0.9 + toneShadow[2] * 0.04);
+        } else if (normal[0] !== 0) {
+          const sideLift = normal[0] > 0 ? 1.03 : 0.97;
+          r = Math.min(1, Math.max(0, r * sideLift));
+          g = Math.min(1, Math.max(0, g * sideLift));
+          b = Math.min(1, Math.max(0, b * sideLift));
+        } else if (normal[1] !== 0) {
+          const lateralLift = normal[1] > 0 ? 1.04 : 0.98;
+          r = Math.min(1, Math.max(0, r * lateralLift + toneMid[0] * 0.015));
+          g = Math.min(1, Math.max(0, g * lateralLift + toneMid[1] * 0.015));
+          b = Math.min(1, Math.max(0, b * lateralLift + toneMid[2] * 0.015));
+        }
+        return [r, g, b];
+      };
+      const detailMesh = this.greedyMesh(frame.voxels, size, colorFn, { seamPad: 0.04 });
+      const shellMesh = this.meshVoxelsSimple(frame.voxels, size, colorFn, { seamPad: 0.04 });
+      const occlusionMesh = this.meshVoxelsSimple(frame.voxels, size, () => [0.18, 0.18, 0.18], { seamPad: 0.04 });
+      const record = {
+        passes: [
+          this._createCharacterGpuMeshRecord(occlusionMesh, toneShadow, toneMid, toneHighlight, { unlit: 1, depthOnly: true, toonSteps: 3 }),
+          this._createCharacterGpuMeshRecord(shellMesh, toneShadow, toneMid, toneHighlight, { toonSteps: 3, depthTestOnly: true }),
+          this._createCharacterGpuMeshRecord(detailMesh, toneShadow, toneMid, toneHighlight, { toonSteps: 4, depthTestOnly: true, depthBias: -0.00012 })
+        ],
+        _characterKey: cacheKey
+      };
+      this.characterVoxelMeshes[cacheKey] = record;
+      return record;
     },
 
     _requestGpuSimpleVoxelMesh(cacheKey, voxels, size, seamPadValue, color, cylindricalStrength = 0.0) {
@@ -3336,6 +3519,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (popup.style.display !== 'block') {
         popup.style.display = 'block';
       }
+      if (typeof window.setDungeonFullscreenUiState === 'function') {
+        window.setDungeonFullscreenUiState(true);
+      }
 
       const displayW = 640;
       const displayH = 480;
@@ -3817,6 +4003,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       // Sprites/torches pass (billboards in screen space, depth-tested)
       const sprites = [];
       const voxelInstances = [];
+      const actorVoxelInstances = [];
       const webgpuSpriteVoxelRects = [];
       const webgpuTorchSprites = [];
       const webgpuOverlaySprites = [];
@@ -3904,6 +4091,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const TORCH_WIDTH_RATIO = 0.6;
       const TORCH_FLAME_RATIO = 0.4;
       const TORCH_ANCHOR_RATIO = 0.78;
+      const characterVoxelActors = this._getVisibleCharacterVoxelActors();
 
       for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
         for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
@@ -4171,6 +4359,50 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           }
         }
       }
+      for (const actor of characterVoxelActors) {
+        const renderPos = this._getCharacterMazeRenderPosition(actor, Date.now()) || { x: actor.mazeX, y: actor.mazeY };
+        const cellX = Math.round(Number.isFinite(renderPos.x) ? renderPos.x : actor.mazeX);
+        const cellY = Math.round(Number.isFinite(renderPos.y) ? renderPos.y : actor.mazeY);
+        const cell = dungeon.cells?.[`${cellX},${cellY}`] || dungeon.cells?.[`${actor.mazeX},${actor.mazeY}`];
+        if (!cell) continue;
+        const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+        const renderWorldX = renderPos.x + 0.5;
+        const renderWorldY = renderPos.y + 0.5;
+        const relX = renderWorldX - camX;
+        const relY = renderWorldY - camY;
+        const distSq = relX * relX + relY * relY;
+        if (distSq > VIS_RADIUS * VIS_RADIUS) continue;
+        const frameIndex = Number.isFinite(actor.walkFrame) ? Math.abs(actor.walkFrame | 0) % 4 : (Math.floor(now / 220) % 4);
+        const facing = actor.facing || 'left';
+        const mesh = this.getCharacterVoxelMesh(actor, frameIndex, facing, {
+          frameCount: 4,
+          voxelSize: 24,
+          depth: 12
+        });
+        if (!mesh) continue;
+        const design = actor.sprite && actor.sprite.spec && actor.sprite.spec.design ? actor.sprite.spec.design : {};
+        const torsoWidth = Number.isFinite(design.torso_width) ? design.torso_width : 5;
+        const legHeight = Number.isFinite(design.leg_height) ? design.leg_height : 10;
+        const shoulderWidth = Number.isFinite(design.head_width) ? design.head_width : torsoWidth;
+        const modelWidth = Math.max(0.286, Math.min(0.506, (0.24 + shoulderWidth * 0.022) * 1.1));
+        const modelDepth = Math.max(0.154, Math.min(0.308, (0.12 + torsoWidth * 0.015) * 1.1));
+        const modelHeight = Math.max(0.748, Math.min(1.078, (0.56 + legHeight * 0.026) * 1.1));
+        actorVoxelInstances.push({
+          actorName: actor.name,
+          mesh,
+          modelPos: {
+            x: renderWorldX - modelWidth * 0.5,
+            y: renderWorldY - modelDepth * 0.5,
+            z: floorH + 0.01
+          },
+          modelScale: {
+            x: modelWidth,
+            y: modelDepth,
+            z: modelHeight
+          }
+        });
+      }
+      voxelInstances.push(...actorVoxelInstances);
       webgpuOverlaySprites.sort((a, b) => b.depth - a.depth);
       webgpuTorchFlameSprites.sort((a, b) => b.depth - a.depth);
 

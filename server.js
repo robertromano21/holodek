@@ -1,12 +1,11 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const { retortWithUserInput } = require('./retort/retortWithUserInput.js');
+const { retortWithUserInput, runNpcAutonomyTick } = require('./retort/retortWithUserInput.js');
 const sharedState = require('./sharedState');
 const fs = require('fs');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
-//const { renderRoomMusic } = require('./retort/renderAudio');
+const { renderArrangementToWav } = require('./retort/renderAudio');
 const app = express();
 const port = 3000;
 
@@ -104,6 +103,8 @@ app.post('/submit-target2', (req, res) => {
 });
 
 const tasks = new Map();  // { taskId: { status: 'processing', result: null } }
+const NPC_AUTONOMY_TICK_MS = 45000; // changed to 45s; main story simulation now also driven via client chatbotprocessinput(every 45s) with char positions for narrative continuity
+let npcAutonomyTickInFlight = false;
 
 app.post('/processInput7', async (req, res) => {
   // If we're still in the character generation / review phase, don't let the main Retort flow
@@ -128,6 +129,9 @@ app.post('/processInput7', async (req, res) => {
   // Background process
   (async () => {
     try {
+      if (req.body && req.body.liveWorldState !== undefined) {
+        sharedState.setLiveWorldState(req.body.liveWorldState);
+      }
       const combatMode = sharedState.getCombatMode();
       console.log(`Starting retortWithUserInput for taskId ${taskId}`);
       const result = await retortWithUserInput(req.body.userInput, broadcast, combatMode);
@@ -148,7 +152,9 @@ app.post('/processInput7', async (req, res) => {
         roomNameDatabaseString, // Include in response
         currentQuest, // New
         imageUrl: result.imageUrl,
-        musicArrangement: result.musicArrangement || null
+        musicArrangement: result.musicArrangement || null,
+        npcDirectives: Array.isArray(result.npcDirectives) ? result.npcDirectives : [],
+        combatRoundOnly: !!result.combatRoundOnly
       };
       tasks.set(taskId, { 
         status: 'complete', 
@@ -472,7 +478,7 @@ app.get('/poll-task2/:taskId', (req, res) => {
 });
 
 app.post('/updateState7', async (req, res) => {
-    const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest } = req.body; // New: currentQuest
+    const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest, liveWorldState } = req.body; // New: currentQuest
 
     if (personalNarrative !== undefined) sharedState.setPersonalNarrative(personalNarrative);
     if (updatedGameConsole !== undefined) sharedState.setUpdatedGameConsole(updatedGameConsole);
@@ -492,6 +498,9 @@ app.post('/updateState7', async (req, res) => {
     if (currentQuest !== undefined) {
         sharedState.setCurrentQuest(currentQuest); // New: Update currentQuest
         console.log("Updated currentQuest:", currentQuest); // Debug log
+    }
+    if (liveWorldState !== undefined) {
+        sharedState.setLiveWorldState(liveWorldState);
     }
 
     res.json({ message: 'State updated successfully' });
@@ -536,49 +545,31 @@ app.post('/music/commit', async (req, res) => {
     fs.mkdirSync(retortDir, { recursive: true });
     fs.mkdirSync(sidDir, { recursive: true });
 
-    // 1) write current_room.json
     const jsonPath = path.join(retortDir, 'current_room.json');
-    fs.writeFileSync(jsonPath, JSON.stringify(arrangement, null, 2), 'utf8');
-
-    // 2) build SID from JSON
-    const asmOut  = path.join(sidDir, 'current_room.asm');
-    const sidCore = path.join(__dirname, 'assets', 'renderSid_poke.js');
-    const a = spawnSync('node', [sidCore, jsonPath, asmOut], { cwd: __dirname, stdio: 'inherit' });
-    if (a.status !== 0) return res.status(500).json({ error: 'renderSid_poke.js failed' });
-
+    const asmOut = path.join(sidDir, 'current_room.asm');
     const sidPath = path.join(sidDir, 'current_room.sid');
-    if (!fs.existsSync(sidPath)) return res.status(500).json({ error: 'SID not produced' });
-
-    // 3) render WAV (single, robust call)
-    const renderSeconds = 60; // full minute
-    const wavBase = path.join(sidDir, 'current_room'); // no extension here
-    const sidArgs = ['-vp', `-w${wavBase}`, `-t${renderSeconds}`, sidPath];
-    console.log('sidplayfp args:', sidArgs.join(' '));
-    const w = spawnSync('sidplayfp', sidArgs, { stdio: 'inherit' });
-    if (w.status !== 0) return res.status(500).json({ error: 'sidplayfp failed' });
-
-    // Normalize output name: current_room.wav
-    const wav1 = `${wavBase}.wav`;        // desired
-    const wav2 = `${wavBase}.wav.wav`;    // some builds append twice
-    const wav3 = wavBase;                 // rare: no extension
-    try {
-      if (fs.existsSync(wav2)) {
-        if (fs.existsSync(wav1)) { try { fs.unlinkSync(wav1); } catch {} }
-        fs.renameSync(wav2, wav1);
-      } else if (!fs.existsSync(wav1) && fs.existsSync(wav3)) {
-        fs.renameSync(wav3, wav1);
-      }
-    } catch (e) {
-      console.warn('WAV normalize warning:', e);
+    const renderSeconds = 60;
+    const wavBase = path.join(sidDir, 'current_room');
+    const sidCore = path.join(__dirname, 'assets', 'renderSid_poke.js');
+    const { wavPath, renderer } = renderArrangementToWav(arrangement, {
+      jsonPath,
+      asmOut,
+      sidOut: sidPath,
+      outBaseNoExt: wavBase,
+      seconds: renderSeconds,
+      renderJsPath: sidCore,
+      cwd: __dirname,
+    });
+    if (!wavPath || !fs.existsSync(wavPath)) {
+      return res.status(500).json({ error: 'WAV not produced at expected path' });
     }
-    if (!fs.existsSync(wav1)) return res.status(500).json({ error: 'WAV not produced at expected path' });
 
     // 4) broadcast + reply (cache-busted URL for clients)
     const token = Date.now();
     const wavUrl = `/sid/current_room.wav?cb=${token}`;
-    broadcast({ type: 'roomMusicReady', coords: key, wav: wavUrl, token });
+    broadcast({ type: 'roomMusicReady', coords: key, wav: wavUrl, token, renderer });
 
-    return res.json({ ok: true, coords: key, wav: wavUrl });
+    return res.json({ ok: true, coords: key, wav: wavUrl, renderer });
   } catch (err) {
     console.error('POST /music/commit error:', err);
     res.status(500).json({ error: String(err && err.message || err) });
@@ -592,6 +583,27 @@ app.get('/get-room-dungeon', (req, res) => {
   const dungeon = sharedState.getRoomDungeon({ x, y, z });
   res.json({ dungeon: dungeon || null });
 });
+
+// DISABLED: the 45s "space weather" / dungeon sim reports (runNpcAutonomyTick + broadcast) were causing Objects in Room to respawn after equipping/taking items (despite guards in retort).
+// The client-driven 45s via chatbotprocessinput('') was also disabled for the same reason.
+// Re-enable only if autonomous background narrative + NPC movement routines are desired again.
+// setInterval(async () => {
+//   if (npcAutonomyTickInFlight) return;
+//   if (sharedState.isCharacterGenerationInProgress && sharedState.isCharacterGenerationInProgress()) return;
+//   if (!sharedState.getLiveWorldState || !sharedState.getLiveWorldState()) return;
+
+//   npcAutonomyTickInFlight = true;
+//   try {
+//     const update = await runNpcAutonomyTick();
+//     if (update && (update.summary || (Array.isArray(update.dialogue) && update.dialogue.length) || (Array.isArray(update.routines) && update.routines.length))) {
+//       broadcast({ type: 'npcAutonomyUpdate', update });
+//     }
+//   } catch (err) {
+//     console.error('[NPC Autonomy] Loop tick failed:', err);
+//   } finally {
+//     npcAutonomyTickInFlight = false;
+//   }
+// }, NPC_AUTONOMY_TICK_MS);
 
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);

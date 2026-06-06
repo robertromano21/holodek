@@ -5,6 +5,8 @@ let personalNarrative = "";
 let updatedGameConsole = "";
 let roomNameDatabaseString = "";
 let combatCharactersString = "";
+let liveWorldState = null;
+let npcAutonomyFeed = [];
 let combatMode = 'Combat Map-Based';
 let dungeonTestingMode = false;
 let currentQuest = "";
@@ -34,6 +36,17 @@ module.exports = {
   setRoomNameDatabase: (database) => { roomNameDatabaseString = database; },
   getCombatCharactersString: () => combatCharactersString,
   setCombatCharactersString: (characters) => { combatCharactersString = characters; },
+  getLiveWorldState: () => liveWorldState,
+  setLiveWorldState: (state) => { liveWorldState = state || null; },
+  getNpcAutonomyFeed: () => npcAutonomyFeed.slice(),
+  appendNpcAutonomyFeed: (entry) => {
+    if (!entry) return;
+    npcAutonomyFeed.push(entry);
+    if (npcAutonomyFeed.length > 12) {
+      npcAutonomyFeed = npcAutonomyFeed.slice(-12);
+    }
+  },
+  clearNpcAutonomyFeed: () => { npcAutonomyFeed = []; },
   getCombatMode: () => {
     console.log('Current combatMode in sharedState:', combatMode);
     return combatMode;
@@ -111,11 +124,23 @@ module.exports = {
   },
   getLastCoords: () => lastCoords,
   setLastCoords: (coords) => {
-    if (!coords || typeof coords !== 'object' || coords.x === undefined || coords.y === undefined || coords.z === undefined) {
+    if (!coords || typeof coords !== 'object') {
       console.warn('setLastCoords: invalid coords, using default', coords);
       lastCoords = { x: 0, y: 0, z: 0 };
+      return;
+    }
+    // Support both {x,y,z} objects and [x,y,z] arrays for robustness
+    let x, y, z;
+    if (Array.isArray(coords)) {
+      x = coords[0]; y = coords[1]; z = coords[2];
     } else {
-      lastCoords = { x: coords.x, y: coords.y, z: coords.z };
+      x = coords.x; y = coords.y; z = coords.z;
+    }
+    if (x === undefined || y === undefined || z === undefined) {
+      console.warn('setLastCoords: invalid coords (missing x/y/z), using default', coords);
+      lastCoords = { x: 0, y: 0, z: 0 };
+    } else {
+      lastCoords = { x: Number(x), y: Number(y), z: Number(z) };
       console.log('Updated lastCoords:', lastCoords);
     }
   },

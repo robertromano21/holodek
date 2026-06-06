@@ -15,8 +15,6 @@ const fs = require('fs');
 const path = require('path');
 
 
-const { spawnSync } = require('child_process');
-
 const ROOT       = path.join(__dirname, '..');
 const RETORT_DIR = path.join(ROOT, 'retort');
 const SID_DIR    = path.join(ROOT, 'sid');
@@ -93,6 +91,140 @@ function coordsKey(c) {
   return `${x},${y},${z}`;
 }
 
+function sanitizeLiveWorldStateForPrompt(state) {
+  if (!state || typeof state !== 'object') return null;
+  const actors = Array.isArray(state.characters)
+    ? state.characters
+        .slice(0, 16)
+        .map(entry => ({
+          name: entry && entry.name ? String(entry.name) : 'Unknown',
+          type: entry && entry.type ? String(entry.type) : 'npc',
+          roomKey: entry && entry.roomKey ? String(entry.roomKey) : null,
+          maze: (entry && Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY))
+            ? { x: entry.mazeX, y: entry.mazeY }
+            : null,
+          render: (entry && Number.isFinite(entry.renderMazeX) && Number.isFinite(entry.renderMazeY))
+            ? { x: Number(entry.renderMazeX), y: Number(entry.renderMazeY) }
+            : null,
+          facing: entry && entry.facing ? String(entry.facing) : null,
+          behavior: entry && entry.behavior ? String(entry.behavior) : null,
+          pairPartnerName: entry && entry.pairPartnerName ? String(entry.pairPartnerName) : null
+        }))
+    : [];
+  return {
+    roomName: state.roomName || null,
+    roomKey: state.roomKey || null,
+    player: state.player || null,
+    currentConversation: state.currentConversation || '',
+    latestUserInput: state.latestUserInput || '',
+    characters: actors
+  };
+}
+
+function extractNpcDirectivesFromResponse(text) {
+  const raw = String(text || '');
+  const match = raw.match(/\[\[NPC_DIRECTIVES\]\]([\s\S]*?)\[\[\/NPC_DIRECTIVES\]\]/i);
+  if (!match) {
+    return { cleanedText: raw.trim(), npcDirectives: [] };
+  }
+  let npcDirectives = [];
+  try {
+    const parsed = JSON.parse((match[1] || '').trim());
+    if (Array.isArray(parsed)) {
+      npcDirectives = parsed
+        .filter(item => item && typeof item === 'object')
+        .map(item => ({
+          name: item.name ? String(item.name) : '',
+          direction: item.direction ? String(item.direction) : 'stay',
+          intent: item.intent ? String(item.intent) : 'check_in',
+          speakTo: item.speakTo ? String(item.speakTo) : '',
+          note: item.note ? String(item.note) : ''
+        }))
+        .filter(item => item.name);
+    }
+  } catch (err) {
+    console.warn('[NPC Directives] Failed to parse directive block:', err && err.message);
+  }
+  const cleanedText = raw.replace(match[0], '').trim();
+  return { cleanedText, npcDirectives };
+}
+
+function buildNpcAutonomyConsoleExcerpt(updatedGameConsole) {
+  const text = String(updatedGameConsole || '');
+  if (!text) return '';
+  const keepers = [
+    /^Room Name:/i,
+    /^Room Description:/i,
+    /^Coordinates:/i,
+    /^Exits:/i,
+    /^Objects in Room:/i,
+    /^NPCs in Party:/i,
+    /^Monsters in Room:/i,
+    /^Monsters State:/i,
+    /^Puzzle in Room:/i,
+    /^Current Quest:/i
+  ];
+  return text
+    .split(/\r?\n/)
+    .filter(line => keepers.some(pattern => pattern.test(line.trim())))
+    .join('\n');
+}
+
+function getFullNpcAutonomyConsoleReference(updatedGameConsole, maxChars = 8000) {
+  const text = String(updatedGameConsole || '').trim();
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n...[truncated for token budget]`;
+}
+
+function upsertGameConsoleLine(consoleText, label, value) {
+  const source = String(consoleText || '');
+  const line = `${label}: ${value}`;
+  const regex = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:.*$`, 'm');
+  if (regex.test(source)) {
+    return source.replace(regex, line);
+  }
+  return `${source}\n${line}`.trim();
+}
+
+function applyNpcAutonomyConsoleMutations(updatedGameConsole, parsed) {
+  let nextConsole = String(updatedGameConsole || '');
+  const summary = parsed && typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
+  const dialogue = Array.isArray(parsed && parsed.dialogue) ? parsed.dialogue : [];
+  const mutations = Array.isArray(parsed && parsed.consoleMutations) ? parsed.consoleMutations : [];
+
+  if (summary) {
+    nextConsole = upsertGameConsoleLine(nextConsole, 'Party Activity', summary);
+  }
+
+  const dialogueSummary = dialogue
+    .filter(item => item && item.speaker && item.line)
+    .slice(0, 4)
+    .map(item => `${item.speaker}: "${item.line}"`)
+    .join(' | ');
+  if (dialogueSummary) {
+    nextConsole = upsertGameConsoleLine(nextConsole, 'Party Dialogue', dialogueSummary);
+  }
+
+  mutations.forEach(mutation => {
+    if (!mutation || typeof mutation !== 'object') return;
+    const op = String(mutation.op || '').toLowerCase();
+    const value = String(mutation.value || '').trim();
+    if (!value) return;
+    if (op === 'set_monsters_state') {
+      nextConsole = upsertGameConsoleLine(nextConsole, 'Monsters State', value);
+    } else if (op === 'set_current_quest_note') {
+      nextConsole = upsertGameConsoleLine(nextConsole, 'Quest Note', value);
+    } else if (op === 'set_party_activity') {
+      nextConsole = upsertGameConsoleLine(nextConsole, 'Party Activity', value);
+    } else if (op === 'set_party_dialogue') {
+      nextConsole = upsertGameConsoleLine(nextConsole, 'Party Dialogue', value);
+    }
+  });
+
+  return nextConsole;
+}
+
 const characterClasses = [
     { name: 'Knight of Atinus', baseHP: 10 },
     { name: 'Knight of Atricles', baseHP: 12 },
@@ -108,23 +240,29 @@ const characterClasses = [
     // Add other classes here
 ];
 
-const { renderRoomMusic } = require('./renderAudio');
+const { renderArrangementToWav } = require('./renderAudio');
 
 function writeLatestJsonAndRender(musicJson, lengthSec = 60) {
   const jsonPath = path.join(RETORT_DIR, 'current_room.json');
-  fs.writeFileSync(jsonPath, JSON.stringify(musicJson, null, 2), 'utf8');
-
   const asmOut = path.join(SID_DIR, 'current_room.asm');
   const sidOut = path.join(SID_DIR, 'current_room.sid');
+  const { wavPath, renderer, sidOut: builtSidOut } = renderArrangementToWav(musicJson, {
+    jsonPath,
+    asmOut,
+    sidOut,
+    outBaseNoExt: path.join(SID_DIR, 'current_room'),
+    seconds: lengthSec,
+    renderJsPath: RENDER_JS,
+    cwd: ROOT,
+  });
 
-  const a = spawnSync('node', [RENDER_JS, jsonPath, asmOut], { stdio: 'inherit' });
-  if (a.status !== 0) throw new Error('renderSid_poke.js failed');
-  if (!fs.existsSync(sidOut)) throw new Error('.sid not produced');
-
-  // *** Important: pass BASENAME (no .wav) ***
-  const wavPath = renderRoomMusic(sidOut, path.join(SID_DIR, 'current_room'), lengthSec);
-
-  return { wavUrl: `/sid/current_room.wav?ts=${Date.now()}`, jsonPath, sidOut, wavOut: wavPath };
+  return {
+    wavUrl: wavPath ? `/sid/current_room.wav?ts=${Date.now()}` : null,
+    jsonPath,
+    sidOut: builtSidOut,
+    wavOut: wavPath,
+    renderer,
+  };
 }
 
 async function generateImage(prompt) {
@@ -636,6 +774,11 @@ function mapToPlainObject(map) {
 async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode()) {
   console.log('Received combatMode in retortWithUserInput:', combatMode);
 
+  const isAutoSimAdvance = !userInput || String(userInput).trim() === '';
+  if (isAutoSimAdvance) {
+    console.log('[Retort] Auto simulation advance (blank input) - will use short history-driven update in main conversation line.');
+  }
+
   // === Special handling for finalized character from client Save button ===
   // When the client clicks "Save & Continue" on the sprite review menu, it calls /startGameWithCharacter
   // which sends a special input starting with __START_WITH_CHARACTER__ containing the full PC object (with sprite).
@@ -670,6 +813,7 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
     // Use the function to delay fetching the updatedGameConsole
   let updatedGameConsole = await getDelayedUpdatedGameConsole();
   let roomNameDatabaseString = await getDelayedRoomNameDatabase();
+  const liveWorldState = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
 
   if (dungeonTestingMode) {
     console.log('Dungeon testing mode enabled; running dungeon-only pipeline.');
@@ -781,7 +925,7 @@ async function generateDefaultClassification($, currentRoom = null, isSideChambe
 
     // Plain assistant call, no schema/parameters
     try {
-      const response = await $.assistant.generation();
+      const response = await $.assistant.generation({ maxTokens: 80 });
       const content = (response && response.content) ? response.content : '';
 
       // Extract JSON (trim any leading/trailing text if needed)
@@ -842,7 +986,7 @@ async function generateKey($, coordinates, direction) {
   $.model = "gpt-4.1-mini";
   $.temperature = 1.0;
   await $.user`Provide the name and modifiers for a key for a locked door at coordinates ${coordinatesToString(coordinates)} in the direction "${direction}". Respond with ONLY the JSON object in the format: {"name": "Key Name", "type": "key", "attack_modifier": W, "damage_modifier": X, "ac": Y, "magic": Z} where "Key Name" is a simple, unique name (e.g., "Skeleton Key", "Iron Key") and W, X, Y, Z are numbers 0, 1, 2, or 3. Do not include any other text, explanations, or comments before or after the JSON.`;
-  const keyResult = await $.assistant.generation({
+  const keyResult = await $.assistant.generation({ maxTokens: 80,
     parameters: {
       name: {type: String},
       type: {type: String, enum: ["key"]},
@@ -1005,7 +1149,7 @@ async function selectExitStatus($) {
   $.model = "gpt-4.1-mini";
   $.temperature = 1.0;
   await $.user`Choose one of the following exit statuses: locked, blocked, barricaded, sealed. Respond with ONLY the JSON object in the format: {"status": "chosen_status"} where "chosen_status" is one of the options. Do not include any other text, explanations, or comments before or after the JSON.`;
-  const statusResult = await $.assistant.generation({
+  const statusResult = await $.assistant.generation({ maxTokens: 50,
     parameters: {
       status: {type: String, enum: ["locked", "blocked", "barricaded", "sealed"]}
     }
@@ -1150,7 +1294,17 @@ async function syncObjectsOnRoomEntry($, coordinates, roomNameDatabasePlain, upd
   }
   // --- union of names (console + DB) ---
   const dbNames = dbObjs.map(o => o?.name).filter(Boolean);
-  const allNames = [...new Set([...existingNames, ...dbNames])];
+  // Actively exclude any names that are currently in the player's Inventory (they were taken/equipped).
+  // This prevents "respawning" of equipped items in the Objects in Room list due to sticky
+  // union from previous console lines. The 45s auto ticks skip this sync entirely (see guard
+  // in seedAndManageQuest and main flow), so they no longer affect objects state.
+  const invLine = (updatedGameConsole.match(/^Inventory:\s*(.*)$/mi)?.[1] || '').trim();
+  const invLower = new Set(
+    invLine && !/^none$/i.test(invLine)
+      ? invLine.split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+      : []
+  );
+  const allNames = [...new Set([...existingNames, ...dbNames])].filter(nm => !invLower.has(String(nm).toLowerCase()));
   // --- build props preferring DB, fallback console, else zeros ---
   const propsList = allNames.map(nm => {
     const dbObj = dbObjs.find(o => (o?.name === nm));
@@ -1251,7 +1405,8 @@ async function getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom
     }
 
     // Always refresh "latest" outputs and WAV
-    const { wavUrl } = writeLatestJsonAndRender(musicJson);
+    const { wavUrl, renderer } = writeLatestJsonAndRender(musicJson);
+    console.log(`Room music rendered for ${key} via ${renderer}`);
 
     return { musicJson, wavUrl, isNew: !sharedState.getRoomMusicWasHit, key, coords: c };
   } catch (err) {
@@ -1438,7 +1593,7 @@ async function generateSidArrangement($, variationToken, roomContext = {}) {
     let lastErr="";
     for (let attempt=0; attempt<=maxRetries; attempt++){
       $.user(prompt + (lastErr ? `\n${fixLabel}\n${lastErr}\nReturn ONLY JSON.` : "\nReturn ONLY JSON."));
-      const reply = await $.assistant.generation();
+      const reply = await $.assistant.generation({ maxTokens: 120 });
       const raw = (reply && reply.content || "").trim();
       const jsonStr = (()=>{ // allow fenced JSON fallback
         try {
@@ -1818,7 +1973,7 @@ console.log("personalNarrative:", personalNarrative);
             // Ask GPT if the monsters attack
             await $.user`The monsters are ${monstersState}. Do they "Attack" or "Doesn't Attack Yet"? Respond with only one of these words.`;
 
-            const attackDecisionResult = await $.assistant.generation({
+            const attackDecisionResult = await $.assistant.generation({ maxTokens: 40,
                 parameters: {
                     attack_decision: {type: String, enum: ["Attack", "Doesn't Attack Yet"]}
                 }
@@ -1874,7 +2029,7 @@ async function sanitizeImage($) {
     await $.user`Please rewrite the following prompt and remove only those parts that violate OpenAI's content policies for DALL-E 3, and otherwise reprint the rest of the prompt verbatim:\n\n${truncatedResponse}`;
     
     // Get the sanitized response
-    const sanitizedResult = await $.assistant.generation();
+    const sanitizedResult = await $.assistant.generation({ maxTokens: 2000 });
     
     // Ensure the sanitized response is assigned to the sanitizedResponse variable
     sanitizedResponse = sanitizedResult.content.trim();
@@ -2041,7 +2196,7 @@ if (currentCoordinatesMatch) {
         $.temperature = 1.0;
         await $.user`Choose how the monsters' state should be determined: "Random" or "Non-Random". Respond with ONLY the JSON object in the format: {"state_choice": "X"} where X is "Random" or "Non-Random". No explanations, comments, or text before or after the JSON.`;
 
-        const stateChoiceResult = await $.assistant.generation({
+        const stateChoiceResult = await $.assistant.generation({ maxTokens: 40,
             parameters: {
                 state_choice: { type: String, enum: ["Random", "Non-Random"] }
             }
@@ -2085,7 +2240,7 @@ if (currentCoordinatesMatch) {
             $.temperature = 1.0;
             await $.user`Choose the monsters' state: "Friendly", "Neutral", or "Hostile". Respond with ONLY the JSON object in the format: {"monster_state": "X"} where X is "Friendly", "Neutral", or "Hostile". No explanations, comments, or text before or after the JSON.`;
 
-            const stateResult = await $.assistant.generation({
+            const stateResult = await $.assistant.generation({ maxTokens: 40,
                 parameters: {
                     monster_state: { type: String, enum: ["Friendly", "Neutral", "Hostile"] }
                 }
@@ -2127,7 +2282,7 @@ if (currentCoordinatesMatch) {
         $.temperature = 1.0;
         $.system`Room Name: ${roomName} Room Description: ${roomDescription}`;
         await $.assistant`Generate a fantasy race and class for an intelligent or unintelligent animal, monster, spirit or other NPC in ${roomName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, formatted exactly as 'Race: [race], Class: [class] and nothing else with no line breaks.'`;
-        const raceClassResult = await $.assistant.generation();
+        const raceClassResult = await $.assistant.generation({ maxTokens: 30 });
         console.log("Race and Class Result:", raceClassResult);
 
         if (!raceClassResult || !raceClassResult.content) {
@@ -2151,7 +2306,7 @@ if (currentCoordinatesMatch) {
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
         await $.assistant`Generate a name for a ${randomSex} monster of the race ${generatedRace} and class ${generatedClass}.`;
-        const nameResult = await $.assistant.generation();
+        const nameResult = await $.assistant.generation({ maxTokens: 30 });
         console.log(nameResult);
 
         if (!nameResult || !nameResult.content) {
@@ -2212,7 +2367,7 @@ if (currentCoordinatesMatch) {
                 $.model = "gpt-4.1-mini";
                 $.temperature = 1.0;
                 await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure. The object should be all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType}.`;
-                const objectResult = await $.assistant.generation();
+                const objectResult = await $.assistant.generation({ maxTokens: 30 });
                 const objectName = objectResult.content.trim().toLowerCase();
 
                 const object = { name: objectName, type: objectType };
@@ -2307,7 +2462,7 @@ async function generateRoomObjects($, roomName, roomDescription) {
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
         await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure for the ${roomName}, with the object all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType} Room Description: ${roomDescription} If the object type is other, it might be a type of treasure that is wearable, a jewel, an orb, a relic or something readable like a scroll or tome. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-        const objectResult = await $.assistant.generation();
+        const objectResult = await $.assistant.generation({ maxTokens: 30 });
         const objectName = objectResult.content.trim().toLowerCase();
         objects.push({ name: objectName, type: objectType });
     }
@@ -2333,7 +2488,7 @@ async function generateObjectModifiers($, object) {
     $.temperature = 1.0;
     await $.user`Provide the modifiers for "${objectName}" which is a ${objectType}. Respond with ONLY the JSON object in the format: {"attack_modifier": W, "damage_modifier": X, "ac": Y, "magic": Z} where W, X, Y, Z are numbers 0, 1, 2, or 3. Do not include any other text, explanations, or comments before or after the JSON.`;
 
-    const modifiersResult = await $.assistant.generation({
+    const modifiersResult = await $.assistant.generation({ maxTokens: 60,
         parameters: {
             attack_modifier: {type: Number, enum: [0, 3, 4, 5]},
             damage_modifier: {type: Number, enum: [0, 4, 5, 6]},
@@ -2524,7 +2679,7 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredT
     Keep JSON valid. No comments, no markdown, no extra text.
   `;
 
-  const tilesResult = await $.assistant.generation({
+  const tilesResult = await $.assistant.generation({ maxTokens: 400, 
     parameters: {
       tiles: {
         type: Object,
@@ -2942,7 +3097,7 @@ ${roomDescription}
   `;
 
     // No parameters: just get raw JSON text and parse it ourselves.
-    const styleResult = await $.assistant.generation();
+    const styleResult = await $.assistant.generation({ maxTokens: 300 });
     
     // Retort returns either { content } or { result } depending on mode
     const raw = styleResult.content || String(styleResult.result || '');
@@ -3065,7 +3220,7 @@ Rules:
   - If a puzzle is present, express it as volumes/prefabs/props.
 JSON only.`;
 
-  const result = await $.assistant.generation();
+  const result = await $.assistant.generation({ maxTokens: 350 });
   const raw = result.content || String(result.result || '');
   const firstBrace = raw.indexOf('{');
   const lastBrace = raw.lastIndexOf('}');
@@ -4646,7 +4801,7 @@ async function determineArtifactType($, nextArtifact) {
     $.temperature = 1.0;
     await $.user`Determine the type of the artifact named "${nextArtifact}". The possible types are: weapon, armor, shield, or other. Respond with only the type.`;
 
-    const typeResult = await $.assistant.generation({
+    const typeResult = await $.assistant.generation({ maxTokens: 40,
         parameters: {
             type: { type: String, enum: ["weapon", "armor", "shield", "other"] }
         }
@@ -4728,7 +4883,7 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.0;
     await $.assistant`Generate a fantasy race and class for a powerful boss character named ${bossName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise), high magical beings, and other entities of pure energy and form, angels, powerful demons. Format exactly as 'Race: [race], Class: [class]' and nothing else with no line breaks.`;
-    const raceClassResult = await $.assistant.generation();
+    const raceClassResult = await $.assistant.generation({ maxTokens: 30 });
     console.log("Race and Class Result:", raceClassResult);
 
     if (!raceClassResult || !raceClassResult.content) {
@@ -4787,7 +4942,7 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
         await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure. The object should be all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType}.`;
-        const objectResult = await $.assistant.generation();
+        const objectResult = await $.assistant.generation({ maxTokens: 30 });
         const objectName = objectResult.content.trim().toLowerCase();
 
         const object = { name: objectName, type: objectType };
@@ -5292,7 +5447,7 @@ Narrative Guidelines
 Backend Integration: Programmatic vs. Narrative Handling`;
         
     //    await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the current room taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore. The underworld plane, Tartarus, which includes the Ruined Temple's many rooms, and outside of which is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-  //      const generationResultName = await $.assistant.generation();
+  //      const generationResultName = await $.assistant.generation({ maxTokens: 40 });
   //      roomName = generationResultName.content.trim();
   //      updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${roomName}`);
 
@@ -5301,7 +5456,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
 // Generate room description
     // Generate room description (only when missing)
     await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
-    const generationResultDescription = await $.assistant.generation();
+    const generationResultDescription = await $.assistant.generation({ maxTokens: 220 });
     roomDescription = generationResultDescription.content.trim();
     updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${roomDescription}`);
     roomDescriptionGenerated = true;
@@ -5384,13 +5539,13 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
       await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} leading to the wastelands of Tartarus. This room is an outdoor area away from the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
-      const generationResultName = await $.assistant.generation();
+      const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
     } else if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length < 2) {
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
       await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
-      const generationResultName = await $.assistant.generation();
+      const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
     }
     for (const exit of roomExitsArray.slice(1)) {
@@ -5398,7 +5553,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
         await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the ${roomName} to the ${exit} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
-        const generationResultName = await $.assistant.generation();
+        const generationResultName = await $.assistant.generation({ maxTokens: 40 });
         newAdjacentRooms[exit] = generationResultName.content.trim();
       }
     }
@@ -5725,12 +5880,12 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       $.user`FYI: For puzzle, tie to variability seed—vary type (e.g., ${diversitySeed}). Limit to 1 para; subvert history motif. Await.`;
 
       await $.assistant`Generate a detailed description of the room's environment and architecture for ${roomName}, weaving in elements of its ecology (e.g., flora, fauna, natural processes), economy (e.g., remnants of trade, resources, societal structures), and archaeology (e.g., ancient ruins, historical artifacts tied to the underworld's lore). Ensure this fits seamlessly with the existing room description, enhancing the narrative flow as the characters explore to advance the current quest and ultimately reclaim the Sepulchra to restore balance to the underworld. Only reference existing NPCs or monsters from the game console, describing any ongoing events, interactions (without dialogue), puzzles, riddles, or obstacles—but do not generate new characters, portable objects, or conversations. Include subtle, built-in hints about underlying events or mysteries (e.g., faint echoes suggesting forgotten rituals), but never reveal solutions. Make the description strange, unusual, and thought-provoking by drawing from surreal inspirations like infinite labyrinths or psychological distortions, varying themes to differentiate this room (e.g., if previous rooms were desolate, make this one vibrant yet corrupted). Incorporate multi-sensory details (sights, sounds, smells, textures) for immersion, and tailor the situation to the player and characters' context, such as information-gathering via clues, research through inscriptions, geographical navigation challenges, resource management dilemmas, logic puzzles, cryptographic symbols, or opportunities for exploiting/persuading existing monsters/NPCs. Output as a single, flowing paragraph with no line breaks, avoiding the word "you" and focusing on third-person narrative that advances the story's tension. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn). - Dilemma cap: 1 moral hook per puzzle (e.g., 'does truth bind or free?'—vary phrasing, no 'reclamation' echoes).`;
-      const puzzleDescriptionResponse = await $.assistant.generation();
+      const puzzleDescriptionResponse = await $.assistant.generation({ maxTokens: 280 });
       puzzleInRoom = puzzleDescriptionResponse.content.trim();
       environmentDescription = puzzleInRoom;
 
       await $.user`Suggest exhaustion limit (2-6) for ${roomName} based on description complexity, lore, and features: ${puzzleInRoom}. Respond JSON: {"exhaustionLimit": int}.`;
-      const limitResp = await $.assistant.generation();
+      const limitResp = await $.assistant.generation({ maxTokens: 60 });
       let limitParsed;
       try {
         limitParsed = JSON.parse(limitResp.content || "{}");
@@ -5755,7 +5910,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.2;
       await $.assistant`Generate a puzzle or non-combat challenge (e.g., riddle, mechanical obstacle, social persuasion, environmental hazard, logic dilemma, cryptographic clue, or resource management task) and its solution for the room named ${roomName}, ensuring it draws directly from the room's environment, architecture, ecology, economy, or archaeology. Make the challenge strange, unusual, and thought-provoking by incorporating surreal or lore-inspired twists (e.g., echoing the underworld's imbalance or Mortacia's fading judgment), varying types to differentiate from previous rooms in the conversation history (e.g., if past puzzles were symbol-based, opt for persuasion or multi-step exploration). Keep it challenging yet resolvable with clear, engaging logic; the resolution should be satisfying, logical, somewhat simple, and tied to player actions like using carried items, conversing or persuading existing monsters/NPCs, or speaking specific words/phrases—include subtle hints in the description but never reveal the solution outright. Infuse multi-sensory details and narrative hooks for immersion, advancing the current quest toward reclaiming the Sepulchra while building tension through potential consequences or lore revelations upon resolution. Output in a single paragraph with no line breaks, avoiding the word "you," formatted as a description integrating the challenge into the room's narrative and clear steps for resolution. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn).`;
-      const puzzleSolutionResponse = await $.assistant.generation();
+      const puzzleSolutionResponse = await $.assistant.generation({ maxTokens: 280 });
       puzzleSolution = puzzleSolutionResponse.content.trim();
 
       if (puzzleInRoom && puzzleSolution) {
@@ -5903,6 +6058,20 @@ async function pruneAndDedupeRoomObjectsOnEntry($, coordKey, roomNameDatabasePla
       // Mark and drop from current room so it won't reappear
       o.taken = true;
       changed = true;
+      // Also strip the name from the current Objects in Room line in the console text
+      // (so the list doesn't "respawn" or stay duplicated with Inventory after equip/take).
+      // The sync later will also enforce via filter, and 45s autos skip prune entirely.
+      try {
+        const nm = String(o.name || '');
+        const nameEsc = nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        updatedGameConsole = String(updatedGameConsole || '').replace(
+          new RegExp(`\\b${nameEsc}\\b\\s*,?\\s*`, 'gi'),
+          ''
+        ).replace(/Objects in Room:\s*,/gi, 'Objects in Room: ')
+         .replace(/,\s*,/g, ',')
+         .replace(/Objects in Room:\s*$/mi, 'Objects in Room: None')
+         .replace(/Objects in Room:\s*,\s*/i, 'Objects in Room: ');
+      } catch (e) {}
       continue;
     }
 
@@ -5941,6 +6110,7 @@ async function pruneAndDedupeRoomObjectsOnEntry($, coordKey, roomNameDatabasePla
     roomNameDatabasePlain[coordKey] = room;
     sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
   }
+  return updatedGameConsole;  // may have had names stripped from Objects line for taken items
 }
 
 // --- ROOM ENSURER (preserves everything) ---
@@ -6144,31 +6314,36 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
     }
   }
   // ---------- console & DB ----------
+  // Skip prune/sync for auto 45s sim advances (blank input) so background ticks don't alter
+  // objects/inventory/keys state or cause "Objects in Room" to reset via DB sync.
+  const isAutoForSeed = !userInput || String(userInput).trim() === '';
   let consoleText = (typeof updatedGameConsole === 'string' ? updatedGameConsole : '') || '';
   if (!consoleText) { try { consoleText = sharedState.getUpdatedGameConsole() || ''; } catch {} }
   updatedGameConsole = consoleText;
   let roomNameDatabasePlain;
   try { roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase() || "{}"); }
   catch { roomNameDatabasePlain = {}; }
-  // Canonicalize once per turn to merge rogue keys
-  roomNameDatabasePlain = canonicalizeRoomDb(roomNameDatabasePlain);
-  // Ensure the start room never loses its name
-  ensureRoom(roomNameDatabasePlain, "0,0,0", { name: "Ruined Temple Entrance" });
-  const coordMatch = consoleText.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
-  const currentCoords = coordMatch
-    ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
-    : { x: 0, y: 0, z: 0 };
-  const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
-  // After ensureRoom(...) + setRoomNameDatabase(...), compute currentRoomKey
-  ensureRoom(roomNameDatabasePlain, currentRoomKey);
-  sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
-  // NEW: prune keys/objects so taken ones never reappear
-  await pruneAndDedupeRoomObjectsOnEntry($, currentRoomKey, roomNameDatabasePlain, updatedGameConsole);
-  // Then do your syncs (they now read the cleaned DB and won't re-add taken keys)
-  updatedGameConsole = await syncObjectsOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
-  updatedGameConsole = await syncKeysOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
-  updatedGameConsole = await syncMonstersOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
-  sharedState.setUpdatedGameConsole(updatedGameConsole);
+  if (!isAutoForSeed) {
+    // Canonicalize once per turn to merge rogue keys
+    roomNameDatabasePlain = canonicalizeRoomDb(roomNameDatabasePlain);
+    // Ensure the start room never loses its name
+    ensureRoom(roomNameDatabasePlain, "0,0,0", { name: "Ruined Temple Entrance" });
+    const coordMatch = consoleText.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
+    const currentCoords = coordMatch
+      ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
+      : { x: 0, y: 0, z: 0 };
+    const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
+    // After ensureRoom(...) + setRoomNameDatabase(...), compute currentRoomKey
+    ensureRoom(roomNameDatabasePlain, currentRoomKey);
+    sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+    // NEW: prune keys/objects so taken ones never reappear
+    updatedGameConsole = await pruneAndDedupeRoomObjectsOnEntry($, currentRoomKey, roomNameDatabasePlain, updatedGameConsole) || updatedGameConsole;
+    // Then do your syncs (they now read the cleaned DB and won't re-add taken keys)
+    updatedGameConsole = await syncObjectsOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
+    updatedGameConsole = await syncKeysOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
+    updatedGameConsole = await syncMonstersOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
+    sharedState.setUpdatedGameConsole(updatedGameConsole);
+  }
   let currentTasks = sharedState.getCurrentTasks() || [];
   let currentTaskIndex = sharedState.getCurrentTaskIndex() || 0;
   const allCoords = Object.keys(roomNameDatabasePlain);
@@ -6402,7 +6577,7 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
     }
     // 1) Decide how many elements are REQUIRED TO COMPLETE the step
     await $.user`How many required elements (0–3) are needed to COMPLETE the next quest step? These are world elements the player must use/defeat/deliver to finish the step (not just to begin it). Respond ONLY {"count": N} with N in {0,1,2,3}.`;
-    const reqCountResp = await $.assistant.generation({
+    const reqCountResp = await $.assistant.generation({ maxTokens: 50,
       parameters: { count: { type: Number, enum: [0, 1, 2, 3] } }
     });
     let countParsed = 0;
@@ -6419,13 +6594,13 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
     const npcExcludeSet = new Set(partyNpcNames.map(n => n.toLowerCase()));
     for (let i = 0; i < reqCount; i++) {
       await $.user`For required element ${i + 1} of ${reqCount}, provide ONLY {"type":"X"} where X ∈ {"object","key","monster"} (non-boss). NEVER pick party NPCs as monsters: ${partyNpcNames}. If monsters are in the current room (${monstersInRoom}), strongly prefer "monster" to incorporate them.`;
-      const typeRespEl = await $.assistant.generation({
+      const typeRespEl = await $.assistant.generation({ maxTokens: 50,
         parameters: { type: { type: String, enum: ["object", "key", "monster"] } }
       });
       const elType = (parseOnlyJson(typeRespEl.content, { type: "object" }).type || "object").toLowerCase();
       const enumList = (preferElsewhere && coordsExceptCurrent.length) ? coordsExceptCurrent : allCoords;
       await $.user`Pick the placement coordinates from this list: ${enumList.join(', ')}. If the element is a monster and there are monsters here, prefer the current room ${currentRoomKey}. Respond ONLY {"placement":"x,y,z"} using one of them.`;
-      const placeRespEl = await $.assistant.generation({
+      const placeRespEl = await $.assistant.generation({ maxTokens: 50,
         parameters: { placement: { type: String, enum: enumList } }
       });
       let placement = (parseOnlyJson(placeRespEl.content, { placement: currentRoomKey }).placement || currentRoomKey).trim();
@@ -6503,7 +6678,7 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
         // As a last resort, ask GPT to provide a monster name NOT in the excluded set
         if (!firstName || firstName === "Unknown" || npcExcludeSet.has(firstName.toLowerCase())) {
           await $.user`Provide ONLY {"name":"X"} where X is a unique monster name appropriate for ${(room.name || 'the room')} that is NOT any of: ${partyNpcNames.join(', ') || '(none)'} and not a party member.`;
-          const nresp = await $.assistant.generation({ parameters: { name: String } });
+          const nresp = await $.assistant.generation({ maxTokens: 40, parameters: { name: String } });
           firstName = (parseOnlyJson(nresp.content, { name: "shade revenant" }).name || "shade revenant").toString();
         }
         requiredElementsStrings.push(`monster|${firstName}|${placement}`);
@@ -6528,14 +6703,14 @@ elementsJson=${JSON.stringify(actualElements)}
 NEVER select party NPCs as targets or monsters. Party NPCs: ${getNpcPartyNames(updatedGameConsole).join(', ') || '(none)'}.
 Pick the best task type from: "fetch","defeat","deliver","investigate","negotiate","puzzle","protect","hybrid".
 Respond ONLY {"type":"X"}.`;
-    const typeResp = await $.assistant.generation({
+    const typeResp = await $.assistant.generation({ maxTokens: 50,
       parameters: { type: { type: String, enum: ["fetch","defeat","deliver","investigate","negotiate","puzzle","protect","hybrid"] } }
     });
     const pickedTypeRaw = (parseOnlyJson(typeResp.content, { type: "hybrid" }).type || "hybrid").toLowerCase();
     const pickedType = titleCase(pickedTypeRaw);
     await $.user`Pick the primary action the player must perform to COMPLETE the step (beyond prerequisites), given those elements.
 Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} with X ∈ {"unlock_exit","defeat_monster","deliver_item","solve_puzzle","investigate","negotiate","protect","other"}.`;
-    const actResp = await $.assistant.generation({
+    const actResp = await $.assistant.generation({ maxTokens: 50,
       parameters: { actionKind: { type: String, enum: ["unlock_exit","defeat_monster","deliver_item","solve_puzzle","investigate","negotiate","protect","other"] } }
     });
     let actionKind = (parseOnlyJson(actResp.content, { actionKind: "other" }).actionKind || "other").toString();
@@ -6549,13 +6724,13 @@ elementsJson=${JSON.stringify(actualElements)}
 Party NPCs remain allies; do not cast them as enemies.
 Respond ONLY {"desc":"..."}.
 `;
-    const descResp = await $.assistant.generation({ parameters: { desc: String } });
+    const descResp = await $.assistant.generation({ maxTokens: 80, parameters: { desc: String } });
     const desc = (parseOnlyJson(descResp.content, { desc: "Proceed." }).desc || "Proceed.").toString();
     await $.user`Define concise "metrics" to decide COMPLETION of this "${pickedType}" step, based ONLY on game console facts (e.g., items in Inventory, monster HP=0, door opened).
 These elements are REQUIRED TO COMPLETE the step. Party NPCs must NOT be used as monsters or targets.
 Respond ONLY {"metrics":"..."}.
 `;
-    const metricsResp = await $.assistant.generation({ parameters: { metrics: String } });
+    const metricsResp = await $.assistant.generation({ maxTokens: 80, parameters: { metrics: String } });
     const metrics = (parseOnlyJson(metricsResp.content, { metrics: "Complete condition met" }).metrics || "Complete condition met").toString();
     const hardRequirements = buildHardRequirements(pickedType, actualElements);
     const actionRequirements = buildActionRequirements(pickedType, actualElements);
@@ -6617,7 +6792,7 @@ Respond ONLY {"metrics":"..."}.
 Use metrics: ${activeTask.metrics}.
 IMPORTANT: Hard requirements are NECESSARY but NOT SUFFICIENT. Only mark Completed if the intended ACTION for this task clearly occurred (e.g., exit actually opened, item delivered, monster HP reached 0), not merely because the item exists in inventory or because you're in the right room.
 Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote":".","narrative":".","reward":"XP gained: X"}.`;
-      const updateResult = await $.assistant.generation({
+      const updateResult = await $.assistant.generation({ maxTokens: 200,
         parameters: {
           updatedStatus: { type: String, enum: ["Pending", "In Progress", "Completed"] },
           progressNote: String,
@@ -6783,7 +6958,7 @@ Narrative Guidelines
 Backend Integration: Programmatic vs. Narrative Handling`;
  
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next artifact to be found in the game taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultArtifact = await $.assistant.generation();
+            const generationResultArtifact = await $.assistant.generation({ maxTokens: 40 });
             nextArtifact = generationResultArtifact.content.trim();
             console.log("Generated nextArtifact:", nextArtifact);
            
@@ -6798,7 +6973,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next powerful boss monster taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultBoss = await $.assistant.generation();
+            const generationResultBoss = await $.assistant.generation({ maxTokens: 40 });
             nextBoss = generationResultBoss.content.trim();
             console.log("Generated nextBoss:", nextBoss);
            
@@ -6880,7 +7055,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultBossRoom = await $.assistant.generation();
+            const generationResultBossRoom = await $.assistant.generation({ maxTokens: 40 });
             bossRoom = generationResultBossRoom.content.trim();
             console.log("Generated bossRoom:", bossRoom);
            
@@ -6893,7 +7068,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
             await $.assistant`Generate a unique description in a single paragraph with no line breaks for the next quest to retrieve ${nextArtifact} by defeating ${nextBoss} at ${bossRoom} taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultQuest = await $.assistant.generation();
+            const generationResultQuest = await $.assistant.generation({ maxTokens: 120 });
             currentQuest = generationResultQuest.content.trim();
             console.log("Generated currentQuest:", currentQuest);
             // Check if the replacement string exists in the console
@@ -7244,6 +7419,11 @@ async function handleCombatRound($, userInput, combatMode) {
             target.hp -= damageRoll;
             combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
+            // Live patch after every damage so the console text (and thus Game Console panel after round) has the intermediate HP.
+            const monstersForPatchMid = [...(aliveMonsters || []), ...(killedThisRound || [])];
+            updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monstersForPatchMid);
+            needsUpdate = true;
+
             const updateHPInConsole = (entity, sectionHeader) => {
                 const entitySectionRegex = new RegExp(`(${sectionHeader}:)([\\s\\S]*?${entity.name}[\\s\\S]*?\\n\\s*HP:)\\s*\\d+`, 'g');
                 updatedGameConsole = updatedGameConsole.replace(
@@ -7393,6 +7573,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     let pc = pcDetails ? extractDetails(pcDetails)[0] : null;
     let npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
     let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(m => m.hp > 0) : [];
+    const killedThisRound = [];
 
     // Preserve selected sprite on parsed PC (the one from review) so later map includes it in string for client.
     ensureSelectedPCSprite(pc);
@@ -7472,6 +7653,13 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             placeCharacter(c, 11, 7, 2); // Offset for monsters
         }
     });
+
+    // Snap to integer grid cells for reliable discrete A* pathfinding and adjacency (incoming positions from client may be floats due to smooth projections/party maze)
+    allCombatants.forEach(combatant => {
+        if (combatant && typeof combatant.x === 'number') combatant.x = Math.round(combatant.x);
+        if (combatant && typeof combatant.y === 'number') combatant.y = Math.round(combatant.y);
+    });
+
     sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
 
     allCombatants.forEach(combatant => {
@@ -7725,6 +7913,12 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
         combatLog.push("Monsters State updated to Dead.");
     }
 
+    // Patch the just-applied HP changes (including negatives for kills this round) into the
+    // console text blocks. This lets the Game Console UI show live HP after each fast round.
+    const monstersForPatch = [...(aliveMonsters || []), ...(killedThisRound || [])];
+    updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monstersForPatch);
+    needsUpdate = true;
+
     // Final filter to ensure only living characters (HP > 0) are in combatCharacters
     combatCharacters = combatCharacters.filter(c => {
         const combatant = [...(pc ? [pc] : []), ...npcs, ...aliveMonsters].find(a => a.name === c.name);
@@ -7743,6 +7937,29 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     const formattedCombatLog = combatLog.map(log => log.split('. ').map(s => s.trim() + '.').join('\n')).join('\n');
     return { combatLog: formattedCombatLog, needsUpdate };
+}
+
+// Patch live HP (and MaxHP) from the post-round simulated characters back into the
+// updatedGameConsole text blocks. This makes the "Game Console" panel (detailed stats)
+// reflect current HP after every programmatic combat round, without waiting for the
+// end-of-battle LLM narrative turn.
+function patchLiveHPToConsole(consoleText, pcData, npcList, monsterList) {
+  let text = String(consoleText || '');
+  const updateStatBlock = (liveObj) => {
+    if (!liveObj || !liveObj.name) return;
+    const nm = liveObj.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // HP line
+    const reHP = new RegExp(`(Name:\\s*${nm}[\\s\\S]{0,500}?\\nHP:\\s*)-?\\d+`, 'i');
+    text = text.replace(reHP, `$1${liveObj.hp}`);
+    // MaxHP line
+    const maxv = (liveObj.maxHp != null ? liveObj.maxHp : (liveObj.MaxHP != null ? liveObj.MaxHP : liveObj.hp));
+    const reMax = new RegExp(`(Name:\\s*${nm}[\\s\\S]{0,500}?\\nMaxHP:\\s*)-?\\d+`, 'i');
+    text = text.replace(reMax, `$1${maxv}`);
+  };
+  if (pcData) updateStatBlock(pcData);
+  (npcList || []).forEach(n => updateStatBlock(n));
+  (monsterList || []).forEach(m => updateStatBlock(m));
+  return text;
 }
 
 // Update the combat map in Phaser (unchanged, logging moved to combatLog in handleCombatRoundWithMap)
@@ -7906,6 +8123,13 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     const monsters = combatCharacters.filter(c => c.type === 'monster');
     pcsAndNpcs.forEach(c => placeCharacter(c, 7, 7, 2));
     monsters.forEach(c => placeCharacter(c, 11, 7, 2));
+
+    // Snap to integer grid cells for reliable discrete A* pathfinding and adjacency (incoming positions from client may be floats due to smooth projections/party maze)
+    allCombatants.forEach(combatant => {
+        if (combatant && typeof combatant.x === 'number') combatant.x = Math.round(combatant.x);
+        if (combatant && typeof combatant.y === 'number') combatant.y = Math.round(combatant.y);
+    });
+
     combatCharacters = allCombatants.map(c => {
       const entry = { name: c.name, type: c === pc ? 'pc' : npcs.some(n => n.name === c.name) ? 'npc' : 'monster', x: c.x, y: c.y };
       if (c === pc && pc && pc.sprite) entry.sprite = pc.sprite;
@@ -8501,7 +8725,7 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
 Classify the player's action into one of ${ACTION_ENUM.join(", ")}.
 Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
 
-  const intentResp = await $.assistant.generation({
+  const intentResp = await $.assistant.generation({ maxTokens: 60,
     parameters: { action: { type: String, enum: ACTION_ENUM } }
   });
 
@@ -8531,7 +8755,7 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
     - Combat: Low rolls (1-6) miss/take damage (e.g., "Strikes miss, wraith retaliates with chilling claws that sap strength"), mid rolls (7-14) minor hits (e.g., "Grazes the wraith with a faint spark of dark energy"), high rolls (15-20) succeed (e.g., "Channels necromantic power, wounding the wraith deeply").
     Outcomes must prioritize the player’s action, be unique to each character’s role and motivations, and advance the Mortacia plot with lore fragments or dilemmas. If the room is exhausted and the action is Search or PuzzleSolving, generate non-discovery outcomes (e.g., "The shadows yield only echoes of a forsaken past"). For Movement, describe the destination vividly with underworld elements. For PuzzleSolving, if the input matches the puzzle solution, set success to 95+% (rolls 2-20). For Dialogue/ObjectInteraction, favor evocative information/discovery tied to the underworld. NPCs/monsters respond dynamically to the player’s action, reflecting their motivations and the underworld’s atmosphere. Ensure exactly 3-6 outcomes per character, covering 1-20 with no gaps or overlaps. Provide all outcomes in this single response.`;
 
-  const outcomesResponse = await $.assistant.generation();
+  const outcomesResponse = await $.assistant.generation({ maxTokens: 600 });
   let outcomesData = (outcomesResponse.content || "").trim();
   console.log("Raw LLM outcomes response:", outcomesData);
 
@@ -8779,7 +9003,7 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
 Is the player clearly attempting to complete the active quest step right now?
 Respond ONLY {"questAttempted":"X"} with X ∈ {"true","false"}.`;
 
-  const qaResp = await $.assistant.generation({
+  const qaResp = await $.assistant.generation({ maxTokens: 50,
     parameters: { questAttempted: { type: String, enum: TRUE_FALSE } }
   });
 
@@ -8817,7 +9041,7 @@ Store this information in memory and await the next prompt`;
 8. puzzleRequiresObject (True/False)
 Respond ONLY a JSON object with these exact keys.`;
 
-  const intentResponse = await $.assistant.generation({
+  const intentResponse = await $.assistant.generation({ maxTokens: 120, 
     parameters: {
       engagedInDialogue: { type: Boolean },
       justLooking: { type: Boolean },
@@ -9034,7 +9258,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   if ((objectToBeDiscovered || exitToBeDiscovered) && !exhausted) {
     const xpEligibleCharacters = [...pcs, ...npcs];
     await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, assign XP for discovering new objects or exits in the room. Award up to 500 XP to each character who contributed to the discovery, based on the initial outcomes: ${serializedInitialOutcomes}. Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
-    const xpResponse = await $.assistant.generation();
+    const xpResponse = await $.assistant.generation({ maxTokens: 60 });
     try { xp_awarded = JSON.parse((xpResponse.content || "{}").trim()); }
     catch { xp_awarded = {}; }
     console.log("XP awarded for discoveries:", xp_awarded);
@@ -9043,7 +9267,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   // ---------- object generation ----------
   if (objectToBeDiscovered) {
     await $.user`Based on the outcomes of actions, respond with ONLY the JSON object in the format: {"count": N} where N is the number of objects discovered (an integer). No explanations, comments, or text before or after the JSON.`;
-    const objectCountResponse = await $.assistant.generation();
+    const objectCountResponse = await $.assistant.generation({ maxTokens: 50 });
     const countStr = objectCountResponse.content || String(objectCountResponse.result || "");
     let numberOfObjects = 1;
     {
@@ -9060,7 +9284,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
     }
     for (let i = 0; i < numberOfObjects; i++) {
       await $.user`Generate a name for a portable object suitable for a fantasy roleplaying game, as described in the outcomes of actions. Respond with ONLY the JSON object in the format: {"name": "X"} where X is the lowercased object name (single-line text without punctuation, fitting the game's narrative). No explanations, comments, or text before or after the JSON.`;
-      const nameResponse = await $.assistant.generation();
+      const nameResponse = await $.assistant.generation({ maxTokens: 30 });
       const nameStr = nameResponse.content || String(nameResponse.result || "");
       let objectName = "unknown object";
       {
@@ -9075,7 +9299,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
       await $.user`Determine the type of the artifact named "${objectName}". Respond with ONLY the JSON object in the format: {"type": "X"} where X is one of "weapon", "armor", "shield", or "other". No explanations, comments, or text before or after the JSON.`;
-      const typeResponse = await $.assistant.generation({
+      const typeResponse = await $.assistant.generation({ maxTokens: 50,
         parameters: { type: { type: String, enum: ["weapon","armor","shield","other"] } }
       });
       const typeStr = typeResponse.content || String(typeResponse.result || "");
@@ -9098,7 +9322,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   // ---------- exit generation ----------
   if (exitToBeDiscovered) {
     await $.user`Generate a unique room name for a room connected to "${roomName}", considering the conversation history, current location, coordinates in the game console, previous locations in the maze, and the game's lore. Respond with ONLY {"name":"X"} where X is lowercased, single-line, no punctuation.`;
-    const roomNameResponse = await $.assistant.generation();
+    const roomNameResponse = await $.assistant.generation({ maxTokens: 40 });
     const rnStr = roomNameResponse.content || String(roomNameResponse.result || "");
     let newRoomName = "unknown chamber";
     {
@@ -9161,7 +9385,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   if (!exhausted) {
     const xpEligibleCharacters = [...pcs, ...npcs];
     await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, decide which characters deserve XP based on their actions in the initial outcomes, excluding discovery-based XP already awarded, and assign up to 500 XP to each deserving character for non-discovery actions. Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
-    const xpResponse = await $.assistant.generation();
+    const xpResponse = await $.assistant.generation({ maxTokens: 60 });
     let additionalXp = {};
     try { additionalXp = JSON.parse((xpResponse.content || "{}").trim()); } catch {}
     for (const [ch, xp] of Object.entries(additionalXp)) {
@@ -9269,7 +9493,7 @@ Return ONLY JSON with keys:
 {"engagedInDialogue":bool,"justLooking":bool,"commandToNPCs":bool,"physicalAction":bool,"puzzleAction":bool,"deterministicCommand":bool}
 `;
 
-  const intentResponse = await $.assistant.generation({
+  const intentResponse = await $.assistant.generation({ maxTokens: 120, 
     parameters: {
       engagedInDialogue:   { type: Boolean },
       justLooking:         { type: Boolean },
@@ -9475,7 +9699,7 @@ async function generatePythonCode($, userInput, updatedGameConsole, errorLogs = 
     
     ${errorLogSection}`;
 
-    const pythonCode = (await $.assistant.generation()).content;
+    const pythonCode = (await $.assistant.generation({ maxTokens: 300 })).content;
     console.log("Generated Python Code:", pythonCode);
     return pythonCode;
 }
@@ -10314,11 +10538,11 @@ Backend Integration: Programmatic vs. Narrative Handling`;
 
     if (isNewRoom) {
       try {
-        const { musicJson, isNew, key, coords: c } =
+        const { musicJson, wavUrl, isNew, key, coords: c } =
           await $.run($ => getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom));
         
-        await renderRoomMusic(musicJson); // ✅ pass only the inner JSON
-        console.log(`Music updated for room at ${coordsKey(coords)}`);
+        musicArrangement = musicJson;
+        console.log(`Music updated for room at ${coordsKey(coords)}${wavUrl ? ` (${wavUrl})` : ''}`);
       } catch (musicErr) {
         console.error('Music generation failed:', musicErr);
         musicArrangement = null;
@@ -10425,9 +10649,11 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     // (Optional but helpful for debugging)
     console.log("Normalized roomNameDatabasePlain (indoor/outdoor applied):", roomNameDatabasePlain);
     
-    updatedGameConsole = await syncObjectsOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
-    updatedGameConsole = await syncKeysOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
-    updatedGameConsole = await syncMonstersOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
+    if (!isAutoSimAdvance) {
+      updatedGameConsole = await syncObjectsOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
+      updatedGameConsole = await syncKeysOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
+      updatedGameConsole = await syncMonstersOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
+    }
 
     console.log("Room Description Generated:", roomDescriptionGenerated); // Debugging log
     console.log("Updated Game Console:", updatedGameConsole); // Debugging log
@@ -10489,7 +10715,11 @@ console.log("personalNarrative:", personalNarrative);
 if (userInput && userInput.trim() !== '') {
    $.user`${userInput}`;
 } else {
-    $.user`Continue with the game proceeding with the story's narrative in the ${roomName}.`; // or whatever default message you want
+    // For the 45s periodic simulation loop (auto advance with blank input), make it occur in the
+    // main conversation line using the most recent conversation history (passed via liveWorldState.currentConversation
+    // and the accumulated retort messages). Produce a short, integrated continuation report so it follows
+    // the latest goings-on (combat, player actions, events) naturally.
+    $.user`[Auto 45s simulation advance / time passes in the dungeon] No direct player command this tick. Using the most recent conversation history (see liveWorldState currentConversation and prior messages for latest events, combat logs, dialogue, and story state), current character positions from live context, and game console, generate a short vivid continuation: 1-4 sentences on immediate environmental phenomena, creature/NPC activities or brief in-character dialogue, and any subtle dungeon events. Continue the story seamlessly from the latest history. Be concise, atmospheric, and integrated -- no full room re-description, no new major quests or images. If relevant, note any minor position shifts for party members only.`;
 }
 
 // Detect "party mode" from NPCs in Party (not None)
@@ -10536,7 +10766,7 @@ If there are monsters in the room, they may not know who Suzerain is or understa
     
     $.user`This is the current game console: ${updatedGameConsole}
     Store the game console information including the current quest, any NPCs in the party and monsters in the room into memory and await the next prompt.`;
-    
+
     const currentCoordsMatch = updatedGameConsole.match(
       /Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/
     );
@@ -10601,21 +10831,19 @@ let charactersAttack = '';
 
 if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRoom.toLowerCase() !== 'none') {
     const combatResult = await handleCombatRound($, userInput, combatMode);
-    combatLog = combatResult.combatLog; // Extract the combat log from the result
+    combatLog = combatResult.combatLog || ''; // Extract the combat log from the result
+    console.log("combatLog (programmatic only): ", combatLog);
 
-    // Instruct GPT to create a short description of the characters preparing to attack
-  /*  $.model = "gpt-4.1-mini";
-    $.temperature = 1.0;
-    await $.user`The characters are about to attack the monsters in the room. Create a short description of the characters announcing and preparing for the attack.`;*/
-
-    charactersAttackResult = await $.assistant.generation();
-    charactersAttack = charactersAttackResult.content.trim(); // Store the generated description in a variable
-    console.log("charactersAttack: ", charactersAttack);
-
-   // const combatResult = await handleCombatRound($, userInput, combatMode);
-  //  combatLog = combatResult.combatLog; // Extract the combat log from the result
-
-    $.user`The characters are currently fighting monsters and here is the current round's combat log: ${combatLog}. Store this information in memory and await the next prompt.`;
+    // Always conclude with just the programmatic combat log (including any "all monsters defeated").
+    // No LLM story generation or aftermath even on conclusion -- let the combat log conclude the event.
+    console.log('[Combat] Programmatic sim (conclude with log only, no LLM even on defeat).');
+    return {
+      content: combatLog,
+      updatedGameConsole,
+      combatCharactersString: sharedState.getCombatCharactersString(),
+      roomNameDatabaseString: roomNameDatabaseString || '',
+      combatRoundOnly: true,
+    };
 }
 
 let outcomes = "";
@@ -10639,17 +10867,21 @@ if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") &&
    // await adjudicateActionWithCodeInterpreter(userInput, updatedGameConsole);
 }   
     if (attackDecision === "Attack") {
-   /*     $.model = "gpt-4.1-mini";
-        $.temperature = 1.0;
-        await $.user`The characters have stumbled upon some monsters. The monsters are about to attack the PC and NPCs in the room. Create a short description of the monsters announcing and preparing for the attack.`;*/
-
- //   monstersAttackResult = await $.assistant.generation();
-   // monstersAttack = monstersAttackResult.content.trim();
-   // console.log("monstersAttack: ", monstersAttack);
     // Store the generated description in a variable    
     const combatResult = await handleCombatRound($, userInput, combatMode);
-    combatLog = combatResult.combatLog; // Extract the combat log from the result
-    $.user`The monster just attacked the characters and here is the current round's combat log: ${combatLog}. Store this information in memory and await the next prompt.`;
+    combatLog = combatResult.combatLog || '';
+    console.log("combatLog (monster attack): ", combatLog);
+
+    // Always conclude with just the programmatic combat log (including any "all monsters defeated").
+    // No LLM story generation or aftermath even on conclusion -- let the combat log conclude the event.
+    console.log('[Combat] Monster-initiated programmatic sim (conclude with log only, no LLM even on defeat).');
+    return {
+      content: combatLog,
+      updatedGameConsole,
+      combatCharactersString: sharedState.getCombatCharactersString(),
+      roomNameDatabaseString: roomNameDatabaseString || '',
+      combatRoundOnly: true,
+    };
     } else if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
   // NEW: ask the LLM whether to run dice adjudication
   const { runSimulation } = await shouldRunAdjudication($, userInput, updatedGameConsole);
@@ -10886,14 +11118,24 @@ Write an interactive fiction adventure without using any *'s and let's play in C
 `;
   }
 console.log('Starting final Retort-JS execution...');
-const result = await $.assistant.generation();
+// Provide character positions context (from live client world state) so periodic simulation
+// turns (via chatbotprocessinput every 45s) let the main narrative follow exact room positions
+// of player + party members instead of just console text.
+if (liveWorldState) {
+  await $.user`Real-time simulation context (character + player positions in current room for autonomous story following): ${JSON.stringify(liveWorldState)}`;
+}
+if (isAutoSimAdvance) {
+  $.model = "gpt-4.1-mini";
+}
+const autoMax = isAutoSimAdvance ? 280 : 850;
+const result = await $.assistant.generation({ maxTokens: autoMax }); // shorter for 45s auto ticks to keep them as quick integrated history-line updates
 console.log('Retort-JS execution completed, result:', result);
 response = result.content || result; // Ensure response is set from the result
 
 const coordsMatch = updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
 const currentCoordinates = coordsMatch 
-  ? [parseInt(coordsMatch[1]), parseInt(coordsMatch[2]), parseInt(coordsMatch[3])] 
-  : [0, 0, 0];
+  ? { x: parseInt(coordsMatch[1], 10), y: parseInt(coordsMatch[2], 10), z: parseInt(coordsMatch[3], 10) } 
+  : { x: 0, y: 0, z: 0 };
 // Replace the existing isNewRoom logic (~line 1200)
 const prevCoords = sharedState.getLastCoords ? sharedState.getLastCoords() : { x: 0, y: 0, z: 0 };
 const isNewRoom = userInput.toLowerCase().match(/^(n|s|e|w|ne|nw|se|sw|up|down|u|d)/) ||
@@ -10953,7 +11195,7 @@ const isNewGeoRoom =
   !lastGeoKey ||
   geoKey !== lastGeoKey;
 
-if (isNewGeoRoom && roomDescription) {
+if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
   console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
   const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
   // 🧭 STEP 0 — classify biome & size
@@ -11262,7 +11504,9 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
   }, '').trim();
   let compiledResponse = formattedDescription + "\n\n" + monstersAttack + "\n\n" + combatLog + "\n\n" + response;
   truncatedResponse = compiledResponse.length > 3900 ? compiledResponse.substring(0, 3900) : compiledResponse;
-  await $.run($ => sanitizeImage($));
+  if (!isAutoSimAdvance) {
+    await $.run($ => sanitizeImage($));
+  }
   let imageUrl = '';
   /* if (sanitizedResponse) {
     try {
@@ -11291,7 +11535,9 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
   }, '').trim();
   let compiledResponse = formattedDescription + "\n\n" + response;
   truncatedResponse = compiledResponse.length > 3800 ? compiledResponse.substring(0, 3800) : compiledResponse;
-  await $.run($ => sanitizeImage($));
+  if (!isAutoSimAdvance) {
+    await $.run($ => sanitizeImage($));
+  }
   let imageUrl = '';
   /* if (sanitizedResponse) {
     try {
@@ -11307,6 +11553,18 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
 } else {
   returnObj.content = narrative + "\n\n" + response;
   returnObj.roomNameDatabaseString = roomNameDatabaseString;
+}
+
+if (isAutoSimAdvance && response) {
+  // For 45s auto sim ticks, the content should be the direct short report generated from the
+  // history-aware prompt, so it appears cleanly as a main conversation line continuation.
+  returnObj.content = response;
+}
+
+if (isAutoSimAdvance) {
+  returnObj.updatedGameConsole = updatedGameConsole;
+  returnObj.combatCharactersString = sharedState.getCombatCharactersString();
+  returnObj.roomNameDatabaseString = roomNameDatabaseString || '';
 }
 
 try {
@@ -11546,7 +11804,7 @@ Respond ONLY with the raw JSON object. No grid, no ascii, no freeform procedure.
     // CRITICAL FIX: We must solicit an *assistant* generation to actually invoke the LLM API and get a reply.
     // Awaiting $.user only "sends" our prompt (the log you see) and returns the user message itself.
     // Using $.assistant.generation() is what triggers the real API call and populates the reply.
-    const reply = await $.assistant.generation();
+    const reply = await $.assistant.generation({ maxTokens: 600 });
     const raw = (reply && reply.content) ? reply.content : '';
 
     console.log('[SpriteArtist] Received reply from LLM, raw length:', raw ? raw.length : 0);
@@ -11612,6 +11870,110 @@ function extractAndParseJson(text) {
   }
 }
 
+async function runNpcAutonomyTick() {
+  const updatedGameConsole = sharedState.getUpdatedGameConsole() || '';
+  const fullConsoleReference = getFullNpcAutonomyConsoleReference(updatedGameConsole);
+  const liveWorldState = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
+  const partyActors = Array.isArray(liveWorldState && liveWorldState.characters)
+    ? liveWorldState.characters.filter(entry => entry && entry.type === 'npc')
+    : [];
+
+  if (!liveWorldState || !partyActors.length) {
+    return { summary: '', dialogue: [], routines: [] };
+  }
+
+  const recentFeed = (sharedState.getNpcAutonomyFeed ? sharedState.getNpcAutonomyFeed() : [])
+    .slice(-4)
+    .map(entry => `${entry.summary || ''} ${(entry.dialogue || []).map(line => `${line.speaker || 'NPC'}: ${line.line || ''}`).join(' ')}`.trim())
+    .filter(Boolean)
+    .join('\n');
+
+  const consoleExcerpt = buildNpcAutonomyConsoleExcerpt(updatedGameConsole);
+
+  let parsed = null;
+  try {
+    parsed = await run(retort(async ($) => {
+      $.model = "gpt-4.1-mini";
+      $.temperature = 0.55;
+
+      await $.system`You are the dungeon simulator and background narrator for a fantasy dungeon crawler (Grave Master aide). Return ONLY raw valid JSON. No markdown, no prose outside JSON, no code fences.`;
+      await $.user`Generate short, integrated reports on things going on in the broader dungeon/temple/wasteland right now. Use the conversation history (in live state), current room, game console, and recent feed as authoritative guide. Scope includes environmental phenomena (sounds, lights, shifts, weather in room or distant), activities of any creatures (party NPCs, monsters, other denizens), and character dialogue. Keep very short and vivid. Still provide movement routines ONLY for the listed party NPCs (to drive client map locomotion algorithmically).`;
+      await $.user`You have access to the authoritative server game console as reference material. Treat it as canonical state. You may request constrained mutations for party or room state.`;
+      await $.user`Allowed routine names (only for party NPCs): lane_search, explore_left, explore_right, pair_up, check_in, scout_far, scout_forward, rear_guard, flank_left, flank_right, anchor_wide, anchor_close, sweep, loiter_far. Choose only from this list.`;
+      await $.user`Cadence rules: this is a continuous autonomous background tick (every ~45s), not main narrative. Produce 1-3 short report sentences + 0-4 dialogue lines total. Draw from full history for continuity and integration into ongoing story.`;
+      await $.user`Current room/game excerpt:\n${consoleExcerpt || 'None available.'}`;
+      await $.user`Authoritative server game console reference:\n${fullConsoleReference || 'None available.'}`;
+      await $.user`Live client world state JSON (includes currentConversation history excerpt):\n${JSON.stringify(liveWorldState)}`;
+      if (recentFeed) {
+        await $.user`Recent autonomous feed excerpt (keep continuity but avoid repetition):\n${recentFeed}`;
+      }
+      await $.user`Return JSON with this exact shape:
+{
+  "summary": "1-3 short sentences for the log: brief report on dungeon events now (env changes, creature activities, integrated with story/history)",
+  "dialogue": [{"speaker":"Exact Name (party NPC, monster, or other)","line":"Short in-character line or environmental sound/echo"}],
+  "routines": [{"name":"Exact Party NPC Name only","routine":"One allowed routine","durationSec":12,"target":"Optional exact party member name","reason":"Very short reason"}],
+  "consoleMutations": [{"op":"set_monsters_state|set_current_quest_note|set_party_activity|set_party_dialogue","value":"short text"}]
+}
+Rules:
+- Summary and dialogue must feel like natural short "meanwhile in the dungeon" reports, grounded in conversation history + current state + surroundings. Include environmental info (e.g. "distant howls echo", "torches flicker as shadows lengthen").
+- Dialogue can come from party, monsters, or implied others, but short.
+- Only output routines for the actual party NPCs in live state (to keep their map movement going); do not invent new.
+- Do not move the player or invent major events.
+- Prefer 0-4 dialogue lines, 2-5 routines max if party present.
+- durationSec 10-15.
+- summary and lines concise, log-friendly, story-integrated.
+- Use consoleMutations sparingly.`;
+
+      const reply = await $.assistant.generation({ maxTokens: 450 });
+      return extractAndParseJson((reply && reply.content) ? reply.content : '');
+    }));
+  } catch (err) {
+    console.warn('[NPC Autonomy] Tick generation failed:', err && err.message);
+    parsed = null;
+  }
+
+  const summary = parsed && typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
+  const dialogue = Array.isArray(parsed && parsed.dialogue)
+    ? parsed.dialogue
+        .filter(item => item && item.speaker && item.line)
+        .slice(0, 6)
+        .map(item => ({ speaker: String(item.speaker), line: String(item.line) }))
+    : [];
+  const routines = Array.isArray(parsed && parsed.routines)
+    ? parsed.routines
+        .filter(item => item && item.name && item.routine)
+        .slice(0, 6)
+        .map(item => ({
+          name: String(item.name),
+          routine: String(item.routine),
+          durationSec: Math.max(8, Math.min(18, parseInt(item.durationSec, 10) || 12)),
+          target: item.target ? String(item.target) : '',
+          reason: item.reason ? String(item.reason) : ''
+        }))
+    : [];
+  const consoleMutations = Array.isArray(parsed && parsed.consoleMutations)
+    ? parsed.consoleMutations
+        .filter(item => item && item.op && item.value)
+        .slice(0, 6)
+        .map(item => ({ op: String(item.op), value: String(item.value) }))
+    : [];
+
+  const mutatedConsole = applyNpcAutonomyConsoleMutations(updatedGameConsole, {
+    summary,
+    dialogue,
+    consoleMutations
+  });
+  if (mutatedConsole && mutatedConsole !== updatedGameConsole) {
+    sharedState.setUpdatedGameConsole(mutatedConsole);
+  }
+
+  const result = { summary, dialogue, routines, consoleMutations, ts: Date.now() };
+  if ((summary || dialogue.length || routines.length) && sharedState.appendNpcAutonomyFeed) {
+    sharedState.appendNpcAutonomyFeed(result);
+  }
+  return result;
+}
+
 // Helper that the server can call from /beginCharacterGeneration
 async function generateFullCharacterWithRetortSprite(baseCharacter) {
   const { generateCharacterSprite } = require('../assets/renderCharacterSprite.js');
@@ -11641,6 +12003,7 @@ async function generateFullCharacterWithRetortSprite(baseCharacter) {
 // Export everything the rest of the app needs
 module.exports = {
   retortWithUserInput,
+  runNpcAutonomyTick,
   generateCharacterSpriteSpecWithRetort,
   generateFullCharacterWithRetortSprite
 };
