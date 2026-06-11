@@ -2696,6 +2696,7 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredT
                   heightRatio: { type: Number },
                   baseWidth: { type: Number },
                   gridWidth: { type: Number },
+                  collisionRadius: { type: Number },
                   detail: {
                     type: Object,
                     properties: {
@@ -2775,7 +2776,7 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredT
         ? String(detail.accentColor).toUpperCase()
         : null;
       const accentStrength = clamp(detail.accentStrength, 0, 1, accentColor ? 0.3 : 0);
-      return {
+      const normalized = {
         profile,
         depth: clamp(raw.depth, 0, 1, 0.7),
         heightRatio: clamp(raw.heightRatio, 0.4, 1.2, 0.9),
@@ -2801,6 +2802,10 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredT
           accentStrength
         }
       };
+      if (Number.isFinite(raw.collisionRadius)) {
+        normalized.collisionRadius = clamp(raw.collisionRadius, 0.05, 0.48, 0.1);
+      }
+      return normalized;
     };
 
     const processed = rawTiles.map(tile => {
@@ -4104,6 +4109,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
         heightRatio: 1.0,
         baseWidth: 0.5,
         gridWidth: 0.5,
+        collisionRadius: 0.09,
         detail: {
           bandCount: 3,
           grooveCount: 6,
@@ -11368,6 +11374,7 @@ try {
       heightRatio: 1.0,
       baseWidth: 0.5,
       gridWidth: 0.5,
+      collisionRadius: 0.09,
       detail: {
         bandCount: 3,
         grooveCount: 6,

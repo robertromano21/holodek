@@ -749,7 +749,8 @@ function movePlayerByDelta(dx, dy) {
     return;
   }
 
-  if (isObstacleAtPos(proposedDungeonX + 0.5, proposedDungeonY + 0.5)) {
+  const anchor = findWalkableStepAnchor(proposedDungeonX, proposedDungeonY);
+  if (!anchor) {
     console.log('Blocked by obstacle');
     return;
   }
@@ -758,8 +759,8 @@ function movePlayerByDelta(dx, dy) {
   // Movement is ok
   playerDungeonX = proposedDungeonX;
   playerDungeonY = proposedDungeonY;
-  playerPosX = playerDungeonX + 0.5;
-  playerPosY = playerDungeonY + 0.5;
+  playerPosX = anchor.x;
+  playerPosY = anchor.y;
   updatePlayerHeightFromCell();
   updatePartyMazeLocomotion(false);
 
@@ -952,11 +953,91 @@ function getCurrentPartyNpcEntries() {
 function getObstacleRadiusForTile(tile) {
   if (!tile || !currentDungeon || !currentDungeon.tiles) return 0;
   const spec = currentDungeon.tiles[tile]?.spriteSpec || {};
+  if (Number.isFinite(spec.collisionRadius)) {
+    return Math.max(0.05, Math.min(0.48, spec.collisionRadius));
+  }
   const baseWidth = Number.isFinite(spec.baseWidth)
     ? spec.baseWidth
     : (Number.isFinite(spec.gridWidth) ? spec.gridWidth : 0.6);
+  const tileName = String(tile || '').toLowerCase();
+  const profile = String(spec.profile || '').toLowerCase();
+  if (
+    tileName === 'pillar' ||
+    tileName.includes('pillar') ||
+    tileName.includes('column') ||
+    profile === 'cylinder'
+  ) {
+    return Math.max(0.08, Math.min(0.18, baseWidth * 0.18));
+  }
   const radius = (baseWidth * 0.5) - 0.02;
   return Math.max(0.12, Math.min(0.48, radius));
+}
+
+function clampPosToTileInterior(value, tileCoord) {
+  const inset = PLAYER_RADIUS + 0.01;
+  return Math.max(tileCoord + inset, Math.min(tileCoord + 1 - inset, value));
+}
+
+function findWalkableStepAnchor(tileX, tileY) {
+  const centerX = tileX + 0.5;
+  const centerY = tileY + 0.5;
+  const targetCell = currentDungeon?.cells?.[`${tileX},${tileY}`];
+  if (!targetCell) return null;
+  if (canOccupyPos(centerX, centerY)) {
+    return { x: centerX, y: centerY };
+  }
+
+  const sameX = clampPosToTileInterior(playerPosX, tileX);
+  const sameY = clampPosToTileInterior(playerPosY, tileY);
+  const candidates = [[sameX, sameY], [sameX, centerY], [centerX, sameY]];
+
+  if (isObstacleTile(String(targetCell.tile || ''))) {
+    const laneOffset = 0.5 - (PLAYER_RADIUS + 0.01);
+    const fromTileX = Math.floor(playerPosX);
+    const fromTileY = Math.floor(playerPosY);
+    const movingHorizontally = Math.abs(tileX - fromTileX) >= Math.abs(tileY - fromTileY);
+
+    if (laneOffset > 0) {
+      if (movingHorizontally) {
+        const preferSouth = sameY >= centerY;
+        const laneYs = preferSouth
+          ? [centerY + laneOffset, centerY - laneOffset]
+          : [centerY - laneOffset, centerY + laneOffset];
+        laneYs.forEach(y => {
+          candidates.push([centerX, y]);
+          candidates.push([sameX, y]);
+        });
+      } else {
+        const preferEast = sameX >= centerX;
+        const laneXs = preferEast
+          ? [centerX + laneOffset, centerX - laneOffset]
+          : [centerX - laneOffset, centerX + laneOffset];
+        laneXs.forEach(x => {
+          candidates.push([x, centerY]);
+          candidates.push([x, sameY]);
+        });
+      }
+    }
+  }
+
+  const inset = PLAYER_RADIUS + 0.01;
+  candidates.push(
+    [tileX + inset, tileY + inset],
+    [tileX + 1 - inset, tileY + inset],
+    [tileX + inset, tileY + 1 - inset],
+    [tileX + 1 - inset, tileY + 1 - inset]
+  );
+
+  const seen = new Set();
+  for (const [x, y] of candidates) {
+    const key = `${x.toFixed(3)},${y.toFixed(3)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (canOccupyPos(x, y)) {
+      return { x, y };
+    }
+  }
+  return null;
 }
 
 function isObstacleAtPos(x, y, excludeName = null) {

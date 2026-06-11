@@ -100,6 +100,26 @@
     return !!(img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0);
   }
 
+  function getObstacleCollisionRadius(tileName, spec) {
+    if (Number.isFinite(spec?.collisionRadius)) {
+      return Math.max(0.05, Math.min(0.48, spec.collisionRadius));
+    }
+    const baseWidth = Number.isFinite(spec?.baseWidth)
+      ? spec.baseWidth
+      : (Number.isFinite(spec?.gridWidth) ? spec.gridWidth : 0.6);
+    const nameLower = String(tileName || '').toLowerCase();
+    const profile = String(spec?.profile || '').toLowerCase();
+    if (
+      nameLower === 'pillar' ||
+      nameLower.includes('pillar') ||
+      nameLower.includes('column') ||
+      profile === 'cylinder'
+    ) {
+      return Math.max(0.08, Math.min(0.18, baseWidth * 0.18));
+    }
+    return Math.max(0.12, Math.min(0.48, (baseWidth * 0.5) - 0.02));
+  }
+
   const TORCH_FLICKER_SPEED = 0.6;
 
   function torchFlicker(seed, timeMs) {
@@ -1621,7 +1641,7 @@ bool isCasterCell(vec4 cell) {
 }
 
 float casterRadiusFromCell(vec4 cell) {
-  return (cell.a >= 0.999) ? 0.5 : max(0.12, cell.a);
+  return (cell.a >= 0.999) ? 0.5 : max(0.05, cell.a);
 }
 
 float floorHeightFromCell(vec4 cell) {
@@ -2899,7 +2919,7 @@ bool isCasterCell(vec4 cell) {
 }
 
 float casterRadiusFromCell(vec4 cell) {
-  return (cell.a >= 0.999) ? 0.5 : max(0.12, cell.a);
+  return (cell.a >= 0.999) ? 0.5 : max(0.05, cell.a);
 }
 
 float edgeDiffusion(float proj, float distHit, vec2 hitXY) {
@@ -3296,10 +3316,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           let obstacleRadius = 0;
           if (isObstacle) {
             const spec = dungeon.tiles?.[tile]?.spriteSpec || {};
-            const baseWidth = Number.isFinite(spec.baseWidth)
-              ? spec.baseWidth
-              : (Number.isFinite(spec.gridWidth) ? spec.gridWidth : 0.6);
-            obstacleRadius = Math.max(0.12, Math.min(0.48, baseWidth * 0.5));
+            obstacleRadius = getObstacleCollisionRadius(tile, spec);
           }
           data[idx + 3] = isSolid
             ? 255
