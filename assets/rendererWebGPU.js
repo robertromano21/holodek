@@ -1056,13 +1056,14 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
         if (frag.y >= min(lineTopR, lineBottomR) && frag.y <= max(lineTopR, lineBottomR)) {
           let vFrac = (frag.y - lineTopR) / max(1.0, lineBottomR - lineTopR);
           let worldV = vFrac * abs(dh);
-          let fracV = fract(bottomZ + worldV);
+          let worldZ = topZ - worldV;
+          let fracV = fract(worldZ);
           let wallX = select(params.camPos.x + nextDist * rayDir.x, params.camPos.y + nextDist * rayDir.y, steppedXPreview);
           let fracU = fract(wallX);
           let tex = textureSampleLevel(floorTex, floorSamp, vec2<f32>(fracU, fracV), 0.0);
           let normal = select(vec3<f32>(0.0, -f32(stepY), 0.0), vec3<f32>(-f32(stepX), 0.0, 0.0), steppedXPreview);
           let normal2D = select(vec2<f32>(0.0, -f32(stepY)), vec2<f32>(-f32(stepX), 0.0), steppedXPreview);
-          let worldPos = vec3<f32>(params.camPos + rayDir * nextDist, bottomZ + worldV);
+          let worldPos = vec3<f32>(params.camPos + rayDir * nextDist, worldZ);
           let torch = accumulateTorchLit(worldPos, normal, i32(floor(worldPos.x)), i32(floor(worldPos.y)), normal2D);
           let litSide = clamp(torch.lit * TORCH_SIDE_BOOST, 0.0, 1.5);
           let shadowFloorVal = mix(0.3, 0.12, shadowStrength);

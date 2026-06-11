@@ -12589,7 +12589,8 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
 
                       const v_frac = (sy - ceilScreenY_raw) / fullHeight;
                       const world_v = v_frac * heightDiff;
-                      const fracV = ((bottomZ + world_v) % 1 + 1) % 1;
+                      const worldZ = topZ - world_v;
+                      const fracV = ((worldZ % 1) + 1) % 1;
 
                       let color;
                       if (hasFloorTexture && floorImageData) {
@@ -12655,7 +12656,8 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
 
                       const v_frac = (sy - ceilScreenY_raw) / fullHeight;
                       const world_v = v_frac * heightDiff;
-                      const fracV = ((bottomZ + world_v) % 1 + 1) % 1;
+                      const worldZ = topZ - world_v;
+                      const fracV = ((worldZ % 1) + 1) % 1;
 
                       let color;
                       if (hasFloorTexture && floorImageData) {

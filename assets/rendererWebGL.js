@@ -2293,7 +2293,8 @@ void main() {
         if (frag.y >= min(lineTopR, lineBottomR) && frag.y <= max(lineTopR, lineBottomR)) {
           float v_frac = (frag.y - lineTopR) / max(1.0, lineBottomR - lineTopR);
           float world_v = v_frac * abs(dh);
-          float fracV = fract(bottomZ + world_v);
+          float worldZ = topZ - world_v;
+          float fracV = fract(worldZ);
           float wallX = sideDistX < sideDistY ? (u_camPos.y + nextDist * rayDir.y) : (u_camPos.x + nextDist * rayDir.x);
           float fracU = fract(wallX);
 
@@ -2306,7 +2307,7 @@ void main() {
             ? vec2(-float(stepX), 0.0)
             : vec2(0.0, -float(stepY));
 
-          vec3 worldPos = vec3(u_camPos + rayDir * nextDist, bottomZ + world_v);
+          vec3 worldPos = vec3(u_camPos + rayDir * nextDist, worldZ);
           float shadowBlend = 0.0;
           vec2 primaryDir2D = vec2(0.0);
           float primaryStrength = 0.0;
