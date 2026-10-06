@@ -32,6 +32,21 @@ if (!createCanvas) {
   };
 }
 
+// Generated (non-preset) characters carry an LLM trait spec (kind === 'procedural'). 2D canvases for those
+// are drawn by the trait-driven catalog extension below (createTraitSpriteCanvas, original C64 style);
+// the detailed 48px generator in assets/renderCharacterProcedural.js is only used for the 3D voxel actors.
+function getProceduralApi() {
+  if (typeof window !== 'undefined' && window.ProceduralCharacters) return window.ProceduralCharacters;
+  if (isNode) {
+    try { return require('./renderCharacterProcedural.js'); } catch (e) { return null; }
+  }
+  return null;
+}
+function getProceduralSpec(character, spriteSpec) {
+  const spec = spriteSpec || (character && character.sprite && character.sprite.spec) || null;
+  return spec && ((spec.kind === 'procedural' && spec.traits) || spec.kind === 'placeholder') ? spec : null;
+}
+
 const BASE_SIZE = 24;  // Increased for more pixels / detail (24x24 base *4 =96px canvas). Allows richer old-school pixel art without losing chunky retro feel.
 const UPSCALE = 4;
 
@@ -635,12 +650,14 @@ function getSuzerainStarterFamily(variant = 0) {
 // Draw order: wing (back), legs, torso (costume), head, arm+hand, sword (front), details/outlines.
 // All positions in base pixels; *u at draw time. Center chosen so the figure sits plumb and centered like the ref.
 function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
+  // Pixel-mock silhouette (user attachment): left-facing blocky profile, sword vertical tip-UP in front of torso,
+  // wing/cape mass on the back, tan skin, dark grey garments, tall boots. Tip-up fighting-ready grip.
   const s = seed || 0;
-  const v = Math.floor(s * 1000) % 5; // 0-4 for color var
+  const v = Math.floor(s * 1000) % 5;
   const mortaciaVariants = [
-    { wingShift: 4, wingLift: 0, wingExtraReach: 1, handLift: 0, swordLift: 0, swordLen: 10, thighLift: 0, bootLift: 0, hairLen: 5, hairFront: 1 },
-    { wingShift: 5, wingLift: -1, wingExtraReach: 2, handLift: -1, swordLift: -1, swordLen: 11, thighLift: -1, bootLift: -1, hairLen: 6, hairFront: 1 },
-    { wingShift: 4, wingLift: 1, wingExtraReach: 2, handLift: 0, swordLift: 0, swordLen: 9, thighLift: 0, bootLift: 0, hairLen: 4, hairFront: 0 }
+    { wingShift: 4, wingLift: 0, wingExtraReach: 2, handLift: 0, swordLift: 0, swordLen: 11, thighLift: 0, bootLift: 0, hairLen: 5, hairFront: 1, stance: 0 },
+    { wingShift: 5, wingLift: -1, wingExtraReach: 3, handLift: -1, swordLift: -1, swordLen: 12, thighLift: -1, bootLift: -1, hairLen: 6, hairFront: 1, stance: 1 },
+    { wingShift: 4, wingLift: 1, wingExtraReach: 2, handLift: 0, swordLift: 0, swordLen: 10, thighLift: 0, bootLift: 0, hairLen: 4, hairFront: 0, stance: 0 }
   ];
   const cfg = mortaciaVariants[Math.abs(variant) % mortaciaVariants.length];
   const wingX = baseX + cfg.wingShift;
@@ -651,102 +668,96 @@ function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   const armY = baseY + 6 + cfg.handLift;
   const forearmY = baseY + 3 + cfg.handLift;
   const handY = baseY + 7 + cfg.handLift;
-  const swordY = baseY - 1 + cfg.swordLift;
+  const swordY = baseY - 2 + cfg.swordLift; // tip starts above the head
+  const stance = cfg.stance || 0;
 
-  // Color variations (greys for costume/wing/boot, light tan for sword, skin tones)
-  const bodyDark = ['#1f1f1f', '#222222', '#252525', '#1c1c1c', '#282828'][v];
-  const greyMid = ['#4a4a4a', '#555555', '#5a5a5a', '#454545', '#606060'][v];
-  const greyLight = ['#6a6a6a', '#777777', '#808080', '#656565', '#888888'][v];
-  const greyDark = ['#2a2a2a', '#333333', '#2f2f2f', '#252525', '#303030'][v];
-  const swordTan = ['#d4c090', '#c8b48a', '#d0b880', '#b8a070', '#c0b080'][v];
-  const skinTone = ['#e8d0b0', '#f0d8b8', '#e0c8a0', '#f5d5b5', '#d8c0a0'][v];
-  const blackDetail = '#111111';
-  const waistDetail = '#3a2a3a'; // small accent like in ref
+  // Dark greys (armor/garments/wings), tan skin, pale sword — matching the pixel mock palette
+  const bodyDark = ['#2a2a2e', '#303034', '#26262a', '#343438', '#222226'][v];
+  const greyMid = ['#4a4a50', '#525258', '#44444a', '#5a5a60', '#3e3e44'][v];
+  const greyLight = ['#6a6a72', '#74747c', '#606068', '#7a7a82', '#585860'][v];
+  const greyDark = ['#1e1e22', '#242428', '#1a1a1e', '#2a2a2e', '#16161a'][v];
+  const swordTan = ['#d8c898', '#cfc090', '#e0d0a0', '#c4b488', '#d0c090'][v];
+  const skinTone = ['#e8c4a8', '#f0d0b0', '#e0b890', '#ecc8a0', '#d8b088'][v];
+  const hairPale = ['#e8e4dc', '#f0ebe2', '#ddd8d0', '#f5f0e8', '#d8d4cc'][v];
+  const blackDetail = '#111114';
 
-  // === WING / back right structure (exact jagged grey on right of ref) ===
-  // Built from overlapping rects to match the stepped, multi-prong silhouette in the image (top hook, main vertical, 3 descending right prongs). Adjusted for exact visual match to Image #2 - tall right blade-like part.
+  // === WING / CAPE MASS (back right): tall vertical + jagged trailing mass per mock ===
   ctx.fillStyle = greyDark;
-  ctx.fillRect((wingX + 0) * u, (wingY + 0) * u, 2 * u, 2 * u); // top upper
+  ctx.fillRect((wingX + 0) * u, (wingY + 0) * u, 2 * u, 3 * u); // top spike past head
   ctx.fillRect((wingX + 1) * u, (wingY + 1) * u, 2 * u, 2 * u);
   ctx.fillStyle = greyMid;
-  ctx.fillRect((wingX + 2) * u, (wingY + 0) * u, 2 * u, 3 * u); // extension
-  ctx.fillRect((wingX + 1) * u, (wingY + 3) * u, 3 * u, 5 * u); // main
+  ctx.fillRect((wingX + 2) * u, (wingY + 0) * u, 2 * u, 4 * u);
+  ctx.fillRect((wingX + 1) * u, (wingY + 3) * u, 3 * u, 6 * u); // main mass
   ctx.fillStyle = greyLight;
-  ctx.fillRect((wingX + 3) * u, (wingY + 2) * u, 2 * u, 3 * u); // upper prong right
-  ctx.fillRect((wingX + 3) * u, (wingY + 5) * u, 2 * u, 2 * u);
-  // Tall right vertical for the wing "blade" to match ref Image #2 (thicker for presence)
+  ctx.fillRect((wingX + 3) * u, (wingY + 2) * u, 2 * u, 4 * u);
+  ctx.fillRect((wingX + 4) * u, (wingY + 1) * u, 1 * u, 3 * u); // thin up protrusion
   ctx.fillStyle = greyMid;
-  ctx.fillRect((wingX + 4) * u, (wingY + 2) * u, 2 * u, (14 + cfg.wingExtraReach) * u); // tall right part with more standoff
+  ctx.fillRect((wingX + 4) * u, (wingY + 3) * u, 2 * u, (12 + cfg.wingExtraReach) * u); // tall trailing blade
   ctx.fillStyle = greyLight;
-  ctx.fillRect((wingX + 3) * u, (wingY + 7) * u, 2 * u, 3 * u); // middle prong
-  ctx.fillRect((wingX + 3) * u, (wingY + 9) * u, 2 * u, 3 * u);
-  ctx.fillStyle = greyLight;
-  ctx.fillRect((wingX + 2) * u, (wingY + 11) * u, 3 * u, 2 * u); // lower prong
-  ctx.fillStyle = greyMid;
-  ctx.fillRect((wingX + 3) * u, (wingY + 12) * u, 2 * u, 3 * u);
+  ctx.fillRect((wingX + 3) * u, (wingY + 7) * u, 2 * u, 3 * u);
+  ctx.fillRect((wingX + 3) * u, (wingY + 10) * u, 2 * u, 3 * u);
+  ctx.fillRect((wingX + 2) * u, (wingY + 12) * u, 3 * u, 2 * u); // lower jagged cape flap
   ctx.fillStyle = greyDark;
-  ctx.fillRect((wingX + 1) * u, (wingY + 14) * u, 2 * u, 4 * u); // bottom
-  ctx.fillRect((wingX + 2) * u, (wingY + 16) * u, 2 * u, 2 * u);
+  ctx.fillRect((wingX + 1) * u, (wingY + 14) * u, 3 * u, 4 * u);
+  ctx.fillRect((wingX + 3) * u, (wingY + 16) * u, 2 * u, 2 * u);
 
-  // === LEGS (skin thighs visible, grey boots together underneath, exact to ref) ===
+  // === LEGS: tan thighs, tall dark boots (slight fighting stance offset) ===
   ctx.fillStyle = skinTone;
-  ctx.fillRect((baseX + 1) * u, thighY * u, 3 * u, 5 * u); // thighs skin (under short costume)
+  ctx.fillRect((baseX + 1) * u, thighY * u, 3 * u, 5 * u);
+  if (stance) ctx.fillRect((baseX + 4) * u, (thighY + 1) * u, 1 * u, 3 * u); // wider stance hint
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX ) * u, bootY * u, 4 * u, 5 * u); // boots
+  ctx.fillRect((baseX) * u, bootY * u, 4 * u, 5 * u);
   ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX ) * u, bootY * u, 1 * u, 5 * u); // left edge
+  ctx.fillRect((baseX) * u, bootY * u, 1 * u, 5 * u);
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 3) * u, bootY * u, 1 * u, 4 * u); // right volume
+  ctx.fillRect((baseX + 3) * u, bootY * u, 1 * u, 4 * u);
   ctx.fillStyle = bodyDark;
-  ctx.fillRect((baseX ) * u, (bootY + 3) * u, 4 * u, 2 * u); // foot bottom
+  ctx.fillRect((baseX) * u, (bootY + 3) * u, 4 * u, 2 * u);
 
-  // === TORSO (dark grey costume body, exact proportions + belt/waist from ref) ===
+  // === TORSO: dark grey garment covering belly (no bare midriff read at map scale) ===
   ctx.fillStyle = bodyDark;
-  ctx.fillRect((baseX ) * u, torsoY * u, 4 * u, 7 * u); // narrower for ref
+  ctx.fillRect((baseX) * u, torsoY * u, 4 * u, 7 * u);
   ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX ) * u, (torsoY + 4) * u, 4 * u, 1 * u); // belt
-  ctx.fillStyle = waistDetail;
-  ctx.fillRect((baseX + 1) * u, (torsoY + 5) * u, 2 * u, 1 * u); // small accent (purple in ref)
+  ctx.fillRect((baseX) * u, (torsoY + 4) * u, 4 * u, 1 * u); // belt
+  ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 7 * u);
   ctx.fillStyle = greyLight;
-  ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 4 * u); // edge
-  ctx.fillStyle = greyMid;
-  ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 7 * u); // side layer for grey costume depth like ref
+  ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 3 * u);
 
-  // === HEAD (small, light top, skin, black bar eye, exact to ref) ===
-  ctx.fillStyle = swordTan;
-  ctx.fillRect((baseX ) * u, (baseY + 1) * u, 4 * u, 2 * u); // light hair/cap top (narrower)
+  // === HEAD: tan face, dark/pale hair mass on top+back ===
+  ctx.fillStyle = greyDark;
+  ctx.fillRect((baseX) * u, (baseY + 1) * u, 4 * u, 2 * u); // dark hair/cap top (mock)
+  ctx.fillStyle = hairPale;
+  ctx.fillRect((baseX + 1) * u, (baseY + 1) * u, 2 * u, 1 * u); // pale highlight
   ctx.fillStyle = skinTone;
-  ctx.fillRect((baseX + 1) * u, (baseY + 3) * u, 3 * u, 3 * u); // face
+  ctx.fillRect((baseX + 1) * u, (baseY + 3) * u, 3 * u, 3 * u);
   ctx.fillStyle = blackDetail;
-  ctx.fillRect((baseX + 1) * u, (baseY + 4) * u, 2 * u, 1 * u); // black eye/mask bar
+  ctx.fillRect((baseX + 1) * u, (baseY + 4) * u, 2 * u, 1 * u);
   ctx.fillStyle = bodyDark;
-  ctx.fillRect((baseX + 1) * u, (baseY + 6) * u, 2 * u, 1 * u); // neck join
-  ctx.fillStyle = swordTan;
-  ctx.fillRect((baseX + 3) * u, (baseY + 2) * u, 1 * u, cfg.hairLen * u); // long back hair strand
-  ctx.fillRect((baseX + 4) * u, (baseY + 3) * u, 1 * u, Math.max(2, cfg.hairLen - 1) * u); // longer outer strand
-  if (cfg.hairFront) {
-    ctx.fillRect((baseX + 0) * u, (baseY + 2) * u, 1 * u, 3 * u); // front fringe
-  }
+  ctx.fillRect((baseX + 1) * u, (baseY + 6) * u, 2 * u, 1 * u);
+  ctx.fillStyle = hairPale;
+  ctx.fillRect((baseX + 3) * u, (baseY + 2) * u, 1 * u, cfg.hairLen * u);
+  ctx.fillRect((baseX + 4) * u, (baseY + 3) * u, 1 * u, Math.max(2, cfg.hairLen - 1) * u);
+  if (cfg.hairFront) ctx.fillRect((baseX + 0) * u, (baseY + 2) * u, 1 * u, 3 * u);
 
-  // === ARM + HAND (skin, raised on left/front holding sword at rib level, exact) ===
+  // === ARM + HAND: skin, grip at mid-torso holding tip-UP sword in front ===
   ctx.fillStyle = skinTone;
-  ctx.fillRect((baseX ) * u, armY * u, 2 * u, 3 * u); // upper arm
-  ctx.fillRect((baseX - 2) * u, forearmY * u, 2 * u, 4 * u); // forearm up
-  ctx.fillRect((baseX - 2) * u, handY * u, 2 * u, 2 * u); // hand at sword base (rib height)
+  ctx.fillRect((baseX) * u, armY * u, 2 * u, 3 * u);
+  ctx.fillRect((baseX - 2) * u, forearmY * u, 2 * u, 4 * u);
+  ctx.fillRect((baseX - 2) * u, handY * u, 2 * u, 2 * u);
 
-  // === SWORD (light tan vertical upward on left, thick, from high above head to hand, exact to ref) ===
+  // === SWORD tip-UP: pale blade vertical in front of torso, hilt at hand ===
   ctx.fillStyle = swordTan;
-  ctx.fillRect((baseX - 3) * u, swordY * u, 2 * u, cfg.swordLen * u); // main blade (further left, starts higher)
-  ctx.fillRect((baseX - 2) * u, (swordY + 1) * u, 1 * u, Math.max(6, cfg.swordLen - 2) * u); // thickness
+  ctx.fillRect((baseX - 3) * u, swordY * u, 2 * u, cfg.swordLen * u);
+  ctx.fillRect((baseX - 2) * u, (swordY + 1) * u, 1 * u, Math.max(6, cfg.swordLen - 2) * u);
   ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX - 3) * u, (handY + 1) * u, 2 * u, 1 * u); // subtle base/hilt near hand
+  ctx.fillRect((baseX - 3) * u, (handY + 1) * u, 2 * u, 1 * u); // hilt/guard
+  ctx.fillRect((baseX - 3) * u, handY * u, 2 * u, 1 * u);
 
-  // === Final retro outlines / definition (thin dark edges for readability, matching ref crispness) ===
   ctx.fillStyle = '#111';
-  ctx.fillRect((baseX - 1) * u, (baseY + 2) * u, 1 * u, 6 * u); // head left
-  ctx.fillRect((baseX - 1) * u, (baseY + 7) * u, 1 * u, 7 * u); // torso left
-  ctx.fillRect((baseX - 1) * u, (baseY + 13) * u, 1 * u, 9 * u); // leg left
-  ctx.fillRect((baseX - 4) * u, swordY * u, 1 * u, (cfg.swordLen + 1) * u); // sword left edge
+  ctx.fillRect((baseX - 1) * u, (baseY + 2) * u, 1 * u, 6 * u);
+  ctx.fillRect((baseX - 1) * u, (baseY + 7) * u, 1 * u, 7 * u);
+  ctx.fillRect((baseX - 1) * u, (baseY + 13) * u, 1 * u, 9 * u);
+  ctx.fillRect((baseX - 4) * u, swordY * u, 1 * u, (cfg.swordLen + 1) * u);
 }
 
 function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
@@ -843,6 +854,8 @@ function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
 // Returns the raw canvas (96x96). This is the best form for Phaser (addCanvas + NEAREST).
 // generateCharacterSprite (below) wraps it for dataUrl compat (review menu, server, <img> tags).
 function createCharacterSpriteCanvas(character, spriteSpec = null) {
+  const traitSpec = getProceduralSpec(character, spriteSpec);
+  if (traitSpec) return createTraitSpriteCanvas(traitSpec, 0);
   const canvas = createCanvas(BASE_SIZE * UPSCALE, BASE_SIZE * UPSCALE);
   const ctx = canvas.getContext('2d');
 
@@ -1575,6 +1588,8 @@ function createCharacterSpriteSpec(character) {
  * Also useful for review previews (draw frames in a <canvas> and cycle with requestAnimationFrame).
  */
 function createCharacterSpriteSheetCanvas(character, spriteSpec = null, frameCount = 4) {
+  const traitSpec = getProceduralSpec(character, spriteSpec);
+  if (traitSpec) return createTraitSpriteSheetCanvas(traitSpec, frameCount);
   const frameCanvas = createCharacterSpriteCanvas(character, spriteSpec); // one frame to get size
   const frameW = frameCanvas.width;
   const frameH = frameCanvas.height;
@@ -1675,14 +1690,187 @@ function mixVoxelColor(a, b, t) {
   ];
 }
 
+/**
+ * Map a procedural trait spec (LLM / preset) into the semantic voxel parts+design+palette
+ * used by createSemanticCharacterVoxelFrame. Never extrudes canvas pixels.
+ */
+function proceduralTraitsToVoxelSpec(character, proceduralSpec) {
+  const t = (proceduralSpec && proceduralSpec.traits) || {};
+  const pal = t.palette || {};
+  const outfit = t.outfit || {};
+  const name = String((character && (character.name || character.Name)) || proceduralSpec.name || '').toLowerCase();
+  const preset = String(proceduralSpec.preset || '').toLowerCase();
+  const isMortacia = preset === 'mortacia' || name.includes('mortacia');
+  const isSuzerain = preset === 'suzerain' || name.includes('suzerain');
+  const female = String((character && (character.sex || character.Sex)) || proceduralSpec.sex || '').toLowerCase() === 'female'
+    || isMortacia;
+  const slender = !!(t.statuesque || t.build === 'slender' || t.naturalLimbs || isMortacia);
+  const heavy = !!(t.build === 'heavy' || t.build === 'bulky') && !slender;
+  const large = t.size === 'large' || t.size === 'huge' || isMortacia;
+  const items = Array.isArray(t.items) ? t.items : [];
+  const weaponItem = items.find((it) => it && (it.slot === 'weapon' || /sword|axe|spear|staff|mace|dagger|scythe|bow|wand/i.test(String(it.type || '')))) || items[0];
+  const weaponTypeRaw = String((weaponItem && weaponItem.type) || '').toLowerCase();
+
+  let head = 'human_hair';
+  if (outfit.helm && outfit.helm !== 'none') {
+    head = (outfit.helm === 'closed' || outfit.helm === 'full') ? 'gallant_helm' : 'plumed_helmet';
+  } else if (outfit.hood) {
+    head = 'pointed_cowl';
+  } else if (t.head === 'skull' || t.bodyPlan === 'skeletal') {
+    head = 'skull_crest';
+  } else if (female || t.hair === 'long') {
+    head = 'human_hair';
+  }
+
+  let torso = 'broad_tunic';
+  const style = String(outfit.style || 'none').toLowerCase();
+  if (style === 'plate' || style === 'mail') torso = 'gallant_plate';
+  else if (style === 'robe' || style === 'cloak') torso = 'flowing_robe';
+  else if (style === 'leather') torso = 'leather_tunic';
+  else if (style === 'gi' || style === 'tabard') torso = 'broad_tunic';
+  else if (isMortacia || t.garment) torso = 'cinched_corset';
+
+  let legs = 'striding_boots';
+  if (style === 'plate' || style === 'mail') legs = 'armored_greaves';
+  else if (style === 'robe') legs = 'flowing_skirt';
+  else if (isMortacia) legs = 'long_striders';
+
+  let weapon = 'sword_broad';
+  if (/spear|staff|wand|bow/.test(weaponTypeRaw)) weapon = weaponTypeRaw.includes('bow') ? 'bow' : (weaponTypeRaw.includes('wand') ? 'wand' : 'spear');
+  else if (/dagger/.test(weaponTypeRaw)) weapon = 'dagger';
+  else if (/axe/.test(weaponTypeRaw)) weapon = 'axe';
+  else if (/mace/.test(weaponTypeRaw)) weapon = 'mace';
+  else if (/scythe/.test(weaponTypeRaw)) weapon = 'scythe';
+  else if (/sword|blade/.test(weaponTypeRaw) || !weaponTypeRaw) weapon = 'sword_broad';
+
+  let accessory = 'none';
+  const wings = String(t.wings || 'none').toLowerCase();
+  if (wings && wings !== 'none') accessory = 'skeletal_wings';
+  else if (outfit.cape || t.garment && t.garment.buttCape) accessory = 'flowing_cape';
+
+  // Palette from trait colors (garment/cape/wing overrides applied in frame builder)
+  const palette = {
+    primary: pal.outfit || '#4a3c2f',
+    secondary: pal.outfit2 || pal.metal || '#8b5a2b',
+    highlight: pal.trim || pal.metal || '#c8ccd4',
+    shadow: '#1a1410',
+    skin: pal.skin || '#e8c39e',
+    accent: (t.capeColor) || pal.trim || pal.glow || '#aa3333'
+  };
+
+  const design = {
+    head_size: large ? 3 : 4,
+    head_width: slender ? 4 : (heavy ? 6 : 5),
+    torso_height: slender ? 5 : 4,
+    torso_width: slender ? 4 : (heavy ? 6 : 5),
+    leg_height: large || slender ? 12 : 10,
+    leg_thickness: slender ? 2 : (heavy ? 3 : 2),
+    arm_length: 5,
+    arm_swing: (t.weaponPose === 'ready' || isMortacia || isSuzerain) ? -2 : 0,
+    stride_amount: (t.weaponPose === 'ready') ? 1 : 1,
+    weapon_length: t.longBlade ? 12 : 9,
+    blade_size: 2,
+    crest_height: head.includes('helm') ? 2 : 1,
+    robe_flare: torso.includes('robe') ? 2 : 1,
+    wing_length: accessory.includes('wing') ? 3 : 1,
+    wing_bone_count: 3,
+    cape_flow: accessory.includes('cape') || outfit.cape ? 3 : 1,
+    pose: (t.weaponPose === 'ready') ? 'ready_stance' : 'idle_stand'
+  };
+
+  if (isMortacia) {
+    Object.assign(palette, {
+      primary: '#5a5a62',
+      secondary: '#4a4a52',
+      highlight: '#9a9ca4',
+      shadow: '#2a2a30',
+      skin: pal.skin || '#e8c4a8',
+      accent: '#6a6a72'
+    });
+    Object.assign(design, {
+      head_size: 3, head_width: 4, torso_height: 5, torso_width: 3,
+      leg_height: 13, leg_thickness: 2, arm_length: 5, arm_swing: -2,
+      stride_amount: 1, weapon_length: 13, blade_size: 2,
+      wing_length: 4, wing_bone_count: 3, cape_flow: 2, pose: 'ready_stance'
+    });
+    head = 'human_hair';
+    torso = 'cinched_corset';
+    legs = 'long_striders';
+    weapon = 'sword_broad';
+    accessory = 'skeletal_wings';
+  }
+  if (isSuzerain) {
+    Object.assign(palette, {
+      primary: '#4a4e56',
+      secondary: '#7a8088',
+      highlight: '#b89440',
+      shadow: '#1a1c20',
+      skin: pal.skin || '#e0c098',
+      accent: t.capeColor || '#aa2222'
+    });
+    Object.assign(design, {
+      head_size: 4, head_width: 5, torso_height: 5, torso_width: 4,
+      leg_height: 11, leg_thickness: 2, arm_length: 5, arm_swing: -2,
+      stride_amount: 1, weapon_length: 12, blade_size: 2,
+      crest_height: 2, cape_flow: 3, pose: 'ready_stance'
+    });
+    head = 'gallant_helm';
+    torso = 'gallant_plate';
+    legs = 'armored_greaves';
+    weapon = 'sword_broad';
+    accessory = 'flowing_cape';
+  }
+
+  return {
+    kind: 'semantic-voxel',
+    preset: isMortacia ? 'mortacia' : (isSuzerain ? 'suzerain' : null),
+    palette,
+    parts: { head, torso, legs, arm: 'swinging_upper_lower', weapon, accessory },
+    pose: design.pose,
+    design,
+    traits: t,
+    garment: t.garment || null,
+    capeColor: t.capeColor || null,
+    wingColor: t.wingColor || null,
+    bootColor: t.bootColor || null,
+    worldScale: proceduralSpec.worldScale
+  };
+}
+
+function resolveVoxelSpriteSpec(character, spriteSpec = null) {
+  const procedural = getProceduralSpec(character, spriteSpec);
+  if (procedural && procedural.kind === 'placeholder') return procedural;
+  if (procedural && procedural.kind === 'procedural') {
+    return proceduralTraitsToVoxelSpec(character, procedural);
+  }
+  if (spriteSpec && spriteSpec.parts && spriteSpec.palette) {
+    return spriteSpec;
+  }
+  return createCharacterSpriteSpec(character || {});
+}
+
+/**
+ * Lean athletic body-part voxel assembly (NOT canvas extrusion / woodcut slabs).
+ * Torso thicker than limbs; wings = thin membranes + bone ridges; sword = thin tip-up blade.
+ * Used for ALL 3D dungeon actors (party companions, NPCs, monsters, presets).
+ */
 function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options = {}) {
-  const spec = spriteSpec || createCharacterSpriteSpec(character);
+  let spec = spriteSpec;
+  if (!spec || (!spec.parts && spec.kind === 'procedural')) {
+    spec = resolveVoxelSpriteSpec(character, spriteSpec);
+  } else if (!spec.parts) {
+    spec = resolveVoxelSpriteSpec(character, spec);
+  }
   const palette = normalizePalette(spec.palette || {});
   const parts = spec.parts || {};
   const design = spec.design || {};
   const poseName = String(spec.pose || design.pose || '').toLowerCase();
-  const size = Math.max(16, Math.min(32, Math.floor(options.voxelSize || 24)));
-  const baseDepth = Math.max(10, Math.min(16, Math.floor(options.depth || 12)));
+  const traits = spec.traits || {};
+  const garment = spec.garment || traits.garment || null;
+  const name = String((character && (character.name || character.Name)) || spec.preset || '').toLowerCase();
+  const isMortacia = spec.preset === 'mortacia' || name.includes('mortacia');
+  const isSuzerain = spec.preset === 'suzerain' || name.includes('suzerain');
+  const size = Math.max(20, Math.min(36, Math.floor(options.voxelSize || 28)));
   const mirror = !!options.mirror;
   const frontDir = mirror ? 1 : -1;
   const backDir = -frontDir;
@@ -1733,17 +1921,37 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
     }
   };
 
-  const primary = hexToVoxelColor(palette.primary, '#4a3c2f');
-  const secondary = hexToVoxelColor(palette.secondary, '#8b5a2b');
-  const highlight = hexToVoxelColor(palette.highlight, '#ffdd66');
-  const shadow = hexToVoxelColor(palette.shadow, '#22110a');
-  const skin = hexToVoxelColor(palette.skin, '#e8c39e');
-  const accent = hexToVoxelColor(palette.accent, '#aa3333');
-  const armor = mixVoxelColor(secondary, shadow, 0.12);
-  const cloth = mixVoxelColor(primary, accent, 0.1);
-  const wingBone = mixVoxelColor(secondary, highlight, 0.18);
+  // Thin membrane fill between two polylines in the XZ plane at fixed Y depth
+  const fillMembrane = (pts, y, color) => {
+    if (!pts || pts.length < 2) return;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      drawLine(a[0], y, a[1], b[0], y, b[1], 1, color);
+    }
+  };
+
+  let primary = hexToVoxelColor(palette.primary, '#4a3c2f');
+  let secondary = hexToVoxelColor(palette.secondary, '#8b5a2b');
+  let highlight = hexToVoxelColor(palette.highlight, '#ffdd66');
+  let shadow = hexToVoxelColor(palette.shadow, '#22110a');
+  let skin = hexToVoxelColor(palette.skin, '#e8c39e');
+  let accent = hexToVoxelColor(palette.accent, '#aa3333');
+  if (spec.wingColor) accent = mixVoxelColor(hexToVoxelColor(spec.wingColor, '#6e6e76'), accent, 0.2);
+  if (spec.capeColor) accent = hexToVoxelColor(spec.capeColor, palette.accent);
+  const armor = mixVoxelColor(secondary, shadow, 0.1);
+  const cloth = garment && garment.color ? hexToVoxelColor(garment.color, palette.primary) : mixVoxelColor(primary, accent, 0.08);
+  const wingBone = mixVoxelColor(secondary, highlight, 0.12);
+  const wingMem = spec.wingColor
+    ? hexToVoxelColor(spec.wingColor, '#6e6e76')
+    : (isMortacia ? hexToVoxelColor('#6e6e76', '#6e6e76') : mixVoxelColor(secondary, shadow, 0.2));
   const darkMetal = mixVoxelColor(shadow, secondary, 0.28);
-  const hairColor = mixVoxelColor(highlight, skin, 0.32);
+  const hairColor = isMortacia
+    ? hexToVoxelColor('#f0ebe0', '#f0ebe0')
+    : mixVoxelColor(highlight, skin, 0.32);
+  const bootCol = spec.bootColor
+    ? hexToVoxelColor(spec.bootColor, '#3e3e46')
+    : (isMortacia ? hexToVoxelColor('#3e3e46', '#3e3e46') : mixVoxelColor(secondary, shadow, 0.25));
 
   const headType = String(parts.head || '').toLowerCase();
   const torsoType = String(parts.torso || '').toLowerCase();
@@ -1751,61 +1959,59 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
   const weaponType = String(parts.weapon || '').toLowerCase();
   const accessoryType = String(parts.accessory || '').toLowerCase();
 
-  const armorLike = torsoType.includes('plate') || torsoType.includes('gallant') || torsoType.includes('chain');
+  const armorLike = torsoType.includes('plate') || torsoType.includes('gallant') || torsoType.includes('chain') || isSuzerain;
   const robeLike = torsoType.includes('robe') || torsoType.includes('dress') || torsoType.includes('flowing') || legsType.includes('flowing');
-  const corsetLike = torsoType.includes('corset');
+  const corsetLike = torsoType.includes('corset') || isMortacia || !!(garment && garment.bikini);
   const helmetLike = headType.includes('helm') || headType.includes('helmet') || headType.includes('cowl') || headType.includes('mask');
   const hairLike = headType.includes('hair') || (!helmetLike && !headType.includes('skull'));
-  const wingLike = accessoryType.includes('wing');
-  const capeLike = accessoryType.includes('cape');
+  const wingLike = accessoryType.includes('wing') || isMortacia;
+  const capeLike = accessoryType.includes('cape') || isSuzerain || !!(garment && garment.buttCape);
+  const buttCape = isMortacia || !!(garment && garment.buttCape);
+  const readyPose = poseName.includes('ready') || poseName.includes('fight') || isMortacia || isSuzerain;
 
-  const targetHeight = Math.floor(size * 0.82);
-  const rawHeadH = clampVoxelNumber(design.head_size, 3, 6, 4);
-  const rawHeadW = clampVoxelNumber(design.head_width, 4, 7, helmetLike ? 6 : 5);
-  const rawTorsoH = clampVoxelNumber(design.torso_height, 4, 7, robeLike ? 5 : 4);
-  const rawTorsoW = clampVoxelNumber(design.torso_width, 4, 8, armorLike ? 6 : 5);
-  const rawLegH = clampVoxelNumber(design.leg_height, 8, 13, 10);
-  const rawLegW = clampVoxelNumber(design.leg_thickness, 2, 4, 3);
+  const targetHeight = Math.floor(size * 0.88);
+  const rawHeadH = clampVoxelNumber(design.head_size, 3, 5, 3);
+  const rawHeadW = clampVoxelNumber(design.head_width, 3, 6, helmetLike ? 5 : 4);
+  const rawTorsoH = clampVoxelNumber(design.torso_height, 4, 6, corsetLike ? 5 : 4);
+  const rawTorsoW = clampVoxelNumber(design.torso_width, 3, 6, armorLike ? 4 : 3);
+  const rawLegH = clampVoxelNumber(design.leg_height, 9, 14, 11);
+  const rawLegW = clampVoxelNumber(design.leg_thickness, 1, 3, 2);
   const rawArmH = clampVoxelNumber(design.arm_length, 4, 7, 5);
-  const rawWeaponLen = clampVoxelNumber(design.weapon_length, 5, 14, 9);
-  const rawStride = clampVoxelNumber(design.stride_amount, 0, 4, 1);
-  const rawArmSwing = clampVoxelNumber(design.arm_swing, -4, 4, 0);
-  const rawCrestH = clampVoxelNumber(design.crest_height, 1, 4, helmetLike ? 2 : 1);
-  const rawRobeFlare = clampVoxelNumber(design.robe_flare, 1, 4, robeLike ? 2 : 1);
-  const rawWingLen = clampVoxelNumber(design.wing_length, 1, 3, wingLike ? 2 : 1);
-  const rawWingBones = clampVoxelNumber(design.wing_bone_count, 3, 6, wingLike ? 4 : 3);
-  const rawCapeFlow = clampVoxelNumber(design.cape_flow, 1, 4, capeLike ? 2 : 1);
-  const scale = Math.min(1.15, Math.max(0.85, targetHeight / Math.max(12, rawHeadH + rawTorsoH + rawLegH + rawCrestH + 1)));
+  const rawWeaponLen = clampVoxelNumber(design.weapon_length, 6, 16, 11);
+  const rawStride = clampVoxelNumber(design.stride_amount, 0, 3, readyPose ? 1 : 1);
+  const rawArmSwing = clampVoxelNumber(design.arm_swing, -4, 4, readyPose ? -2 : 0);
+  const rawCrestH = clampVoxelNumber(design.crest_height, 1, 3, helmetLike ? 2 : 1);
+  const rawRobeFlare = clampVoxelNumber(design.robe_flare, 1, 3, robeLike ? 2 : 1);
+  const rawWingLen = clampVoxelNumber(design.wing_length, 1, 5, wingLike ? 3 : 1);
+  const rawWingBones = clampVoxelNumber(design.wing_bone_count, 3, 5, 3);
+  const rawCapeFlow = clampVoxelNumber(design.cape_flow, 1, 4, capeLike ? 3 : 1);
+  const scale = Math.min(1.2, Math.max(0.8, targetHeight / Math.max(14, rawHeadH + rawTorsoH + rawLegH + rawCrestH + 1)));
   const scaleDim = (value, min, max) => Math.max(min, Math.min(max, Math.round(value * scale)));
 
-  let headH = scaleDim(rawHeadH, 3, 6);
-  let headW = scaleDim(rawHeadW, 4, 7);
-  let torsoH = scaleDim(rawTorsoH, 4, 7);
-  let torsoW = scaleDim(rawTorsoW, 4, 8);
-  let legH = scaleDim(rawLegH, 8, 13);
-  let legW = scaleDim(rawLegW, 2, 4);
+  let headH = scaleDim(rawHeadH, 3, 5);
+  let headW = scaleDim(rawHeadW, 3, 6);
+  let torsoH = scaleDim(rawTorsoH, 4, 6);
+  let torsoW = scaleDim(rawTorsoW, 3, 6);
+  let legH = scaleDim(rawLegH, 9, 14);
+  let legW = scaleDim(rawLegW, 1, 3);
   let armH = scaleDim(rawArmH, 4, 7);
-  let weaponLen = scaleDim(rawWeaponLen, 5, 14);
-  let crestH = scaleDim(rawCrestH, 1, 4);
-  const robeFlare = scaleDim(rawRobeFlare, 1, 4);
-  const wingLen = scaleDim(rawWingLen, 1, 4);
-  const wingBones = scaleDim(rawWingBones, 3, 6);
+  let weaponLen = scaleDim(rawWeaponLen, 6, 16);
+  let crestH = scaleDim(rawCrestH, 1, 3);
+  const robeFlare = scaleDim(rawRobeFlare, 1, 3);
+  const wingLen = scaleDim(rawWingLen, 1, 5);
+  const wingBones = Math.max(3, Math.min(5, Math.round(rawWingBones)));
   const capeFlow = scaleDim(rawCapeFlow, 1, 4);
 
-  if (poseName.includes('idle') || poseName.includes('stand')) {
-    armH = Math.max(4, armH - 1);
-  } else if (poseName.includes('run') || poseName.includes('dash')) {
-    legH = Math.max(8, legH - 1);
-    weaponLen = Math.max(5, weaponLen - 1);
-  } else if (poseName.includes('kneel')) {
-    legH = Math.max(7, legH - 2);
+  if (readyPose) {
+    armH = Math.max(4, armH);
   }
 
-  const stride = Math.max(0, Math.min(3, Math.round(rawStride)));
+  const stride = Math.max(0, Math.min(2, Math.round(rawStride)));
   const armSwing = Math.max(-4, Math.min(4, Math.round(rawArmSwing)));
-  const torsoDepth = Math.max(6, Math.min(10, baseDepth - (robeLike ? 1 : 0) + (armorLike ? 1 : 0)));
-  const limbDepth = Math.max(4, torsoDepth - 1);
-  const headDepth = Math.max(4, torsoDepth - 1);
+  // Lean depths: torso thicker than limbs (athletic, not Minecraft sticks / chunky boxes)
+  const torsoDepth = Math.max(4, Math.min(6, armorLike ? 5 : 4));
+  const limbDepth = 2;
+  const headDepth = Math.max(3, Math.min(4, torsoDepth - 1));
   const centerX = Math.floor(size / 2);
   const centerY = Math.floor(size / 2);
 
@@ -1830,273 +2036,422 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
   const torsoY0 = centerY - Math.floor(torsoDepth / 2);
   const torsoY1 = torsoY0 + torsoDepth - 1;
 
-  fillBox(torsoX0, torsoX1, torsoY0, torsoY1, torsoZ0, torsoZ1, robeLike ? cloth : primary);
-  if (armorLike) {
-    fillBox(torsoX0 - 1, torsoX1 + 1, torsoY0, torsoY1, torsoZ1 - 1, torsoZ1, armor);
-    fillBox(torsoX0, torsoX1, centerY - 1, centerY + 1, torsoZ0 + 1, torsoZ0 + 1, highlight);
-  }
-  if (corsetLike) {
-    fillBox(centerX - 1, centerX + 1, torsoY0, torsoY1, torsoZ0 + 1, torsoZ1 - 1, shadow);
-    fillBox(centerX - 2, centerX + 2, torsoY0, torsoY1, torsoZ0 + 1, torsoZ0 + 1, accent);
-  }
-  if (robeLike) {
+  // --- TORSO ---
+  if (corsetLike && !armorLike) {
+    // Hourglass: wider chest, cinched waist, slight hips; bikini/sports-bra coverage
+    const chestZ1 = torsoZ1;
+    const chestZ0 = torsoZ0 + Math.floor(torsoH * 0.45);
+    const waistZ1 = chestZ0;
+    const waistZ0 = torsoZ0 + Math.floor(torsoH * 0.15);
+    const hipZ1 = waistZ0;
+    fillBox(torsoX0, torsoX1, torsoY0, torsoY1, chestZ0, chestZ1, cloth); // top / bra band
+    fillBox(centerX - 1, centerX + 1, torsoY0, torsoY1, waistZ0, waistZ1, skin); // bare midriff
+    // cups / coverage
+    fillBox(torsoX0, centerX - 1, torsoY0, torsoY1, chestZ0 + 1, chestZ1, mixVoxelColor(cloth, shadow, 0.1));
+    fillBox(centerX + 1, torsoX1, torsoY0, torsoY1, chestZ0 + 1, chestZ1, mixVoxelColor(cloth, shadow, 0.1));
+    fillBox(centerX - 1, centerX + 1, torsoY0 + 1, torsoY1 - 1, chestZ0, chestZ0, mixVoxelColor(cloth, highlight, 0.15)); // V strap
+    // high-cut bottoms
+    fillBox(torsoX0, torsoX1, torsoY0, torsoY1, hipZ1 - 1, hipZ1 + 1, cloth);
+    fillBox(centerX - Math.floor(torsoW / 2), centerX + Math.floor(torsoW / 2), torsoY0, torsoY1, legZ1 - 1, hipZ1, mixVoxelColor(cloth, shadow, 0.08));
+  } else if (armorLike) {
+    fillBox(torsoX0, torsoX1, torsoY0, torsoY1, torsoZ0, torsoZ1, armor);
+    // slim spaulders (not chunky)
+    fillBox(torsoX0 - 1, torsoX0, torsoY0, torsoY1, torsoZ1 - 1, torsoZ1, mixVoxelColor(armor, highlight, 0.15));
+    fillBox(torsoX1, torsoX1 + 1, torsoY0, torsoY1, torsoZ1 - 1, torsoZ1, mixVoxelColor(armor, highlight, 0.15));
+    fillBox(centerX - 1, centerX + 1, centerY - 1, centerY + 1, torsoZ0 + 1, torsoZ0 + 1, highlight);
+  } else if (robeLike) {
+    fillBox(torsoX0, torsoX1, torsoY0, torsoY1, torsoZ0, torsoZ1, cloth);
     fillBox(torsoX0 - robeFlare, torsoX1 + robeFlare, torsoY0, torsoY1, legZ0 + Math.max(1, Math.floor(legH * 0.25)), torsoZ0 + 1, cloth);
-    fillBox(torsoX0 - robeFlare + 1, torsoX1 + robeFlare - 1, torsoY0 + 1, torsoY1 - 1, legZ0 + 1, legZ0 + Math.max(2, Math.floor(legH * 0.28)), accent);
+  } else {
+    fillBox(torsoX0, torsoX1, torsoY0, torsoY1, torsoZ0, torsoZ1, primary);
   }
 
-  const shoulderPad = armorLike ? 1 : 0;
-  fillBox(torsoX0 - shoulderPad, torsoX1 + shoulderPad, torsoY0, torsoY1, torsoZ1, torsoZ1, mixVoxelColor(primary, highlight, 0.2));
-
+  // --- HEAD ---
   const headX0 = centerX - Math.floor(headW / 2);
   const headX1 = headX0 + headW - 1;
   const headY0 = centerY - Math.floor(headDepth / 2);
   const headY1 = headY0 + headDepth - 1;
   fillBox(headX0, headX1, headY0, headY1, headZ0, headZ1, helmetLike ? armor : skin);
   if (helmetLike) {
+    // closed helm slit
+    fillBox(headX0 + 1, headX1 - 1, centerY - 1, centerY + 1, headZ0 + Math.floor(headH * 0.4), headZ0 + Math.floor(headH * 0.4), shadow);
     fillBox(headX0, headX1, headY0, headY1, headZ1, headZ1, highlight);
-    fillBox(headX0 + Math.max(1, Math.floor(headW * 0.2)), headX1 - Math.max(1, Math.floor(headW * 0.2)), centerY - 1, centerY + 1, headZ0 + 1, headZ0 + 1, shadow);
-    if (headType.includes('gallant') || headType.includes('plumed') || headType.includes('crest')) {
-      fillBox(centerX - 1, centerX + 1, centerY - 1, centerY + 1, headZ1 + 1, Math.min(size - 2, headZ1 + crestH), accent);
-      if (headType.includes('gallant') || headType.includes('plumed')) {
-        drawLine(centerX, centerY, headZ1 + 1, centerX + backDir * 2, centerY, Math.min(size - 2, headZ1 + crestH + 1), 2, highlight);
-      }
+    if (crestH > 0) {
+      fillBox(centerX, centerX, centerY - 1, centerY + 1, headZ1 + 1, Math.min(size - 2, headZ1 + crestH), mixVoxelColor(accent, highlight, 0.2));
     }
   } else {
     const eyeX = frontDir < 0 ? (headX0 + 1) : (headX1 - 1);
     fillBox(eyeX, eyeX, centerY, centerY, headZ0 + Math.max(1, Math.floor(headH * 0.45)), headZ0 + Math.max(1, Math.floor(headH * 0.45)), shadow);
     if (hairLike) {
-      fillBox(headX0 - (frontDir < 0 ? 1 : 0), headX1 + (frontDir > 0 ? 1 : 0), headY0, headY1, headZ0 + Math.max(1, Math.floor(headH * 0.55)), headZ1 + (headType.includes('crowned') ? 1 : 0), hairColor);
-      drawLine(headX0 + backDir, centerY, headZ1 - 1, headX0 + backDir * 2, centerY, headZ0 - 1, 1, hairColor);
-    }
-    if (headType.includes('skull') || headType.includes('crowned')) {
-      fillBox(centerX - 1, centerX + 1, centerY - 1, centerY + 1, headZ1 + 1, Math.min(size - 2, headZ1 + crestH), headType.includes('crowned') ? highlight : shadow);
+      fillBox(headX0 - (frontDir < 0 ? 1 : 0), headX1 + (frontDir > 0 ? 1 : 0), headY0, headY1, headZ0 + Math.max(1, Math.floor(headH * 0.5)), headZ1 + 1, hairColor);
+      drawLine(headX0 + backDir, centerY, headZ1 - 1, headX0 + backDir * 2, centerY, Math.max(torsoZ1 - 1, headZ0 - 2), 1, hairColor);
     }
   }
 
-  const footColor = armorLike ? darkMetal : secondary;
-  const legColor = armorLike ? armor : secondary;
-  if (legsType.includes('flowing') || robeLike) {
+  // --- LEGS (lean; thighs visible for Mortacia) ---
+  const footColor = armorLike ? darkMetal : bootCol;
+  const legColor = armorLike ? armor : (corsetLike ? skin : secondary);
+  const bootH = isMortacia ? Math.max(3, Math.floor(legH * 0.45)) : Math.max(2, Math.floor(legH * 0.3));
+  if (legsType.includes('flowing') || (robeLike && !corsetLike)) {
     fillBox(centerX - Math.floor((torsoW + robeFlare) / 2), centerX + Math.floor((torsoW + robeFlare) / 2), centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, torsoZ0 + 1, cloth);
-    fillBox(centerX - Math.floor((torsoW + robeFlare + 1) / 2), centerX + Math.floor((torsoW + robeFlare + 1) / 2), centerY - Math.floor((limbDepth - 1) / 2), centerY + Math.floor((limbDepth - 1) / 2), legZ0, legZ0 + 1, footColor);
+    fillBox(centerX - 1, centerX + 1, centerY - 1, centerY + 1, legZ0, legZ0 + 1, footColor);
   } else {
     const legGap = stride > 0 ? 1 : 0;
-    const legLead = Math.min(2, stride);
+    const legLead = readyPose ? 1 : Math.min(1, stride);
     const frontLegX0 = centerX - legGap - legW;
     const frontLegX1 = frontLegX0 + legW - 1;
     const backLegX0 = centerX + legGap;
     const backLegX1 = backLegX0 + legW - 1;
-    fillBox(frontDir < 0 ? frontLegX0 - legLead : frontLegX0 + legLead, frontDir < 0 ? frontLegX1 - legLead : frontLegX1 + legLead, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ1, legColor);
-    fillBox(backDir < 0 ? backLegX0 - Math.max(0, stride - 1) : backLegX0 + Math.max(0, stride - 1), backDir < 0 ? backLegX1 - Math.max(0, stride - 1) : backLegX1 + Math.max(0, stride - 1), centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ1 - 1, mixVoxelColor(legColor, shadow, 0.14));
-    fillBox(frontDir < 0 ? frontLegX0 - legLead - 1 : frontLegX0 + legLead - 1, frontDir < 0 ? frontLegX1 - legLead + 1 : frontLegX1 + legLead + 1, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ0 + 1, footColor);
-    fillBox(backDir < 0 ? backLegX0 - Math.max(0, stride - 1) - 1 : backLegX0 + Math.max(0, stride - 1) - 1, backDir < 0 ? backLegX1 - Math.max(0, stride - 1) + 1 : backLegX1 + Math.max(0, stride - 1) + 1, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ0 + 1, footColor);
+    const fShift = frontDir < 0 ? -legLead : legLead;
+    const bShift = backDir < 0 ? -Math.max(0, stride - 1) : Math.max(0, stride - 1);
+    // thighs / legs
+    fillBox(frontLegX0 + fShift, frontLegX1 + fShift, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0 + bootH, legZ1, legColor);
+    fillBox(backLegX0 + bShift, backLegX1 + bShift, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0 + bootH, legZ1 - 1, mixVoxelColor(legColor, shadow, 0.12));
+    // tall boots
+    fillBox(frontLegX0 + fShift - (armorLike ? 0 : 0), frontLegX1 + fShift, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ0 + bootH, footColor);
+    fillBox(backLegX0 + bShift, backLegX1 + bShift, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0, legZ0 + bootH, footColor);
+    // boot cuff
+    fillBox(frontLegX0 + fShift, frontLegX1 + fShift, centerY - Math.floor(limbDepth / 2), centerY + Math.floor(limbDepth / 2), legZ0 + bootH, legZ0 + bootH, mixVoxelColor(footColor, highlight, 0.1));
   }
 
+  // --- ARMS (ready stance: bent elbows, weapon hand forward) ---
   const shoulderX = centerX + frontDir * Math.floor((torsoW + 1) / 2);
-  const shoulderZ = torsoZ1 - Math.max(1, Math.floor(torsoH * 0.25));
-  const elbowX = shoulderX + frontDir * Math.max(1, Math.floor(Math.abs(armSwing) * 0.5));
-  const elbowZ = shoulderZ - Math.max(0, armSwing);
-  const handX = shoulderX + frontDir * Math.max(2, Math.floor(torsoW * 0.5) + Math.max(0, stride));
-  const handZ = Math.max(legZ0 + 3, torsoZ0 + Math.floor(torsoH * 0.42) - armSwing);
-  const armColor = armorLike ? armor : secondary;
-  drawLine(shoulderX, centerY + 1, shoulderZ, elbowX, centerY + 1, elbowZ, 2, armColor);
-  drawLine(elbowX, centerY + 1, elbowZ, handX, centerY + 1, handZ, 2, armColor);
-  fillBox(handX - 1, handX, centerY, centerY + 1, handZ - 1, handZ, skin);
+  const shoulderZ = torsoZ1 - Math.max(1, Math.floor(torsoH * 0.2));
+  const elbowX = shoulderX + frontDir * (readyPose ? 2 : Math.max(1, Math.floor(Math.abs(armSwing) * 0.5)));
+  const elbowZ = shoulderZ - (readyPose ? 2 : Math.max(0, armSwing));
+  const handX = shoulderX + frontDir * (readyPose ? 3 : Math.max(2, Math.floor(torsoW * 0.5) + Math.max(0, stride)));
+  const handZ = readyPose
+    ? Math.max(legZ0 + 4, torsoZ0 + Math.floor(torsoH * 0.55))
+    : Math.max(legZ0 + 3, torsoZ0 + Math.floor(torsoH * 0.42) - armSwing);
+  const armColor = armorLike ? armor : (corsetLike ? skin : secondary);
+  drawLine(shoulderX, centerY + 1, shoulderZ, elbowX, centerY + 1, elbowZ, 1, armColor);
+  drawLine(elbowX, centerY + 1, elbowZ, handX, centerY + 1, handZ, 1, armColor);
+  fillBox(handX - 1, handX, centerY, centerY + 1, handZ - 1, handZ, armorLike ? darkMetal : skin);
 
   const backShoulderX = centerX + backDir * Math.floor((torsoW + 1) / 2);
   drawLine(backShoulderX, centerY - 1, shoulderZ, backShoulderX + backDir, centerY - 1, shoulderZ - 3, 1, mixVoxelColor(armColor, shadow, 0.2));
 
-  if (capeLike) {
+  // --- CAPE / BUTT CAPE ---
+  if (capeLike || buttCape) {
+    const capeCol = isSuzerain
+      ? hexToVoxelColor(spec.capeColor || '#aa2222', '#aa2222')
+      : (buttCape ? cloth : accent);
     const capeTopX = centerX + backDir * Math.floor((torsoW + 1) / 2);
-    const capeFront = capeTopX + backDir * 2;
-    fillBox(Math.min(capeTopX, capeFront), Math.max(capeTopX, capeFront), centerY - Math.floor((torsoDepth - 2) / 2), centerY + Math.floor((torsoDepth - 2) / 2), torsoZ0 + 1, legZ0 + Math.floor(legH * 0.7), accent);
-    fillBox(Math.min(capeFront, capeFront + backDir * (1 + capeFlow)), Math.max(capeFront, capeFront + backDir * (1 + capeFlow)), centerY - Math.floor((torsoDepth - 3) / 2), centerY + Math.floor((torsoDepth - 3) / 2), legZ0 + Math.floor(legH * 0.2), legZ0 + 1, mixVoxelColor(accent, shadow, 0.16));
-    fillBox(Math.min(capeTopX, capeFront), Math.max(capeTopX, capeFront), centerY - Math.floor((torsoDepth + 1) / 2), centerY - Math.floor((torsoDepth - 1) / 2), torsoZ0 + 2, legZ0 + Math.floor(legH * 0.55), mixVoxelColor(accent, highlight, 0.08));
-  }
-
-  if (wingLike) {
-    const wingBaseX = centerX + backDir * (Math.floor(torsoW / 2) + 1);
-    const wingBaseZ = torsoZ1 - 1;
-    drawLine(wingBaseX, centerY - 1, wingBaseZ, wingBaseX + backDir * (2 + wingLen), centerY - 1, wingBaseZ + Math.max(3, wingLen + 2), 2, wingBone);
-    drawLine(wingBaseX, centerY + 1, wingBaseZ - 1, wingBaseX + backDir * (2 + wingLen), centerY + 1, wingBaseZ + Math.max(2, wingLen + 1), 2, mixVoxelColor(wingBone, shadow, 0.08));
-    for (let i = 0; i < wingBones; i++) {
-      const fanZ = wingBaseZ + 1 + i;
-      const fanX = wingBaseX + backDir * (3 + Math.floor(i * 0.6));
-      drawLine(wingBaseX + backDir, centerY - 1, wingBaseZ + 1, fanX, centerY - 1, fanZ + wingLen, 1, mixVoxelColor(wingBone, highlight, 0.1));
-      drawLine(wingBaseX + backDir, centerY + 1, wingBaseZ, fanX, centerY + 1, fanZ + Math.max(1, wingLen - 1), 1, mixVoxelColor(wingBone, shadow, 0.04));
+    const capeHang = buttCape
+      ? legZ0 + Math.floor(legH * 0.55)
+      : legZ0 + Math.floor(legH * 0.15);
+    // thin cape sheet (depth 1-2), not a slab
+    const capeY = centerY - Math.floor(torsoDepth / 2) - 1;
+    fillBox(Math.min(capeTopX, capeTopX + backDir * (1 + capeFlow)), Math.max(capeTopX, capeTopX + backDir * (1 + capeFlow)), capeY, capeY + 1, torsoZ0 + 1, capeHang, capeCol);
+    if (!buttCape) {
+      // flowing lower edge
+      fillBox(capeTopX + backDir * (1 + capeFlow), capeTopX + backDir * (2 + capeFlow), capeY, capeY, legZ0 + 1, capeHang - 2, mixVoxelColor(capeCol, shadow, 0.15));
     }
-    fillBox(wingBaseX + backDir * 2, wingBaseX + backDir * 2 + 1, centerY - 1, centerY, wingBaseZ - 1, wingBaseZ + 1, mixVoxelColor(wingBone, shadow, 0.1));
   }
 
-  const weaponY0 = centerY;
-  const weaponY1 = centerY + 1;
+  // --- WINGS (Mortacia: triangular pointy tops; hang to ankles then angle UP toward hands; 3 bones from peak) ---
+  if (wingLike) {
+    const peakX = centerX + backDir * (Math.floor(torsoW / 2) + 1);
+    const peakZ = Math.min(size - 2, headZ1 + 1);
+    const peakY = centerY - 1;
+    const ankleZ = legZ0 + 1;
+    const outerX = peakX + backDir * (3 + wingLen);
+    const handReachX = handX + backDir;
+    const handReachZ = Math.max(handZ, torsoZ0 + 1);
+    // membrane: peak -> outer tip -> ankle flare -> up toward hands
+    const memPts = [
+      [peakX, peakZ],
+      [outerX, peakZ - 1],
+      [outerX + backDir, Math.floor((peakZ + ankleZ) * 0.55)],
+      [outerX - backDir, ankleZ],
+      [Math.floor((outerX + handReachX) * 0.5), Math.floor((ankleZ + handReachZ) * 0.45)],
+      [handReachX, handReachZ],
+      [peakX + backDir, torsoZ1]
+    ];
+    // fill membrane as thin sheets at peakY and peakY+1
+    for (let yi = 0; yi < 2; yi++) {
+      fillMembrane(memPts, peakY + yi, mixVoxelColor(wingMem, shadow, yi * 0.08));
+      // denser fill: scan between peak and outer for each z
+      for (let z = ankleZ; z <= peakZ; z++) {
+        const tDown = (peakZ - z) / Math.max(1, peakZ - ankleZ);
+        const xOuter = peakX + backDir * Math.round((2 + wingLen) * Math.min(1, tDown * 1.4));
+        // after ankle hang, taper inward toward hands
+        let xInner = peakX + backDir;
+        if (z < torsoZ0) {
+          const tUp = (torsoZ0 - z) / Math.max(1, torsoZ0 - ankleZ);
+          xInner = peakX + backDir * Math.round(1 + tUp * Math.abs(handReachX - peakX) * 0.35);
+        }
+        const x0 = Math.min(xInner, xOuter);
+        const x1 = Math.max(xInner, xOuter);
+        for (let x = x0; x <= x1; x++) {
+          setVoxel(x, peakY + yi, z, mixVoxelColor(wingMem, shadow, 0.05 * yi));
+        }
+      }
+    }
+    // 3 bones radiating from peak
+    for (let i = 0; i < wingBones; i++) {
+      const t = i / Math.max(1, wingBones - 1);
+      const tipX = peakX + backDir * (2 + Math.round(wingLen * (0.55 + 0.45 * t)));
+      const tipZ = i === 0 ? peakZ - 1 : (i === wingBones - 1 ? ankleZ + 1 : Math.floor(peakZ + (ankleZ - peakZ) * (0.35 + 0.4 * t)));
+      drawLine(peakX, peakY, peakZ, tipX, peakY, tipZ, 1, wingBone);
+    }
+    // leading edge ridge
+    drawLine(peakX, peakY, peakZ, outerX, peakY, peakZ - 1, 1, mixVoxelColor(wingBone, highlight, 0.15));
+  }
+
+  // --- WEAPON (thin tip-UP blade from ready hand) ---
+  const bladeColor = mixVoxelColor(highlight, secondary, 0.1);
   const haftColor = mixVoxelColor(accent, shadow, 0.22);
-  const bladeColor = mixVoxelColor(highlight, secondary, 0.12);
+  const tipZ = Math.min(size - 2, handZ + weaponLen);
   if (weaponType.includes('spear') || weaponType.includes('staff') || weaponType.includes('wand') || weaponType.includes('bow')) {
-    drawLine(handX + frontDir, centerY, handZ, handX + frontDir, centerY, Math.min(size - 2, handZ + weaponLen), 1, haftColor);
-    fillBox(handX + frontDir - 1, handX + frontDir + 1, centerY, centerY, Math.min(size - 2, handZ + weaponLen - 1), Math.min(size - 2, handZ + weaponLen), weaponType.includes('wand') ? highlight : bladeColor);
-  } else if (weaponType.includes('dagger') || weaponType.includes('sword')) {
-    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + Math.max(3, weaponLen - 2)), bladeColor);
-    fillBox(handX + frontDir * 2, handX + frontDir * 2, weaponY0, weaponY1, handZ + 1, Math.min(size - 2, handZ + Math.max(2, weaponLen - 4)), mixVoxelColor(bladeColor, highlight, 0.2));
-    fillBox(handX - 1, handX + 1, weaponY0, weaponY1, handZ - 1, handZ - 1, haftColor);
+    drawLine(handX + frontDir, centerY, handZ - 2, handX + frontDir, centerY, tipZ, 1, haftColor);
+    fillBox(handX + frontDir - 1, handX + frontDir + 1, centerY, centerY, tipZ - 1, tipZ, weaponType.includes('wand') ? highlight : bladeColor);
+  } else if (weaponType.includes('dagger') || weaponType.includes('sword') || !weaponType) {
+    // thin blade (1 voxel in Y), tip up
+    fillBox(handX + frontDir, handX + frontDir, centerY, centerY, handZ, tipZ, bladeColor);
+    // slight edge highlight along length
+    if (weaponLen > 6) {
+      fillBox(handX + frontDir, handX + frontDir, centerY, centerY, tipZ - 2, tipZ, mixVoxelColor(bladeColor, highlight, 0.35));
+    }
+    // crossguard
+    fillBox(handX + frontDir - 1, handX + frontDir + 1, centerY, centerY, handZ, handZ, haftColor);
+    // grip
+    fillBox(handX, handX + frontDir, centerY, centerY, handZ - 2, handZ - 1, haftColor);
   } else if (weaponType.includes('axe')) {
-    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + weaponLen - 2), haftColor);
-    fillBox(handX + frontDir * 2, handX + frontDir * 4, weaponY0, weaponY1, Math.min(size - 2, handZ + weaponLen - 3), Math.min(size - 2, handZ + weaponLen), bladeColor);
+    fillBox(handX + frontDir, handX + frontDir, centerY, centerY, handZ, tipZ - 2, haftColor);
+    fillBox(handX + frontDir * 2, handX + frontDir * 3, centerY, centerY, tipZ - 3, tipZ, bladeColor);
   } else if (weaponType.includes('mace')) {
-    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + weaponLen - 2), haftColor);
-    fillBox(handX + frontDir - 1, handX + frontDir + 1, weaponY0, weaponY1, Math.min(size - 2, handZ + weaponLen - 1), Math.min(size - 2, handZ + weaponLen + 1), secondary);
+    fillBox(handX + frontDir, handX + frontDir, centerY, centerY, handZ, tipZ - 2, haftColor);
+    fillBox(handX + frontDir - 1, handX + frontDir + 1, centerY, centerY, tipZ - 1, tipZ, secondary);
   } else if (weaponType.includes('scythe')) {
-    fillBox(handX + frontDir, handX + frontDir, weaponY0, weaponY1, handZ, Math.min(size - 2, handZ + weaponLen), haftColor);
-    drawLine(handX + frontDir, centerY, Math.min(size - 2, handZ + weaponLen - 1), handX + frontDir * 4, centerY, Math.min(size - 2, handZ + weaponLen - 3), 1, bladeColor);
+    fillBox(handX + frontDir, handX + frontDir, centerY, centerY, handZ, tipZ, haftColor);
+    drawLine(handX + frontDir, centerY, tipZ - 1, handX + frontDir * 3, centerY, tipZ - 3, 1, bladeColor);
   }
 
-  return {
-    size,
-    voxels,
-    colors
-  };
+  return { size, voxels, colors };
 }
 
-function voxelizeCharacterFrameCanvas(canvas, options = {}) {
-  const voxelSize = Math.max(12, Math.min(32, Math.floor(options.voxelSize || 24)));
-  const baseDepth = Math.max(4, Math.min(14, Math.floor(options.depth || 10)));
-  const mirror = !!options.mirror;
-  const sourceW = Math.max(1, canvas && canvas.width ? canvas.width : BASE_SIZE * UPSCALE);
-  const sourceH = Math.max(1, canvas && canvas.height ? canvas.height : BASE_SIZE * UPSCALE);
-  const sourcePixelGridW = Math.max(1, Math.min(BASE_SIZE, Math.floor(options.sourcePixelGridW || BASE_SIZE)));
-  const sourcePixelGridH = Math.max(1, Math.min(BASE_SIZE, Math.floor(options.sourcePixelGridH || BASE_SIZE)));
-  const sampleW = sourceW / sourcePixelGridW;
-  const sampleH = sourceH / sourcePixelGridH;
-  const voxels = new Uint8Array(voxelSize * voxelSize * voxelSize);
-  const colors = new Float32Array(voxels.length * 3);
+function sampleCanvasToGrid(canvas, gridW, gridH, mirror) {
+  const sourceW = Math.max(1, canvas && canvas.width ? canvas.width : gridW);
+  const sourceH = Math.max(1, canvas && canvas.height ? canvas.height : gridH);
+  const sampleW = sourceW / gridW;
+  const sampleH = sourceH / gridH;
   const ctx = canvas && typeof canvas.getContext === 'function' ? canvas.getContext('2d') : null;
   const imageData = (ctx && typeof ctx.getImageData === 'function')
     ? ctx.getImageData(0, 0, sourceW, sourceH).data
     : null;
-  const readPixel = (px, py) => {
-    if (!imageData) return [0, 0, 0, 0];
-    const x = Math.max(0, Math.min(sourceW - 1, px | 0));
-    const y = Math.max(0, Math.min(sourceH - 1, py | 0));
-    const idx = (y * sourceW + x) * 4;
-    return [
-      imageData[idx],
-      imageData[idx + 1],
-      imageData[idx + 2],
-      imageData[idx + 3]
-    ];
-  };
-  const indexOf = (x, y, z) => x + y * voxelSize + z * voxelSize * voxelSize;
-  const spriteGrid = new Uint8Array(sourcePixelGridW * sourcePixelGridH);
-  const spriteColors = new Float32Array(sourcePixelGridW * sourcePixelGridH * 3);
-
-  for (let sy = 0; sy < sourcePixelGridH; sy++) {
-    for (let sx = 0; sx < sourcePixelGridW; sx++) {
-      const srcSX = mirror ? (sourcePixelGridW - 1 - sx) : sx;
+  const grid = new Uint8Array(gridW * gridH);
+  const colors = new Float32Array(gridW * gridH * 3);
+  if (!imageData) return { grid, colors, gridW, gridH };
+  for (let sy = 0; sy < gridH; sy++) {
+    for (let sx = 0; sx < gridW; sx++) {
+      const srcSX = mirror ? (gridW - 1 - sx) : sx;
       const x0 = Math.floor(srcSX * sampleW);
       const x1 = Math.max(x0 + 1, Math.floor((srcSX + 1) * sampleW));
       const y0 = Math.floor(sy * sampleH);
       const y1 = Math.max(y0 + 1, Math.floor((sy + 1) * sampleH));
-      let alphaSum = 0;
-      let sampleCount = 0;
-      let rSum = 0;
-      let gSum = 0;
-      let bSum = 0;
-      let opaqueCount = 0;
+      let alphaSum = 0, sampleCount = 0, rSum = 0, gSum = 0, bSum = 0, opaqueCount = 0;
       for (let py = y0; py < y1; py++) {
         for (let px = x0; px < x1; px++) {
-          const [r, g, b, a] = readPixel(px, py);
-          alphaSum += a;
-          sampleCount++;
+          const x = Math.max(0, Math.min(sourceW - 1, px));
+          const y = Math.max(0, Math.min(sourceH - 1, py));
+          const idx = (y * sourceW + x) * 4;
+          const a = imageData[idx + 3];
+          alphaSum += a; sampleCount++;
           if (a > 24) {
-            rSum += r;
-            gSum += g;
-            bSum += b;
-            opaqueCount++;
+            rSum += imageData[idx]; gSum += imageData[idx + 1]; bSum += imageData[idx + 2]; opaqueCount++;
           }
         }
       }
       if (!sampleCount || !opaqueCount) continue;
-      const alphaAvg = alphaSum / sampleCount;
-      if (alphaAvg <= 24) continue;
-      const cellIndex = sx + sy * sourcePixelGridW;
-      spriteGrid[cellIndex] = 1;
-      spriteColors[cellIndex * 3] = Math.min(1, Math.max(0, (rSum / opaqueCount) / 255));
-      spriteColors[cellIndex * 3 + 1] = Math.min(1, Math.max(0, (gSum / opaqueCount) / 255));
-      spriteColors[cellIndex * 3 + 2] = Math.min(1, Math.max(0, (bSum / opaqueCount) / 255));
+      if (alphaSum / sampleCount <= 24) continue;
+      const cellIndex = sx + sy * gridW;
+      grid[cellIndex] = 1;
+      colors[cellIndex * 3] = Math.min(1, Math.max(0, (rSum / opaqueCount) / 255));
+      colors[cellIndex * 3 + 1] = Math.min(1, Math.max(0, (gSum / opaqueCount) / 255));
+      colors[cellIndex * 3 + 2] = Math.min(1, Math.max(0, (bSum / opaqueCount) / 255));
     }
   }
+  return { grid, colors, gridW, gridH };
+}
 
-  const depthStart = Math.max(0, Math.floor((voxelSize - baseDepth) * 0.5));
-  const depthEnd = Math.min(voxelSize, depthStart + baseDepth);
+function voxelizeCharacterFrameCanvas(canvas, options = {}) {
+  // Single-view shallow extrusion (fallback). Prefer voxelizeMultiViewSolid for 3D actors.
+  const voxelSize = Math.max(12, Math.min(options.allowLargeVoxelGrid ? 64 : 32, Math.floor(options.voxelSize || 48)));
+  const baseDepth = Math.max(2, Math.min(16, Math.floor(options.depth || 5)));
+  const taper = options.taper !== false;
+  const mirror = !!options.mirror;
+  const sourcePixelGridW = Math.max(1, Math.min(64, Math.floor(options.sourcePixelGridW || BASE_SIZE)));
+  const sourcePixelGridH = Math.max(1, Math.min(64, Math.floor(options.sourcePixelGridH || BASE_SIZE)));
+  const sampled = sampleCanvasToGrid(canvas, sourcePixelGridW, sourcePixelGridH, mirror);
+  const voxels = new Uint8Array(voxelSize * voxelSize * voxelSize);
+  const colors = new Float32Array(voxels.length * 3);
+  const indexOf = (x, y, z) => x + y * voxelSize + z * voxelSize * voxelSize;
+  const neighborCount = (sx, sy) => {
+    let n = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const x = sx + dx, y = sy + dy;
+      if (x < 0 || y < 0 || x >= sourcePixelGridW || y >= sourcePixelGridH) continue;
+      if (sampled.grid[x + y * sourcePixelGridW]) n++;
+    }
+    return n;
+  };
   for (let gz = 0; gz < voxelSize; gz++) {
     const sy = Math.max(0, Math.min(sourcePixelGridH - 1, Math.floor((gz / voxelSize) * sourcePixelGridH)));
     for (let gx = 0; gx < voxelSize; gx++) {
       const sx = Math.max(0, Math.min(sourcePixelGridW - 1, Math.floor((gx / voxelSize) * sourcePixelGridW)));
       const cellIndex = sx + sy * sourcePixelGridW;
-      if (!spriteGrid[cellIndex]) continue;
-      const baseColor = [
-        spriteColors[cellIndex * 3],
-        spriteColors[cellIndex * 3 + 1],
-        spriteColors[cellIndex * 3 + 2]
-      ];
+      if (!sampled.grid[cellIndex]) continue;
+      const baseColor = [sampled.colors[cellIndex * 3], sampled.colors[cellIndex * 3 + 1], sampled.colors[cellIndex * 3 + 2]];
       const z = voxelSize - 1 - gz;
-      for (let gy = depthStart; gy < depthEnd; gy++) {
+      let localDepth = baseDepth;
+      if (taper) {
+        const n = neighborCount(sx, sy);
+        const edge = 1 - Math.min(1, n / 8);
+        localDepth = Math.max(2, Math.round(baseDepth * (1 - 0.45 * edge)));
+      }
+      const localStart = Math.max(0, Math.floor((voxelSize - localDepth) * 0.5));
+      const localEnd = Math.min(voxelSize, localStart + localDepth);
+      for (let gy = localStart; gy < localEnd; gy++) {
         const voxelIndex = indexOf(gx, gy, z);
         voxels[voxelIndex] = 1;
-        const depthT = baseDepth > 1 ? (gy - depthStart) / (baseDepth - 1) : 0.5;
-        const shade = 0.98 + (0.04 * (0.5 - Math.abs(depthT - 0.5)));
+        const depthT = localDepth > 1 ? (gy - localStart) / (localDepth - 1) : 0.5;
+        const shade = 0.94 + 0.12 * (1 - Math.abs(depthT - 0.35));
         colors[voxelIndex * 3] = Math.min(1, baseColor[0] * shade);
         colors[voxelIndex * 3 + 1] = Math.min(1, baseColor[1] * shade);
         colors[voxelIndex * 3 + 2] = Math.min(1, baseColor[2] * shade);
       }
     }
   }
+  return { size: voxelSize, voxels, colors };
+}
 
-  return {
-    size: voxelSize,
-    voxels,
-    colors
-  };
+/**
+ * Solid-ish volume from front + side + three-quarter billboard views of the SAME approved sprite art.
+ * Visual-hull carve: voxel exists where front(x,z) AND side(y,z) agree (¾ softens). Colors from front (fallback side/¾).
+ */
+function voxelizeMultiViewSolid(viewCanvases, options = {}) {
+  const voxelSize = Math.max(16, Math.min(options.allowLargeVoxelGrid ? 64 : 48, Math.floor(options.voxelSize || 48)));
+  const gridN = Math.max(16, Math.min(64, Math.floor(options.sourcePixelGridW || options.voxelSize || 48)));
+  const mirror = !!options.mirror;
+  const front = sampleCanvasToGrid(viewCanvases.front, gridN, gridN, mirror);
+  const side = sampleCanvasToGrid(viewCanvases.side || viewCanvases.front, gridN, gridN, false);
+  const tq = sampleCanvasToGrid(viewCanvases.threeQuarter || viewCanvases.front, gridN, gridN, mirror);
+  const voxels = new Uint8Array(voxelSize * voxelSize * voxelSize);
+  const colors = new Float32Array(voxels.length * 3);
+  const indexOf = (x, y, z) => x + y * voxelSize + z * voxelSize * voxelSize;
+
+  // Map voxel coords → sprite grids
+  const toGrid = (v) => Math.max(0, Math.min(gridN - 1, Math.floor((v / voxelSize) * gridN)));
+
+  for (let vz = 0; vz < voxelSize; vz++) {
+    const gzFront = toGrid(voxelSize - 1 - vz); // y-down in sprite → z-up in voxels
+    for (let vx = 0; vx < voxelSize; vx++) {
+      const gx = toGrid(vx);
+      const frontIdx = gx + gzFront * gridN;
+      if (!front.grid[frontIdx]) continue;
+      for (let vy = 0; vy < voxelSize; vy++) {
+        const gy = toGrid(vy);
+        const sideIdx = gy + gzFront * gridN;
+        // Visual hull: need front + side. Three-quarter softens edges (prefer, don't require).
+        if (!side.grid[sideIdx]) continue;
+        const tqIdx = gx + gzFront * gridN;
+        // Optional: discard corners far from ¾ silhouette to round the volume
+        const tqHit = tq.grid[tqIdx];
+        // Interior bias: if only barely on side edge and missing ¾, skip (reduces slabs)
+        let sideN = 0;
+        for (let d = -1; d <= 1; d++) {
+          const yy = gy + d;
+          if (yy >= 0 && yy < gridN && side.grid[yy + gzFront * gridN]) sideN++;
+        }
+        if (!tqHit && sideN <= 1) continue;
+
+        const vi = indexOf(vx, vy, vz);
+        voxels[vi] = 1;
+        // Color priority: front → threeQuarter → side (sprite pixels, not redesign)
+        let r, g, b;
+        if (front.grid[frontIdx]) {
+          r = front.colors[frontIdx * 3]; g = front.colors[frontIdx * 3 + 1]; b = front.colors[frontIdx * 3 + 2];
+        } else if (tqHit) {
+          r = tq.colors[tqIdx * 3]; g = tq.colors[tqIdx * 3 + 1]; b = tq.colors[tqIdx * 3 + 2];
+        } else {
+          r = side.colors[sideIdx * 3]; g = side.colors[sideIdx * 3 + 1]; b = side.colors[sideIdx * 3 + 2];
+        }
+        // Mild depth shade so faces read in torch light
+        const depthT = voxelSize > 1 ? vy / (voxelSize - 1) : 0.5;
+        const shade = 0.93 + 0.12 * (1 - Math.abs(depthT - 0.45));
+        colors[vi * 3] = Math.min(1, r * shade);
+        colors[vi * 3 + 1] = Math.min(1, g * shade);
+        colors[vi * 3 + 2] = Math.min(1, b * shade);
+      }
+    }
+  }
+  return { size: voxelSize, voxels, colors };
 }
 
 function createCharacterVoxelFrames(character, spriteSpec = null, options = {}) {
   const frameCount = Math.max(1, Math.min(8, Math.floor(options.frameCount || 4)));
-  const mode = String(options.mode || 'semantic').toLowerCase();
-  if (mode === 'projected' || mode === 'sprite') {
-    const frames = extractCharacterFrameCanvases(character, spriteSpec, frameCount);
-    return frames.map((frameCanvas) => voxelizeCharacterFrameCanvas(frameCanvas, options));
+  const mode = String(options.mode || 'sprite').toLowerCase();
+  const view = String(options.view || 'front').toLowerCase() === 'back' ? 'back' : 'front';
+  const solid = options.solid !== false; // default solid multi-view for 3D actors
+  const proceduralSpec = getProceduralSpec(character, spriteSpec);
+  if (proceduralSpec && proceduralSpec.kind === 'placeholder') {
+    const size = 12;
+    return Array.from({ length: frameCount }, () => ({
+      size,
+      voxels: new Uint8Array(size * size * size),
+      colors: new Float32Array(size * size * size * 3),
+      empty: true
+    }));
   }
-  const baseSpec = spriteSpec || createCharacterSpriteSpec(character);
-  const baseDesign = baseSpec.design || {};
-  const basePose = String(baseSpec.pose || baseDesign.pose || '').toLowerCase();
-  const name = String(character && (character.name || character.Name || '')).toLowerCase();
-  const frames = [];
-  for (let f = 0; f < frameCount; f++) {
-    const t = frameCount > 1 ? f / (frameCount - 1) : 0;
-    const swingWave = Math.cos(t * Math.PI * 2);
-    const strideWave = Math.sin(t * Math.PI * 2);
-    const frameChar = Object.assign({}, character, {
-      _rerollSeed: (character && character._rerollSeed ? character._rerollSeed : 0) + (f * 0.19)
+
+  if (mode === 'semantic') {
+    const baseSpec = (typeof resolveVoxelSpriteSpec === 'function')
+      ? resolveVoxelSpriteSpec(character, spriteSpec || proceduralSpec)
+      : (spriteSpec || createCharacterSpriteSpec(character || {}));
+    return Array.from({ length: frameCount }, () => createSemanticCharacterVoxelFrame(character, baseSpec, options));
+  }
+
+  const proceduralApi = proceduralSpec ? getProceduralApi() : null;
+  if (proceduralSpec && proceduralApi && typeof proceduralApi.createBillboardCanvas === 'function') {
+    const grid = Math.min(64, proceduralSpec.grid || 64);
+    const make = (f, v) => proceduralApi.createBillboardCanvas(proceduralSpec, { frame: f % 4, view: v });
+    return Array.from({ length: frameCount }, (_, f) => {
+      if (solid) {
+        const views = {
+          front: make(f, view === 'back' ? 'back' : 'front'),
+          side: make(f, 'side'),
+          threeQuarter: make(f, 'threeQuarter')
+        };
+        return voxelizeMultiViewSolid(views, Object.assign({}, options, {
+          voxelSize: options.voxelSize || grid,
+          allowLargeVoxelGrid: true,
+          sourcePixelGridW: grid,
+          sourcePixelGridH: grid,
+          mirror: !!options.mirror
+        }));
+      }
+      const canvas = make(f, view);
+      return voxelizeCharacterFrameCanvas(canvas, Object.assign({}, options, {
+        voxelSize: options.voxelSize || grid,
+        allowLargeVoxelGrid: true,
+        sourcePixelGridW: grid,
+        sourcePixelGridH: grid,
+        depth: Math.max(3, Math.min(8, Math.floor(options.depth || 5))),
+        taper: options.taper !== false,
+        mirror: !!options.mirror
+      }));
     });
-    const frameDesign = {
-      ...baseDesign,
-      stride_amount: clampVoxelNumber((baseDesign.stride_amount || 1) + strideWave * (basePose.includes('idle') ? 0.25 : 0.85), 0, 4, 1),
-      arm_swing: clampVoxelNumber((baseDesign.arm_swing || 0) + swingWave * (basePose.includes('cast') ? 0.6 : 1.2), -4, 4, 0),
-      weapon_length: clampVoxelNumber((baseDesign.weapon_length || 9) + (basePose.includes('attack') ? (swingWave > 0 ? 1 : 0) : 0), 5, 14, 9),
-      blade_size: clampVoxelNumber((baseDesign.blade_size || 3) + (swingWave > 0.35 ? 1 : 0), 2, 6, 3)
-    };
-    const frameSpec = {
-      ...baseSpec,
-      pose: baseSpec.pose,
-      design: frameDesign
-    };
-    if (name.includes('suzerain')) {
-      frameSpec.design.arm_swing = clampVoxelNumber((baseDesign.arm_swing || 0) + (swingWave * 0.5), -3, 3, 0);
-      frameSpec.design.stride_amount = clampVoxelNumber((baseDesign.stride_amount || 1) + (strideWave * 0.4), 0, 3, 1);
-    }
-    frames.push(createSemanticCharacterVoxelFrame(frameChar, frameSpec, options));
   }
-  return frames;
+
+  const frames = extractCharacterFrameCanvases(character, spriteSpec, frameCount);
+  return frames.map((frameCanvas) => voxelizeCharacterFrameCanvas(frameCanvas, Object.assign({}, options, {
+    depth: Math.max(3, Math.min(8, Math.floor(options.depth || 5))),
+    taper: options.taper !== false
+  })));
 }
+
 
 /**
  * Helper for Phaser scenes: registers a generated character as a proper spritesheet texture
@@ -2173,6 +2528,995 @@ function registerAnimatedCharacterSprite(scene, character, options = {}) {
   };
 }
 
+// =====================================================================================================
+// TRAIT-DRIVEN CATALOG EXTENSION (C64 style)
+// Every generated (non-preset) character arrives with an LLM trait spec (spec.kind === 'procedural',
+// spec.traits from retort/characterTraitSpec.js). The 2D sprite (combat map token, party panel, 'Your
+// Sprite') is drawn here in the SAME style as the original catalog above: 24x24 grid x4, side profile
+// facing right, chunky stacked bands, few colours, shadow sides + top highlight. The humanoid body reuses
+// the original prefabs (drawHead / drawTorso / drawStridingLegs / drawSwingArm / drawWeapon /
+// drawAccessoryCape / drawSkeletalWings); the trait spec only picks prefabs, palette and add-on parts:
+// body-plan silhouettes (beast, draconic, serpent, spider, ooze / floating eye, elemental, spectral),
+// horns, wings, tails, hood vs helm, robe vs armour, held weapon / shield / orb in its own colour,
+// glow eyes, plus a 1-cell outline so the silhouette reads at 32px. Presets (Mortacia / Suzerain) never
+// come through here: they keep their hand-made art. The detailed 48px renderer
+// (renderCharacterProcedural.js) is used for the 3D world actors only.
+// =====================================================================================================
+const C64_GRID = BASE_SIZE;      // 24
+const C64_U = UPSCALE;           // 4
+
+function c64Rgb(hex) {
+  const s = String(hex || '#000000').replace('#', '');
+  const v = s.length === 3 ? s.split('').map((ch) => ch + ch).join('') : s.padEnd(6, '0').slice(0, 6);
+  const n = parseInt(v, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function c64Hex(rgb) {
+  return '#' + rgb.map((x) => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2, '0')).join('');
+}
+function c64Mix(a, b, t) {
+  const A = c64Rgb(a), B = c64Rgb(b);
+  return c64Hex([A[0] + (B[0] - A[0]) * t, A[1] + (B[1] - A[1]) * t, A[2] + (B[2] - A[2]) * t]);
+}
+function c64Dark(hex, t) { return c64Mix(hex, '#000000', t); }
+function c64Light(hex, t) { return c64Mix(hex, '#ffffff', t); }
+function c64Lum(hex) { const c = c64Rgb(hex); return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]; }
+// Push a colour away from very dark / muddy values so it survives the few-colour look on dark maps.
+function c64Readable(hex, minLum = 46) {
+  let h = hex;
+  for (let i = 0; i < 6 && c64Lum(h) < minLum; i++) h = c64Light(h, 0.18);
+  return h;
+}
+function c64HashRng(seed) {
+  let s = (seed >>> 0) || 1;
+  return function () {
+    s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
+    return (s >>> 0) / 4294967296;
+  };
+}
+
+function isTraitSpriteSpec(spec) {
+  return !!(spec && spec.kind === 'procedural' && spec.traits && spec.traits.palette);
+}
+function isPlaceholderSpriteSpec(spec) {
+  return !!(spec && spec.kind === 'placeholder');
+}
+
+// Build the few-colour palette (original normalizePalette fields + glow/eye/metal) from the trait palette.
+function c64PaletteFromTraits(t, rng) {
+  const P = t.palette || {};
+  const style = (t.outfit && t.outfit.style) || 'none';
+  const bare = style === 'none' || ['beast', 'serpent', 'spider', 'ooze', 'elemental', 'draconic'].includes(t.bodyPlan);
+  let skin = c64Readable(P.skin || '#d69e78', bare ? 60 : 88);
+  if (t.bodyPlan === 'skeletal' || t.covering === 'bone') skin = c64Readable(P.skin && c64Lum(P.skin) > 120 ? P.skin : '#d8d0b4', 120);
+  let outfit = c64Readable(bare ? (P.skin2 || P.skin || '#806040') : (P.outfit || '#5a4a3a'), 40);
+  // the face must stand out from the clothes / hair
+  if (!bare && Math.abs(c64Lum(skin) - c64Lum(outfit)) < 35) skin = c64Lum(outfit) < 128 ? c64Light(skin, 0.35) : c64Dark(skin, 0.35);
+  let outfit2 = c64Readable(bare ? c64Dark(skin, 0.3) : (P.outfit2 || c64Dark(outfit, 0.3)), 34);
+  const metal = c64Readable(P.metal || '#9aa3ad', 90);
+  let trim = c64Readable(P.trim || '#c9a64a', 70);
+  if (Math.abs(c64Lum(trim) - c64Lum(outfit)) < 30) trim = c64Lum(outfit) > 120 ? c64Dark(trim, 0.45) : c64Light(trim, 0.4);
+  const glow = P.glow || '#ffe8a0';
+  const eye = (t.eyes && (t.eyes.glow || t.eyes.style === 'glowing')) ? c64Light(glow, 0.1) : '#111111';
+  const hair = c64Readable(P.hair || '#3a2618', 36);
+  const shadow = c64Dark(outfit2, 0.55);
+  const isPlate = style === 'plate' || style === 'mail';
+  return {
+    primary: isPlate ? metal : outfit,
+    secondary: bare ? c64Dark(skin, 0.18) : (isPlate ? c64Dark(metal, 0.28) : outfit2),
+    highlight: isPlate ? c64Light(metal, 0.35) : trim,
+    shadow,
+    skin,
+    accent: trim,
+    hair,
+    glow,
+    eye,
+    metal,
+    outfit,
+    outfit2,
+    trim,
+    horn: c64Lum(skin) > 150 ? c64Dark(skin, 0.35) : '#d9cfb0',
+    outline: '#0d0b12',
+    aura: (t.aura && t.aura.strength >= 0.5) ? (t.aura.color || glow) : null
+  };
+}
+
+// --- cell-unit drawing helpers (1 cell = 4 canvas px) ----------------------------------------------
+function c64R(ctx, x, y, w, h, color) {
+  if (w <= 0 || h <= 0) return;
+  if (!color) { ctx.clearRect(Math.round(x * C64_U), Math.round(y * C64_U), Math.round(w * C64_U), Math.round(h * C64_U)); return; }
+  ctx.fillStyle = color;
+  ctx.fillRect(Math.round(x * C64_U), Math.round(y * C64_U), Math.round(w * C64_U), Math.round(h * C64_U));
+}
+function c64Dither(ctx, x, y, w, h, color, phase = 0) {
+  ctx.fillStyle = color;
+  for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+    if (((xx + yy + phase) & 1) === 0) ctx.fillRect((x + xx) * C64_U, (y + yy) * C64_U, C64_U, C64_U);
+  }
+}
+function c64Line(ctx, x0, y0, x1, y1, color, w = 1) {
+  const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  for (let i = 0; i <= n; i++) {
+    const x = Math.round(x0 + (x1 - x0) * i / n);
+    const y = Math.round(y0 + (y1 - y0) * i / n);
+    c64R(ctx, x, y, w, w, color);
+  }
+}
+function c64Disc(ctx, cx, cy, r, color) {
+  for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) {
+    if (x * x + y * y <= r * r + r * 0.6) c64R(ctx, cx + x, cy + y, 1, 1, color);
+  }
+}
+function c64Oval(ctx, cx, cy, rx, ry, color) {
+  for (let y = -ry; y <= ry; y++) for (let x = -rx; x <= rx; x++) {
+    if ((x * x) / (rx * rx + 0.3) + (y * y) / (ry * ry + 0.3) <= 1.0) c64R(ctx, cx + x, cy + y, 1, 1, color);
+  }
+}
+
+// --- add-on prefabs ---------------------------------------------------------------------------------
+function c64Poly(ctx, pts, color) {
+  let minY = Infinity, maxY = -Infinity;
+  pts.forEach(([, y]) => { minY = Math.min(minY, y); maxY = Math.max(maxY, y); });
+  for (let y = Math.floor(minY); y <= Math.ceil(maxY); y++) {
+    const xs = [];
+    for (let i = 0; i < pts.length; i++) {
+      const [x0, y0] = pts[i], [x1, y1] = pts[(i + 1) % pts.length];
+      if ((y0 <= y + 0.5 && y1 > y + 0.5) || (y1 <= y + 0.5 && y0 > y + 0.5)) xs.push(x0 + (y + 0.5 - y0) * (x1 - x0) / (y1 - y0));
+    }
+    xs.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const a = Math.round(xs[k]), b = Math.round(xs[k + 1]);
+      if (b > a) c64R(ctx, a, y, b - a, 1, color);
+    }
+  }
+}
+function c64Wings(ctx, kind, sx, sy, span, pal, frame) {
+  // sx,sy = shoulder (back side). Profile: the far wing spreads up/back to the left, the near wing tip
+  // shows over the front shoulder. Flaps between frames.
+  if (!kind || kind === 'none') return;
+  const flap = (frame === 1 || frame === 3) ? 1 : 0;
+  if (kind === 'bone') {
+    drawSkeletalWings(ctx, sx - 2, sy - 3, C64_U, { ...pal }, 6, 4, 1.2, -1);
+    return;
+  }
+  const base = pal.wing || pal.secondary;
+  const memb = kind === 'insect' ? c64Light(pal.glow, 0.55) : (kind === 'flame' ? pal.glow : (kind === 'spectral' ? c64Light(pal.glow, 0.3) : base));
+  const bone = kind === 'feather' ? c64Light(memb, 0.45) : c64Dark(memb, 0.5);
+  const E = [sx - 2, sy - span + 1 + flap];
+  const T = [sx - span, sy - span + 3 + flap * 2];
+  const F1 = [sx - span + 1, sy + 1];
+  const F2 = [sx - 3, sy + 2];
+  if (kind === 'insect' || kind === 'spectral' || kind === 'flame') {
+    // two long thin dithered blades
+    for (let i = 0; i <= span; i++) {
+      const x = Math.round(sx - 1 - i * 0.9), y = Math.round(sy - i * 0.8 + flap);
+      c64Dither(ctx, x - 1, y, 3, 2, memb, i + frame);
+      c64Dither(ctx, x - 1, y + 3, 2, 1, memb, i + frame + 1);
+    }
+    c64Line(ctx, sx, sy, Math.round(sx - span * 0.9), Math.round(sy - span * 0.8 + flap), bone);
+    return;
+  }
+  c64Poly(ctx, [[sx, sy], E, T, F1, F2], memb);
+  // scalloped trailing edge between finger tips
+  if (kind === 'bat') {
+    const mx = Math.round((F1[0] + F2[0]) / 2), my = Math.round((F1[1] + F2[1]) / 2);
+    c64R(ctx, mx, my - 1, 1, 1, null); c64R(ctx, mx - 1, my, 3, 1, null);
+    const mx2 = Math.round((T[0] + F1[0]) / 2) + 1, my2 = Math.round((T[1] + F1[1]) / 2);
+    c64R(ctx, mx2, my2, 1, 1, null);
+  }
+  c64Line(ctx, sx, sy, E[0], E[1], bone);
+  c64Line(ctx, E[0], E[1], T[0], T[1], bone);
+  if (kind === 'bat') { c64Line(ctx, E[0], E[1], F1[0], F1[1], bone); c64Line(ctx, E[0], E[1], F2[0], F2[1], bone); c64R(ctx, E[0], E[1] - 1, 1, 1, pal.horn || bone); }
+  else for (let r = 2; r < span; r += 2) c64Line(ctx, E[0] - 1, E[1] + r, Math.round(T[0] + r * 0.4), Math.round(T[1] + r), bone);
+  // near wing tip over the front shoulder
+  c64Poly(ctx, [[sx + 2, sy], [sx + 3, sy - 3 + flap], [sx + 5, sy - 2 + flap], [sx + 4, sy + 1]], memb);
+  c64R(ctx, sx + 3, sy - 3 + flap, 1, 1, bone);
+}
+
+function c64Tail(ctx, kind, x, y, pal, frame) {
+  // x,y = base at lower back (tail extends to the left / behind)
+  if (!kind || kind === 'none') return;
+  const sway = (frame === 1) ? -1 : (frame === 3 ? 1 : 0);
+  const col = kind === 'flame' ? pal.glow : (kind === 'wisp' ? c64Light(pal.glow, 0.3) : (pal.tail || pal.secondary));
+  const dark = c64Dark(col, 0.35);
+  if (kind === 'thick' || kind === 'scaled') {
+    // U-shaped tail: down and back from the lower back, then up to a raised tip (reads as a tail, not a limb)
+    const pts = [[x - 1, y], [x - 2, y + 1], [x - 3, y + 2], [x - 4, y + 3], [x - 5, y + 3 + sway], [x - 6, y + 2 + sway], [x - 7, y + 1 + sway], [x - 7, y + sway]];
+    pts.forEach(([px, py], i) => c64R(ctx, px, py, 1, i < 4 ? 2 : 1, i < 4 ? col : dark));
+    c64R(ctx, x - 8, y - 1 + sway, 1, 1, kind === 'scaled' ? pal.horn || dark : dark);
+    if (kind === 'scaled') { c64R(ctx, x - 2, y, 1, 1, dark); c64R(ctx, x - 4, y + 2, 1, 1, dark); }
+    return;
+  }
+  if (kind === 'tentacle') {
+    for (let i = 0; i < 7; i++) c64R(ctx, x - 1 - i, y + 1 + Math.round(Math.sin(i * 0.9 + sway) * 1.2), 1, 1, col);
+    return;
+  }
+  if (kind === 'stinger') {
+    c64Line(ctx, x - 1, y, x - 4, y - 3, col);
+    c64Line(ctx, x - 4, y - 3, x - 3, y - 6 + sway, col);
+    c64R(ctx, x - 2, y - 7 + sway, 2, 1, pal.glow);
+    return;
+  }
+  if (kind === 'flame' || kind === 'wisp') {
+    c64Dither(ctx, x - 5, y, 5, 2, col, frame);
+    c64R(ctx, x - 6, y - 1 + sway, 1, 1, col);
+    return;
+  }
+  // thin
+  c64Line(ctx, x - 1, y + 1, x - 4, y + 3 + sway, col);
+  c64Line(ctx, x - 4, y + 3 + sway, x - 6, y + 1 + sway, col);
+  c64R(ctx, x - 7, y + sway, 1, 1, dark);
+}
+
+function c64Horns(ctx, kind, hx, hy, hw, pal) {
+  if (!kind || kind === 'none') return;
+  const c = pal.horn;
+  const d = c64Dark(c, 0.35);
+  if (kind === 'nubs') { c64R(ctx, hx + 1, hy - 1, 1, 1, c); c64R(ctx, hx + hw - 2, hy - 1, 1, 1, c); return; }
+  if (kind === 'crown') { for (let i = 0; i < hw; i += 2) c64R(ctx, hx + i, hy - 2, 1, 2, c); c64R(ctx, hx, hy - 1, hw, 1, d); return; }
+  if (kind === 'antlers') {
+    c64Line(ctx, hx + 1, hy - 1, hx - 1, hy - 4, c); c64R(ctx, hx - 2, hy - 4, 1, 1, c); c64R(ctx, hx, hy - 3, 1, 1, c);
+    c64Line(ctx, hx + hw - 2, hy - 1, hx + hw, hy - 4, c); c64R(ctx, hx + hw + 1, hy - 4, 1, 1, c); c64R(ctx, hx + hw - 1, hy - 3, 1, 1, c);
+    return;
+  }
+  if (kind === 'ram') {
+    // curl on the side of the head (profile: visible on back side)
+    c64R(ctx, hx - 1, hy - 1, 3, 1, c); c64R(ctx, hx - 2, hy, 1, 3, c); c64R(ctx, hx - 1, hy + 3, 2, 1, c); c64R(ctx, hx - 1, hy + 1, 1, 1, d);
+    c64R(ctx, hx + hw - 1, hy - 1, 2, 1, c);
+    return;
+  }
+  if (kind === 'long') {
+    c64Line(ctx, hx + 1, hy - 1, hx - 1, hy - 5, c); c64Line(ctx, hx + hw - 2, hy - 1, hx + hw - 1, hy - 5, c);
+    return;
+  }
+  // curved (default demon horns): up then sweeping back
+  c64R(ctx, hx, hy - 2, 1, 2, c); c64R(ctx, hx - 1, hy - 3, 1, 1, c); c64R(ctx, hx - 2, hy - 3, 1, 1, d);
+  c64R(ctx, hx + hw - 1, hy - 2, 1, 2, c); c64R(ctx, hx + hw - 1, hy - 3, 1, 1, c); c64R(ctx, hx + hw - 2, hy - 4, 1, 1, d);
+}
+
+function c64ItemPalette(item, pal) {
+  const color = c64Readable(item && item.color ? item.color : pal.metal, 70);
+  return {
+    ...pal,
+    highlight: color,
+    accent: item && item.accent ? c64Readable(c64Dark(item.accent, 0.1), 40) : c64Dark(color, 0.45),
+    shadow: c64Dark(color, 0.6)
+  };
+}
+const C64_WEAPON_MAP = {
+  sword: 'sword_broad', greatsword: 'sword_broad', scimitar: 'sword_broad', axe: 'axe', staff: 'staff_crook', dagger: 'dagger',
+  mace: 'mace', hammer: 'mace', flail: 'mace', spear: 'spear', trident: 'spear', scythe: 'scythe_long', sickle: 'scythe_long',
+  wand: 'wand', banner: 'spear'
+};
+
+// One-handed weapons are held raised forward (diagonal), so the face stays clear at 24px.
+const C64_ONE_HANDED = ['sword', 'scimitar', 'axe', 'mace', 'hammer', 'flail', 'dagger', 'sickle', 'wand'];
+function c64OneHandedWeapon(ctx, item, gx, gy, pal, frame) {
+  const ip = c64ItemPalette(item, pal);
+  const type = item.type;
+  const blade = ip.highlight, grip = ip.accent;
+  const L = type === 'dagger' || type === 'wand' ? 4 : 7;
+  const pt = (i) => [gx + Math.floor((i + 1) / 2), gy - i];
+  const isBlade = type === 'sword' || type === 'scimitar' || type === 'dagger';
+  for (let i = 0; i <= L; i++) {
+    const [x, y] = pt(i);
+    let col = isBlade ? (i <= 1 ? grip : blade) : (i >= L - 1 && type !== 'wand' && type !== 'flail' && type !== 'sickle' ? blade : grip);
+    if (type === 'scimitar' && i > L - 3) c64R(ctx, x + 1, y, 1, 1, blade);
+    c64R(ctx, x, y, 1, 1, col);
+  }
+  const [tx, ty] = pt(L);
+  if (isBlade) { c64R(ctx, gx - 1, gy - 2, 3, 1, c64Dark(blade, 0.35)); c64R(ctx, tx, ty - 1, 1, 1, c64Light(blade, 0.35)); }
+  else if (type === 'axe') { c64R(ctx, tx + 1, ty, 2, 3, blade); c64R(ctx, tx + 2, ty - 1, 1, 1, blade); c64R(ctx, tx + 2, ty + 3, 1, 1, blade); }
+  else if (type === 'mace') { c64R(ctx, tx - 1, ty - 1, 3, 3, blade); c64R(ctx, tx, ty - 2, 1, 1, blade); c64R(ctx, tx + 2, ty, 1, 1, c64Dark(blade, 0.3)); }
+  else if (type === 'hammer') { c64R(ctx, tx - 1, ty - 1, 4, 2, blade); c64R(ctx, tx - 1, ty, 4, 1, c64Dark(blade, 0.3)); }
+  else if (type === 'flail') { c64R(ctx, tx + 1, ty + 1, 1, 2, grip); c64R(ctx, tx + 1, ty + 3 - (frame & 1), 2, 2, blade); }
+  else if (type === 'sickle') { c64R(ctx, tx, ty - 1, 2, 1, blade); c64R(ctx, tx + 2, ty, 1, 2, blade); c64R(ctx, tx + 1, ty + 2, 1, 1, blade); }
+  else if (type === 'wand') c64R(ctx, tx, ty - 1, 1, 1, c64Light(pal.glow, 0.3));
+  if (item.glow) c64R(ctx, tx + 1, ty - 1 - (frame & 1), 1, 1, c64Light(pal.glow, 0.35));
+}
+
+// Draws a held weapon/item at hand (hx,hy = hand cell). Returns true when something was drawn.
+function c64HeldItem(ctx, item, hx, hy, pal, frame, facing = 1) {
+  if (!item) return false;
+  const type = item.type;
+  const ip = c64ItemPalette(item, pal);
+  if (C64_ONE_HANDED.includes(type)) { c64OneHandedWeapon(ctx, item, hx, hy, pal, frame); return true; }
+  if (C64_WEAPON_MAP[type]) {
+    const len = type === 'greatsword' || type === 'scythe' || type === 'staff' || type === 'spear' || type === 'trident' || type === 'banner' ? 12
+      : (type === 'dagger' || type === 'wand' || type === 'sickle' ? 5 : 8);
+    const wy = hy + 1 - len;
+    drawWeapon(ctx, (hx + 1) * C64_U, wy * C64_U, C64_U, ip, len, C64_WEAPON_MAP[type], type === 'greatsword' ? 5 : 4, facing);
+    if (type === 'trident') { c64R(ctx, hx, wy, 1, 2, ip.highlight); c64R(ctx, hx + 2, wy, 1, 2, ip.highlight); c64R(ctx, hx, wy + 2, 3, 1, ip.highlight); }
+    if (type === 'hammer') c64R(ctx, hx, wy, 3, 2, ip.highlight);
+    if (type === 'banner') { c64R(ctx, hx + 2, wy, 3, 4, ip.accent); c64R(ctx, hx + 3, wy + 1, 1, 1, ip.highlight); }
+    if (item.glow) { c64R(ctx, hx + 1, wy - 1, 1, 1, c64Light(pal.glow, 0.3)); }
+    return true;
+  }
+  if (type === 'bow' || type === 'crossbow') {
+    const c = ip.accent;
+    c64Line(ctx, hx + 1, hy - 5, hx + 3, hy - 3, c); c64R(ctx, hx + 3, hy - 3, 1, 5, c); c64Line(ctx, hx + 3, hy + 2, hx + 1, hy + 4, c);
+    c64R(ctx, hx + 1, hy - 4, 1, 8, c64Light(ip.highlight, 0.4));
+    return true;
+  }
+  if (type === 'whip') {
+    c64R(ctx, hx + 1, hy, 1, 1, ip.accent);
+    for (let i = 0; i < 6; i++) c64R(ctx, hx + 2 + Math.floor(i / 2), hy + 1 + i, 1, 1, ip.highlight);
+    return true;
+  }
+  if (type === 'claws') {
+    c64R(ctx, hx + 2, hy, 1, 1, ip.highlight); c64R(ctx, hx + 2, hy + 2, 1, 1, ip.highlight); c64R(ctx, hx + 3, hy + 1, 1, 1, ip.highlight);
+    return true;
+  }
+  if (type === 'orb' || type === 'crystal' || type === 'skull' || type === 'lantern' || type === 'tome' || type === 'horn' || type === 'amulet' || type === 'ring' || type === 'crown') {
+    const ox = hx + 2;
+    const oy = hy - 2;
+    const glowC = item.glow ? c64Light(item.accent || pal.glow, 0.35) : null;
+    if (glowC) { c64R(ctx, ox - 1, oy + 1, 1, 1, glowC); c64R(ctx, ox + 3, oy + 1 - (frame & 1), 1, 1, glowC); c64R(ctx, ox + 1, oy - 2 + (frame & 1), 1, 1, glowC); }
+    if (type === 'orb' || type === 'amulet' || type === 'ring') {
+      c64Disc(ctx, ox + 1, oy + 1, 1, ip.highlight);
+      c64R(ctx, ox + 1, oy, 1, 1, glowC || c64Light(ip.highlight, 0.6));
+      if (c64Lum(ip.highlight) < 50) c64R(ctx, ox, oy, 1, 1, c64Light(ip.accent, 0.4));
+    } else if (type === 'crystal') {
+      c64R(ctx, ox + 1, oy - 1, 1, 4, ip.highlight); c64R(ctx, ox, oy, 3, 2, ip.highlight); c64R(ctx, ox + 1, oy, 1, 1, c64Light(ip.highlight, 0.6));
+    } else if (type === 'skull') {
+      c64R(ctx, ox, oy, 3, 2, '#e0dcc8'); c64R(ctx, ox, oy + 2, 2, 1, '#e0dcc8'); c64R(ctx, ox, oy + 1, 1, 1, '#111'); c64R(ctx, ox + 2, oy + 1, 1, 1, '#111');
+    } else if (type === 'lantern') {
+      c64R(ctx, ox + 1, oy - 1, 1, 1, ip.accent); c64R(ctx, ox, oy, 3, 3, ip.accent); c64R(ctx, ox + 1, oy + 1, 1, 1, c64Light(pal.glow, 0.2));
+    } else if (type === 'tome') {
+      c64R(ctx, ox, oy, 3, 3, ip.highlight); c64R(ctx, ox, oy, 1, 3, ip.accent);
+    } else {
+      c64R(ctx, ox, oy, 2, 2, ip.highlight);
+    }
+    return true;
+  }
+  return false;
+}
+
+function c64Shield(ctx, item, x, y, pal) {
+  if (!item) return;
+  const ip = c64ItemPalette(item, pal);
+  const face = ip.highlight;
+  const rim = c64Dark(face, 0.5);
+  const emb = item.accent ? c64Light(item.accent, c64Lum(item.accent) < 70 ? 0.45 : 0) : c64Light(face, 0.5);
+  const shape = item.shape || 'heater';
+  if (shape === 'round' || shape === 'buckler') {
+    const r = shape === 'buckler' ? 1 : 2;
+    c64Disc(ctx, x + 2, y + 2, r + 1, rim);
+    c64Disc(ctx, x + 2, y + 2, r, face);
+    c64R(ctx, x + 2, y + 2, 1, 1, emb);
+    return;
+  }
+  const h = shape === 'tower' ? 6 : 5;
+  c64R(ctx, x, y, 3, h - 1, face);
+  c64R(ctx, x + 1, y + h - 1, 1, 1, face);
+  c64R(ctx, x, y, 3, 1, c64Light(face, 0.3));
+  c64R(ctx, x + 2, y + 1, 1, h - 2, rim);
+  c64R(ctx, x + 1, y + 1, 1, 2, emb);
+  if (item.glow) c64R(ctx, x + 1, y + 1, 1, 1, c64Light(pal.glow, 0.4));
+  if (shape === 'spiked') c64R(ctx, x + 3, y + 2, 1, 1, rim);
+}
+
+function c64Eyes(ctx, t, hx, hy, hw, hh, pal, facing = 1) {
+  const glow = t.eyes && (t.eyes.glow || t.eyes.style === 'glowing');
+  const col = glow ? pal.eye : '#111111';
+  const ey = hy + 1 + (hh >= 5 ? 1 : 0);
+  if (t.eyes && t.eyes.style === 'cyclops') { c64R(ctx, hx + Math.floor(hw / 2), ey, 1, 1, glow ? col : '#ffffff'); c64R(ctx, hx + Math.floor(hw / 2), ey, 0.5, 0.5, '#111'); return; }
+  if (t.eyes && t.eyes.style === 'compound') { c64R(ctx, hx + hw - 2, ey, 2, 2, '#7a1020'); c64R(ctx, hx + hw - 2, ey, 1, 1, '#ff6070'); return; }
+  if (t.eyes && t.eyes.style === 'hollow') { c64R(ctx, hx + hw - 2, ey, 1, 1, '#000000'); c64R(ctx, hx + hw - 4, ey, 1, 1, '#000000'); if (glow) c64R(ctx, hx + hw - 2, ey, 0.5, 0.5, col); return; }
+  const front = facing > 0 ? hx + hw - 2 : hx + 1;
+  c64R(ctx, front, ey, 1, 1, col);
+  if (glow) { c64R(ctx, front - 2 * facing, ey, 1, 1, col); c64R(ctx, front + facing, ey, 1, 1, c64Dark(col, 0.25)); }
+}
+
+// --- body plans ------------------------------------------------------------------------------------
+function c64Proportions(t, rng) {
+  const sz = t.size || 'medium';
+  const base = { tiny: [3, 3, 6], small: [3, 4, 8], medium: [4, 5, 10], large: [4, 6, 11], huge: [5, 6, 12] }[sz] || [4, 5, 10];
+  const build = t.build || 'average';
+  let torsoW = build === 'slender' ? 4 : (build === 'heavy' ? 6 : 5);
+  if (sz === 'large' || sz === 'huge' || t.bodyPlan === 'giant') torsoW += 1;
+  if (sz === 'tiny' || sz === 'small') torsoW = Math.max(4, torsoW - 1);
+  let headW = Math.max(4, Math.min(6, torsoW - (rng() < 0.5 ? 0 : 1)));
+  return { headH: base[0], torsoH: base[1] + (rng() < 0.3 ? 1 : 0) - (rng() < 0.2 ? 1 : 0), legH: base[2] + (rng() < 0.35 ? 1 : 0), torsoW, headW, legW: build === 'heavy' ? 4 : (build === 'slender' ? 2 : 3), armH: base[1] };
+}
+
+function c64Humanoid(ctx, spec, t, pal, frame, rng) {
+  // Clean side-profile figure in the catalog's visual language: small round head with the face on the
+  // right, stacked torso bands (shadow back edge, highlight front edge, belt), striding legs, front arm
+  // swinging with the held item, back arm behind. Every add-on comes from the trait spec.
+  const sex = String(spec.sex || '').toLowerCase();
+  const isFemale = /^f/.test(sex);
+  const style = (t.outfit && t.outfit.style) || 'none';
+  const helm = (t.outfit && t.outfit.helm) || 'none';
+  const hooded = !!(t.outfit && t.outfit.hood) || helm === 'hood' || helm === 'cowl';
+  const spectral = t.bodyPlan === 'spectral' || (t.translucency >= 0.45 && (t.tattered || t.floating));
+  const naga = !!t.nagaTorso || t.bodyPlan === 'serpent';
+  const skeletal = t.bodyPlan === 'skeletal';
+  const insect = t.bodyPlan === 'insectoid';
+  const p = c64Proportions(t, rng);
+  const robe = ['robe', 'dress', 'cloak', 'rags'].includes(style);
+  const armour = style === 'plate' || style === 'mail';
+  const step = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  const bob = frame === 2 ? -1 : 0;
+  const lift = (t.floating || spectral) ? (-1 - (frame & 1)) : 0;
+  const cx = 11;
+  const tw = p.torsoW, hw = Math.max(4, Math.min(5, p.headW)), hh = Math.max(4, Math.min(5, p.headH));
+  const legH = naga ? 0 : p.legH;
+  const ground = 22;
+  const torsoBottom = naga ? 16 : ground - legH + 1;
+  const torsoY = torsoBottom - p.torsoH + bob + lift;
+  const headY = torsoY - hh;
+  const tx = cx - Math.floor(tw / 2);
+  const hx = cx - Math.floor(hw / 2) + 1;
+
+  const skin = pal.skin, skinD = c64Dark(pal.skin, 0.28);
+  let body = style === 'none' || skeletal ? skin : (armour ? pal.metal : pal.outfit);
+  let bodyD = style === 'none' || skeletal ? skinD : (armour ? c64Dark(pal.metal, 0.35) : c64Dark(pal.outfit, 0.3));
+  let bodyL = style === 'none' || skeletal ? c64Light(skin, 0.25) : (armour ? c64Light(pal.metal, 0.4) : c64Light(pal.outfit, 0.22));
+  const trim = pal.trim;
+  const legC = robe ? body : (armour ? c64Dark(pal.metal, 0.15) : (style === 'none' || skeletal ? skin : pal.outfit2));
+  const legD = c64Dark(legC, 0.3);
+  const boot = armour ? c64Dark(pal.metal, 0.45) : c64Dark(pal.outfit2, 0.45);
+
+  const items = Array.isArray(t.items) ? t.items : [];
+  const weapon = items.find((i) => i.slot === 'weapon' && i.type !== 'shield') || items.find((i) => C64_WEAPON_MAP[i.type] || ['bow', 'crossbow', 'whip', 'claws'].includes(i.type));
+  const shield = items.find((i) => i.type === 'shield' || i.slot === 'shield');
+  const handItem = items.find((i) => i !== weapon && i !== shield && ['orb', 'crystal', 'skull', 'lantern', 'tome', 'horn', 'amulet'].includes(i.type));
+
+  // --- behind: wings, cape, tail, back arm / extra arms, back weapon
+  if (t.wings && t.wings !== 'none') {
+    let wingCol = t.wings === 'bone' ? pal.horn : (t.wings === 'feather' ? c64Light(pal.hair, 0.5) : c64Dark(skin, 0.4));
+    if (Math.abs(c64Lum(wingCol) - c64Lum(body)) < 28) wingCol = c64Lum(body) < 110 ? c64Light(wingCol, 0.35) : c64Dark(wingCol, 0.35);
+    c64Wings(ctx, t.wings, tx + 1, torsoY + 1, Math.max(6, p.torsoH + 2), { ...pal, wing: wingCol, secondary: wingCol }, frame);
+  }
+  if (t.outfit && t.outfit.cape) {
+    const auraC = t.aura && t.aura.color ? c64Readable(t.aura.color, 50) : null;
+    const capeCol = auraC && Math.abs(c64Lum(auraC) - c64Lum(body)) > 18 ? auraC
+      : (c64Lum(trim) > 60 && c64Lum(trim) < 210 && Math.abs(c64Lum(trim) - c64Lum(body)) > 25 ? trim : c64Light(pal.outfit2, 0.25));
+    const ch = p.torsoH + Math.floor(legH * 0.7);
+    c64R(ctx, tx - 2, torsoY + 1, 3, ch, capeCol);
+    c64R(ctx, tx - 3 - (frame & 1), torsoY + 3, 1, ch - 3, capeCol);
+    c64R(ctx, tx - 1, torsoY + 2, 1, ch - 2, c64Dark(capeCol, 0.35));
+  }
+  if (t.tail && t.tail !== 'none' && !naga) c64Tail(ctx, t.tail, tx + 1, torsoBottom - 1 + bob + lift, { ...pal, tail: c64Dark(skin, 0.08) }, frame);
+  if (t.spikes) for (let i = 0; i < p.torsoH; i += 2) c64R(ctx, tx - 1, torsoY + i, 1, 1, pal.horn);
+  // back arm (darker, mostly hidden)
+  const backArmC = robe || armour ? bodyD : skinD;
+  c64R(ctx, tx, torsoY + 1, 1, p.armH, backArmC);
+  if (t.extraArms > 0 || insect) {
+    c64R(ctx, tx - 1, torsoY + 2, 1, p.armH - 1, backArmC);
+    c64R(ctx, tx - 2, torsoY + 1 + p.armH, 2, 1, skinD);
+  }
+
+  // --- lower body
+  if (naga) {
+    // serpent tail: from the hips down to the ground, then coiled back to the left
+    const sc = skin, scD = skinD;
+    c64R(ctx, tx, torsoBottom, tw, 3, sc);
+    c64R(ctx, tx + 1, torsoBottom + 3, tw, 2, sc);
+    c64Oval(ctx, cx - 1, 20, 7, 2, sc);
+    c64R(ctx, cx - 7, 21, 13, 1, scD);
+    c64R(ctx, tx + tw - 1, torsoBottom, 1, 5, c64Light(sc, 0.25));
+    c64R(ctx, cx - 9 - step, 19, 2, 1, sc); c64R(ctx, cx - 10 - step, 18, 1, 1, sc);
+  } else if (spectral) {
+    for (let i = 0; i < legH; i++) {
+      const w = Math.max(1, tw + 1 - Math.floor(i * (tw + 1) / legH));
+      const x = tx - 1 + Math.floor((tw + 2 - w) / 2) - Math.floor(i / 3) + ((frame & 1) && i % 3 === 0 ? 1 : 0);
+      if (i >= Math.floor(legH * 0.45)) c64Dither(ctx, x, torsoBottom + i + lift, w, 1, body, i + frame);
+      else c64R(ctx, x, torsoBottom + i + lift, w, 1, body);
+    }
+  } else if (robe) {
+    // robe flares to the ground, feet step out underneath
+    for (let i = 0; i < legH - 1; i++) {
+      const flare = Math.min(2, Math.floor(i / 3));
+      c64R(ctx, tx - flare, torsoBottom + i + bob, tw + flare * 2 - (i === legH - 2 ? 0 : 0), 1, body);
+      c64R(ctx, tx - flare, torsoBottom + i + bob, 1, 1, bodyD);
+      c64R(ctx, tx + tw + flare - 1, torsoBottom + i + bob, 1, 1, bodyL);
+    }
+    c64R(ctx, tx - 2, ground - 1 + bob, tw + 4, 1, trim);
+    c64R(ctx, cx + step, ground, 2, 1, boot);
+    c64R(ctx, cx - 2 - step, ground, 2, 1, c64Dark(boot, 0.3));
+  } else {
+    // two legs: back leg darker; stride swaps per frame
+    const lx = cx - 2, rx = cx;
+    const backOff = -step, frontOff = step;
+    const legW = skeletal ? 1 : 2;
+    c64R(ctx, lx + backOff, torsoBottom, legW, legH - 1, skeletal ? skinD : legD);
+    c64R(ctx, lx + backOff, ground, legW + 1, 1, skeletal ? skinD : c64Dark(boot, 0.3));
+    c64R(ctx, rx + frontOff, torsoBottom, legW, legH - 1, legC);
+    c64R(ctx, rx + frontOff, ground, legW + 1, 1, skeletal ? skin : boot);
+    if (!skeletal) {
+      c64R(ctx, rx + frontOff, ground - 3, legW, 2, boot);
+      c64R(ctx, lx + backOff, ground - 3, legW, 2, c64Dark(boot, 0.3));
+      if (armour) c64R(ctx, rx + frontOff, torsoBottom + Math.floor(legH / 2) - 1, legW, 1, c64Light(pal.metal, 0.35));
+    }
+    if (t.claws) c64R(ctx, rx + frontOff + legW + 1, ground, 1, 1, pal.horn);
+  }
+
+  // --- torso
+  c64R(ctx, tx, torsoY, tw, p.torsoH, body);
+  c64R(ctx, tx, torsoY, 1, p.torsoH, bodyD);
+  c64R(ctx, tx + tw - 1, torsoY + 1, 1, p.torsoH - 1, bodyL);
+  c64R(ctx, tx + 1, torsoY, tw - 2, 1, bodyL);
+  if (armour) {
+    c64R(ctx, tx - 1, torsoY, tw + 2, 2, c64Light(pal.metal, 0.2));        // pauldrons
+    c64R(ctx, tx - 1, torsoY + 1, tw + 2, 1, c64Dark(pal.metal, 0.2));
+    if (style === 'mail') for (let y = 2; y < p.torsoH - 1; y++) c64Dither(ctx, tx + 1, torsoY + y, tw - 2, 1, c64Dark(pal.metal, 0.25), y);
+  }
+  if (skeletal && (style === 'none' || style === 'rags')) for (let y = 1; y < p.torsoH - 1; y += 2) c64R(ctx, tx + 1, torsoY + y, tw - 2, 1, c64Dark(skin, 0.6));
+  if (style !== 'none' && !skeletal) c64R(ctx, tx, torsoY + p.torsoH - 2, tw, 1, robe ? trim : c64Dark(trim, 0.1)); // belt
+  if (style === 'tabard') c64R(ctx, cx, torsoY + 1, 2, p.torsoH, trim);
+  if (isFemale && !armour && style !== 'none') c64R(ctx, tx + tw - 1, torsoY + 1, 1, 1, c64Light(body, 0.35));
+  if (t.outfit && t.outfit.symbol && t.outfit.symbol !== 'none' && style !== 'none') {
+    const sc = t.outfit.symbol === 'holy' || t.outfit.symbol === 'sun' ? '#f2d64a' : (t.outfit.symbol === 'skull' ? '#e0dcc8' : c64Light(pal.glow, 0.15));
+    c64R(ctx, cx, torsoY + 2, 1, 1, sc);
+  }
+  if (t.markings === 'runes' || t.markings === 'veins' || t.markings === 'cracks') c64R(ctx, cx - 1, torsoY + 2, 1, 2, c64Light(pal.glow, 0.1));
+
+  // --- head (a dark rim first, so the head reads cleanly over wings / horns / cape behind it)
+  const headC = skeletal || t.head === 'skull' ? pal.skin : skin;
+  if ((t.wings && t.wings !== 'none') || (t.outfit && t.outfit.cape)) {
+    c64R(ctx, hx, headY - 1, hw - 1, 1, pal.outline);
+    c64R(ctx, hx - 1, headY, 1, hh, pal.outline);
+    c64R(ctx, tx - 1, torsoY, 1, p.torsoH, pal.outline);
+  }
+  c64R(ctx, hx + 1, headY, hw - 2, 1, headC);
+  c64R(ctx, hx, headY + 1, hw, hh - 2, headC);
+  c64R(ctx, hx + 1, headY + hh - 1, hw - 1, 1, headC);
+  c64R(ctx, hx, headY + 1, 1, hh - 2, c64Dark(headC, 0.18));
+  c64R(ctx, cx, headY + hh, 2, 1, skinD); // neck
+  const snout = t.head === 'beast' || t.head === 'reptile' || t.head === 'demon' || t.head === 'bird' || insect;
+  if (snout) {
+    const sc = t.head === 'bird' ? '#e0a030' : (insect ? pal.horn : headC);
+    c64R(ctx, hx + hw, headY + 2, 2, 2, sc);
+    c64R(ctx, hx + hw + 1, headY + 3, 1, 1, c64Dark(sc, 0.35));
+  } else {
+    c64R(ctx, hx + hw, headY + 2, 1, 1, headC); // nose
+  }
+  if (t.head === 'skull' || skeletal) { c64R(ctx, hx + hw - 2, headY + 1, 1, 2, '#000000'); c64R(ctx, hx + 1, headY + hh - 1, hw - 2, 1, c64Dark(headC, 0.45)); }
+  if (t.tusks || t.fangs) c64R(ctx, hx + hw - 1, headY + hh - 1, 1, 1, '#f4f0e0');
+  if (t.beard && !hooded) c64R(ctx, hx + 1, headY + hh - 1, hw - 1, 2, pal.hair);
+  // ears
+  if (t.ears === 'pointed' || t.ears === 'long') { c64R(ctx, hx + 1, headY + 1, 1, 2, c64Dark(headC, 0.1)); c64R(ctx, hx, headY - (t.ears === 'long' ? 1 : 0), 1, 2, c64Dark(headC, 0.1)); }
+  if (t.ears === 'animal') { c64R(ctx, hx + 1, headY - 1, 1, 1, headC); c64R(ctx, hx + hw - 2, headY - 1, 1, 1, headC); }
+  if (t.ears === 'fin') c64R(ctx, hx, headY, 1, 3, pal.glow);
+  // hair (cap + back), long hair falls down the back
+  const showHair = t.hair && t.hair !== 'none' && !hooded && !['closed', 'horned'].includes(helm);
+  if (showHair) {
+    const hc = pal.hair;
+    if (t.hair === 'mohawk') { c64R(ctx, hx + 1, headY - 1, hw - 2, 1, hc); c64R(ctx, hx + 2, headY - 2, 1, 1, hc); }
+    else if (t.hair === 'snakes') { for (let i = 0; i < hw; i += 2) c64R(ctx, hx + i, headY - 1 - (i % 4 ? 0 : 1), 1, 2, '#4f8a3a'); }
+    else if (t.hair === 'flame') { c64R(ctx, hx, headY, hw - 1, 1, pal.glow); c64R(ctx, hx + 1, headY - 1, hw - 2, 1, pal.glow); c64R(ctx, hx + 2, headY - 2 - (frame & 1), 1, 1, c64Light(pal.glow, 0.4)); }
+    else {
+      c64R(ctx, hx, headY, hw - 1, 1, hc);
+      c64R(ctx, hx + 1, headY - 1, hw - 2, 1, hc);
+      c64R(ctx, hx, headY + 1, 2, 2, hc);
+      if (t.hair === 'topknot') c64R(ctx, hx + 1, headY - 2, 2, 1, hc);
+      if (t.hair === 'long' || t.hair === 'flowing' || t.hair === 'braid' || (isFemale && t.hair !== 'short')) {
+        c64R(ctx, hx - 1, headY + 1, 2, hh + 1, hc);
+        if (t.hair === 'flowing') c64R(ctx, hx - 2, headY + 3 + (frame & 1), 1, hh, hc);
+        if (t.hair === 'braid') c64R(ctx, hx - 1, headY + hh + 2, 1, 3, c64Dark(hc, 0.2));
+      }
+    }
+  }
+  if (t.mane) c64R(ctx, hx - 2, headY + 1, 2, hh + 2, pal.hair);
+  // helm / crown / hood
+  if (hooded) {
+    const hc = robe ? body : pal.outfit2 && c64Lum(pal.outfit2) > 40 ? pal.outfit2 : pal.outfit;
+    c64R(ctx, hx - 1, headY - 1, hw + 1, 2, hc);
+    c64R(ctx, hx - 1, headY + 1, 2, hh + 1, hc);
+    c64R(ctx, hx + hw - 1, headY, 1, 2, c64Dark(hc, 0.2));
+    c64R(ctx, hx + 1, headY - 2, hw - 2, 1, hc);
+    c64R(ctx, hx, headY - 1, hw - 1, 1, c64Light(hc, 0.2));
+    // face in shadow
+    c64R(ctx, hx + 1, headY + 1, hw - 1, hh - 2, c64Mix(headC, '#000000', spectral || t.translucency > 0.35 ? 0.8 : 0.4));
+  } else if (helm === 'closed' || helm === 'horned' || helm === 'open') {
+    const m = pal.metal, mD = c64Dark(m, 0.35);
+    c64R(ctx, hx - 1, headY - 1, hw + 1, 2, m);
+    c64R(ctx, hx - 1, headY + 1, 2, hh - 1, m);
+    c64R(ctx, hx, headY - 1, hw - 1, 1, c64Light(m, 0.35));
+    if (helm !== 'open') {
+      c64R(ctx, hx + 1, headY + 1, hw - 1, hh - 2, m);
+      c64R(ctx, hx + 2, headY + 2, hw - 1, 1, '#101010'); // visor slit
+    }
+    if (helm === 'horned') c64Horns(ctx, 'long', hx, headY, hw, { ...pal, horn: c64Light(m, 0.45) });
+    else if (rng() < 0.6) { c64R(ctx, hx + 1, headY - 3, 1, 2, trim); c64R(ctx, hx, headY - 2, 1, 1, trim); } // plume
+    c64R(ctx, hx - 1, headY + 1, 1, hh - 1, mD);
+  } else if (helm === 'crown' || helm === 'circlet') {
+    const cc = helm === 'crown' ? '#f2c94a' : pal.metal;
+    c64R(ctx, hx, headY, hw - 1, 1, cc);
+    if (helm === 'crown') for (let i = 0; i < hw - 1; i += 2) c64R(ctx, hx + i, headY - 1, 1, 1, cc);
+    else c64R(ctx, hx + hw - 2, headY, 1, 1, c64Light(pal.glow, 0.2));
+  }
+  if (t.horns && t.horns !== 'none' && helm !== 'horned') c64Horns(ctx, t.horns, hx, headY - (hooded ? 1 : 0), hw, pal);
+  if (insect) { c64Line(ctx, hx + 2, headY - 1, hx + 4, headY - 3, pal.horn); c64R(ctx, hx + 5, headY - 4, 1, 1, pal.horn); }
+  // eyes (skip when a closed helm covers the face; glow eyes still show through the slit)
+  const glowEyes = t.eyes && (t.eyes.glow || t.eyes.style === 'glowing');
+  if (!(helm === 'closed' || helm === 'horned') || glowEyes) {
+    const ey = headY + 2;
+    const ec = glowEyes ? pal.eye : (hooded ? '#000000' : '#101010');
+    if (t.eyes && t.eyes.style === 'cyclops') c64R(ctx, hx + hw - 2, ey - 1, 1, 1, glowEyes ? ec : '#f0f0f0');
+    else if (t.eyes && t.eyes.style === 'compound') c64R(ctx, hx + hw - 2, ey - 1, 2, 2, '#c02030');
+    else {
+      c64R(ctx, hx + hw - 2, ey - 1, 1, 1, ec);
+      if (glowEyes) c64R(ctx, hx + hw - 4, ey - 1, 1, 1, c64Dark(ec, 0.2));
+    }
+  }
+  if (t.halo) c64R(ctx, hx, headY - 3, hw - 1, 1, '#ffe680');
+
+  // --- shield on the body, front arm + held items
+  if (shield) c64Shield(ctx, shield, tx + tw, torsoY + 2, pal);
+  const swing = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  const ax = tx + tw - 1;
+  const armC = robe || armour || style === 'gi' ? body : (style === 'leather' || style === 'furs' ? c64Dark(pal.outfit, 0.1) : skin);
+  const handY = torsoY + p.armH;
+  const handX = ax + 1 + Math.max(0, swing);
+  if (!shield) {
+    c64R(ctx, ax, torsoY + 1, 2, 2, armC);
+    c64R(ctx, ax + Math.max(0, swing), torsoY + 3, 2, p.armH - 3, armC);
+    c64R(ctx, ax + Math.max(0, swing), torsoY + 3, 1, p.armH - 3, c64Dark(armC, 0.2));
+  } else {
+    c64R(ctx, ax, torsoY + 1, 1, 2, armC); // shoulder; the arm is behind the shield
+  }
+  c64R(ctx, handX, handY, 2, 1, skeletal ? pal.skin : skin);
+  const front = weapon || handItem;
+  if (front) c64HeldItem(ctx, front, weapon ? (C64_ONE_HANDED.includes(weapon.type) ? handX + 1 : handX + 1) : handX - 1, weapon && C64_ONE_HANDED.includes(weapon.type) ? handY : handY, pal, frame, 1);
+  if (weapon && handItem) {
+    if (handItem.type === 'amulet') c64R(ctx, cx, torsoY + 1, 1, 1, c64Readable(handItem.color || pal.glow, 90));
+    else c64HeldItem(ctx, handItem, tx - 4, torsoY + p.armH - 1, pal, frame, 1);
+  }
+  if (t.handGlow) c64Dither(ctx, handX, handY - 1, 3, 3, c64Light(pal.glow, 0.25), frame & 1);
+  return { hx, headY, tx, torsoY };
+}
+
+function c64Beast(ctx, spec, t, pal, frame, rng, draconic) {
+  const body = draconic ? pal.skin : pal.skin;
+  const dark = c64Dark(body, 0.3);
+  const light = c64Light(body, 0.25);
+  const big = t.size === 'large' || t.size === 'huge' || draconic;
+  const bx = draconic ? 6 : 5, by = draconic ? 12 : 13, bw = big ? 11 : 10, bh = big ? 5 : 4;
+  const step = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  if (t.wings && t.wings !== 'none') c64Wings(ctx, t.wings, bx + 6, by + 1, draconic ? 9 : 6, { ...pal, wing: c64Lum(body) < 70 ? c64Mix(c64Light(body, 0.45), pal.eye && pal.eye !== '#111111' ? pal.eye : body, 0.25) : c64Mix(body, pal.outfit2 || dark, 0.4) }, frame);
+  c64Tail(ctx, t.tail && t.tail !== 'none' ? t.tail : (draconic ? 'thick' : 'thin'), bx + 1, by + 1, { ...pal, tail: body }, frame);
+  // legs (back pair darker)
+  const legH = 22 - (by + bh) + 1;
+  [[bx + 1, -step, dark], [bx + bw - 3, step, dark], [bx + 2, step, body], [bx + bw - 2, -step, body]].forEach(([lx, s, col]) => {
+    c64R(ctx, lx + (s > 0 ? 1 : 0), by + bh, 2, legH, col);
+    c64R(ctx, lx + (s > 0 ? 1 : 0) + 1, 22, 2, 1, t.claws ? pal.horn : c64Dark(col, 0.3));
+  });
+  // body
+  c64R(ctx, bx, by, bw, bh, body);
+  c64R(ctx, bx + 1, by - 1, bw - 2, 1, body);
+  c64R(ctx, bx + 1, by + bh - 1, bw - 2, 1, light);
+  c64R(ctx, bx + 1, by - 1, bw - 3, 1, c64Light(body, 0.15));
+  if (t.markings === 'stripes') for (let i = 2; i < bw - 1; i += 3) c64R(ctx, bx + i, by, 1, bh - 1, dark);
+  if (t.markings === 'spots') for (let i = 2; i < bw - 1; i += 3) c64R(ctx, bx + i, by + 1 + (i % 2), 1, 1, dark);
+  if (t.spikes || draconic) for (let i = 1; i < bw - 1; i += 2) c64R(ctx, bx + i, by - 2, 1, 1, pal.horn);
+  // neck + head
+  let hx, hy;
+  if (draconic) {
+    c64Line(ctx, bx + bw - 1, by, bx + bw + 2, by - 4, body, 2);
+    hx = bx + bw + 1; hy = by - 7;
+    c64R(ctx, hx, hy, 4, 3, body); c64R(ctx, hx + 4, hy + 1, 2, 2, body); c64R(ctx, hx + 4, hy + 2, 2, 1, dark);
+    c64R(ctx, hx + 2, hy + 1, 1, 1, pal.eye !== '#111111' ? pal.eye : '#ffd040');
+    c64Horns(ctx, t.horns && t.horns !== 'none' ? t.horns : 'long', hx, hy, 4, pal);
+    if (t.element === 'fire' && frame === 1) c64Dither(ctx, hx + 6, hy + 1, 2, 2, pal.glow, 0);
+  } else {
+    hx = bx + bw - 1; hy = by - 3;
+    c64R(ctx, hx, hy, 4, 4, body);
+    c64R(ctx, hx + 4, hy + 2, 2, 2, t.head === 'bird' ? '#e0a030' : body);
+    c64R(ctx, hx + 5, hy + 3, 1, 1, dark);
+    if (t.ears !== 'none') c64R(ctx, hx, hy - 1, 1, 1, body), c64R(ctx, hx + 2, hy - 1, 1, 1, body);
+    c64R(ctx, hx + 2, hy + 1, 1, 1, pal.eye);
+    if (t.horns && t.horns !== 'none') c64Horns(ctx, t.horns, hx, hy, 4, pal);
+    if (t.mane) c64R(ctx, hx - 2, hy, 2, 5, pal.hair);
+    if (t.tusks || t.fangs) c64R(ctx, hx + 4, hy + 4, 1, 1, '#f4f0e0');
+  }
+}
+
+function c64Serpent(ctx, spec, t, pal, frame, rng) {
+  const body = pal.skin, dark = c64Dark(body, 0.3), belly = c64Light(body, 0.35);
+  const sway = (frame === 1) ? 1 : (frame === 3 ? -1 : 0);
+  // coils
+  c64Oval(ctx, 11, 20, 7, 2, body);
+  c64R(ctx, 5, 21, 12, 1, dark);
+  c64Oval(ctx, 9 + sway, 17, 5, 1, body);
+  c64R(ctx, 6 + sway, 17, 7, 1, belly);
+  c64Tail(ctx, t.tail === 'stinger' ? 'stinger' : 'thin', 5, 19, { ...pal, tail: body }, frame);
+  if (t.nagaTorso) {
+    // humanoid upper body rising from the coils
+    const fake = { ...t, bodyPlan: 'humanoid', size: 'small', tail: 'none' };
+    ctx.save();
+    ctx.translate(2 * C64_U, -6 * C64_U);
+    const pal2 = { ...pal };
+    const hp = c64Proportions(fake, rng);
+    const torsoX = 11 - Math.floor(hp.torsoW / 2) - 1, torsoY = 16 - hp.torsoH;
+    drawTorso(ctx, t.outfit && t.outfit.style === 'plate' ? 'plate_armor' : 'jerkin', torsoX, torsoY, C64_U, { ...pal2, primary: t.outfit && t.outfit.style !== 'none' ? pal.outfit : body }, hp, false, false, '', 2, 2, 1);
+    const headX = torsoX + Math.floor((hp.torsoW - hp.headW) / 2) + 1, headY = torsoY - hp.headH + 1;
+    drawHead(ctx, t.hair && t.hair !== 'none' ? 'human_hair' : 'normal_human', headX, headY, C64_U, { ...pal2, highlight: pal.hair }, hp, /^f/i.test(spec.sex || ''), '', '', 2, 3, 1);
+    c64Eyes(ctx, t, headX, headY, hp.headW, hp.headH, pal, 1);
+    if (t.horns && t.horns !== 'none') c64Horns(ctx, t.horns, headX, headY, hp.headW, pal);
+    const items = Array.isArray(t.items) ? t.items : [];
+    drawSwingArm(ctx, torsoX + hp.torsoW - 1, torsoY + 1, C64_U, { ...pal2, secondary: body }, { armH: 4 }, 0, false, 2);
+    c64HeldItem(ctx, items.find((i) => i.slot === 'weapon') || items[0], torsoX + hp.torsoW, torsoY + 5, pal, frame, 1);
+    ctx.restore();
+    return;
+  }
+  // raised neck + head (cobra-like)
+  c64R(ctx, 13 + sway, 9, 2, 8, body);
+  c64R(ctx, 14 + sway, 10, 1, 7, belly);
+  c64R(ctx, 12 + sway, 6, 5, 3, body);
+  c64R(ctx, 17 + sway, 7, 1, 2, dark);
+  c64R(ctx, 15 + sway, 7, 1, 1, pal.eye !== '#111111' ? pal.eye : '#ffd040');
+  if (t.horns && t.horns !== 'none') c64Horns(ctx, t.horns, 12 + sway, 6, 5, pal);
+  if (t.fangs) c64R(ctx, 16 + sway, 9, 1, 1, '#f4f0e0');
+  if (frame === 1 || frame === 3) c64R(ctx, 18 + sway, 8, 1, 1, '#d02030');
+}
+
+function c64Spider(ctx, spec, t, pal, frame, rng) {
+  const body = c64Readable(pal.skin, 50), dark = c64Dark(body, 0.45), light = c64Light(body, 0.3);
+  const eye = pal.eye !== '#111111' ? pal.eye : '#ff3040';
+  const step = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  // 4 legs per side as high arches (far side darker, offset); knees above the body = spider silhouette
+  const legs = [[-7, -2], [-3, -4], [2, -4], [6, -2]];
+  legs.forEach(([dx, kyOff], i) => {
+    const s = (i % 2 ? step : -step);
+    const hipX = 11 + Math.round(dx * 0.3), hipY = 15;
+    const kneeX = 11 + Math.round(dx * 0.75), kneeY = 9 + kyOff + 4 + (s > 0 ? -1 : 0);
+    const footX = 11 + Math.round(dx * 1.45) + s, footY = 22;
+    c64Line(ctx, hipX - 1, hipY, kneeX - 1, kneeY + 1, dark);
+    c64Line(ctx, kneeX - 1, kneeY + 1, footX - 1, footY, dark);
+    c64Line(ctx, hipX, hipY, kneeX, kneeY, body);
+    c64Line(ctx, kneeX, kneeY, footX, footY, body);
+  });
+  // abdomen (rear, big) + cephalothorax (front)
+  c64Oval(ctx, 7, 14, 4, 3, body);
+  c64R(ctx, 5, 11, 4, 1, light);
+  c64R(ctx, 4, 12, 1, 2, light);
+  if (t.markings && t.markings !== 'none') { c64R(ctx, 6, 13, 3, 1, c64Readable(pal.glow, 90)); c64R(ctx, 7, 12, 1, 3, c64Readable(pal.glow, 90)); }
+  else c64R(ctx, 6, 14, 2, 1, dark);
+  c64Oval(ctx, 13, 15, 2, 2, body);
+  c64R(ctx, 13, 13, 2, 1, light);
+  c64R(ctx, 14, 14, 2, 1, eye);
+  c64R(ctx, 13, 14, 1, 1, c64Dark(eye, 0.3));
+  c64R(ctx, 15, 16, 1, 2, pal.horn); // fangs
+  if (t.tail === 'stinger') c64Tail(ctx, 'stinger', 5, 12, { ...pal, tail: body }, frame);
+}
+
+function c64Ooze(ctx, spec, t, pal, frame, rng) {
+  const body = pal.skin, dark = c64Dark(body, 0.35), light = c64Light(body, 0.4);
+  const floatingEye = (t.eyes && t.eyes.style === 'cyclops') || t.head === 'eyeless' || t.floating;
+  if (floatingEye) {
+    const y = 10 + (frame === 2 ? -1 : 0);
+    for (let i = 0; i < Math.max(3, t.tentacles || 4); i++) {
+      const x = 8 + i * 2;
+      for (let k = 0; k < 6; k++) c64R(ctx, x + Math.round(Math.sin(k * 0.8 + i + frame) * 0.8), y + 4 + k, 1, 1, k > 3 ? dark : body);
+    }
+    c64Disc(ctx, 12, y, 5, body);
+    c64R(ctx, 9, y - 4, 4, 1, light);
+    c64Disc(ctx, 13, y, 2, '#f2f0e8');
+    c64R(ctx, 13, y, 2, 1, pal.eye !== '#111111' ? pal.eye : '#c02020');
+    c64R(ctx, 14, y, 1, 1, '#000000');
+    return;
+  }
+  const squash = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  const rx = 7 + squash, ry = 5 - squash;
+  c64Oval(ctx, 11, 22 - ry, rx, ry, body);
+  c64R(ctx, 4 - squash, 21, 15 + squash * 2, 1, body);
+  c64R(ctx, 4 - squash, 22, 15 + squash * 2, 1, dark);
+  c64Dither(ctx, 8, 22 - ry * 2 + 2, 4, 2, light, frame);
+  c64R(ctx, 9, 22 - ry * 2 + 1, 3, 1, light);
+  c64R(ctx, 6, 22, 1, 1, null);
+  // eyes / bones floating inside
+  c64R(ctx, 12, 22 - ry - 1, 1, 1, pal.eye !== '#111111' ? pal.eye : '#101010');
+  c64R(ctx, 15, 22 - ry - 1, 1, 1, pal.eye !== '#111111' ? pal.eye : '#101010');
+  const item = (t.items || [])[0];
+  if (item) c64R(ctx, 9, 20, 2, 1, c64Readable(item.color || pal.metal, 70));
+}
+
+function c64Elemental(ctx, spec, t, pal, frame, rng) {
+  const stony = t.covering === 'stone' || t.element === 'earth' || t.covering === 'crystal' || t.covering === 'bark' || t.covering === 'metal';
+  const core = pal.skin, glow = pal.glow;
+  if (stony) {
+    const dark = c64Dark(core, 0.35), light = c64Light(core, 0.25);
+    const bob = frame === 2 ? -1 : 0;
+    c64R(ctx, 8, 7 + bob, 7, 7, core); c64R(ctx, 9, 6 + bob, 5, 1, light);
+    c64R(ctx, 10, 3 + bob, 4, 4, core); c64R(ctx, 12, 4 + bob, 1, 1, glow);
+    c64R(ctx, 5, 8 + bob, 3, 6, dark); c64R(ctx, 15, 8 + bob, 3, 6, core); c64R(ctx, 15, 14 + bob, 3, 2, dark);
+    c64R(ctx, 8, 14 + bob, 3, 8 - bob, dark); c64R(ctx, 12, 14 + bob, 3, 8 - bob, core);
+    c64R(ctx, 10, 9 + bob, 1, 3, dark); c64R(ctx, 13, 11 + bob, 1, 1, glow);
+    if (t.markings === 'cracks' || t.markings === 'runes' || t.markings === 'veins') { c64R(ctx, 11, 8 + bob, 1, 2, glow); c64R(ctx, 9, 16 + bob, 1, 2, glow); }
+    return;
+  }
+  // flame / storm / water / frost / shadow figure: flickering tapered column with arms
+  const hot = c64Light(glow, 0.35);
+  for (let y = 4; y <= 21; y++) {
+    const tY = (y - 4) / 17;
+    let w = Math.round(2 + Math.sin(tY * Math.PI) * 4 + (y > 15 ? (21 - y) * -0.2 : 0));
+    const jitter = ((y + frame) % 3 === 0) ? 1 : 0;
+    const x = 11 - Math.floor(w / 2) + jitter;
+    if (y > 18) c64Dither(ctx, x, y, w, 1, core, y + frame);
+    else c64R(ctx, x, y, w, 1, core);
+    if (y > 6 && y < 16 && w > 3) c64R(ctx, x + 1, y, Math.max(1, w - 3), 1, glow);
+  }
+  // flame tips on the head
+  c64R(ctx, 10, 2 + (frame & 1), 1, 2, glow); c64R(ctx, 12, 1 + ((frame + 1) & 1), 1, 3, hot); c64R(ctx, 14, 3, 1, 1, glow);
+  // arms
+  const sw = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  c64Line(ctx, 8, 9, 5, 12 + sw, core, 1); c64Line(ctx, 14, 9, 17, 11 - sw, core, 1);
+  c64R(ctx, 4, 12 + sw, 2, 2, glow); c64R(ctx, 17, 10 - sw, 2, 2, glow);
+  // eyes
+  c64R(ctx, 11, 6, 1, 1, '#ffffff'); c64R(ctx, 13, 6, 1, 1, '#ffffff');
+}
+
+// Placeholder while the LLM spec is pending: a neutral shimmering mote (not a character).
+function drawPlaceholderShimmer(ctx, frame, seed) {
+  const rng = c64HashRng((seed >>> 0) + frame * 7919);
+  const cols = ['#5a6478', '#8a94aa', '#c8d0e0'];
+  c64Dither(ctx, 9, 12, 6, 8, '#3a4050', frame);
+  for (let i = 0; i < 7; i++) {
+    const x = 8 + Math.floor(rng() * 8), y = 9 + Math.floor(rng() * 12);
+    c64R(ctx, x, y, 1, 1, cols[Math.floor(rng() * cols.length)]);
+  }
+  c64R(ctx, 11, 8 + (frame & 1), 2, 1, '#c8d0e0');
+}
+
+// 1-cell outline around the silhouette (cells with >= 3 opaque px count as filled). Aura characters get a
+// coloured outline instead of black (C64-style glow).
+function c64OutlinePass(ctx, color, fill) {
+  if (typeof ctx.getImageData !== 'function') return;
+  const S = C64_GRID * C64_U;
+  const img = ctx.getImageData(0, 0, S, S);
+  const d = img.data;
+  const occ = new Uint8Array(C64_GRID * C64_GRID);
+  for (let cy = 0; cy < C64_GRID; cy++) for (let cx = 0; cx < C64_GRID; cx++) {
+    let n = 0;
+    for (let y = 0; y < C64_U; y++) for (let x = 0; x < C64_U; x++) if (d[((cy * C64_U + y) * S + cx * C64_U + x) * 4 + 3] > 40) n++;
+    occ[cy * C64_GRID + cx] = n >= 3 ? 1 : 0;
+  }
+  const rgb = c64Rgb(color);
+  for (let cy = 0; cy < C64_GRID; cy++) for (let cx = 0; cx < C64_GRID; cx++) {
+    if (occ[cy * C64_GRID + cx]) continue;
+    const nb = (cx > 0 && occ[cy * C64_GRID + cx - 1]) || (cx < C64_GRID - 1 && occ[cy * C64_GRID + cx + 1])
+      || (cy > 0 && occ[(cy - 1) * C64_GRID + cx]) || (cy < C64_GRID - 1 && occ[(cy + 1) * C64_GRID + cx]);
+    if (!nb) continue;
+    for (let y = 0; y < C64_U; y++) for (let x = 0; x < C64_U; x++) {
+      const i = ((cy * C64_U + y) * S + cx * C64_U + x) * 4;
+      if (d[i + 3] > 40 && !fill) continue;
+      d[i] = rgb[0]; d[i + 1] = rgb[1]; d[i + 2] = rgb[2]; d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// Snap every pixel to the nearest of the sprite's own few palette colours (keeps the C64 look tight
+// even where prefabs mix shades) - max ~12 colours.
+function c64LimitColours(ctx, pal) {
+  if (typeof ctx.getImageData !== 'function') return;
+  const S = C64_GRID * C64_U;
+  const img = ctx.getImageData(0, 0, S, S);
+  const d = img.data;
+  const counts = new Map();
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 40) { d[i + 3] = 0; continue; }
+    d[i + 3] = 255;
+    const k = (d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+    counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const keep = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k]) => [(k >> 16) & 255, (k >> 8) & 255, k & 255]);
+  for (let i = 0; i < d.length; i += 4) {
+    if (!d[i + 3]) continue;
+    let best = keep[0], bd = Infinity;
+    for (const c of keep) {
+      const dd = (c[0] - d[i]) ** 2 + (c[1] - d[i + 1]) ** 2 + (c[2] - d[i + 2]) ** 2;
+      if (dd < bd) { bd = dd; best = c; }
+    }
+    d[i] = best[0]; d[i + 1] = best[1]; d[i + 2] = best[2];
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// Seeded variation so two similar specs still differ (hue nudge of outfit/trim, proportions via rng).
+function c64HueRotate(hex, deg) {
+  const [r, g, b] = c64Rgb(hex).map(v => v / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  if (d < 0.04) return hex; // greys stay grey
+  const sat = d / (1 - Math.abs(2 * l - 1));
+  let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h = ((h * 60 + deg) % 360 + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * sat, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+  const [rr, gg, bb] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return c64Hex([(rr + m) * 255, (gg + m) * 255, (bb + m) * 255]);
+}
+
+// Uniqueness rerolls (spec.variant > 0, chosen server-side) must change the 2D token visibly too: rotate the
+// outfit/trim hues (less when the LLM gave a signature palette).
+function c64VariantPalette(pal, variant, signature, plan) {
+  const v = variant | 0;
+  if (v <= 0) return pal;
+  const deg = (signature ? 29 : 53) * v;
+  const tintHue = (97 * v) % 360;
+  const tint = c64HueRotate('#c04040', tintHue);
+  // grey/black colours have no hue to rotate: tint them toward a per-variant hue instead
+  const shift = (hex, d) => { const r = c64HueRotate(hex, d); return r === hex ? c64Mix(hex, tint, 0.3) : r; };
+  const out = { ...pal };
+  ['outfit', 'primary', 'secondary', 'highlight', 'accent', 'trim'].forEach((k, i) => { if (out[k]) out[k] = shift(out[k], i % 2 ? -deg : deg); });
+  // creatures are mostly 'skin' (hide, scales, slime, flame): shift that too
+  if (plan && plan !== 'humanoid' && plan !== 'skeletal' && out.skin) {
+    out.skin = shift(out.skin, deg);
+    if (out.skin2) out.skin2 = shift(out.skin2, deg);
+  }
+  return out;
+}
+
+function c64VaryPalette(pal, rng, signature) {
+  if (signature) return pal;
+  const nudge = (hex, amt) => {
+    const c = c64Rgb(hex);
+    const r = rng();
+    const k = (r - 0.5) * amt;
+    return c64Hex([c[0] * (1 + k), c[1] * (1 - k * 0.5), c[2] * (1 + k * 0.7)]);
+  };
+  return { ...pal, outfit: nudge(pal.outfit, 0.35), primary: nudge(pal.primary, 0.3), trim: nudge(pal.trim, 0.3), highlight: nudge(pal.highlight, 0.25) };
+}
+
+function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
+  const canvas = createCanvas(C64_GRID * C64_U, C64_GRID * C64_U);
+  const ctx = canvas.getContext('2d');
+  if (!ctx || typeof ctx.fillRect !== 'function') return canvas;
+  if (isPlaceholderSpriteSpec(spec)) {
+    drawPlaceholderShimmer(ctx, frame, spec.seed || 1);
+    return canvas;
+  }
+  const t = spec.traits;
+  const rng = c64HashRng((spec.seed >>> 0) ^ 0x9e3779b9);
+  const pal = c64VariantPalette(c64VaryPalette(c64PaletteFromTraits(t, rng), rng, !!t.signature), spec.variant, !!t.signature, t.bodyPlan || 'humanoid');
+  const plan = t.bodyPlan || 'humanoid';
+  const fr = frame | 0;
+  if (plan === 'beast') c64Beast(ctx, spec, t, pal, fr, rng, false);
+  else if (plan === 'draconic') c64Beast(ctx, spec, t, pal, fr, rng, true);
+  else if (plan === 'serpent' && !t.nagaTorso) c64Serpent(ctx, spec, t, pal, fr, rng);
+  else if (plan === 'spider') c64Spider(ctx, spec, t, pal, fr, rng);
+  else if (plan === 'ooze') c64Ooze(ctx, spec, t, pal, fr, rng);
+  else if (plan === 'elemental') c64Elemental(ctx, spec, t, pal, fr, rng);
+  else c64Humanoid(ctx, spec, t, pal, fr, rng);
+  if (options.outline !== false) c64OutlinePass(ctx, pal.outline, true);
+  c64LimitColours(ctx, pal);
+  return canvas;
+}
+
+function createTraitSpriteSheetCanvas(spec, frameCount = 4) {
+  const n = Math.max(1, Math.min(8, frameCount | 0 || 4));
+  const S = C64_GRID * C64_U;
+  const sheet = createCanvas(S * n, S);
+  const ctx = sheet.getContext('2d');
+  for (let f = 0; f < n; f++) ctx.drawImage(createTraitSpriteCanvas(spec, f % 4), f * S, 0);
+  return sheet;
+}
+
+// 12x12 fingerprint of the 2D sprite (used together with the detailed one in the uniqueness check).
+function traitSpriteFingerprint(spec) {
+  const cv = createTraitSpriteCanvas(spec, 0);
+  const ctx = cv.getContext('2d');
+  if (!ctx || typeof ctx.getImageData !== 'function') return null;
+  const S = C64_GRID * C64_U;
+  const d = ctx.getImageData(0, 0, S, S).data;
+  const N = 12, cell = S / N;
+  const alpha = [], lum = [];
+  let r = 0, g = 0, b = 0, w = 0;
+  for (let cy = 0; cy < N; cy++) for (let cx = 0; cx < N; cx++) {
+    let a = 0, l = 0;
+    for (let y = cy * cell; y < (cy + 1) * cell; y++) for (let x = cx * cell; x < (cx + 1) * cell; x++) {
+      const i = (y * S + x) * 4;
+      const pa = d[i + 3] / 255;
+      a += pa; l += pa * (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+      r += d[i] * pa; g += d[i + 1] * pa; b += d[i + 2] * pa; w += pa;
+    }
+    alpha.push(a / (cell * cell)); lum.push(a > 0 ? l / a / 255 : 0);
+  }
+  return { alpha, lum, col: w ? [r / w, g / w, b / w] : [0, 0, 0] };
+}
+
 // Safe export
 if (typeof module !== 'undefined' && module && module.exports) {
   module.exports = {
@@ -2181,8 +3525,16 @@ if (typeof module !== 'undefined' && module && module.exports) {
     createCharacterSpriteSheetCanvas,
     extractCharacterFrameCanvases,
     createCharacterVoxelFrames,
+    createSemanticCharacterVoxelFrame,
+    voxelizeMultiViewSolid,
+    voxelizeCharacterFrameCanvas,
+    resolveVoxelSpriteSpec,
+    proceduralTraitsToVoxelSpec,
     registerAnimatedCharacterSprite,
     createCharacterSpriteSpec,
+    createTraitSpriteCanvas,
+    createTraitSpriteSheetCanvas,
+    traitSpriteFingerprint,
     _createCanvas: createCanvas
   };
 }
@@ -2193,6 +3545,11 @@ if (typeof window !== 'undefined') {
   window.createCharacterSpriteSheetCanvas = createCharacterSpriteSheetCanvas;
   window.extractCharacterFrameCanvases = extractCharacterFrameCanvases;
   window.createCharacterVoxelFrames = createCharacterVoxelFrames;
+  window.createSemanticCharacterVoxelFrame = createSemanticCharacterVoxelFrame;
+  window.resolveVoxelSpriteSpec = resolveVoxelSpriteSpec;
   window.registerAnimatedCharacterSprite = registerAnimatedCharacterSprite;
   window.createCharacterSpriteSpec = createCharacterSpriteSpec;
+  window.createTraitSpriteCanvas = createTraitSpriteCanvas;
+  window.createTraitSpriteSheetCanvas = createTraitSpriteSheetCanvas;
+  window.traitSpriteFingerprint = traitSpriteFingerprint;
 }

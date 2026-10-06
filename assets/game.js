@@ -14,7 +14,7 @@ const MUSIC_STORE   = 'rooms';
 // --- IndexedDB for dungeon layouts ---
 const DUNGEON_DB_NAME = 'cotg-dungeons';
 const DUNGEON_STORE   = 'rooms';
-const DUNGEON_CACHE_VERSION = 2;
+const DUNGEON_CACHE_VERSION = 4; // v4: level spec (description + puzzle) structures/decals/scatter + Objects in Room items
 let dungeonDBPromise = null;
 let lastDungeonGeoKey = null;
 
@@ -196,22 +196,12 @@ async function switchDungeonForCoordinates(coordString) {
   playerPosX = playerDungeonX + 0.5;
   playerPosY = playerDungeonY + 0.5;
 
-  syncPartyMazeToCombatPositions(true);
-  updatePartyMazeLocomotion(true);
   ensurePartyMazeIdleInterval();
   preloadDungeonTextures();
   updatePlayerHeightFromCell();
+  refreshPartyDungeonPresence(true);
   renderDungeonView();
   logDungeonCombatSync('move');
-
-  if (window.combatGame) {
-    const scene = window.combatGame.scene.getScene('CombatScene');
-    if (scene && scene.redrawCombatRT) {
-      scene.redrawCombatRT();
-    } else if (scene && scene.drawDungeonOverlay) {
-      scene.drawDungeonOverlay();
-    }
-  }
 }
 
 function logDungeonLayout(dungeon) {
@@ -471,6 +461,12 @@ eventSource.onmessage = function(event) {
     return;
   }
 
+  // Procedural sprite trait specs generated (or re-generated after a retry) by the server LLM.
+  if (data?.type === 'characterTraits') {
+    if (data.traits) applyCharacterTraitSpecs(data.traits);
+    return;
+  }
+
     // DUNGEON LOADED — THE DEMON HAS SPOKEN
     if (data.type === 'dungeonLoaded') {
       (async () => {
@@ -521,25 +517,12 @@ eventSource.onmessage = function(event) {
         playerZInitialized = false;
         playerPosX = playerDungeonX + 0.5;
         playerPosY = playerDungeonY + 0.5;
-        syncPartyMazeToCombatPositions(true);
-        updatePartyMazeLocomotion(true);
         ensurePartyMazeIdleInterval();
     
         preloadDungeonTextures();
         updatePlayerHeightFromCell();
+        refreshPartyDungeonPresence(true);
         renderDungeonView();
-    
-        // Combat overlay sync - use the rotating RT version when available
-        if (window.combatGame) {
-          const scene = window.combatGame.scene.getScene('CombatScene');
-          if (scene) {
-            if (scene.redrawCombatRT) {
-              scene.redrawCombatRT();
-            } else if (scene.drawDungeonOverlay) {
-              scene.drawDungeonOverlay();
-            }
-          }
-        }
       })();
         
     // Refresh the combat-map overlay if the scene is alive (rotating version preferred)
@@ -787,16 +770,13 @@ function movePlayerByDelta(dx, dy) {
   playerDungeonX = proposedDungeonX;
   playerDungeonY = proposedDungeonY;*/
 
-  // 3) COMBAT MAP: Player stays FIXED in the center (7,7 on 15x15 grid)
-  const CENTER_X = 7;
-  const CENTER_Y = 7;
+  // 3) COMBAT MAP: Player stays fixed in the center of the tactical grid.
+  const CENTER_X = COMBAT_GRID_CENTER;
+  const CENTER_Y = COMBAT_GRID_CENTER;
 
   pcData.x = CENTER_X;
   pcData.y = CENTER_Y;
   moveCombatVisualTo(combatScene, pcData, { x: CENTER_X, y: CENTER_Y, type: 'pc' }, true);
-
-  // Keep camera centered on player
-  combatScene.centerCameraOn(CENTER_X, CENTER_Y);
 
   // Sync global combatCharacters (for server & other logic)
   const pcGlobal = window.combatCharacters && window.combatCharacters.find(c => c.type === 'pc');
@@ -886,12 +866,17 @@ const PLAYER_RADIUS = 0.2;
 const Z_SMOOTH = 8.0;
 const RUN_MULT = 1.6;
 const PC_WALK_FRAME_MS = 220;
-const NPC_WALK_FRAME_MS = 260;
-const NPC_MOVE_TWEEN_MS = 280;
-const NPC_MOVE_THINK_MS = 120;
-const NPC_MOVE_STEP_MS = 420;
+const NPC_WALK_FRAME_MS = 200;
+const NPC_MOVE_TWEEN_MS = 420;
+const NPC_MOVE_THINK_MS = 90;
+const NPC_MOVE_STEP_MS = 380;
 const NPC_MOVE_VARIANCE_MS = 240;
 const PARTY_IDLE_INTERVAL_MS = 180;
+const COMBAT_GRID_SIZE = 31;
+const COMBAT_CELL_SIZE = 25;
+const COMBAT_GRID_CENTER = Math.floor(COMBAT_GRID_SIZE / 2);
+const COMBAT_CANVAS_SIZE = COMBAT_GRID_SIZE * COMBAT_CELL_SIZE;
+const COMBAT_ACTOR_TOKEN_SCALE = 1.25;
 
 function deriveFacingFromDelta(dx, dy, fallback = 'left') {
   const safeFallback = String(fallback || 'left').toLowerCase() === 'right' ? 'right' : 'left';
@@ -976,6 +961,23 @@ function getObstacleRadiusForTile(tile) {
 function clampPosToTileInterior(value, tileCoord) {
   const inset = PLAYER_RADIUS + 0.01;
   return Math.max(tileCoord + inset, Math.min(tileCoord + 1 - inset, value));
+}
+
+function findRecoveryAnchorInTile(tileX, tileY) {
+  const cell = currentDungeon?.cells?.[`${tileX},${tileY}`];
+  if (!cell || isBlockedDungeonCell(cell)) return null;
+  const inset = PLAYER_RADIUS + 0.01;
+  const candidates = [
+    [tileX + 0.5, tileY + 0.5],
+    [tileX + inset, tileY + inset],
+    [tileX + 1 - inset, tileY + inset],
+    [tileX + inset, tileY + 1 - inset],
+    [tileX + 1 - inset, tileY + 1 - inset]
+  ];
+  for (const [x, y] of candidates) {
+    if (!isObstacleAtPos(x, y)) return { x, y };
+  }
+  return null;
 }
 
 function findWalkableStepAnchor(tileX, tileY) {
@@ -1063,6 +1065,22 @@ function isObstacleAtPos(x, y, excludeName = null) {
   return false;
 }
 
+// Objects in Room placed by the server (dungeon.sceneObjects), minus anything no longer listed in the latest
+// console's "Objects in Room" line (taken / dropped elsewhere). Used by the 2D combat map and the 3D renderer.
+function getVisibleSceneObjects() {
+  const list = currentDungeon && Array.isArray(currentDungeon.sceneObjects) ? currentDungeon.sceneObjects : [];
+  if (!list.length) return list;
+  const SI = window.SceneItems;
+  const cur = SI && typeof SI.parseRoomObjects === 'function' ? SI.parseRoomObjects(window.lastServerGameConsole) : null;
+  if (!cur) return list;
+  const present = cur.map((o) => SI.normName(o.name));
+  return list.filter((o) => {
+    const n = SI.normName(o.name);
+    return present.some((p) => p === n || (p.length > 3 && (p.includes(n) || n.includes(p))));
+  });
+}
+window.getVisibleSceneObjects = getVisibleSceneObjects;
+
 function isBlockedDungeonCell(cell) {
   if (!cell) return true;
   const tile = String(cell.tile || '');
@@ -1084,6 +1102,8 @@ function canEnterTile(fromX, fromY, toX, toY, excludeName = null) {
   if (fromX === toX && fromY === toY) return true;
   const targetCell = currentDungeon.cells[`${toX},${toY}`];
   if (!targetCell || isBlockedDungeonCell(targetCell)) return false;
+  // holodek-1: do NOT hard-block pillar/custom tiles here — PC squeezes via isObstacleAtPos radius.
+  // Party spawn/BFS still rejects props via isSpawnBlockedCell.
   const currentCell = currentDungeon.cells[`${fromX},${fromY}`] || {};
   const currentFloor = typeof currentCell.floorHeight === 'number' ? currentCell.floorHeight : 0;
   const targetFloor = typeof targetCell.floorHeight === 'number' ? targetCell.floorHeight : 0;
@@ -1156,6 +1176,18 @@ function ensurePlayerOnValidTile() {
 
   const tileX = Math.floor(playerPosX);
   const tileY = Math.floor(playerPosY);
+  if (tileX !== playerDungeonX || tileY !== playerDungeonY) {
+    const anchor = findRecoveryAnchorInTile(playerDungeonX, playerDungeonY);
+    if (anchor) {
+      playerPosX = anchor.x;
+      playerPosY = anchor.y;
+      DUNGEON_MOVE.velX = 0;
+      DUNGEON_MOVE.velY = 0;
+      updatePlayerHeightFromCell();
+      syncCombatPlayerCenter();
+      return true;
+    }
+  }
   const cell = currentDungeon.cells[`${tileX},${tileY}`];
 
   if (!cell || isBlockedDungeonCell(cell) || isObstacleAtPos(playerPosX, playerPosY)) {
@@ -1178,15 +1210,13 @@ function syncCombatPlayerCenter() {
   const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
   if (!combatScene || !combatScene.pcName || !combatScene.characters[combatScene.pcName]) return;
   const pcData = combatScene.characters[combatScene.pcName];
-  const cellSize = 25;
-  const CENTER_X = 7;
-  const CENTER_Y = 7;
+  const cellSize = COMBAT_CELL_SIZE;
+  const CENTER_X = COMBAT_GRID_CENTER;
+  const CENTER_Y = COMBAT_GRID_CENTER;
 
   pcData.x = CENTER_X;
   pcData.y = CENTER_Y;
   moveCombatVisualTo(combatScene, pcData, { x: CENTER_X, y: CENTER_Y, type: 'pc' }, true);
-  combatScene.centerCameraOn(CENTER_X, CENTER_Y);
-
   const pcGlobal = window.combatCharacters && window.combatCharacters.find(c => c.type === 'pc');
   if (pcGlobal) {
     pcGlobal.x = CENTER_X;
@@ -1197,7 +1227,7 @@ function syncCombatPlayerCenter() {
   syncPartyMazeToCombatPositions(false);
   if (Array.isArray(window.combatCharacters)) {
     window.combatCharacters.forEach(entry => {
-      if (!entry || entry.type !== 'npc') return;
+      if (!entry || (entry.type !== 'npc' && entry.type !== 'monster')) return;
       const npcSceneData = combatScene.characters && combatScene.characters[entry.name];
       if (!npcSceneData) return;
       npcSceneData.x = entry.x;
@@ -1205,21 +1235,6 @@ function syncCombatPlayerCenter() {
       applyCombatVisualFrame(npcSceneData.sprite, entry);
       moveCombatVisualTo(combatScene, npcSceneData, entry, false);
     });
-  }
-
-  if (combatScene.domContainer) {
-    const gridSize = combatScene.gridSize || 15;
-    const gridPx = gridSize * cellSize;
-    const viewW = combatScene.domContainer.clientWidth;
-    const viewH = combatScene.domContainer.clientHeight;
-    const targetX = CENTER_X * cellSize + cellSize / 2;
-    const targetY = CENTER_Y * cellSize + cellSize / 2;
-    const maxScrollX = Math.max(0, gridPx - viewW);
-    const maxScrollY = Math.max(0, gridPx - viewH);
-    const scrollLeft = Math.max(0, Math.min(maxScrollX, targetX - viewW / 2));
-    const scrollTop = Math.max(0, Math.min(maxScrollY, targetY - viewH / 2));
-    combatScene.domContainer.scrollLeft = scrollLeft;
-    combatScene.domContainer.scrollTop = scrollTop;
   }
 }
 
@@ -1249,6 +1264,180 @@ function getPlayerPosForMap() {
   const px = Number.isFinite(playerPosX) ? playerPosX : playerDungeonX + 0.5;
   const py = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
   return { x: px, y: py };
+}
+
+function getDungeonPositionDebug() {
+  const dungeon = currentDungeon;
+  const posX = Number.isFinite(playerPosX) ? playerPosX : playerDungeonX + 0.5;
+  const posY = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
+  const posTileX = Math.floor(posX);
+  const posTileY = Math.floor(posY);
+  const dirX = Math.cos(playerAngle);
+  const dirY = Math.sin(playerAngle);
+  const eyeBack = Number.isFinite(window.WEBGL_EYE_BACK) ? window.WEBGL_EYE_BACK : 0;
+  const camX = posX - dirX * eyeBack;
+  const camY = posY - dirY * eyeBack;
+  const tileInfo = (x, y) => {
+    const cell = dungeon && dungeon.cells ? dungeon.cells[`${x},${y}`] : null;
+    return {
+      key: `${x},${y}`,
+      tile: cell ? (cell.tile || 'floor') : 'void',
+      blocked: !cell || isBlockedDungeonCell(cell),
+      obstacle: !!(cell && isObstacleTile(String(cell.tile || ''))),
+      floorHeight: cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : null,
+      ceilHeight: cell && typeof cell.ceilHeight === 'number' ? cell.ceilHeight : null
+    };
+  };
+  return {
+    geoKey: dungeon && dungeon.geoKey,
+    playerDungeon: { x: playerDungeonX, y: playerDungeonY },
+    playerPos: { x: Number(posX.toFixed(3)), y: Number(posY.toFixed(3)) },
+    playerPosTile: tileInfo(posTileX, posTileY),
+    playerDungeonTile: tileInfo(playerDungeonX, playerDungeonY),
+    camera: { x: Number(camX.toFixed(3)), y: Number(camY.toFixed(3)) },
+    cameraTile: tileInfo(Math.floor(camX), Math.floor(camY)),
+    angle: Number(playerAngle.toFixed(3)),
+    eyeBack,
+    z: Number(playerZ.toFixed(3)),
+    zTarget: Number(playerZTarget.toFixed(3))
+  };
+}
+
+function describeDungeonCellAt(tileX, tileY) {
+  const cell = currentDungeon && currentDungeon.cells ? currentDungeon.cells[`${tileX},${tileY}`] : null;
+  return {
+    key: `${tileX},${tileY}`,
+    tile: cell ? (cell.tile || 'floor') : 'void',
+    feature: cell ? (cell.feature || null) : null,
+    blocked: !cell || isBlockedDungeonCell(cell),
+    obstacle: !!(cell && isObstacleTile(String(cell.tile || ''))),
+    doorOpen: cell && cell.door ? !!cell.door.isOpen : null,
+    floorHeight: cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : null,
+    ceilHeight: cell && typeof cell.ceilHeight === 'number' ? cell.ceilHeight : null
+  };
+}
+
+function getObstacleAtPosDetail(x, y) {
+  if (!currentDungeon || !currentDungeon.cells) return null;
+  const cx = Math.floor(x);
+  const cy = Math.floor(y);
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      const tileX = cx + ox;
+      const tileY = cy + oy;
+      const cell = currentDungeon.cells[`${tileX},${tileY}`];
+      if (!cell) continue;
+      const tile = String(cell.tile || '');
+      if (!isObstacleTile(tile)) continue;
+      const radius = getObstacleRadiusForTile(tile);
+      if (radius <= 0) continue;
+      const centerX = tileX + 0.5;
+      const centerY = tileY + 0.5;
+      const dist = Math.hypot(x - centerX, y - centerY);
+      const minDist = radius + PLAYER_RADIUS;
+      if (dist < minDist) {
+        return {
+          reason: 'prop collision',
+          tile,
+          key: `${tileX},${tileY}`,
+          radius: Number(radius.toFixed(3)),
+          playerRadius: PLAYER_RADIUS,
+          distance: Number(dist.toFixed(3)),
+          needed: Number(minDist.toFixed(3))
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function getOccupancyBlockReason(nextX, nextY, excludeName = null) {
+  const currX = playerPosX;
+  const currY = playerPosY;
+  const offsets = [
+    [PLAYER_RADIUS, PLAYER_RADIUS],
+    [-PLAYER_RADIUS, PLAYER_RADIUS],
+    [PLAYER_RADIUS, -PLAYER_RADIUS],
+    [-PLAYER_RADIUS, -PLAYER_RADIUS],
+    [PLAYER_RADIUS, 0],
+    [-PLAYER_RADIUS, 0],
+    [0, PLAYER_RADIUS],
+    [0, -PLAYER_RADIUS]
+  ];
+  for (const [ox, oy] of offsets) {
+    const fromX = Math.floor(currX + ox);
+    const fromY = Math.floor(currY + oy);
+    const toX = Math.floor(nextX + ox);
+    const toY = Math.floor(nextY + oy);
+    if (!canEnterTile(fromX, fromY, toX, toY, excludeName)) {
+      const to = describeDungeonCellAt(toX, toY);
+      const from = describeDungeonCellAt(fromX, fromY);
+      let reason = 'blocked tile';
+      if (to.tile === 'void') reason = 'void';
+      else if (to.tile === 'door' && to.doorOpen === false) reason = 'closed door';
+      else if (to.tile === 'torch') reason = 'torch wall';
+      else if (to.blocked) reason = `${to.tile} wall`;
+      else if (Number.isFinite(from.floorHeight) && Number.isFinite(to.floorHeight) && Math.abs(to.floorHeight - from.floorHeight) > MAX_STEP) reason = 'height step too steep';
+      return {
+        reason,
+        sample: { x: Number((nextX + ox).toFixed(3)), y: Number((nextY + oy).toFixed(3)) },
+        offset: { x: ox, y: oy },
+        from,
+        to
+      };
+    }
+  }
+  const obstacle = getObstacleAtPosDetail(nextX, nextY);
+  if (obstacle) return obstacle;
+  return null;
+}
+
+if (typeof window !== 'undefined') {
+  window.debugDungeonPosition = function debugDungeonPosition() {
+    const info = getDungeonPositionDebug();
+    console.table({
+      playerDungeon: info.playerDungeonTile,
+      playerPos: info.playerPosTile,
+      camera: info.cameraTile
+    });
+    console.log('[DungeonPosition]', info);
+    return info;
+  };
+  window.debugDungeonBlocker = function debugDungeonBlocker(distance = 2) {
+    const maxDistance = Math.max(0.2, Math.min(8, Number(distance) || 2));
+    const posX = Number.isFinite(playerPosX) ? playerPosX : playerDungeonX + 0.5;
+    const posY = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
+    const dirX = Math.cos(playerAngle);
+    const dirY = Math.sin(playerAngle);
+    const samples = [];
+    for (let d = 0.1; d <= maxDistance + 0.0001; d += 0.1) {
+      const x = posX + dirX * d;
+      const y = posY + dirY * d;
+      const block = getOccupancyBlockReason(x, y);
+      const row = {
+        distance: Number(d.toFixed(2)),
+        x: Number(x.toFixed(3)),
+        y: Number(y.toFixed(3)),
+        tile: describeDungeonCellAt(Math.floor(x), Math.floor(y)).tile,
+        blocked: !!block,
+        reason: block ? block.reason : 'clear'
+      };
+      samples.push(row);
+      if (block) {
+        console.table(samples);
+        console.log('[DungeonBlocker]', { ...block, at: row, position: getDungeonPositionDebug() });
+        return block;
+      }
+    }
+    console.table(samples);
+    console.log('[DungeonBlocker] clear for', maxDistance, 'tiles', getDungeonPositionDebug());
+    return null;
+  };
+}
+
+function getCombatMapRotationAngle() {
+  // 3D uses playerAngle as the forward vector; the 2D map keeps "forward" at screen-up.
+  return -(playerAngle + Math.PI / 2);
 }
 
 function updateDungeonMovement(now) {
@@ -1342,6 +1531,13 @@ function updateDungeonMovement(now) {
     const zSmooth = Number.isFinite(window.WEBGL_Z_SMOOTH) ? window.WEBGL_Z_SMOOTH : Z_SMOOTH;
     const zLerp = 1 - Math.exp(-zSmooth * dt);
     playerZ += (playerZTarget - playerZ) * zLerp;
+    const footCell = currentDungeon && currentDungeon.cells
+      ? currentDungeon.cells[`${Math.floor(playerPosX)},${Math.floor(playerPosY)}`]
+      : null;
+    const floorHeight = footCell && typeof footCell.floorHeight === 'number' ? footCell.floorHeight : null;
+    if (Number.isFinite(floorHeight) && playerZ < floorHeight + 0.12) {
+      playerZ = floorHeight + 0.12;
+    }
   }
   /*if (moveInput === 0 && speedAfter < 0.05) {
     const centerX = Math.floor(playerPosX) + 0.5;
@@ -2102,13 +2298,15 @@ window.ensureKnownSpritesInCombatList = ensureKnownSpritesInCombatList;
 
 function ensureCombatTextureForCharacter(scene, character) {
   if (!scene || !scene.textures || !character || !character.name) return null;
-  if ((!character.sprite || !character.sprite.dataUrl) && character.type !== 'monster') {
-    const known = resolveKnownCharacterSprite(character.name, character.type);
+  applyProceduralSpriteToEntry(character);
+  if (!character.sprite || !character.sprite.dataUrl) {
+    const known = character.type === 'monster' ? null : resolveKnownCharacterSprite(character.name, character.type);
     if (known) character.sprite = known;
+    else if (character.type === 'monster') ensureMonsterSpriteData(character);
   }
   if (!character.sprite || !character.sprite.dataUrl) return null;
 
-  const texKey = 'char-sprite-' + String(character.name).replace(/\s+/g, '_') + '-sheet';
+  const texKey = getCombatTextureKey(character);
   if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteSheetCanvas === 'function') {
     try {
       const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
@@ -2171,6 +2369,58 @@ function applyCombatVisualFrame(sprite, character) {
   }
 }
 
+function drawCombatTextureOnRT(scene, texKey, frameName, x, y, size, character) {
+  if (!scene || !scene.renderRT || !texKey || !scene.textures || !scene.textures.exists(texKey)) return false;
+  const frame = frameName || undefined;
+  const flipped = getCombatFacingFlip(character);
+
+  if (scene.make && typeof scene.make.sprite === 'function') {
+    const temp = scene.make.sprite({ x: x + size / 2, y: y + size / 2, key: texKey, frame, add: false });
+    temp.setOrigin(0.5, 0.5);
+    temp.setDisplaySize(size, size);
+    if (typeof temp.setFlipX === 'function') temp.setFlipX(flipped);
+    scene.renderRT.draw(temp);
+    temp.destroy();
+    return true;
+  }
+
+  if (frameName && typeof scene.renderRT.drawFrame === 'function') {
+    scene.renderRT.drawFrame(texKey, frameName, x, y);
+    return true;
+  }
+  scene.renderRT.draw(texKey, x, y);
+  return true;
+}
+
+function setCombatVisualOverlayVisible(charData, visible) {
+  if (!charData) return;
+  if (charData.sprite && typeof charData.sprite.setVisible === 'function') charData.sprite.setVisible(visible);
+  if (charData.label && typeof charData.label.setVisible === 'function') charData.label.setVisible(visible);
+}
+
+function syncCombatActorOverlayFromMaze(scene) {
+  if (!scene || !scene.characters || !Array.isArray(window.combatCharacters)) return;
+  if (!shouldUsePartyMazeAnchors()) {
+    window.combatCharacters.forEach((entry) => {
+      if (!entry || entry.type === 'pc') return;
+      setCombatVisualOverlayVisible(scene.characters[entry.name], true);
+    });
+    return;
+  }
+  syncPartyMazeToCombatPositions(false);
+  window.combatCharacters.forEach((entry) => {
+    if (!entry || entry.type === 'pc') return;
+    const charData = scene.characters[entry.name];
+    if (!charData) return;
+    charData.x = entry.x;
+    charData.y = entry.y;
+    charData.type = entry.type;
+    applyCombatVisualFrame(charData.sprite, entry);
+    moveCombatVisualTo(scene, charData, entry, true);
+    setCombatVisualOverlayVisible(charData, false);
+  });
+}
+
 function moveCombatVisualTo(scene, charData, character, immediate = false) {
   if (!scene || !charData || !character) return;
   const cellSize = 25;
@@ -2178,7 +2428,7 @@ function moveCombatVisualTo(scene, charData, character, immediate = false) {
   const targetY = character.y * cellSize + cellSize / 2;
   const targetLabelY = targetY + (character.type === 'pc' ? 20 : 29);
   const isSmoothNpc = !immediate
-    && character.type === 'npc'
+    && (character.type === 'npc' || character.type === 'monster')
     && charData.sprite
     && charData.label
     && typeof charData.sprite.setPosition === 'function'
@@ -2217,6 +2467,7 @@ function createCombatVisual(scene, character) {
       : scene.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey);
     sprite.setDisplaySize(31.875, 31.875);
     sprite.setVisible(true);
+    sprite._holodekTexKey = texKey;
     applyCombatVisualFrame(sprite, character);
     return sprite;
   }
@@ -2256,8 +2507,8 @@ class CombatScene extends Phaser.Scene {
     
 
         this.PIXEL_SCALE = 2;
-        this.gridSize = 15;
-        this.cellSize = 25;
+        this.gridSize = COMBAT_GRID_SIZE;
+        this.cellSize = COMBAT_CELL_SIZE;
     
         this.worldW = this.gridSize * this.cellSize;
         this.worldH = this.gridSize * this.cellSize;
@@ -2278,7 +2529,6 @@ class CombatScene extends Phaser.Scene {
         // Camera shows only the RT
         const cam = this.cameras.main;
         cam.setBounds(0, 0, this.worldW, this.worldH);
-        cam.startFollow(this.renderRT);
         cam.roundPixels = true;
         this.game.renderer.config.antialias = false;
     
@@ -2308,10 +2558,10 @@ class CombatScene extends Phaser.Scene {
         }
         // Sync Phaser camera with DOM scroll position initially
         this.sys.game.loop.wake();
-        this.syncCameraWithScroll();
+        this.syncCameraWithScroll(false);
         this.time.delayedCall(50, () => this.sys.game.loop.sleep());
         // Listen for scroll events on the DOM container to update the camera
-        this.domContainer.addEventListener('scroll', () => this.syncCameraWithScroll(), { passive: true }); // Use passive for performance
+        this.domContainer.addEventListener('scroll', () => this.syncCameraWithScroll(true), { passive: true }); // Use passive for performance
         // Handle PC movement with arrow keys (up/down/left/right for grid position)
       /*  this.input.keyboard.on('keydown', (event) => {
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
@@ -2413,7 +2663,7 @@ class CombatScene extends Phaser.Scene {
         if (!this.characters) return;
         const dt = Math.max(0.001, Math.min(0.05, (delta || 16) / 1000));
         Object.values(this.characters).forEach(charData => {
-            if (!charData || charData.type !== 'npc' || !charData.sprite || !charData.label) return;
+            if (!charData || (charData.type !== 'npc' && charData.type !== 'monster') || !charData.sprite || !charData.label) return;
             if (!Number.isFinite(charData.targetPixelX) || !Number.isFinite(charData.targetPixelY)) return;
             const smoothingMs = Math.max(120, Number.isFinite(charData.visualSmoothingMs) ? charData.visualSmoothingMs : NPC_MOVE_TWEEN_MS);
             const smoothing = 1 - Math.exp(-(1000 / smoothingMs) * dt * 8);
@@ -2440,19 +2690,20 @@ class CombatScene extends Phaser.Scene {
             this.forcePlayerToCenter();
             return;
         }
+        syncCombatActorOverlayFromMaze(this);
 
         // Clean 2D rotating tactical map using the cute 2D generated sprites (the billboards)
         // shrunk down for walls, pillars, customs etc. on the grid.
         // Player-centered, rotates with facing, smooth frac movement, thick grid on top.
         const pos = getPlayerPosForMap();
-        const combatAngle = -(playerAngle + Math.PI / 2);  // negated: turn right in 3D now makes the world (floor+walls+grid) spin LEFT around player (correct egocentric per 5/31 log + user report)
+        const combatAngle = getCombatMapRotationAngle();  // egocentric map: player forward is screen-up.
         const cs = this.RT_CELL;
         const half = Math.floor(this.gridSize / 2);
         const centerX = (half + 0.5) * cs;
         const centerY = (half + 0.5) * cs;
         const fracX = pos.x - Math.floor(pos.x) - 0.5;
         const fracY = pos.y - Math.floor(pos.y) - 0.5;
-        const viewRadius = 8;
+        const viewRadius = half;
 
         // Base floor squares + reddish wall blocks (batched in local space, rotated together).
         // Walls drawn AFTER the grid so they sit on top solid (no grid lines showing through).
@@ -2497,7 +2748,8 @@ class CombatScene extends Phaser.Scene {
                 // Base square for every cell
                 baseGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
 
-                const isWallCell = isBlockedDungeonCell(cell) || tileLower.includes('wall') || tile === 'door' || tile === 'torch' || tileLower.includes('brick') || tileLower.includes('stone');
+                // holodek-1 overlay style: only true blockers — NOT includes('stone'|'brick') (those are often elevated floors)
+                const isWallCell = isBlockedDungeonCell(cell) || tile === 'wall' || tile === 'door' || tile === 'torch' || tileLower === 'wall' || tileLower.endsWith('_wall');
 
                 if (isWallCell) {
                     // Full cell size + drawn after grid = solid walls, no gaps or lines showing through
@@ -2571,6 +2823,31 @@ class CombatScene extends Phaser.Scene {
         this.renderRT.draw(pillarGfx);
         pillarGfx.destroy();
 
+        // Objects in Room: pickable items with their own procedural sprites (renderSceneItems.js), registered as
+        // cell-sized Phaser canvas textures (RenderTexture.draw draws at native size)
+        if (window.SceneItems) {
+            const isz = Math.max(4, Math.round(cs * 0.8));
+            for (const obj of getVisibleSceneObjects()) {
+                const ddx = obj.x - Math.floor(pos.x), ddy = obj.y - Math.floor(pos.y);
+                if (Math.abs(ddx) > viewRadius || Math.abs(ddy) > viewRadius) continue;
+                const tkey = 'scene-item-' + window.SceneItems.normName([obj.name, obj.type, obj.magic].join(' ')).replace(/ /g, '_') + '-' + isz;
+                if (!this.textures.exists(tkey)) {
+                    const src = window.SceneItems.createItemCanvas(obj, { scale: 2 });
+                    if (!src) continue;
+                    const cv = document.createElement('canvas');
+                    cv.width = isz; cv.height = isz;
+                    const cx2 = cv.getContext('2d');
+                    cx2.imageSmoothingEnabled = isz < src.width; // downscale smoothly, never blur upscales
+                    cx2.drawImage(src, 0, 0, isz, isz);
+                    this.textures.addCanvas(tkey, cv);
+                }
+                const lx = (ddx + 0.5 - fracX) * cs, ly = (ddy + 0.5 - fracY) * cs;
+                const rx = centerX + lx * Math.cos(combatAngle) - ly * Math.sin(combatAngle);
+                const ry = centerY + lx * Math.sin(combatAngle) + ly * Math.cos(combatAngle);
+                this.renderRT.draw(tkey, Math.round(rx - isz / 2), Math.round(ry - isz / 2));
+            }
+        }
+
         // Draw the thick rotating grid lines (matching the good earlier 2D versions)
         const gridGfx = this.make.graphics({ add: false });
         gridGfx.lineStyle(1, 0x888888, 0.35);  // fainter grid so walls on top obscure it strongly (only faint lines visible through walls)
@@ -2593,6 +2870,37 @@ class CombatScene extends Phaser.Scene {
         gridGfx.setRotation(+combatAngle);
         this.renderRT.draw(gridGfx);
         gridGfx.destroy();
+
+        // NPCs + room monsters: draw into the rotating RT at maze-relative cells (same path as items).
+        // Root cause: redrawCombatRT only stamped the PC token, so Mode 1/2/3 showed actors in 3D
+        // but not on the combat map whenever the RT path was active.
+        if (Array.isArray(window.combatCharacters)) {
+            const actorSize = (this.cellSize / this.PIXEL_SCALE) * COMBAT_ACTOR_TOKEN_SCALE;
+            for (const entry of window.combatCharacters) {
+                if (!entry || entry.type === 'pc') continue;
+                if (entry.type === 'monster') ensureMonsterSpriteData(entry);
+                const rp = (typeof getPartyEntryRenderMazePosition === 'function')
+                    ? getPartyEntryRenderMazePosition(entry)
+                    : null;
+                const mx = (rp && Number.isFinite(rp.x)) ? rp.x : entry.mazeX;
+                const my = (rp && Number.isFinite(rp.y)) ? rp.y : entry.mazeY;
+                if (!Number.isFinite(mx) || !Number.isFinite(my)) continue;
+                const ddx = mx - Math.floor(pos.x);
+                const ddy = my - Math.floor(pos.y);
+                if (Math.abs(ddx) > viewRadius || Math.abs(ddy) > viewRadius) continue;
+                const tkey = ensureCombatTextureForCharacter(this, entry);
+                if (!tkey || !this.textures.exists(tkey)) continue;
+                const lx = (ddx + 0.5 - fracX) * cs;
+                const ly = (ddy + 0.5 - fracY) * cs;
+                const rx = centerX + lx * Math.cos(combatAngle) - ly * Math.sin(combatAngle);
+                const ry = centerY + lx * Math.sin(combatAngle) + ly * Math.cos(combatAngle);
+                const tex = this.textures.get(tkey);
+                const frameName = (tex && tex.has && tex.has('frame0')) ? getCombatFrameName(entry) : null;
+                const dx = Math.round(rx - actorSize / 2);
+                const dy = Math.round(ry - actorSize / 2);
+                drawCombatTextureOnRT(this, tkey, frameName, dx, dy, actorSize, entry);
+            }
+        }
 
         // Draw the PC's custom generated pixel art (the Retort-directed prefab catalog sprite)
         // directly into the low-res NEAREST RT as a fixed central token.
@@ -2656,7 +2964,7 @@ class CombatScene extends Phaser.Scene {
                 // Custom sprite icon size (user request: shrink by 15% from the 1.5x enlargement).
                 // Base: 25px on screen. Now ~31.875px (1.275x). Use ~15.9375 in RT space (PIXEL_SCALE=2) for final ~31.875px.
                 // NEAREST keeps pixels crisp.
-                const pcSize = (this.cellSize / this.PIXEL_SCALE) * 1.275;  // 12.5 * 1.275 = 15.9375 -> ~31.875px final (15% shrink from previous 1.5x)
+                const pcSize = (this.cellSize / this.PIXEL_SCALE) * COMBAT_ACTOR_TOKEN_SCALE;
                 // Try to use a frame from the sheet if present (Phaser sprite editor style output)
                 const tex = this.textures.get(pcKey);
                 let frameName = null;
@@ -2670,25 +2978,7 @@ class CombatScene extends Phaser.Scene {
                 const pcAnimState = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw)
                   || (window.combatCharacters || []).find(c => c && c.type === 'pc')
                   || fullChar;
-                const facingRight = getCombatFacingFlip(pcAnimState);
-                if (facingRight && this.make && typeof this.make.sprite === 'function') {
-                    const tempSprite = this.make.sprite({
-                        x: centerX,
-                        y: centerY,
-                        key: pcKey,
-                        frame: frameName || undefined,
-                        add: false
-                    });
-                    tempSprite.setDisplaySize(pcSize, pcSize);
-                    tempSprite.setOrigin(0.5, 0.5);
-                    tempSprite.setFlipX(true);
-                    this.renderRT.draw(tempSprite);
-                    tempSprite.destroy();
-                } else if (frameName) {
-                    this.renderRT.draw(pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcSize);
-                } else {
-                    this.renderRT.draw(pcKey, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcSize);
-                }
+                drawCombatTextureOnRT(this, pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcAnimState);
             }
         }
 
@@ -2782,8 +3072,8 @@ class CombatScene extends Phaser.Scene {
     drawDungeonOverlay() {
         if (!currentDungeon) return;
 
-        const gridSize = 15;
-        const cellSize = 25;
+        const gridSize = COMBAT_GRID_SIZE;
+        const cellSize = COMBAT_CELL_SIZE;
 
         const GRID_PIXEL_SCALE = 2;  // grid line lattice
         const WALL_PIXEL_SCALE = 4;  // wall blockiness
@@ -2867,12 +3157,10 @@ class CombatScene extends Phaser.Scene {
             }
         }
     }
-    syncCameraWithScroll() {
+    syncCameraWithScroll(fromUser = true) {
         if (!this.domContainer) return;
-        const scrollX = this.domContainer.scrollLeft;
-        const scrollY = this.domContainer.scrollTop;
-        this.cameras.main.scrollX = scrollX;
-        this.cameras.main.scrollY = scrollY;
+        if (this._programmaticCombatScroll) return;
+        if (fromUser) this._userScrolledCombatMap = true;
     }
     isPositionOccupied(x, y, excludeName) {
         return Object.entries(this.characters).some(([name, data]) => {
@@ -2907,8 +3195,8 @@ class CombatScene extends Phaser.Scene {
             const entry = {
                 name: char.name,
                 type: char.type,
-                x: char.x || 0,
-                y: char.y || 0
+                x: Number.isFinite(char.x) ? char.x : COMBAT_GRID_CENTER,
+                y: Number.isFinite(char.y) ? char.y : COMBAT_GRID_CENTER
             };
             if (char.sprite) entry.sprite = char.sprite;
             if (Number.isFinite(char.mazeX)) entry.mazeX = char.mazeX;
@@ -2950,13 +3238,9 @@ class CombatScene extends Phaser.Scene {
         characters.forEach((character, index) => {
             let sprite, color;
     
-            if (character.type === 'pc' || character.type === 'npc') {
-                if (character.type === 'pc') this.pcName = character.name;
-                sprite = createCombatVisual(this, character);
-            } else if (character.type === 'monster') {
-                color = 0xff0000;
-                sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, color);
-            }
+            // PCs, NPCs and monsters all get their (procedural) sprite; createCombatVisual falls back to shapes.
+            if (character.type === 'pc') this.pcName = character.name;
+            sprite = createCombatVisual(this, character);
    
             sprite.setOrigin(0.5, 0.5);
    
@@ -2968,16 +3252,10 @@ class CombatScene extends Phaser.Scene {
             });
             label.setOrigin(0.5, 0.5);
     
-            this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type };
+            this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type, texKey: sprite._holodekTexKey || null };
             applyCombatVisualFrame(sprite, character);
         });
    
-        // Center camera on PC if present
-        const pc = characters.find(c => c.type === 'pc');
-        if (pc) {
-            this.centerCameraOn(pc.x, pc.y);
-        }
-       
         this.time.delayedCall(50, () => this.sys.game.loop.sleep());
     }
     determinePositioning() {
@@ -2987,7 +3265,7 @@ class CombatScene extends Phaser.Scene {
         return 'far';
     }
     positionCharacters(pcsAndNpcs, monsters, positioning) {
-        const gridSize = 15; // Reduced to 15x15 grid
+    const gridSize = COMBAT_GRID_SIZE;
         const centerX = Math.floor(gridSize / 2); // Center of the 15x15 grid (7,7)
         if (positioning === 'melee') {
             const groupCenterY = Math.floor(gridSize / 2); // 7
@@ -3004,6 +3282,7 @@ class CombatScene extends Phaser.Scene {
         }
     }
     placeGroup(characters, centerX, centerY, radius) {
+        const gridSize = COMBAT_GRID_SIZE;
         let placed = new Set();
         characters.forEach((character, index) => {
             let attempts = 0;
@@ -3015,22 +3294,17 @@ class CombatScene extends Phaser.Scene {
                 x = Math.round(centerX + Math.cos(angle) * distance);
                 y = Math.round(centerY + Math.sin(angle) * distance);
                 attempts++;
-            } while ((placed.has(`${x},${y}`) || x < 0 || x >= 15 || y < 0 || y >= 15) && attempts < maxAttempts); // Updated grid bounds
+            } while ((placed.has(`${x},${y}`) || x < 0 || x >= gridSize || y < 0 || y >= gridSize) && attempts < maxAttempts);
             if (attempts < maxAttempts) {
                 placed.add(`${x},${y}`);
                 character.x = x;
                 character.y = y;
             } else {
-                character.x = Math.min(14, Math.max(0, centerX + index)); // Updated to 14 (15-1)
-                character.y = Math.min(14, Math.max(0, centerY));
+                character.x = Math.min(gridSize - 1, Math.max(0, centerX + index));
+                character.y = Math.min(gridSize - 1, Math.max(0, centerY));
             }
         });
   // console.log("Positions assigned:", characters.map(c => ({ name: c.name, x: c.x, y: c.y })));
-        // Center the camera on the PC after placing characters
-        const pc = characters.find(c => c.type === 'pc');
-        if (pc) {
-            this.centerCameraOn(pc.x, pc.y);
-        }
     }
    
     updatePositions(characters) {
@@ -3050,18 +3324,15 @@ class CombatScene extends Phaser.Scene {
                 charData.x = character.x;
                 charData.y = character.y;
                 charData.type = character.type;
+                if (!character.sprite || !character.sprite.dataUrl) ensureKnownSpritesInCombatList([character]);
+                refreshCombatVisualIfStale(this, charData, character);
                 applyCombatVisualFrame(charData.sprite, character);
                 moveCombatVisualTo(this, charData, character, false);
             } else {
                 // Add new character if not present
-                let sprite, color;
-                if (character.type === 'pc' || character.type === 'npc') {
-                    if (character.type === 'pc') this.pcName = character.name;
-                    sprite = createCombatVisual(this, character);
-                } else if (character.type === 'monster') {
-                    color = 0xff0000;
-                    sprite = this.add.rectangle(character.x * 25 + 12.5, character.y * 25 + 12.5, 12.5, 12.5, color);
-                }
+                let sprite;
+                if (character.type === 'pc') this.pcName = character.name;
+                sprite = createCombatVisual(this, character);
                 sprite.setOrigin(0.5, 0.5);
                 const pcFontSize = (character.type === 'pc') ? '10px' : '11px';
                 let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, character.name, {
@@ -3070,7 +3341,7 @@ class CombatScene extends Phaser.Scene {
                     align: 'center'
                 });
                 label.setOrigin(0.5, 0.5);
-                this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type };
+                this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type, texKey: sprite._holodekTexKey || null };
                 applyCombatVisualFrame(sprite, character);
             }
             // Update window.combatCharacters with the latest position
@@ -3129,27 +3400,29 @@ class CombatScene extends Phaser.Scene {
         });
     }
    
-    centerCameraOn(x, y) {
-        const cellSize = 25;
-        const visibleWidth = 10 * cellSize; // 400px (for reference)
-        const visibleHeight = 10 * cellSize; // 400px
-        const totalWidth = 15 * cellSize; // 600px
-        const totalHeight = 15 * cellSize; // 600px
+    centerCameraOn(x, y, force = false) {
+        // Once the player has touched the combat-map scrollbars, no later redraw/update is allowed to snap it back.
+        // toggleCombatPopup explicitly clears this flag before its one-time open centering.
+        if (this._userScrolledCombatMap) return;
+        const cellSize = COMBAT_CELL_SIZE;
+        const visibleWidth = this.domContainer ? this.domContainer.clientWidth : this.scale.width;
+        const visibleHeight = this.domContainer ? this.domContainer.clientHeight : this.scale.height;
+        const totalWidth = this.gridSize * cellSize;
+        const totalHeight = this.gridSize * cellSize;
         // Calculate target position to center on the given point
         const targetX = x * cellSize - visibleWidth / 2;
         const targetY = y * cellSize - visibleHeight / 2;
-        const maxScrollX = totalWidth - visibleWidth; // 600 - 400 = 200
-        const maxScrollY = totalHeight - visibleHeight; // 200
+        const maxScrollX = Math.max(0, totalWidth - visibleWidth);
+        const maxScrollY = Math.max(0, totalHeight - visibleHeight);
         // Set camera scroll position, clamped to bounds
         const newScrollX = Phaser.Math.Clamp(targetX, 0, maxScrollX);
         const newScrollY = Phaser.Math.Clamp(targetY, 0, maxScrollY);
-        // Update Phaser camera
-        this.cameras.main.scrollX = newScrollX;
-        this.cameras.main.scrollY = newScrollY;
-        // Sync DOM scroll position with camera
+        // Scroll the popup viewport over the larger tactical canvas.
         if (this.domContainer) {
+            this._programmaticCombatScroll = true;
             this.domContainer.scrollLeft = newScrollX;
             this.domContainer.scrollTop = newScrollY;
+            setTimeout(() => { this._programmaticCombatScroll = false; }, 0);
      // console.log(`Centering on (${x}, ${y}), scrolling to (${newScrollX}, ${newScrollY})`);
         }
     }
@@ -3157,9 +3430,9 @@ class CombatScene extends Phaser.Scene {
     forcePlayerToCenter() {
         if (!this.pcName || !this.characters[this.pcName]) return;
 
-        const cellSize = 25;
-        const CENTER_X = 7;
-        const CENTER_Y = 7;
+        const cellSize = COMBAT_CELL_SIZE;
+        const CENTER_X = COMBAT_GRID_CENTER;
+        const CENTER_Y = COMBAT_GRID_CENTER;
         const pcData = this.characters[this.pcName];
 
         pcData.x = CENTER_X;
@@ -3180,8 +3453,6 @@ class CombatScene extends Phaser.Scene {
             );
         }
 
-        // Keep the viewport centered on the player
-        this.centerCameraOn(CENTER_X, CENTER_Y);
     }
 }
 
@@ -3198,8 +3469,8 @@ window.game = new Phaser.Game(gameConfig);
 
 window.combatGame = new Phaser.Game({
   type: Phaser.CANVAS,
-  width: 375,
-  height: 375,
+  width: COMBAT_CANVAS_SIZE,
+  height: COMBAT_CANVAS_SIZE,
   parent: 'combat-container',
   scene: CombatScene,
   backgroundColor: '#333333',
@@ -3215,7 +3486,7 @@ window.combatGame = new Phaser.Game({
 });
 
 setTimeout(() => {
-  applyCombatPixelScale();
+  // The combat RT handles pixel scaling; resizing Phaser's backing canvas here breaks the scrollable map.
 }, 0); 
 
 function clearAllCookies() {
@@ -7338,7 +7609,9 @@ function resolveKnownCharacterSprite(name, type = null) {
 function ensureKnownSpritesInCombatList(list) {
   if (!Array.isArray(list)) return list;
   list.forEach(entry => {
-    if (!entry || (entry.sprite && entry.sprite.dataUrl)) return;
+    if (!entry) return;
+    if (applyProceduralSpriteToEntry(entry)) return;
+    if (entry.sprite && entry.sprite.dataUrl) return;
     const known = resolveKnownCharacterSprite(entry.name, entry.type);
     if (known) entry.sprite = known;
   });
@@ -7397,10 +7670,10 @@ function getCurrentCombatRoomKey() {
 }
 
 function projectMazePointToCombatGrid(worldX, worldY) {
-  const centerX = 7;
-  const centerY = 7;
+  const centerX = COMBAT_GRID_CENTER;
+  const centerY = COMBAT_GRID_CENTER;
   const pos = getPlayerPosForMap();
-  const combatAngle = -(playerAngle + Math.PI / 2);
+  const combatAngle = getCombatMapRotationAngle();
   const relX = Number(worldX) - pos.x;
   const relY = Number(worldY) - pos.y;
   const cosA = Math.cos(combatAngle);
@@ -7422,6 +7695,85 @@ function refreshPartyCombatProjection(updateScene = true) {
   return true;
 }
 
+// Party Mode: after a dungeon loads/switches, maze anchors are assigned but Phaser combat sprites
+// were only redrawn via redrawCombatRT (PC token) — NPC icons kept stale x/y (often 0,0 cluster).
+// Force a full maze→combat projection + sprite move so the 2D map matches 3D actor cells.
+function refreshPartyDungeonPresence(forceReset = true) {
+  if (!currentDungeon || !Array.isArray(window.combatCharacters) || !window.combatCharacters.length) return false;
+  if (forceReset) {
+    window.combatCharacters.forEach((entry) => {
+      if (!entry) return;
+      delete entry._renderFromMazeX;
+      delete entry._renderFromMazeY;
+      delete entry._renderTweenToX;
+      delete entry._renderTweenToY;
+      delete entry._renderTweenStartedAt;
+      delete entry.renderMazeX;
+      delete entry.renderMazeY;
+    });
+  }
+  syncPartyMazeToCombatPositions(!!forceReset);
+  updatePartyMazeLocomotion(true);
+  const combatScene = window.combatGame && window.combatGame.scene && window.combatGame.scene.getScene('CombatScene');
+  if (combatScene) {
+    if (typeof combatScene.updatePositions === 'function') {
+      combatScene.updatePositions(window.combatCharacters);
+    }
+    if (typeof combatScene.redrawCombatRT === 'function') {
+      combatScene.redrawCombatRT();
+    } else if (typeof combatScene.drawDungeonOverlay === 'function') {
+      combatScene.drawDungeonOverlay();
+    }
+  }
+  return true;
+}
+window.refreshPartyDungeonPresence = refreshPartyDungeonPresence;
+
+// Smooth 3D billboard XY between maze cells (combat map already tweens via moveCombatVisualTo).
+// Renderer calls this from _getCharacterMazeRenderPosition; without it, actors popped cell-to-cell
+// and could briefly read as inside walls during party steps.
+function getPartyEntryRenderMazePosition(entry, now = Date.now()) {
+  if (!entry || !Number.isFinite(entry.mazeX) || !Number.isFinite(entry.mazeY)) return null;
+  const toX = entry.mazeX;
+  const toY = entry.mazeY;
+  if (!Number.isFinite(entry._renderFromMazeX) || !Number.isFinite(entry._renderFromMazeY)) {
+    entry._renderFromMazeX = toX;
+    entry._renderFromMazeY = toY;
+    entry.renderMazeX = toX;
+    entry.renderMazeY = toY;
+    return { x: toX, y: toY };
+  }
+  if (entry._renderFromMazeX !== toX || entry._renderFromMazeY !== toY) {
+    // New cell: if we weren't already mid-tween toward this cell, start a tween from last rendered pos
+    if (entry._renderTweenToX !== toX || entry._renderTweenToY !== toY) {
+      entry._renderFromMazeX = Number.isFinite(entry.renderMazeX) ? entry.renderMazeX : entry._renderFromMazeX;
+      entry._renderFromMazeY = Number.isFinite(entry.renderMazeY) ? entry.renderMazeY : entry._renderFromMazeY;
+      entry._renderTweenToX = toX;
+      entry._renderTweenToY = toY;
+      entry._renderTweenStartedAt = now;
+    }
+  }
+  const tweenMs = Math.max(120, Number.isFinite(entry.moveTweenMs) ? entry.moveTweenMs : NPC_MOVE_TWEEN_MS);
+  const started = Number.isFinite(entry._renderTweenStartedAt) ? entry._renderTweenStartedAt : now;
+  const t = Math.max(0, Math.min(1, (now - started) / tweenMs));
+  // Smootherstep: less pop at start/end of cell transitions
+  const ease = t * t * t * (t * (t * 6 - 15) + 10);
+  const fromX = entry._renderFromMazeX;
+  const fromY = entry._renderFromMazeY;
+  const x = fromX + (toX - fromX) * ease;
+  const y = fromY + (toY - fromY) * ease;
+  entry.renderMazeX = x;
+  entry.renderMazeY = y;
+  if (t >= 1) {
+    entry._renderFromMazeX = toX;
+    entry._renderFromMazeY = toY;
+    entry._renderTweenToX = toX;
+    entry._renderTweenToY = toY;
+  }
+  return { x, y };
+}
+window.getPartyEntryRenderMazePosition = getPartyEntryRenderMazePosition;
+
 function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
   if (!dungeon || !dungeon.cells) return [];
   const start = findNearestUnblockedTile(dungeon, origin);
@@ -7429,6 +7781,13 @@ function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
   const visited = new Set([key(start.x, start.y)]);
   const queue = [{ x: start.x, y: start.y, dist: 0 }];
   const tiles = [];
+  // Party Mode only path uses this for NPC/monster anchors. Solo Mortacia (PC) is not placed via maze
+  // anchors. Require step-height continuity so party members never spawn on a lower/higher terrace
+  // that the 3D view reads as under the floor / floating while the combat map still shows them nearby.
+  const floorOf = (x, y) => {
+    const c = dungeon.cells[key(x, y)];
+    return (c && typeof c.floorHeight === 'number') ? c.floorHeight : 0;
+  };
 
   while (queue.length) {
     const { x, y, dist } = queue.shift();
@@ -7437,6 +7796,7 @@ function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
       tiles.push({ x, y, dist });
     }
     if (dist >= maxRadius) continue;
+    const fromFloor = floorOf(x, y);
     const neighbors = [
       { x: x + 1, y },
       { x: x - 1, y },
@@ -7448,6 +7808,8 @@ function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
       if (visited.has(k)) continue;
       const nextCell = dungeon.cells[k];
       if (!nextCell || isSpawnBlockedCell(nextCell)) continue;
+      const toFloor = floorOf(next.x, next.y);
+      if (Math.abs(toFloor - fromFloor) > MAX_STEP) continue;
       visited.add(k);
       queue.push({ x: next.x, y: next.y, dist: dist + 1 });
     }
@@ -7456,9 +7818,351 @@ function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
   return tiles;
 }
 
+// Combat rounds drive positions from the server (SSE 'movement'/'final'); while one is running the
+// maze anchors must not overwrite those combat-grid positions.
+function markCombatRoundActive(ms = 90000) {
+  window._combatRoundActiveUntil = Date.now() + ms;
+}
+function isCombatRoundActive() {
+  return Date.now() < (window._combatRoundActiveUntil || 0);
+}
+if (typeof window !== 'undefined') window.markCombatRoundActive = markCombatRoundActive;
+
 function shouldUsePartyMazeAnchors() {
   if (!currentDungeon || !Array.isArray(window.combatCharacters)) return false;
-  return !window.combatCharacters.some(c => c && c.type === 'monster');
+  // When a dungeon is loaded, the 3D renderer and combat map must share maze-space as the source of truth.
+  // Server combat movement can still pause wandering, but it must not make room monsters fall back to the
+  // old right-side grid grouping while they are visible in the 3D room.
+  return true;
+}
+
+// ---- Generated character sprites (LLM trait spec -> C64 2D token + detailed 3D actor) ------------------
+// Presets (Mortacia, Suzerain) always keep their original hand-made sprites. Every other character
+// (party-creation PCs, NPCs, monsters - including name-only monsters) is drawn on the fly from its OWN
+// LLM trait spec (server: retort/characterTraitSpec.js):
+//   - 2D (combat map token, party panel, 'Your Sprite'): createTraitSpriteCanvas in renderCharacterSprite.js
+//     (original 24x24 C64 catalog style + trait-driven silhouette parts)
+//   - 3D world actor: renderCharacterProcedural.js (detailed 48px, 'world' look), via createCharacterVoxelFrames.
+// No keyword fallback is ever shown: until the spec arrives the character is a neutral shimmer on the map
+// and invisible in 3D; the server retries the LLM call forever (backoff, max 3 concurrent) and pushes
+// {type:'characterTraits'} over SSE when a spec lands. Salt + variant come from the server cache, so the
+// same name always gives the same sprite; the server's uniqueness pass checks both looks.
+const PRESET_SPRITE_NAMES = ['mortacia', 'suzerain'];
+window._characterTraitSpecs = window._characterTraitSpecs || {};    // lower name -> {name,traits,salt,variant,source}
+window._proceduralSpriteCache = window._proceduralSpriteCache || {}; // lower name -> {sprite, sig}
+window._characterSheetIndex = window._characterSheetIndex || {};    // lower name -> parsed console sheet
+
+function getProceduralCharactersApi() {
+  return (typeof window !== 'undefined' && window.ProceduralCharacters) || null;
+}
+
+function isPresetSpriteCharacter(name) {
+  const first = String(name || '').trim().toLowerCase().split(/\s+/)[0];
+  return PRESET_SPRITE_NAMES.includes(first);
+}
+
+function shouldUseProceduralSprite(entry) {
+  if (!entry || !entry.name || !getProceduralCharactersApi() || typeof window.createTraitSpriteCanvas !== 'function') return false;
+  return !isPresetSpriteCharacter(entry.name);
+}
+
+function proceduralNameKey(name) {
+  return String(name || '').trim().toLowerCase();
+}
+
+function proceduralSheetSignature(sheet) {
+  if (!sheet) return '';
+  return [sheet.race, sheet.class, sheet.sex, sheet.isMonster ? 1 : 0]
+    .map(v => String(v || '').toLowerCase().trim()).join('|');
+}
+
+// Parse the PC / NPC / monster blocks out of the latest game console and remember them by name.
+function updateCharacterSheetsFromConsole(text) {
+  const api = getProceduralCharactersApi();
+  if (!api || typeof text !== 'string' || !text || text === window._lastSheetConsoleText) return [];
+  window._lastSheetConsoleText = text;
+  let parsed;
+  try { parsed = api.parseConsoleCharacterSheets(text); } catch (e) { return []; }
+  const changed = [];
+  (parsed && parsed.all ? parsed.all : []).forEach(sheet => {
+    const key = proceduralNameKey(sheet && sheet.name);
+    if (!key || key === 'none' || key === 'unknown' || /^\d+$/.test(key) || isPresetSpriteCharacter(key)) return;
+    const prev = window._characterSheetIndex[key];
+    window._characterSheetIndex[key] = sheet;
+    if (!prev || proceduralSheetSignature(prev) !== proceduralSheetSignature(sheet)) changed.push(sheet);
+  });
+  if (changed.length) requestCharacterTraitSpecs(changed);
+  refreshProceduralSpritesInRoster();
+  return changed;
+}
+
+// Debounced batch POST /character-traits. Re-requests a name when its sheet changed (e.g. a name-only
+// monster later gets its full console sheet) and re-polls pending names every 45s (the server retries the
+// LLM itself; this just catches pushes we missed).
+function requestCharacterTraitSpecs(sheets) {
+  window._traitRequestQueue = window._traitRequestQueue || new Map();
+  window._traitRequested = window._traitRequested || {};
+  const now = Date.now();
+  (sheets || []).forEach(sheet => {
+    const key = proceduralNameKey(sheet && sheet.name);
+    if (!key || isPresetSpriteCharacter(key)) return;
+    const sig = proceduralSheetSignature(sheet);
+    const known = window._characterTraitSpecs[key];
+    const last = window._traitRequested[key];
+    if (known && known.source === 'llm' && last && last.sig === sig) return;
+    if (last && last.sig === sig && now - last.at < 45000) return;
+    window._traitRequestQueue.set(key, sheet);
+  });
+  if (!window._traitRequestQueue.size || window._traitRequestTimer) return;
+  window._traitRequestTimer = setTimeout(() => {
+    window._traitRequestTimer = null;
+    const batch = Array.from(window._traitRequestQueue.entries()).slice(0, 24);
+    batch.forEach(([key, sheet]) => {
+      window._traitRequestQueue.delete(key);
+      window._traitRequested[key] = { sig: proceduralSheetSignature(sheet), at: Date.now() };
+    });
+    if (!batch.length) return;
+    fetch('/character-traits', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheets: batch.map(([, sheet]) => sheet) })
+    })
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => { if (data && data.traits) applyCharacterTraitSpecs(data.traits); })
+      .catch(err => console.warn('[Sprite] trait spec request failed (placeholder stays, will retry):', err && err.message));
+    if (window._traitRequestQueue.size) requestCharacterTraitSpecs([]);
+  }, 250);
+}
+
+// Server entries (POST response or SSE 'characterTraits'): store and swap sprites whose look changed.
+function applyCharacterTraitSpecs(map) {
+  if (!map || typeof map !== 'object') return false;
+  let changed = false;
+  Object.values(map).forEach(entry => {
+    if (!entry || !entry.name) return;
+    const key = proceduralNameKey(entry.name);
+    const prev = window._characterTraitSpecs[key];
+    if (prev && prev.source === 'llm' && entry.source !== 'llm') return; // never downgrade
+    if (prev && prev.source === entry.source && prev.salt === entry.salt && prev.variant === entry.variant
+      && JSON.stringify(prev.traits || null) === JSON.stringify(entry.traits || null)) return;
+    window._characterTraitSpecs[key] = entry;
+    changed = true;
+  });
+  if (changed) { refreshProceduralSpritesInRoster(); fireTraitReadyWaiters(); }
+  return changed;
+}
+window.applyCharacterTraitSpecs = applyCharacterTraitSpecs;
+
+function buildProceduralSheetForEntry(entry) {
+  const key = proceduralNameKey(entry.name);
+  const sheet = window._characterSheetIndex[key];
+  const isMonster = entry.type === 'monster';
+  if (sheet) {
+    return { ...sheet, isMonster: isMonster || !!sheet.isMonster, role: entry.type || sheet.role };
+  }
+  let reg = null;
+  try { reg = getPartyCharacterRegistry()[entry.name] || null; } catch (e) { reg = null; }
+  const pending = window._pendingStartingCharacter;
+  if (!reg && pending && proceduralNameKey(pending.Name || pending.name) === key) reg = pending;
+  const pick = (a, b) => (reg && (reg[a] || reg[b])) || entry[a] || entry[b] || '';
+  // name-only monsters: the LLM still gets the name (+ "monster") and invents a fitting creature
+  return {
+    name: entry.name,
+    sex: pick('Sex', 'sex'),
+    race: pick('Race', 'race'),
+    class: pick('Class', 'class') || (isMonster ? 'Monster' : ''),
+    level: pick('Level', 'level') || 1,
+    isMonster,
+    role: entry.type || (isMonster ? 'monster' : 'npc')
+  };
+}
+
+function createSpritePlaceholder(entry) {
+  const key = proceduralNameKey(entry.name);
+  const spec = { kind: 'placeholder', name: entry.name, key: 'ph-' + hashCharacterName(key).toString(36), seed: hashCharacterName(key) };
+  let dataUrl = '';
+  try {
+    const canvas = window.createTraitSpriteCanvas(spec, 0);
+    dataUrl = canvas && canvas.toDataURL ? canvas.toDataURL('image/png') : '';
+  } catch (e) { dataUrl = ''; }
+  return { dataUrl, spec, generated: true, clientOnly: true, placeholder: true, monster: entry.type === 'monster' };
+}
+
+function getProceduralSpriteFor(entry) {
+  const api = getProceduralCharactersApi();
+  if (!api || !entry || !entry.name) return null;
+  const key = proceduralNameKey(entry.name);
+  const sheet = buildProceduralSheetForEntry(entry);
+  requestCharacterTraitSpecs([sheet]);
+  const server = window._characterTraitSpecs[key] || null;
+  const ready = !!(server && server.source === 'llm' && server.traits);
+  const sig = (ready ? [server.salt, server.variant, sheet.level, hashCharacterName(JSON.stringify(server.traits)).toString(36)].join(':') : 'placeholder');
+  const cached = window._proceduralSpriteCache[key];
+  if (cached && cached.sig === sig) return cached.sprite;
+  let sprite;
+  if (!ready) {
+    sprite = createSpritePlaceholder(entry);
+  } else {
+    try {
+      const spec = api.buildProceduralSpriteSpec(sheet, server.traits, { salt: server.salt >>> 0, variant: server.variant | 0, source: 'llm' });
+      const canvas = window.createTraitSpriteCanvas(spec, 0);
+      const dataUrl = canvas && canvas.toDataURL ? canvas.toDataURL('image/png') : '';
+      if (!dataUrl) return null;
+      sprite = { dataUrl, spec, generated: true, clientOnly: true, procedural: true, source: 'llm', monster: entry.type === 'monster' };
+    } catch (e) {
+      console.warn('[Sprite] trait sprite failed', entry.name, e);
+      sprite = createSpritePlaceholder(entry);
+    }
+  }
+  window._proceduralSpriteCache[key] = { sprite, sig };
+  return sprite;
+}
+
+// Returns true when the entry's sprite changed.
+function applyProceduralSpriteToEntry(entry) {
+  if (!shouldUseProceduralSprite(entry)) return false;
+  const sprite = getProceduralSpriteFor(entry);
+  if (!sprite) return false;
+  const current = entry.sprite && entry.sprite.spec;
+  if (current && current.key === sprite.spec.key && entry.sprite.dataUrl) return false;
+  entry.sprite = { ...sprite };
+  return true;
+}
+window.applyProceduralSpriteToEntry = applyProceduralSpriteToEntry;
+
+// Character-creation review ('Your Sprite' / party review): generated PCs + party NPCs get their sprite from
+// their own LLM trait spec right away (shimmer until it lands). Presets return false -> original art.
+function characterObjectToTraitSheet(c, role) {
+  return {
+    name: c.Name || c.name, sex: c.Sex || c.sex || '', race: c.Race || c.race || '', class: c.Class || c.class || '',
+    level: c.Level || c.level || 1, equipped: c.Equipped || c.equipped || '', isMonster: false, role: role || 'pc'
+  };
+}
+
+function ensureTraitSpriteForCharacter(character, role, onReady) {
+  if (!character) return false;
+  const entry = { name: character.Name || character.name, type: role || 'pc' };
+  if (!shouldUseProceduralSprite(entry)) return false;
+  const key = proceduralNameKey(entry.name);
+  if (!window._characterSheetIndex[key]) window._characterSheetIndex[key] = characterObjectToTraitSheet(character, entry.type);
+  const sprite = getProceduralSpriteFor(entry);
+  if (!sprite) return false;
+  character.sprite = { ...sprite };
+  if (sprite.placeholder && typeof onReady === 'function') {
+    window._traitReadyWaiters = (window._traitReadyWaiters || []).filter(w => w.key !== key);
+    window._traitReadyWaiters.push({ key, fn: onReady });
+  }
+  return true;
+}
+window.ensureTraitSpriteForCharacter = ensureTraitSpriteForCharacter;
+
+// 'Reroll Sprite' for a generated character: same stats, new salt + fresh LLM spec. Resolves to true once
+// the new sprite is on character.sprite.
+function rerollTraitSpriteForCharacter(character, role) {
+  const entry = { name: character && (character.Name || character.name), type: role || 'pc' };
+  if (!shouldUseProceduralSprite(entry)) return Promise.resolve(false);
+  const key = proceduralNameKey(entry.name);
+  const sheet = window._characterSheetIndex[key] || characterObjectToTraitSheet(character, entry.type);
+  window._characterSheetIndex[key] = sheet;
+  return fetch('/character-traits', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sheets: [sheet], reroll: true, wait: true })
+  })
+    .then(r => (r.ok ? r.json() : null))
+    .then(data => {
+      if (!data || !data.traits) return false;
+      applyCharacterTraitSpecs(data.traits);
+      const sprite = getProceduralSpriteFor(entry);
+      if (sprite) character.sprite = { ...sprite };
+      return !!(sprite && !sprite.placeholder);
+    });
+}
+window.rerollTraitSpriteForCharacter = rerollTraitSpriteForCharacter;
+window.isPresetSpriteCharacter = isPresetSpriteCharacter;
+
+function fireTraitReadyWaiters() {
+  const waiters = window._traitReadyWaiters || [];
+  if (!waiters.length) return;
+  window._traitReadyWaiters = waiters.filter(w => {
+    const s = window._characterTraitSpecs[w.key];
+    if (!(s && s.source === 'llm' && s.traits)) return true;
+    try { w.fn(); } catch (e) { console.warn('[Sprite] review refresh failed', e); }
+    return false;
+  });
+}
+
+function getCombatTextureKey(character) {
+  const base = 'char-sprite-' + String(character && character.name).replace(/\s+/g, '_') + '-sheet';
+  const spec = character && character.sprite && character.sprite.spec;
+  return spec && (spec.kind === 'procedural' || spec.kind === 'placeholder') && spec.key ? base + '-' + spec.key : base;
+}
+
+// Re-create a combat-map visual when its sprite (texture key) changed, e.g. after an LLM spec arrived.
+function refreshCombatVisualIfStale(scene, charData, character) {
+  if (!scene || !charData || !character || !charData.sprite) return false;
+  if (!character.sprite || !character.sprite.dataUrl) return false;
+  const wanted = getCombatTextureKey(character);
+  if (charData.texKey === wanted) return false;
+  const old = charData.sprite;
+  const x = Number.isFinite(old.x) ? old.x : character.x * 25 + 12.5;
+  const y = Number.isFinite(old.y) ? old.y : character.y * 25 + 12.5;
+  const next = createCombatVisual(scene, character);
+  if (!next) return false;
+  next.setOrigin(0.5, 0.5);
+  if (typeof next.setPosition === 'function') next.setPosition(x, y);
+  const oldKey = charData.texKey;
+  try { old.destroy(); } catch (e) { /* ignore */ }
+  charData.sprite = next;
+  charData.texKey = next._holodekTexKey || null;
+  if (oldKey && oldKey !== charData.texKey && scene.textures && scene.textures.exists(oldKey)) {
+    try { scene.textures.remove(oldKey); } catch (e) { /* ignore */ }
+  }
+  applyCombatVisualFrame(next, character);
+  return true;
+}
+
+function refreshProceduralSpritesInRoster() {
+  const list = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
+  let changed = false;
+  list.forEach(entry => { if (applyProceduralSpriteToEntry(entry)) changed = true; });
+  if (!changed) return false;
+  try {
+    const scene = window.combatGame && window.combatGame.scene && window.combatGame.scene.getScene('CombatScene');
+    if (scene && scene.characters) {
+      list.forEach(entry => refreshCombatVisualIfStale(scene, scene.characters[entry.name], entry));
+      if (typeof scene.redrawCombatRT === 'function') scene.redrawCombatRT();
+    }
+  } catch (e) { console.warn('[Sprite] combat visual refresh failed', e); }
+  try { if (typeof window.renderPartyInfoPopup === 'function') window.renderPartyInfoPopup(); } catch (e) { /* ignore */ }
+  try { if (typeof currentDungeon !== 'undefined' && currentDungeon) renderDungeonView(); } catch (e) { /* ignore */ }
+  return true;
+}
+window.refreshProceduralSpritesInRoster = refreshProceduralSpritesInRoster;
+
+// Monsters only arrive as names from 'Monsters in Room' (+ their console sheet when present); give each a
+// client-side sprite (spec + dataUrl) so the 3D view / combat map can draw it. Always from the monster's own
+// LLM trait spec (placeholder until it lands); the legacy generator below only runs for a preset name or
+// if the trait renderers failed to load. Not added to the party registry.
+function ensureMonsterSpriteData(entry) {
+  if (!entry || entry.type !== 'monster') return;
+  if (applyProceduralSpriteToEntry(entry) || (entry.sprite && entry.sprite.spec && entry.sprite.dataUrl)) return;
+  window._monsterSpriteCache = window._monsterSpriteCache || {};
+  const cached = window._monsterSpriteCache[entry.name];
+  if (cached) { entry.sprite = cloneSpritePayload(cached) || cached; return; }
+  if (typeof window.generateCharacterSprite !== 'function' || typeof window.createCharacterSpriteSpec !== 'function') return;
+  try {
+    const character = { Name: entry.name, Sex: 'Unknown', Race: 'Monster', Class: 'Monster', Level: 1,
+      _rerollSeed: (hashCharacterName(entry.name) % 1000) / 1000 };
+    const spec = window.createCharacterSpriteSpec(character);
+    const dataUrl = window.generateCharacterSprite(character, spec);
+    if (!dataUrl) return;
+    const sprite = { dataUrl, spec, generated: true, clientOnly: true, monster: true };
+    window._monsterSpriteCache[entry.name] = sprite;
+    entry.sprite = cloneSpritePayload(sprite) || sprite;
+  } catch (e) {
+    console.warn('[Sprite] monster sprite generation failed', entry.name, e);
+  }
 }
 
 function ensurePartyMazeAnchors(forceReset = false) {
@@ -7468,17 +8172,27 @@ function ensurePartyMazeAnchors(forceReset = false) {
   const tiles = collectNearbyWalkableTiles(currentDungeon, origin, 18)
     .filter(tile => !(tile.x === origin.x && tile.y === origin.y));
   const occupied = new Set([`${origin.x},${origin.y}`]);
+  // NPCs and monsters both get a dungeon cell through the same placement path.
   const npcEntries = window.combatCharacters
-    .filter(c => c && c.type === 'npc')
-    .sort((a, b) => hashCharacterName(a.name) - hashCharacterName(b.name));
+    .filter(c => c && (c.type === 'npc' || c.type === 'monster'))
+    .sort((a, b) => ((a.type === 'monster') - (b.type === 'monster')) || (hashCharacterName(a.name) - hashCharacterName(b.name)));
+  npcEntries.forEach(ensureMonsterSpriteData);
 
+  const originCell = currentDungeon.cells[`${origin.x},${origin.y}`] || {};
+  const originFloor = typeof originCell.floorHeight === 'number' ? originCell.floorHeight : 0;
   npcEntries.forEach(entry => {
+    const cell = (Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY))
+      ? currentDungeon.cells[`${entry.mazeX},${entry.mazeY}`]
+      : null;
+    const cellFloor = (cell && typeof cell.floorHeight === 'number') ? cell.floorHeight : 0;
+    const sameFloorBand = Math.abs(cellFloor - originFloor) <= MAX_STEP;
     const hasValidExistingTile = !forceReset
       && entry.mazeRoomKey === roomKey
       && Number.isFinite(entry.mazeX)
       && Number.isFinite(entry.mazeY)
-      && currentDungeon.cells[`${entry.mazeX},${entry.mazeY}`]
-      && !isSpawnBlockedCell(currentDungeon.cells[`${entry.mazeX},${entry.mazeY}`])
+      && cell
+      && !isSpawnBlockedCell(cell)
+      && sameFloorBand
       && !occupied.has(`${entry.mazeX},${entry.mazeY}`);
     if (hasValidExistingTile) {
       occupied.add(`${entry.mazeX},${entry.mazeY}`);
@@ -7498,10 +8212,39 @@ function ensurePartyMazeAnchors(forceReset = false) {
     while (tileIndex < tiles.length && occupied.has(`${tiles[tileIndex].x},${tiles[tileIndex].y}`)) {
       tileIndex++;
     }
-    const fallback = tiles[tileIndex] || findNearestUnblockedTile(currentDungeon, origin);
+    let fallback = tiles[tileIndex];
+    if (!fallback) {
+      // Same-floor-band search so we never drop party onto a terrace the 3D view reads as mid-floor / under-floor
+      const safe = findNearestUnblockedTile(currentDungeon, origin);
+      const safeCell = currentDungeon.cells[`${safe.x},${safe.y}`] || {};
+      const safeFloor = typeof safeCell.floorHeight === 'number' ? safeCell.floorHeight : 0;
+      if (Math.abs(safeFloor - originFloor) <= MAX_STEP && !occupied.has(`${safe.x},${safe.y}`)) {
+        fallback = safe;
+      } else {
+        // Prefer staying next to the PC on the origin cell's neighbors of matching height
+        const neigh = [
+          { x: origin.x + 1, y: origin.y }, { x: origin.x - 1, y: origin.y },
+          { x: origin.x, y: origin.y + 1 }, { x: origin.x, y: origin.y - 1 }
+        ];
+        fallback = neigh.find((n) => {
+          const c = currentDungeon.cells[`${n.x},${n.y}`];
+          if (!c || isSpawnBlockedCell(c) || occupied.has(`${n.x},${n.y}`)) return false;
+          const fh = typeof c.floorHeight === 'number' ? c.floorHeight : 0;
+          return Math.abs(fh - originFloor) <= MAX_STEP;
+        }) || { x: origin.x, y: origin.y };
+      }
+    }
     entry.mazeX = fallback.x;
     entry.mazeY = fallback.y;
     entry.mazeRoomKey = roomKey;
+    // Reset 3D render tween so combat map + dungeon view don't desync after reanchor
+    entry._renderFromMazeX = entry.mazeX;
+    entry._renderFromMazeY = entry.mazeY;
+    entry.renderMazeX = entry.mazeX;
+    entry.renderMazeY = entry.mazeY;
+    entry._renderTweenToX = entry.mazeX;
+    entry._renderTweenToY = entry.mazeY;
+    entry._renderTweenStartedAt = Date.now();
     occupied.add(`${entry.mazeX},${entry.mazeY}`);
     tileIndex++;
   });
@@ -7515,12 +8258,12 @@ function syncPartyMazeToCombatPositions(forceReset = false) {
   window.combatCharacters.forEach(entry => {
     if (!entry) return;
     if (entry.type === 'pc') {
-      entry.x = 7;
-      entry.y = 7;
+      entry.x = COMBAT_GRID_CENTER;
+      entry.y = COMBAT_GRID_CENTER;
       entry.mazeX = playerDungeonX;
       entry.mazeY = playerDungeonY;
       entry.mazeRoomKey = roomKey;
-    } else if (entry.type === 'npc' && Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
+    } else if ((entry.type === 'npc' || entry.type === 'monster') && Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
       const projected = projectMazePointToCombatGrid(entry.mazeX + 0.5, entry.mazeY + 0.5);
       entry.x = projected.x;
       entry.y = projected.y;
@@ -7687,6 +8430,139 @@ function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
   return start;
 }
 
+// ---- Monster wandering ---------------------------------------------------------------------------------
+// Outside combat, monsters slowly random-walk around their spawn ("home") cell instead of standing still.
+// Hostile monsters drift toward the player but always stop >= 2 cells away (wandering never starts combat;
+// combat still only starts through the normal game flow). Frozen while a combat round is active.
+const MONSTER_WANDER_MIN_MS = 1500;
+const MONSTER_WANDER_MAX_MS = 3000;
+const MONSTER_WANDER_RADIUS = 7;      // max Chebyshev distance from the home cell
+const MONSTER_MIN_PC_DIST = 2;        // never closer than this (Chebyshev) to the player
+const MONSTER_MOVE_TWEEN_MS = 640;
+const MONSTER_WALK_FRAME_MS = 300;
+window._monsterHomeAnchors = window._monsterHomeAnchors || {};
+
+function getCurrentRoomMonsterEntries() {
+  if (!Array.isArray(window.combatCharacters)) return [];
+  const roomKey = getCurrentCombatRoomKey();
+  return window.combatCharacters.filter(entry =>
+    entry
+    && entry.type === 'monster'
+    && Number.isFinite(entry.mazeX)
+    && Number.isFinite(entry.mazeY)
+    && (!entry.mazeRoomKey || entry.mazeRoomKey === roomKey)
+  );
+}
+
+function isMonsterHostile(entry) {
+  const negative = /\b(not|non)[-\s]?hostile|friendly|peaceful|neutral|calm|asleep|sleeping|dormant|docile/i;
+  const positive = /hostile|aggress|attack|angry|enrag|furious|hunting/i;
+  const latest = window.latestUpdatedData && typeof window.latestUpdatedData.monstersState === 'string'
+    ? window.latestUpdatedData.monstersState : '';
+  if (latest) return positive.test(latest) && !negative.test(latest);
+  const sheet = window._characterSheetIndex && window._characterSheetIndex[proceduralNameKey(entry && entry.name)];
+  return !!(sheet && sheet.hostile);
+}
+
+function chebyshevDist(ax, ay, bx, by) {
+  return Math.max(Math.abs(ax - bx), Math.abs(ay - by));
+}
+
+function getMonsterHomeAnchor(entry, roomKey) {
+  const key = roomKey + '|' + entry.name;
+  let home = window._monsterHomeAnchors[key];
+  const cell = home && currentDungeon && currentDungeon.cells ? currentDungeon.cells[`${home.x},${home.y}`] : null;
+  if (!home || !cell || isSpawnBlockedCell(cell)) {
+    home = window._monsterHomeAnchors[key] = { x: entry.mazeX, y: entry.mazeY };
+  }
+  return home;
+}
+
+// Number of blocked/landmark neighbours (8-way): used to prefer open floor over hugging walls / props.
+function countBlockedNeighbors(x, y) {
+  if (!currentDungeon || !currentDungeon.cells) return 0;
+  let n = 0;
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      if (!ox && !oy) continue;
+      const cell = currentDungeon.cells[`${x + ox},${y + oy}`];
+      if (!cell || isSpawnBlockedCell(cell)) n++;
+    }
+  }
+  return n;
+}
+
+function chooseMonsterWanderStep(entry, home, blockedTiles, hostile, rng) {
+  const px = playerDungeonX;
+  const py = playerDungeonY;
+  const cx = entry.mazeX;
+  const cy = entry.mazeY;
+  const options = [
+    { x: cx + 1, y: cy }, { x: cx - 1, y: cy }, { x: cx, y: cy + 1 }, { x: cx, y: cy - 1 }
+  ];
+  const curPcDist = chebyshevDist(cx, cy, px, py);
+  let best = null;
+  let bestScore = Number.POSITIVE_INFINITY;
+  options.forEach(opt => {
+    const key = `${opt.x},${opt.y}`;
+    if (blockedTiles.has(key)) return;
+    const cell = currentDungeon.cells[key];
+    if (!cell || isSpawnBlockedCell(cell)) return;
+    if (!canEnterTile(cx, cy, opt.x, opt.y, entry.name)) return;
+    if (isObstacleAtPos(opt.x + 0.5, opt.y + 0.5, entry.name)) return;
+    const pcDist = chebyshevDist(opt.x, opt.y, px, py);
+    if (pcDist < MONSTER_MIN_PC_DIST && pcDist < curPcDist + 1) return; // never step next to the player
+    const homeDist = chebyshevDist(opt.x, opt.y, home.x, home.y);
+    if (homeDist > MONSTER_WANDER_RADIUS && homeDist >= chebyshevDist(cx, cy, home.x, home.y)) return;
+    let score = rng() * 4;                                // random walk
+    score += countBlockedNeighbors(opt.x, opt.y) * 0.45;   // prefer open floor
+    score += Math.max(0, homeDist - MONSTER_WANDER_RADIUS * 0.6) * 1.2; // soft leash
+    if (opt.x === entry._prevMazeX && opt.y === entry._prevMazeY) score += 1.5; // avoid jitter
+    if (hostile) score += (pcDist - curPcDist) * 2.2;     // drift toward the player
+    if (score < bestScore) { bestScore = score; best = opt; }
+  });
+  return best;
+}
+
+function updateMonsterWandering(monsterEntries, reservedTiles, now, force = false) {
+  if (!monsterEntries || !monsterEntries.length || !currentDungeon || !currentDungeon.cells) return false;
+  if (isCombatRoundActive()) return false;
+  const roomKey = getCurrentCombatRoomKey();
+  let anyMoved = false;
+  monsterEntries.forEach(entry => {
+    const home = getMonsterHomeAnchor(entry, roomKey);
+    const seed = hashCharacterName(entry.name);
+    if (!Number.isFinite(entry._nextWanderAt)) {
+      entry._nextWanderAt = now + MONSTER_WANDER_MIN_MS + (seed % (MONSTER_WANDER_MAX_MS - MONSTER_WANDER_MIN_MS));
+      return;
+    }
+    if (!force && now < entry._nextWanderAt) return;
+    const hostile = isMonsterHostile(entry);
+    const span = MONSTER_WANDER_MAX_MS - MONSTER_WANDER_MIN_MS;
+    entry._nextWanderAt = now + MONSTER_WANDER_MIN_MS + Math.floor(Math.random() * span) - (hostile ? 300 : 0);
+    // Idle sometimes (non-hostile monsters linger more).
+    if (!force && Math.random() < (hostile ? 0.12 : 0.3)) { resetWalkFrame(entry); return; }
+    const blocked = new Set(reservedTiles);
+    blocked.delete(`${entry.mazeX},${entry.mazeY}`);
+    const step = chooseMonsterWanderStep(entry, home, blocked, hostile, Math.random);
+    if (!step) { resetWalkFrame(entry); return; }
+    reservedTiles.delete(`${entry.mazeX},${entry.mazeY}`);
+    entry._prevMazeX = entry.mazeX;
+    entry._prevMazeY = entry.mazeY;
+    entry.facing = deriveFacingFromDelta(step.x - entry.mazeX, step.y - entry.mazeY, entry.facing);
+    entry.mazeX = step.x;
+    entry.mazeY = step.y;
+    entry.mazeRoomKey = roomKey;
+    entry._wanderSteps = (entry._wanderSteps || 0) + 1;
+    advanceWalkFrame(entry, now, MONSTER_WALK_FRAME_MS);
+    entry.moveTweenMs = MONSTER_MOVE_TWEEN_MS;
+    reservedTiles.add(`${step.x},${step.y}`);
+    anyMoved = true;
+  });
+  return anyMoved;
+}
+window.updateMonsterWandering = updateMonsterWandering;
+
 function updatePartyMazeLocomotion(force = false) {
   if (!shouldUsePartyMazeAnchors()) return false;
   const now = Date.now();
@@ -7695,7 +8571,8 @@ function updatePartyMazeLocomotion(force = false) {
 
   ensurePartyMazeAnchors(false);
   const partyEntries = getCurrentPartyNpcEntries();
-  if (!partyEntries.length) return false;
+  const monsterEntries = getCurrentRoomMonsterEntries();
+  if (!partyEntries.length && !monsterEntries.length) return false;
 
   const roomKey = getCurrentCombatRoomKey();
   const orderedEntries = partyEntries.slice().sort((a, b) => {
@@ -7705,6 +8582,8 @@ function updatePartyMazeLocomotion(force = false) {
   });
 
   const reservedTiles = new Set([`${playerDungeonX},${playerDungeonY}`]);
+  // Monster cells are occupied too, so NPC goals / paths never land on a monster.
+  monsterEntries.forEach(m => reservedTiles.add(`${m.mazeX},${m.mazeY}`));
   let anyMoved = false;
 
   orderedEntries.forEach(entry => {
@@ -7726,6 +8605,17 @@ function updatePartyMazeLocomotion(force = false) {
     const moved = nextStep.x !== entry.mazeX || nextStep.y !== entry.mazeY;
     if (moved) {
       entry.facing = deriveFacingFromDelta(nextStep.x - entry.mazeX, nextStep.y - entry.mazeY, entry.facing);
+      // Keep 3D billboard tween continuous from last rendered pos (not a snap)
+      if (Number.isFinite(entry.renderMazeX) && Number.isFinite(entry.renderMazeY)) {
+        entry._renderFromMazeX = entry.renderMazeX;
+        entry._renderFromMazeY = entry.renderMazeY;
+      } else {
+        entry._renderFromMazeX = entry.mazeX;
+        entry._renderFromMazeY = entry.mazeY;
+      }
+      entry._renderTweenToX = nextStep.x;
+      entry._renderTweenToY = nextStep.y;
+      entry._renderTweenStartedAt = now;
       entry.mazeX = nextStep.x;
       entry.mazeY = nextStep.y;
       entry.mazeRoomKey = roomKey;
@@ -7741,6 +8631,8 @@ function updatePartyMazeLocomotion(force = false) {
     reservedTiles.add(`${entry.mazeX},${entry.mazeY}`);
   });
 
+  if (updateMonsterWandering(monsterEntries, reservedTiles, now, false)) anyMoved = true;
+
   if (anyMoved) {
     syncPartyMazeToCombatPositions(false);
     const combatScene = window.combatGame && window.combatGame.scene && window.combatGame.scene.getScene('CombatScene');
@@ -7755,6 +8647,8 @@ if (typeof window !== 'undefined') {
   window.seedPartyCombatRoster = seedPartyCombatRoster;
   window.syncPartyMazeToCombatPositions = syncPartyMazeToCombatPositions;
   window.updatePartyMazeLocomotion = updatePartyMazeLocomotion;
+  window.refreshPartyDungeonPresence = refreshPartyDungeonPresence;
+  window.getPartyEntryRenderMazePosition = getPartyEntryRenderMazePosition;
 }
 
 // Function to create Mortacia character and add her to npcsString
@@ -10929,6 +11823,9 @@ fetchWithTimeout('/updateState7', {
     .then(data => console.log(data))
     .catch(error => console.error('Error:', error));
 
+// An attack starts a server-driven combat round: keep the maze anchors off the combat grid.
+if (/\battack\b/i.test(String(userInput || ''))) markCombatRoundActive();
+
 // Extend $.ajax with a timeout setting
 $.ajax({
   url: '/processInput7',
@@ -10976,6 +11873,10 @@ $.ajax({
               let content = result.response;
               let imageUrl = result.imageUrl;
               let serverGameConsole = result.updatedGameConsole;
+              if (typeof serverGameConsole === 'string' && serverGameConsole) {
+                window.lastServerGameConsole = serverGameConsole;
+                try { updateCharacterSheetsFromConsole(serverGameConsole); } catch (e) { console.warn('[Sprite] sheet parse failed', e); }
+              }
          //     window.lastGameConsoleText = serverGameConsole || window.lastGameConsoleText || "";
               let newCombatCharactersString = result.combatCharactersString;
               let serverRoomNameDatabaseString = result.roomNameDatabaseString; // Extract from server
@@ -11284,17 +12185,6 @@ $.ajax({
 });
   } 
 
-  $(document).ready(function() {
-    // Attach the chatbotprocessinput function to the input field's enter key event
-    $('#chatuserinput').keydown(function(event) {
-      if (event.keyCode == 13) { // Enter key
-        event.preventDefault(); // Prevent default action (new line)
-        chatbotprocessinput(); // Call the processing function
-      }
-    });
-  });
-  
-  
 //const sharedState = require('./sharedState');
 
 // Your game logic that updates personalNarrative and updatedGameConsole
@@ -11368,6 +12258,9 @@ function preloadDungeonTextures() {
       const tile = currentDungeon.customTiles[i];
       if (!tile || !tile.type) continue;
       const key = `custom_${tile.type}_${i}`; // FIXED: Use full key like server (not 'ob_')
+      // The server's tile entry is authoritative (scene-spec sprites live in a shared library,
+      // not under the geoKey name); only fall back to the geoKey path when it has no URL.
+      if (currentDungeon.tiles && currentDungeon.tiles[key] && currentDungeon.tiles[key].url && dungeonTextures[key]) continue;
       const url = resolveCustomTileURL(tile, i);
       if (!url) {
         console.warn('No resolved URL for custom tile', tile);
@@ -11384,14 +12277,19 @@ function preloadDungeonTextures() {
 
 function updatePlayerHeightFromCell() {
   if (!currentDungeon || !currentDungeon.cells) return;
-  const key  = `${playerDungeonX},${playerDungeonY}`;
-  const cell = currentDungeon.cells[key];
+  // Feet tile from continuous pos (holodek-2) + soft lerp only (holodek-1) — no mid-step Z snap.
+  const tx = Number.isFinite(playerPosX) ? Math.floor(playerPosX) : playerDungeonX;
+  const ty = Number.isFinite(playerPosY) ? Math.floor(playerPosY) : playerDungeonY;
+  const cell = currentDungeon.cells[`${tx},${ty}`]
+    || currentDungeon.cells[`${playerDungeonX},${playerDungeonY}`];
   const floorHeight =
     cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
   playerZTarget = floorHeight + PLAYER_EYE_HEIGHT;
   if (!playerZInitialized || !Number.isFinite(playerZ)) {
     playerZ = playerZTarget;
     playerZInitialized = true;
+  } else if (playerZ < floorHeight + 0.12) {
+    playerZ = floorHeight + 0.12;
   }
 }
 
@@ -12000,7 +12898,14 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
 
   const TORCH_LIGHT_RADIUS = 6.0;
   const TORCH_LIGHT_FALLOFF = 0.6;
-  const TORCH_LIGHT_COLOR = { r: 255, g: 190, b: 130 };
+  // Torch/light colour follows the room's scene spec (candle gold, lava red, witchlight blue...).
+  const TORCH_LIGHT_COLOR = (() => {
+    const hex = currentDungeon && currentDungeon.sceneSpec && currentDungeon.sceneSpec.lighting && currentDungeon.sceneSpec.lighting.color;
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ''));
+    if (!m) return { r: 255, g: 190, b: 130 };
+    const n = parseInt(m[1], 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  })();
   // Per-surface torch tuning knobs (1.0 = default).
   const TORCH_WALL_BOOST = 1.3;
   const TORCH_SIDE_BOOST = 1.1;

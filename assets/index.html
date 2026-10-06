@@ -9,6 +9,9 @@
  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
  <script src="/node_modules/phaser/dist/phaser.min.js"></script>
 <audio id="room-music" src="/sid/current_room.wav" loop autoplay></audio>
+ <script src="/assets/renderCharacterProcedural.js"></script>
+ <script src="/assets/renderSceneItems.js"></script>
+ <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js"></script>
 <script src="/assets/game.js"></script>
  <script src="/assets/rendererWebGL.js"></script>
@@ -315,7 +318,7 @@ function toggleCombatMode() {
             combatPopup.style.top = '105px';
             combatPopup.style.left = '5px';
 
-            // Center the combat map on the PC when opening, using global character data
+            // Refresh combat roster/art. Initial open may center once; manual scrolling remains respected after that.
             const combatScene = window.combatGame && window.combatGame.scene ? window.combatGame.scene.getScene('CombatScene') : null;
             if (combatScene) {
                 const combatRoster = getCombatRosterForUi();
@@ -330,17 +333,14 @@ function toggleCombatMode() {
                 if (typeof window.updateCombatScene === 'function' && window.combatCharacters && window.combatCharacters.length > 0) {
                     window.updateCombatScene(window.combatCharacters);
                 }
-                const pc = window.combatCharacters?.find(c => c.type === 'pc');
-                if (pc) {
-                    combatScene.centerCameraOn(pc.x, pc.y);
-                    console.log(`Centering on PC at (${pc.x}, ${pc.y}) from toggleCombatPopup`);
-                    // Force redraw so the custom sprite (from beginning review) is composited into the RT for combat view.
-                    if (typeof combatScene.redrawCombatRT === 'function') {
-                        combatScene.redrawCombatRT();
-                    }
-                } else {
-                    console.log("No PC found in combatCharacters, centering on grid center");
-                    combatScene.centerCameraOn(Math.floor(10 / 2), Math.floor(10 / 2)); // Center at (15, 15)
+                if (!combatScene._combatMapInitialCentered) {
+                    const pc = window.combatCharacters?.find(c => c.type === 'pc');
+                    combatScene._userScrolledCombatMap = false;
+                    combatScene.centerCameraOn(pc ? pc.x : 15, pc ? pc.y : 15, true);
+                    combatScene._combatMapInitialCentered = true;
+                }
+                if (typeof combatScene.redrawCombatRT === 'function') {
+                    combatScene.redrawCombatRT();
                 }
             } else {
                 console.warn("CombatScene not found! combatGame may have failed to initialize (check for JS errors in game.js).");
@@ -349,8 +349,8 @@ function toggleCombatMode() {
                     try {
                         window.combatGame = new Phaser.Game({
                             type: Phaser.WEBGL,
-                            width: 375,
-                            height: 375,
+                            width: 775,
+                            height: 775,
                             parent: 'combat-container',
                             scene: CombatScene,
                             backgroundColor: '#333333',
@@ -437,8 +437,8 @@ function toggleCombatMode() {
           name: source.name || source.Name || entry.label || `PartyMember${index + 1}`,
           type: index === 0 ? 'pc' : 'npc',
           sprite: entry.sprite || source.sprite || null,
-          x: index === 0 ? 7 : 0,
-          y: index === 0 ? 7 : 0,
+          x: index === 0 ? 15 : 0,
+          y: index === 0 ? 15 : 0,
           Name: source.Name || source.name || entry.label || `PartyMember${index + 1}`,
           Sex: source.Sex || source.sex || '',
           Race: source.Race || source.race || '',
@@ -639,6 +639,7 @@ function toggleCombatMode() {
         const img = new Image();
         img.onload = () => {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.imageSmoothingEnabled = false; // crisp pixel art (procedural sprites are 96px)
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         };
         img.src = entry.sprite.dataUrl;
@@ -1456,8 +1457,8 @@ function toggleCombatMode() {
   }
   
     #combat-container canvas {
-      width: 375px !important;
-      height: 375px !important;
+      width: 775px !important;
+      height: 775px !important;
       image-rendering: pixelated;
       image-rendering: crisp-edges;
     }
@@ -1765,8 +1766,8 @@ function toggleCombatMode() {
         name: member.Name || member.name || `PartyMember${idx + 1}`,
         type: idx === 0 ? 'pc' : 'npc',
         sprite: member.sprite || null,
-        x: idx === 0 ? 7 : 0,
-        y: idx === 0 ? 7 : 0
+        x: idx === 0 ? 15 : 0,
+        y: idx === 0 ? 15 : 0
       }));
     }
 
@@ -1803,6 +1804,19 @@ function toggleCombatMode() {
       const img = document.getElementById('review-sprite-img');
       const nameEl = document.getElementById('review-character-name');
       const detailsEl = document.getElementById('review-character-details');
+
+      // Generated (non-preset) characters: sprite comes from their own LLM trait spec (shimmer until it lands,
+      // then this menu re-renders). Presets (Mortacia, Suzerain) keep their original hand-made art.
+      const reviewState = getPendingPartyReviewState();
+      const reviewRole = (reviewState && reviewState.index > 0) ? 'npc' : 'pc';
+      let traitDriven = false;
+      if (typeof window.ensureTraitSpriteForCharacter === 'function') {
+        try {
+          traitDriven = window.ensureTraitSpriteForCharacter(character, reviewRole, () => {
+            if (panel.style.display !== 'none' && getActiveReviewedCharacter() === character) showCharacterSpriteReviewMenu(character);
+          });
+        } catch (e) { console.warn('[SpriteReview] trait sprite failed', e); }
+      }
 
       // Prefer the generated sprite (dataUrl from server LLM + renderer)
       const spriteUrl = (character && character.sprite && character.sprite.dataUrl) ? character.sprite.dataUrl : '';
@@ -1888,7 +1902,15 @@ function toggleCombatMode() {
 
       // Status for client vs LLM artist
       const statusEl = document.getElementById('review-sprite-status');
-      if (statusEl) {
+      if (statusEl && traitDriven) {
+        if (character.sprite && character.sprite.placeholder) {
+          statusEl.textContent = 'Drawing your character from its LLM trait spec...';
+          statusEl.style.color = '#ffaa66';
+        } else {
+          statusEl.textContent = 'Drawn from this character\'s own LLM trait spec.';
+          statusEl.style.color = '#aaffaa';
+        }
+      } else if (statusEl) {
         if (character.sprite && character.sprite.clientOnly) {
           statusEl.textContent = 'Fast client preview. Retort LLM artist started on "1" — will auto-refresh with creative sprite shortly (no need to click Reroll).';
           statusEl.style.color = '#ffaa66';
@@ -1931,6 +1953,18 @@ function toggleCombatMode() {
       if (!character) return;
 
       if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
+
+      // Generated characters: new salt + fresh LLM trait spec (presets fall through to the original reroll).
+      const name = character.Name || character.name;
+      if (typeof window.rerollTraitSpriteForCharacter === 'function'
+          && !(typeof window.isPresetSpriteCharacter === 'function' && window.isPresetSpriteCharacter(name))) {
+        const statusEl = document.getElementById('review-sprite-status');
+        if (statusEl) { statusEl.textContent = 'Asking the LLM for a new look...'; statusEl.style.color = '#ffaa66'; }
+        window.rerollTraitSpriteForCharacter(character, (partyReview && partyReview.index > 0) ? 'npc' : 'pc')
+          .catch(err => console.warn('[SpriteReview] trait reroll failed', err))
+          .then(() => showCharacterSpriteReviewMenu(character));
+        return;
+      }
 
       // Prefer a real server-side LLM reroll for fresh creative spriteSpec (same stats, new art direction)
       fetch('/rerollCharacterSprite', {

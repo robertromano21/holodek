@@ -6,6 +6,7 @@ const sharedState = require('./sharedState');
 const fs = require('fs');
 const path = require('path');
 const { renderArrangementToWav } = require('./retort/renderAudio');
+const characterTraits = require('./retort/characterTraitSpec');
 const app = express();
 const port = 3000;
 
@@ -62,6 +63,25 @@ app.get('/combat-updates2', (req, res) => {
 function broadcast(data) {
     clients.forEach(client => client.send(data));
 }
+
+// Procedural character sprites: structured visual trait specs (one cheap LLM call per new character, cached by name).
+// Body: { sheets: [{name, sex, race, class, level, equipped, isMonster}], wait?: boolean, reroll?: boolean }
+// Returns cached entries immediately (source 'llm' | 'pending'); finished specs are also broadcast as
+// { type: 'characterTraits', traits: { [name]: entry } } over /combat-updates2.
+app.post('/character-traits', async (req, res) => {
+  try {
+    const sheets = req.body && Array.isArray(req.body.sheets) ? req.body.sheets : [];
+    const traits = await characterTraits.requestTraitSpecs(sheets, { broadcast, wait: !!(req.body && req.body.wait), reroll: !!(req.body && req.body.reroll) });
+    res.json({ traits });
+  } catch (err) {
+    console.error('[traits] endpoint error:', err && err.message);
+    res.status(500).json({ error: 'trait generation failed', traits: {} });
+  }
+});
+app.get('/character-traits', (req, res) => {
+  const names = String(req.query.names || '').split('|').map((n) => n.trim()).filter(Boolean);
+  res.json({ traits: characterTraits.getCachedTraitSpecs(names) });
+});
 
 // Get current combat mode
 app.get('/get-combat-mode2', (req, res) => {
@@ -143,6 +163,7 @@ app.post('/processInput7', async (req, res) => {
             sharedState.setUpdatedGameConsole(updatedGameConsole);
         }
       const combatCharactersString = sharedState.getCombatCharactersString();
+      characterTraits.ensureTraitSpecsForConsole(updatedGameConsole, broadcast); // new PCs/NPCs/monsters -> trait specs (async)
       const roomNameDatabaseString = sharedState.getRoomNameDatabase(); // Add this
       const currentQuest = sharedState.getCurrentQuest(); // New: Include current quest
       const finalResult = { 

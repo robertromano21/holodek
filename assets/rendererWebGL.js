@@ -96,6 +96,12 @@
   const TORCH_LIGHT_FALLOFF = 0.6;
   const TORCH_LIGHT_COLOR = { r: 255, g: 190, b: 130 };
 
+  // Bump when character voxel assembly changes (invalidates mesh caches).
+  if (typeof window !== 'undefined') {
+    window.CHARACTER_VOXEL_MESH_REV = Math.max(Number(window.CHARACTER_VOXEL_MESH_REV) || 0, 5);
+    window.CHARACTER_BILLBOARD_REV = Math.max(Number(window.CHARACTER_BILLBOARD_REV) || 0, 5);
+  }
+
   function isTextureReady(img) {
     return !!(img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0);
   }
@@ -227,6 +233,7 @@
     voxelMeshes: {},
     characterVoxelFrames: {},
     characterVoxelMeshes: {},
+    _actorShadowPatches: null,
     voxelPaletteKey: null,
     sceneResourceVersion: '',
     sceneCellData: null,
@@ -272,18 +279,32 @@
       };
     },
 
+    // Spec that drives the 3D world figure. Built-in presets (Mortacia, Suzerain) keep their original hand-made
+    // 2D sprite on entry.sprite, but in the 3D world they use a fixed hand-authored detailed spec
+    // (ProceduralCharacters.getPresetProceduralSpec). Everyone else: their own sprite spec.
+    _getActorWorldSpec(character) {
+      if (!character) return null;
+      const api = window.ProceduralCharacters;
+      if (api && typeof api.getPresetProceduralSpec === 'function') {
+        const preset = api.getPresetProceduralSpec(character.name || character.Name);
+        if (preset) return preset;
+      }
+      return character.sprite && character.sprite.spec ? character.sprite.spec : null;
+    },
+
     _getCharacterVoxelCacheKey(character, facing, frameIndex, opts = {}) {
-      const spec = character && character.sprite && character.sprite.spec ? character.sprite.spec : null;
+      const spec = this._getActorWorldSpec(character);
       const spriteKey = character && character.sprite && character.sprite.dataUrl ? character.sprite.dataUrl.length : 0;
       const seed = Number.isFinite(character && character._rerollSeed) ? character._rerollSeed : 0;
-      const specKey = spec ? JSON.stringify(spec) : '';
+      const specKey = spec ? ((spec.kind === 'procedural' && spec.key) ? spec.key : JSON.stringify(spec)) : '';
       const meshRev = Number.isFinite(window.CHARACTER_VOXEL_MESH_REV) ? window.CHARACTER_VOXEL_MESH_REV : 0;
       return [
         character && character.name ? character.name : 'actor',
-        facing || 'left',
+        facing || 'front',
         frameIndex | 0,
-        opts.voxelSize || 24,
-        opts.depth || 8,
+        opts.voxelSize || 48,
+        opts.depth || 14,
+        opts.view || '',
         spriteKey,
         seed,
         meshRev,
@@ -309,7 +330,8 @@
         entry
         && entry.type !== 'pc'
         && entry.sprite
-        && entry.sprite.spec
+        && this._getActorWorldSpec(entry)
+        && this._getActorWorldSpec(entry).kind !== 'placeholder' // trait spec still pending: nothing in 3D
         && Number.isFinite(entry.mazeX)
         && Number.isFinite(entry.mazeY)
         && (!entry.mazeRoomKey || entry.mazeRoomKey === roomKey)
@@ -335,20 +357,107 @@
       return this._getVisibleCharacterVoxelActors().length > 0;
     },
 
+    // Temporarily mark floor cells under visible actors as soft casters (same path as pillars)
+    // so torch floor/wall shadows pick up character silhouettes. a≈0.16 < 0.5 so camera rays stay clear.
+    _syncActorShadowCasters(actors) {
+      const gl = this.gl;
+      if (!gl || !this.cellTex || !this.sceneCellData || !this.gridW || !this.gridH) return;
+      // Restore previous frame patches first
+      if (Array.isArray(this._actorShadowPatches) && this._actorShadowPatches.length) {
+        for (const p of this._actorShadowPatches) {
+          this.sceneCellData[p.idx] = p.prev;
+        }
+        this._actorShadowPatches = null;
+      }
+      const list = Array.isArray(actors) ? actors : [];
+      if (!list.length) {
+        // Still re-upload if we restored patches
+        gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.gridW, this.gridH, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.sceneCellData);
+        return;
+      }
+      const patches = [];
+      const data = this.sceneCellData;
+      const W = this.gridW;
+      const H = this.gridH;
+      const radiusByte = Math.max(1, Math.min(200, Math.round(0.16 * 255))); // ~slim pillar
+      for (const actor of list) {
+        const pos = this._getCharacterMazeRenderPosition(actor, Date.now()) || { x: actor.mazeX, y: actor.mazeY };
+        if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) continue;
+        const cx = Math.floor(pos.x + 0.5);
+        const cy = Math.floor(pos.y + 0.5);
+        if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
+        const idx = (cy * W + cx) * 4;
+        const aIdx = idx + 3;
+        const prev = data[aIdx];
+        if (prev >= 250) continue; // solid wall / door — leave alone
+        if (prev >= radiusByte) continue; // already a stronger obstacle
+        patches.push({ idx: aIdx, prev });
+        data[aIdx] = radiusByte;
+      }
+      this._actorShadowPatches = patches;
+      gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    },
+
+    _clearCharacterVoxelCaches() {
+      this.characterVoxelFrames = {};
+      const gl = this.gl;
+      if (gl && this.characterVoxelMeshes) {
+        for (const key of Object.keys(this.characterVoxelMeshes)) {
+          const rec = this.characterVoxelMeshes[key];
+          const passes = (rec && rec.passes) || (rec ? [rec] : []);
+          for (const pass of passes) {
+            try { if (pass.vbo) gl.deleteBuffer(pass.vbo); } catch (e) {}
+            try { if (pass.ibo) gl.deleteBuffer(pass.ibo); } catch (e) {}
+          }
+        }
+      }
+      this.characterVoxelMeshes = {};
+    },
+
     _getCharacterVoxelFrameSet(character, facing, opts = {}) {
       if (typeof window.createCharacterVoxelFrames !== 'function' || !character) return null;
-      const spec = character.sprite && character.sprite.spec ? character.sprite.spec : null;
-      const frameSetKey = this._getCharacterVoxelCacheKey(character, facing, -1, opts);
+      const spec = this._getActorWorldSpec(character);
+      const view = (opts.view || facing || 'front').toLowerCase() === 'back' ? 'back' : 'front';
+      const frameSetKey = this._getCharacterVoxelCacheKey(character, view, -1, Object.assign({}, opts, { view }));
       if (!this.characterVoxelFrames[frameSetKey]) {
+        // Extrude the approved procedural BILLBOARD sprites (Mortacia v12 / Suzerain / LLM traits).
+        const grid = (spec && spec.grid) ? Math.min(64, spec.grid) : 48;
         const frames = window.createCharacterVoxelFrames(character, spec, {
           frameCount: Math.max(1, Math.min(8, Math.floor(opts.frameCount || 4))),
-          voxelSize: opts.voxelSize || 24,
-          depth: opts.depth || 8,
-          mirror: String(facing || 'left').toLowerCase() === 'right'
+          voxelSize: opts.voxelSize || grid,
+          depth: opts.depth || 14,
+          view,
+          solid: opts.solid !== false,
+          taper: true,
+          mirror: !!opts.mirror
         });
         this.characterVoxelFrames[frameSetKey] = Array.isArray(frames) ? frames : null;
       }
       return this.characterVoxelFrames[frameSetKey];
+    },
+
+    // Front/back view pick (same motion heuristic as the old billboard path).
+    _getActorBillboardView(actor, wx, wy, camX, camY, now) {
+      this._actorMotion = this._actorMotion || {};
+      const key = actor && actor.name ? actor.name : 'actor';
+      const m = this._actorMotion[key] || { x: wx, y: wy, view: 'front', movedAt: 0 };
+      const mvx = wx - m.x, mvy = wy - m.y;
+      const moved = mvx * mvx + mvy * mvy;
+      if (moved > 1e-5) {
+        const toCamX = camX - wx, toCamY = camY - wy;
+        m.view = (mvx * toCamX + mvy * toCamY) < 0 ? 'back' : 'front';
+        m.movedAt = now;
+      } else if (now - m.movedAt > 900) {
+        m.view = 'front';
+      }
+      m.x = wx; m.y = wy;
+      this._actorMotion[key] = m;
+      const api = window.ProceduralCharacters;
+      const spec = this._getActorWorldSpec(actor);
+      if (api && api.supportsBackView && spec && !api.supportsBackView(spec)) return 'front';
+      return m.view;
     },
 
     _createCharacterGpuMeshRecord(mesh, toneShadow, toneMid, toneHighlight, hints = {}) {
@@ -375,7 +484,8 @@
     },
 
     getCharacterVoxelMesh(character, frameIndex = 0, facing = 'left', opts = {}) {
-      if (!character || !character.sprite || !character.sprite.spec || !this.gl) return null;
+      const worldSpec = this._getActorWorldSpec(character);
+      if (!character || !character.sprite || !worldSpec || !this.gl) return null;
       const cacheKey = this._getCharacterVoxelCacheKey(character, facing, frameIndex, opts);
       if (this.characterVoxelMeshes[cacheKey]) return this.characterVoxelMeshes[cacheKey];
       const frames = this._getCharacterVoxelFrameSet(character, facing, opts);
@@ -383,58 +493,54 @@
       const frame = frames[Math.abs(frameIndex | 0) % frames.length];
       if (!frame || !frame.voxels || !frame.colors) return null;
       const size = frame.size || 24;
-      const palette = character.sprite.spec.palette || {};
-      const parseHexColor = (value, fallback) => {
-        const m = String(value || fallback).match(/^#?([0-9a-fA-F]{6})$/);
-        const v = m ? parseInt(m[1], 16) : fallback;
-        return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255];
-      };
-      const mixColor = (a, b, t) => [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t
-      ];
-      const shadowBase = parseHexColor(palette.shadow, 0x181818);
-      const primaryBase = parseHexColor(palette.primary, 0x666666);
-      const secondaryBase = parseHexColor(palette.secondary, 0x7d7d7d);
-      const highlightBase = parseHexColor(palette.highlight, 0xcccccc);
-      const skinBase = parseHexColor(palette.skin, 0xd9bf98);
-      const accentBase = parseHexColor(palette.accent, 0xa07050);
-      const toneShadow = mixColor(shadowBase, primaryBase, 0.24);
-      const toneMid = mixColor(primaryBase, secondaryBase, 0.26);
-      const toneHighlight = mixColor(
-        highlightBase,
-        mixColor(skinBase, accentBase, 0.28),
-        0.14
-      );
-      const livelyMid = mixColor(toneMid, accentBase, 0.1);
+      // ROOT CAUSE FIX (beige cardboard): procedural specs store colors in traits.palette, not
+      // spec.palette. Empty palette → beige/brown tone uniforms (skin/accent fallbacks) that
+      // multiply away sprite albedos in the voxel shader (v_color * ramp). Use NEUTRAL tones so
+      // sprite pixel colors stay intact; only modulate brightness.
+      // Also: colorFn used `frame.colors[i] || 0.35` which turned legitimate 0.0 channels + empty
+      // greedy-face centers into grey. Sample floored coords and nearest solid voxel instead.
+      const toneShadow = [0.45, 0.45, 0.45];
+      const toneMid = [1.0, 1.0, 1.0];
+      const toneHighlight = [1.25, 1.25, 1.25];
       const colorFn = (x, y, z, normal) => {
-        const idx = x + y * size + z * size * size;
+        const clampi = (v) => Math.max(0, Math.min(size - 1, Math.floor(v)));
+        let xi = clampi(x), yi = clampi(y), zi = clampi(z);
+        let idx = xi + yi * size + zi * size * size;
+        if (!frame.voxels[idx]) {
+          let found = false;
+          for (let r = 1; r <= 2 && !found; r++) {
+            for (let dz = -r; dz <= r && !found; dz++) {
+              for (let dy = -r; dy <= r && !found; dy++) {
+                for (let dx = -r; dx <= r && !found; dx++) {
+                  const xx = xi + dx, yy = yi + dy, zz = zi + dz;
+                  if (xx < 0 || yy < 0 || zz < 0 || xx >= size || yy >= size || zz >= size) continue;
+                  const j = xx + yy * size + zz * size * size;
+                  if (frame.voxels[j]) { idx = j; found = true; }
+                }
+              }
+            }
+          }
+          if (!found) return [0.55, 0.55, 0.55];
+        }
         const base = idx * 3;
-        let r = frame.colors[base] || 0.35;
-        let g = frame.colors[base + 1] || 0.35;
-        let b = frame.colors[base + 2] || 0.35;
-        r = r * 0.95 + livelyMid[0] * 0.05;
-        g = g * 0.95 + livelyMid[1] * 0.05;
-        b = b * 0.95 + livelyMid[2] * 0.05;
-        if (normal[2] > 0.5) {
-          r = Math.min(1, r * 1.08 + toneHighlight[0] * 0.03);
-          g = Math.min(1, g * 1.08 + toneHighlight[1] * 0.03);
-          b = Math.min(1, b * 1.08 + toneHighlight[2] * 0.03);
-        } else if (normal[2] < -0.5) {
-          r = Math.max(0, r * 0.9 + toneShadow[0] * 0.04);
-          g = Math.max(0, g * 0.9 + toneShadow[1] * 0.04);
-          b = Math.max(0, b * 0.9 + toneShadow[2] * 0.04);
-        } else if (normal[0] !== 0) {
+        let r = frame.colors[base];
+        let g = frame.colors[base + 1];
+        let b = frame.colors[base + 2];
+        // Mild normal shading only — no palette hue injection
+        if (normal && normal[2] > 0.5) {
+          r = Math.min(1, r * 1.06); g = Math.min(1, g * 1.06); b = Math.min(1, b * 1.06);
+        } else if (normal && normal[2] < -0.5) {
+          r = Math.max(0, r * 0.92); g = Math.max(0, g * 0.92); b = Math.max(0, b * 0.92);
+        } else if (normal && normal[0] !== 0) {
           const sideLift = normal[0] > 0 ? 1.03 : 0.97;
           r = Math.min(1, Math.max(0, r * sideLift));
           g = Math.min(1, Math.max(0, g * sideLift));
           b = Math.min(1, Math.max(0, b * sideLift));
-        } else if (normal[1] !== 0) {
-          const lateralLift = normal[1] > 0 ? 1.04 : 0.98;
-          r = Math.min(1, Math.max(0, r * lateralLift + toneMid[0] * 0.015));
-          g = Math.min(1, Math.max(0, g * lateralLift + toneMid[1] * 0.015));
-          b = Math.min(1, Math.max(0, b * lateralLift + toneMid[2] * 0.015));
+        } else if (normal && normal[1] !== 0) {
+          const lateralLift = normal[1] > 0 ? 1.04 : 0.96;
+          r = Math.min(1, Math.max(0, r * lateralLift));
+          g = Math.min(1, Math.max(0, g * lateralLift));
+          b = Math.min(1, Math.max(0, b * lateralLift));
         }
         return [r, g, b];
       };
@@ -2723,6 +2829,7 @@ void main() {
         'uniform vec2 u_haloClipDir;',
         'uniform vec2 u_haloClipSpan;',
         'uniform float u_shadowStrength;',
+        'uniform float u_alphaCut;',
         'uniform int u_torchCount;',
         'uniform vec3 u_torchPos[' + MAX_TORCH_LIGHTS + '];',
         'uniform float u_torchRadius[' + MAX_TORCH_LIGHTS + '];',
@@ -2735,7 +2842,7 @@ void main() {
         '}',
         'void main() {',
         '  vec4 tex = texture(u_tex, v_uv);',
-        '  if (tex.a < 0.01) discard;',
+        '  if (tex.a < max(0.01, u_alphaCut)) discard;',
         '  if (u_haloMode > 0.5) {',
         '    vec2 p = v_uv * 2.0 - 1.0;',
         '    float r2 = dot(p, p);',
@@ -2780,10 +2887,17 @@ void main() {
         '    torchLit += (TORCH_AMBIENT + ndotlTorch * (1.0 - TORCH_AMBIENT)) * atten;',
         '  }',
         '  torchLit *= TORCH_SPRITE_BOOST;',
+        '  if (u_alphaCut > 0.4) torchLit *= 0.6; // character billboards: gentler torch gain (keeps materials readable)',
         '  vec3 torchColor = vec3(1.0, 190.0/255.0, 130.0/255.0);',
         '  float distanceShade = max(0.3, 1.0 - v_depth * u_depthShadeScale);',
         '  float torchLight = torchLit * 0.6;',
         '  vec3 col = (tex.rgb * (shade + torchLight) + torchColor * torchLit * 0.35) * distanceShade;',
+        '  if (u_alphaCut > 0.4) {',
+        '    // character billboards: hue-preserving highlight roll-off so torch-lit figures keep their colours',
+        '    // instead of clipping to white',
+        '    float peak = max(col.r, max(col.g, col.b));',
+        '    if (peak > 0.9) col *= (0.9 + (1.0 - exp(-(peak - 0.9) * 2.5)) * 0.25) / peak;',
+        '  }',
         '  outColor = vec4(col, tex.a) * u_tint;',
         '  gl_FragDepth = v_depth;',
         '}'
@@ -3127,6 +3241,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         haloClipDir: gl.getUniformLocation(this.spriteProgram, 'u_haloClipDir'),
         haloClipSpan: gl.getUniformLocation(this.spriteProgram, 'u_haloClipSpan'),
         shadowStrength: gl.getUniformLocation(this.spriteProgram, 'u_shadowStrength'),
+        alphaCut: gl.getUniformLocation(this.spriteProgram, 'u_alphaCut'),
         torchCount: gl.getUniformLocation(this.spriteProgram, 'u_torchCount'),
         torchPos: gl.getUniformLocation(this.spriteProgram, 'u_torchPos[0]'),
         torchRadius: gl.getUniformLocation(this.spriteProgram, 'u_torchRadius[0]'),
@@ -3368,6 +3483,168 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
     },
 
+    // ---- Character billboards (Doom-style) -------------------------------------------------------------
+    // Picks the view (front, or back when the actor walks away from the camera), the walk frame, and returns
+    // a cached GL texture of the procedural billboard plus its world size / foot inset.
+    // Pick front / threeQuarter / side / back from camera↔actor yaw (with hysteresis so views don't flicker).
+    _pickActorBillboardView(actor, wx, wy, camX, camY, now) {
+      this._actorMotion = this._actorMotion || {};
+      const key = actor && actor.name ? actor.name : 'actor';
+      const m = this._actorMotion[key] || { x: wx, y: wy, view: 'front', mirror: false, faceAng: NaN, movedAt: 0, viewHoldUntil: 0 };
+      const mvx = wx - (Number.isFinite(m.x) ? m.x : wx);
+      const mvy = wy - (Number.isFinite(m.y) ? m.y : wy);
+      const moved = mvx * mvx + mvy * mvy;
+      if (moved > 1e-6) {
+        m.faceAng = Math.atan2(mvy, mvx);
+        m.movedAt = now;
+      } else if (!Number.isFinite(m.faceAng)) {
+        // Idle with no history: face the camera (front view)
+        m.faceAng = Math.atan2(camY - wy, camX - wx);
+      } else if (now - (m.movedAt || 0) > 1100) {
+        // Idle long enough: ease facing toward camera so they look at the party
+        const want = Math.atan2(camY - wy, camX - wx);
+        let d = want - m.faceAng;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        m.faceAng += d * 0.12;
+      }
+      m.x = wx; m.y = wy;
+      const toCamAng = Math.atan2(camY - wy, camX - wx);
+      let rel = m.faceAng - toCamAng;
+      while (rel > Math.PI) rel -= Math.PI * 2;
+      while (rel < -Math.PI) rel += Math.PI * 2;
+      const a = Math.abs(rel);
+      let view = 'front';
+      if (a < Math.PI * 0.22) view = 'front';
+      else if (a < Math.PI * 0.48) view = 'threeQuarter';
+      else if (a < Math.PI * 0.78) view = 'side';
+      else if (a < Math.PI * 0.95) view = 'threeQuarter'; // rear ¾ — use back art if available below
+      else view = 'back';
+      // Rear threeQuarter: prefer true back sprite when nearly behind
+      if (view === 'threeQuarter' && a >= Math.PI * 0.78) view = 'back';
+      // facing +1 = figure faces screen-right (weapon/right-hand on forward/right for side/¾);
+      // facing -1 = faces screen-left. Procedural remap keeps the SAME body hand (never flip whole sprite).
+      const facing = rel < 0 ? -1 : 1;
+      const api = window.ProceduralCharacters;
+      const spec = this._getActorWorldSpec(actor);
+      if (view === 'back' && api && api.supportsBackView && spec && !api.supportsBackView(spec)) {
+        view = 'front';
+      }
+      // Hysteresis: hold current view briefly unless the new one is clearly different
+      if (m.view && m.view !== view && now < (m.viewHoldUntil || 0)) {
+        // keep m.view / m.facing
+      } else if (m.view !== view || m.facing !== facing) {
+        m.view = view;
+        m.facing = facing;
+        m.viewHoldUntil = now + 140;
+      }
+      this._actorMotion[key] = m;
+      return { view: m.view || 'front', facing: (m.facing === -1 ? -1 : 1), mirror: false };
+    },
+
+    _getCharacterBillboard(actor, wx, wy, camX, camY, now) {
+      const api = window.ProceduralCharacters;
+      const spec = this._getActorWorldSpec(actor);
+      if (!api || typeof api.renderBillboardPixels !== 'function' || !spec || spec.kind !== 'procedural' || !this.gl) return null;
+      const pick = this._pickActorBillboardView(actor, wx, wy, camX, camY, now);
+      const view = pick.view;
+      const facing = pick.facing === -1 ? -1 : 1;
+      // Walk cycle: while tweening, advance by time; idle holds frame 0-ish
+      const moving = (() => {
+        const m = this._actorMotion[actor.name];
+        return m && (now - (m.movedAt || 0) < 320);
+      })();
+      const frame = Number.isFinite(actor.walkFrame)
+        ? Math.abs(actor.walkFrame | 0) % 4
+        : (moving ? (Math.floor(now / 180) % 4) : 0);
+      const bbRev = Number.isFinite(window.CHARACTER_BILLBOARD_REV) ? window.CHARACTER_BILLBOARD_REV : 0;
+      // Cache by facing (drawn art), never by bitmap-mirror — keeps weapon on the same hand
+      const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev].join('|');
+      this._billboardTexCache = this._billboardTexCache || new Map();
+      let entry = this._billboardTexCache.get(key);
+      if (!entry) {
+        const pix = api.renderBillboardPixels(spec, { frame, view, facing });
+        if (!pix || !pix.bounds) return null;
+        const data = new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength);
+        const bounds = pix.bounds;
+        const gl = this.gl;
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+        try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
+        const ws = Number.isFinite(spec.worldScale) ? Math.max(0.55, Math.min(1.7, spec.worldScale)) : 1;
+        const rawInset = (pix.h - 1 - bounds.maxY) / pix.h;
+        entry = { tex, worldHeight: 1.22 * ws, footInset: Math.max(0, Math.min(0.08, rawInset)), view, facing };
+        if (this._billboardTexCache.size > 256) {
+          const oldKey = this._billboardTexCache.keys().next().value;
+          const old = this._billboardTexCache.get(oldKey);
+          try { gl.deleteTexture(old.tex); } catch (e) { /* ignore */ }
+          this._billboardTexCache.delete(oldKey);
+        }
+        this._billboardTexCache.set(key, entry);
+      }
+      return entry;
+    },
+
+    // Item billboard texture (Objects in Room), cached per name/type/magic.
+    _getItemBillboard(obj) {
+      const api = window.SceneItems;
+      if (!api || !this.gl) return null;
+      const key = [obj.name, obj.type, obj.magic].join('|').toLowerCase();
+      this._itemTexCache = this._itemTexCache || new Map();
+      let entry = this._itemTexCache.get(key);
+      if (entry) return entry;
+      const pix = api.renderItemPixels(obj, { scale: 2 });
+      const gl = this.gl;
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength));
+      try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
+      entry = { tex, worldHeight: 0.42, footInset: pix.footInset, glow: !!pix.glow };
+      this._itemTexCache.set(key, entry);
+      return entry;
+    },
+
+    _drawCharacterBillboard(spr, width, height, lighting, depthShadeScale) {
+      const gl = this.gl;
+      if (!spr.actorTex) return;
+      const x0 = (spr.drawLeft / width) * 2 - 1, x1 = (spr.drawRight / width) * 2 - 1;
+      const y0 = 1 - (spr.drawEndY / height) * 2, y1 = 1 - (spr.drawStartY / height) * 2;
+      const verts = new Float32Array([
+        x0, y0, 0, 1, spr.depth,
+        x1, y0, 1, 1, spr.depth,
+        x0, y1, 0, 0, spr.depth,
+        x1, y1, 1, 0, spr.depth
+      ]);
+      gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, spr.actorTex);
+      gl.uniform1i(this.spriteUniforms.tex, 0);
+      gl.uniform2f(this.spriteUniforms.lightDir, lighting.dirX, lighting.dirY);
+      gl.uniform1f(this.spriteUniforms.lightElev, lighting.elevation);
+      gl.uniform1f(this.spriteUniforms.lightIntensity, lighting.intensity);
+      gl.uniform1f(this.spriteUniforms.profile, 1.0);       // rounded normal across the width: soft form shading
+      gl.uniform1f(this.spriteUniforms.depthAmount, 0.55);
+      gl.uniform3f(this.spriteUniforms.spritePos, spr.lightX, spr.lightY, spr.baseZ);
+      gl.uniform1f(this.spriteUniforms.spriteHeight, spr.worldHeight);
+      gl.uniform1f(this.spriteUniforms.spriteVFlip, 1.0);   // v = 0 is the top of the figure
+      if (this.spriteUniforms.depthShadeScale) gl.uniform1f(this.spriteUniforms.depthShadeScale, depthShadeScale);
+      if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.5);
+      gl.uniform4f(this.spriteUniforms.tint, 1.0, 1.0, 1.0, 1.0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.01);
+    },
+
     getSpriteTexture(img) {
       if (!img || !img.complete || img.naturalWidth === 0) return null;
       const key = img.src || img._webglKey || `${img.naturalWidth}x${img.naturalHeight}`;
@@ -3410,6 +3687,30 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
       this.haloTexSource = canvas;
+    },
+
+    buildBlobShadowTexture() {
+      if (this.blobShadowTex || !this.gl) return;
+      const size = 64;
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      const grad = ctx.createRadialGradient(size / 2, size / 2, 1, size / 2, size / 2, size / 2);
+      grad.addColorStop(0, 'rgba(0, 0, 0, 0.55)');
+      grad.addColorStop(0.45, 'rgba(0, 0, 0, 0.28)');
+      grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, size, size);
+      const gl = this.gl;
+      this.blobShadowTex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.blobShadowTex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
     },
 
     buildFlameTexture() {
@@ -3570,24 +3871,30 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const eyeBack = Number.isFinite(window.WEBGL_EYE_BACK) ? window.WEBGL_EYE_BACK : 0.0;
       let camX = playerWorldX - dirX * eyeBack;
       let camY = playerWorldY - dirY * eyeBack;
-      //const camCell = dungeon.cells?.[`${Math.floor(camX)},${Math.floor(camY)}`];
-      //const camTile = camCell?.tile;
-      //const camBlocked = !camCell || camTile === 'wall' || camTile === 'door' || camTile === 'pillar' || camTile === 'torch';
-      /*if (camBlocked) {
-        camX = playerWorldX;
-        camY = playerWorldY;
-        const now = performance.now();
-        if (!this._lastCamGuardLog || now - this._lastCamGuardLog > 750) {
-          this._lastCamGuardLog = now;
-          console.log('[WebGL] eyeBack blocked by', camTile || 'void', 'falling back to player cell');
-        }
-      }*/
-      const playerCell = dungeon.cells?.[`${playerX},${playerY}`] || {};
+      const isBlockedCameraCell = (x, y) => {
+        const cell = dungeon.cells?.[`${Math.floor(x)},${Math.floor(y)}`];
+        if (!cell) return true;
+        const tile = cell.tile || 'floor';
+        if (tile === 'wall' || tile === 'torch') return true;
+        if (tile === 'door') return cell?.door?.isOpen === false;
+        return false;
+      };
+      if (isBlockedCameraCell(camX, camY)) {
+        camX = isBlockedCameraCell(playerWorldX, playerWorldY) ? playerX + 0.5 : playerWorldX;
+        camY = isBlockedCameraCell(playerWorldX, playerWorldY) ? playerY + 0.5 : playerWorldY;
+      }
+      // Floor under continuous feet (not only integer dungeon tile) — Party Mode mid-floor bug was
+      // eyeZ stuck low / wrong cell while raycast floors sat higher, so the floor slab cut the view.
+      const footTileX = Math.floor(playerWorldX);
+      const footTileY = Math.floor(playerWorldY);
+      const playerCell = dungeon.cells?.[`${footTileX},${footTileY}`]
+        || dungeon.cells?.[`${playerX},${playerY}`]
+        || {};
       const playerFloor = typeof playerCell.floorHeight === 'number' ? playerCell.floorHeight : 0;
-      const eyeZ = Number.isFinite(window.playerZ)
-        ? window.playerZ
-        : playerFloor + (window.PLAYER_EYE_HEIGHT || 0.5);
-      // Optional: store globally for consistency
+      const eyeH = (Number.isFinite(window.PLAYER_EYE_HEIGHT) ? window.PLAYER_EYE_HEIGHT : 0.65);
+      let eyeZ = Number.isFinite(window.playerZ) ? window.playerZ : (playerFloor + eyeH);
+      if (!Number.isFinite(eyeZ)) eyeZ = playerFloor + eyeH;
+      else if (eyeZ < playerFloor + 0.12) eyeZ = playerFloor + 0.12;
       window.playerZ = eyeZ;
 
       let minFloor = Infinity;
@@ -3920,6 +4227,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       torchLights.sort((a, b) => a.dist2 - b.dist2);
       packTorchUniforms(torchLights, torchUniformData);
 
+      // Dynamic character shadow casters (party/NPC/monster footprints) — must be in cellTex
+      // before the raycast pass so floors/walls get silhouettes from torch shadow DDA.
+      const characterVoxelActorsEarly = this._getVisibleCharacterVoxelActors();
+      // Billboard mode: do NOT stamp actor cells into cellTex (that was for voxel casters and
+      // darkened floors under party members, reading as "stuck mid-floor"). Soft blob shadows instead.
+
       gl.viewport(0, 0, width, height);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -3940,7 +4253,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform2i(this.uniformLocations.gridSize, this.gridW, this.gridH);
       gl.uniform2i(this.uniformLocations.playerTile, playerX, playerY);
       gl.uniform1i(this.uniformLocations.skipBackCell, 1);
-      gl.uniform1i(this.uniformLocations.flipY, 1);
+      // The dungeon model, movement/collision, and 2D combat map all use currentDungeon.cells[x,y]
+      // directly. Do not mirror the cell texture in WebGL or the 3D view renders a different row.
+      gl.uniform1i(this.uniformLocations.flipY, 0);
       //gl.uniform1i(this.uniformLocations.skipBackCell, window.DEBUG_WEBGL_SKIP_BACK === false ? 0 : 1);
       gl.uniform1f(this.uniformLocations.heightMin, this.heightMin);
       gl.uniform1f(this.uniformLocations.heightRange, this.heightRange);
@@ -4109,8 +4424,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const TORCH_WIDTH_RATIO = 0.6;
       const TORCH_FLAME_RATIO = 0.4;
       const TORCH_ANCHOR_RATIO = 0.78;
-      const characterVoxelActors = this._getVisibleCharacterVoxelActors();
-
       for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
         for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
           const wx = playerX + dx;
@@ -4377,47 +4690,126 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           }
         }
       }
-      for (const actor of characterVoxelActors) {
-        const renderPos = this._getCharacterMazeRenderPosition(actor, Date.now()) || { x: actor.mazeX, y: actor.mazeY };
-        const cellX = Math.round(Number.isFinite(renderPos.x) ? renderPos.x : actor.mazeX);
-        const cellY = Math.round(Number.isFinite(renderPos.y) ? renderPos.y : actor.mazeY);
-        const cell = dungeon.cells?.[`${cellX},${cellY}`] || dungeon.cells?.[`${actor.mazeX},${actor.mazeY}`];
+      // Character actors: Doom-style billboards (approved procedural sprites) + soft ground blob shadow.
+      // Views: front / threeQuarter / side / back by camera yaw (mirrors for left/right). No voxel extrusion.
+      // ALL visible dungeon actors. 2D combat-map sprites unchanged. Party Mode floor-under-feet clamp kept.
+      for (const actor of characterVoxelActorsEarly) {
+        const renderPos = this._getCharacterMazeRenderPosition(actor, now) || { x: actor.mazeX, y: actor.mazeY };
+        const footX = Number.isFinite(renderPos.x) ? renderPos.x : actor.mazeX;
+        const footY = Number.isFinite(renderPos.y) ? renderPos.y : actor.mazeY;
+        // Continuous feet → cell under soles (not +0.5 snap which could pick a terrace edge)
+        const cellX = Math.floor(footX);
+        const cellY = Math.floor(footY);
+        const cell = dungeon.cells?.[`${cellX},${cellY}`]
+          || dungeon.cells?.[`${Math.floor(footX + 0.5)},${Math.floor(footY + 0.5)}`]
+          || dungeon.cells?.[`${actor.mazeX},${actor.mazeY}`];
         if (!cell) continue;
-        const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
-        const renderWorldX = renderPos.x + 0.5;
-        const renderWorldY = renderPos.y + 0.5;
-        const relX = renderWorldX - camX;
-        const relY = renderWorldY - camY;
-        const distSq = relX * relX + relY * relY;
-        if (distSq > VIS_RADIUS * VIS_RADIUS) continue;
-        const frameIndex = Number.isFinite(actor.walkFrame) ? Math.abs(actor.walkFrame | 0) % 4 : (Math.floor(now / 220) % 4);
-        const facing = actor.facing || 'left';
-        const mesh = this.getCharacterVoxelMesh(actor, frameIndex, facing, {
-          frameCount: 4,
-          voxelSize: 24,
-          depth: 12
+        let floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+        // Only lift actors that fell onto a clearly lower disconnected terrace (same-room band).
+        // Never pull them onto playerFloor when that would bury the camera-relative floor slab through them.
+        const playerFloorH = playerFloor;
+        if (Number.isFinite(playerFloorH) && (playerFloorH - floorH) > 0.45 && (playerFloorH - floorH) <= 1.55) {
+          floorH = playerFloorH;
+        }
+        const wx = footX + 0.5;
+        const wy = footY + 0.5;
+        const dxp = wx - camX;
+        const dyp = wy - camY;
+        const distSq = dxp * dxp + dyp * dyp;
+        if (distSq > VIS_RADIUS * VIS_RADIUS || distSq < 0.04) continue;
+        const bb = this._getCharacterBillboard(actor, wx, wy, camX, camY, now);
+        if (!bb) continue;
+        const invDet = 1.0 / (planeX * dirY - dirX * planeY);
+        const transformX = invDet * (dirY * dxp - dirX * dyp);
+        const transformY = invDet * (-planeY * dxp + planeX * dyp);
+        if (transformY <= 0.05) continue;
+        const screenX = (width / 2) * (1 + transformX / transformY);
+        const worldH = bb.worldHeight;
+        // Feet sit ON the walkable floor: clamp footInset so transparent padding cannot sink the figure
+        // into the floor plane (that made the tan floor slab bisect winged characters).
+        const inset = Math.max(0, Math.min(0.08, Number.isFinite(bb.footInset) ? bb.footInset : 0));
+        const feetZ = floorH + 0.02;
+        const baseZ = feetZ - inset * worldH;
+        const screenH = worldH * focalLength / transformY;
+        const screenW = screenH;
+        const bottomY = height / 2 + (eyeZ - baseZ) * focalLength / transformY;
+        const topY = bottomY - screenH;
+        const left = screenX - screenW / 2;
+        const right = screenX + screenW / 2;
+        if (right < 0 || left >= width || bottomY < 0 || topY >= height) continue;
+        // Strong depth pull so floor raycast depth does not win through the billboard mid-body
+        const actorDepth = Math.min(1.0, Math.max(0.0, (transformY - 0.42) / depthFarDepth));
+        const shadowWorldR = Math.max(0.18, Math.min(0.42, worldH * 0.22));
+        const shadowScreenW = shadowWorldR * 2.2 * focalLength / transformY;
+        const shadowScreenH = shadowWorldR * 0.85 * focalLength / transformY;
+        const footScreenY = height / 2 + (eyeZ - feetZ) * focalLength / transformY;
+        // Shadow closer than floor so soft blob is visible (was losing the depth test)
+        const shadowDepth = Math.min(1.0, Math.max(0.0, (transformY - 0.5) / depthFarDepth));
+        sprites.push({
+          type: 'actorShadow',
+          lightX: wx,
+          lightY: wy,
+          screenX,
+          drawLeft: screenX - shadowScreenW * 0.5,
+          drawRight: screenX + shadowScreenW * 0.5,
+          drawStartY: footScreenY - shadowScreenH * 0.5,
+          drawEndY: footScreenY + shadowScreenH * 0.5,
+          rawDrawStartY: footScreenY - shadowScreenH * 0.5,
+          rawDrawEndY: footScreenY + shadowScreenH * 0.5,
+          depth: shadowDepth,
+          viewDist: transformY,
+          baseZ: feetZ,
+          worldHeight: 0.01
         });
-        if (!mesh) continue;
-        const design = actor.sprite && actor.sprite.spec && actor.sprite.spec.design ? actor.sprite.spec.design : {};
-        const torsoWidth = Number.isFinite(design.torso_width) ? design.torso_width : 5;
-        const legHeight = Number.isFinite(design.leg_height) ? design.leg_height : 10;
-        const shoulderWidth = Number.isFinite(design.head_width) ? design.head_width : torsoWidth;
-        const modelWidth = Math.max(0.286, Math.min(0.506, (0.24 + shoulderWidth * 0.022) * 1.1));
-        const modelDepth = Math.max(0.154, Math.min(0.308, (0.12 + torsoWidth * 0.015) * 1.1));
-        const modelHeight = Math.max(0.748, Math.min(1.078, (0.56 + legHeight * 0.026) * 1.1));
-        actorVoxelInstances.push({
+        sprites.push({
+          type: 'actor',
           actorName: actor.name,
-          mesh,
-          modelPos: {
-            x: renderWorldX - modelWidth * 0.5,
-            y: renderWorldY - modelDepth * 0.5,
-            z: floorH + 0.01
-          },
-          modelScale: {
-            x: modelWidth,
-            y: modelDepth,
-            z: modelHeight
-          }
+          actorTex: bb.tex,
+          texImg: null,
+          lightX: wx,
+          lightY: wy,
+          screenX,
+          drawLeft: left,
+          drawRight: right,
+          drawStartY: topY,
+          drawEndY: bottomY,
+          rawDrawStartY: topY,
+          rawDrawEndY: bottomY,
+          depth: actorDepth,
+          viewDist: transformY,
+          baseZ,
+          worldHeight: worldH
+        });
+      }
+
+      // Objects in Room: Doom-style item billboards standing on their floor cell (renderSceneItems.js)
+      const sceneItems = (typeof window.getVisibleSceneObjects === 'function' && window.SceneItems) ? window.getVisibleSceneObjects() : [];
+      for (const obj of sceneItems) {
+        const cell = dungeon.cells?.[`${obj.x},${obj.y}`];
+        if (!cell) continue;
+        const wx = obj.x + 0.5, wy = obj.y + 0.5;
+        const dxp = wx - camX, dyp = wy - camY;
+        const distSq = dxp * dxp + dyp * dyp;
+        if (distSq > VIS_RADIUS * VIS_RADIUS || distSq < 0.04) continue;
+        const it = this._getItemBillboard(obj);
+        if (!it) continue;
+        const invDet = 1.0 / (planeX * dirY - dirX * planeY);
+        const transformX = invDet * (dirY * dxp - dirX * dyp);
+        const transformY = invDet * (-planeY * dxp + planeX * dyp);
+        if (transformY <= 0.05) continue;
+        const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+        const bob = it.glow ? 0.04 + 0.03 * Math.sin(now / 420 + obj.x * 1.7 + obj.y) : 0; // magic items hover
+        const baseZ = floorH + 0.005 + bob - it.footInset * it.worldHeight;
+        const screenX = (width / 2) * (1 + transformX / transformY);
+        const screenH = it.worldHeight * focalLength / transformY;
+        const bottomY = height / 2 + (eyeZ - baseZ) * focalLength / transformY;
+        const left = screenX - screenH / 2;
+        if (left + screenH < 0 || left >= width || bottomY < 0 || bottomY - screenH >= height) continue;
+        sprites.push({
+          type: 'actor', actorName: 'item:' + obj.name, actorTex: it.tex, texImg: null, lightX: wx, lightY: wy, screenX,
+          drawLeft: left, drawRight: left + screenH, drawStartY: bottomY - screenH, drawEndY: bottomY,
+          rawDrawStartY: bottomY - screenH, rawDrawEndY: bottomY,
+          depth: Math.min(1.0, Math.max(0.0, transformY / depthFarDepth)), viewDist: transformY, baseZ, worldHeight: it.worldHeight
         });
       }
       voxelInstances.push(...actorVoxelInstances);
@@ -4455,7 +4847,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           gl.uniform2i(this.voxelUniforms.gridSize, this.gridW, this.gridH);
         }
         if (this.voxelUniforms.flipY) {
-          gl.uniform1i(this.voxelUniforms.flipY, 1);
+          gl.uniform1i(this.voxelUniforms.flipY, 0);
         }
         let baseVoxelDepthBias = 0.0;
         if (this.voxelUniforms.depthBias) {
@@ -4549,6 +4941,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       sprites.sort((a, b) => b.depth - a.depth);
 
       this.buildHaloTexture();
+      this.buildBlobShadowTexture();
       this.buildFlameTexture();
 
       gl.useProgram(this.spriteProgram);
@@ -4613,6 +5006,47 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             gl.uniform1fv(this.spriteUniforms.torchRadius, torchData.radiusArr);
             gl.uniform1fv(this.spriteUniforms.torchIntensity, torchData.intensityArr);
           }
+        }
+        if (spr.type === 'actorShadow') {
+          this.buildBlobShadowTexture();
+          if (this.blobShadowTex) {
+            const x0 = (spr.drawLeft / width) * 2 - 1, x1 = (spr.drawRight / width) * 2 - 1;
+            const y0 = 1 - (spr.drawEndY / height) * 2, y1 = 1 - (spr.drawStartY / height) * 2;
+            const verts = new Float32Array([
+              x0, y0, 0, 1, spr.depth,
+              x1, y0, 1, 1, spr.depth,
+              x0, y1, 0, 0, spr.depth,
+              x1, y1, 1, 0, spr.depth
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, this.blobShadowTex);
+            gl.uniform1i(this.spriteUniforms.tex, 0);
+            gl.uniform2f(this.spriteUniforms.lightDir, lighting.dirX, lighting.dirY);
+            gl.uniform1f(this.spriteUniforms.lightElev, lighting.elevation);
+            gl.uniform1f(this.spriteUniforms.lightIntensity, 0.0);
+            gl.uniform1f(this.spriteUniforms.profile, 0.0);
+            gl.uniform1f(this.spriteUniforms.depthAmount, 0.0);
+            gl.uniform3f(this.spriteUniforms.spritePos, spr.lightX, spr.lightY, spr.baseZ);
+            gl.uniform1f(this.spriteUniforms.spriteHeight, 0.01);
+            gl.uniform1f(this.spriteUniforms.spriteVFlip, 0.0);
+            if (this.spriteUniforms.depthShadeScale) gl.uniform1f(this.spriteUniforms.depthShadeScale, 1.0);
+            if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.02);
+            if (this.spriteUniforms.tint) gl.uniform4f(this.spriteUniforms.tint, 0.05, 0.04, 0.03, 0.62);
+            if (this.spriteUniforms.torchCount) gl.uniform1i(this.spriteUniforms.torchCount, 0);
+            gl.depthMask(false);
+            gl.disable(gl.DEPTH_TEST); // must sit on floor even when floor depth wins
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthMask(true);
+            if (this.spriteUniforms.tint) gl.uniform4f(this.spriteUniforms.tint, 1, 1, 1, 1);
+            if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.5);
+          }
+          continue;
+        }
+        if (spr.type === 'actor') {
+          this._drawCharacterBillboard(spr, width, height, lighting, depthShadeScale);
+          continue;
         }
         const tex = spr.texImg ? this.getSpriteTexture(spr.texImg) : null;
 

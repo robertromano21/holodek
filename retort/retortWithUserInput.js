@@ -20,6 +20,34 @@ const RETORT_DIR = path.join(ROOT, 'retort');
 const SID_DIR    = path.join(ROOT, 'sid');
 const RENDER_JS  = path.join(ROOT, 'assets', 'renderSid_poke.js');
 const { generateCharacterSprite, createCharacterSpriteSpec } = require('../assets/renderCharacterSprite.js');
+const {
+  buildSceneSpec,
+  sceneInputFromConsole,
+  applySceneSpecToClassification,
+  applySceneSpecToVisualStyle,
+  sceneRequiredCustomTypes,
+  checkSceneAgainstDungeon,
+  describeSceneSpec
+} = require('./sceneSpec.js');
+
+// Save the room's scene spec in the room-name database under its coordinates so
+// prose checks and later visits read the same structured scene.
+const { applySceneGraphics, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom } = require('./sceneRoomBuilder.js');
+const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
+
+function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
+  try {
+    const db = JSON.parse(dbString || '{}');
+    db[coordKey] = db[coordKey] || {};
+    db[coordKey].sceneSpec = spec;
+    const out = JSON.stringify(db, null, 2);
+    if (sharedState.setRoomNameDatabase) sharedState.setRoomNameDatabase(out);
+    return out;
+  } catch (e) {
+    console.error('[SceneSpec] failed to store spec for', coordKey, e);
+    return dbString;
+  }
+}
 
 // Helper to attach a generated sprite to a character object (used for initial PCs and rerolls)
 function attachGeneratedSpriteToCharacter(character) {
@@ -2055,6 +2083,27 @@ function calculateCumulativeXp(xpThreshold, level) {
     }
 }
 
+// generateMonstersForRoomUsingGPT writes its result into the turn-level updatedGameConsole (the
+// current room) and returns nothing. Quest seeding needs a monsters block for a *placement* room, so
+// run it on a sandbox copy and hand back only the monsters section (current room left untouched).
+async function generateMonstersBlockIsolated($, roomName, roomDescription, roomCoordinates) {
+  const saved = updatedGameConsole;
+  const base = String(saved || '')
+    .replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:|$)/, 'Monsters in Room: None\n')
+    .replace(/Monsters Equipped Properties: .*/, 'Monsters Equipped Properties: None')
+    .replace(/Monsters State: .*/, 'Monsters State: None');
+  updatedGameConsole = base;
+  let generated = base;
+  try {
+    await generateMonstersForRoomUsingGPT($, roomName, roomDescription, roomCoordinates);
+    generated = updatedGameConsole;
+  } finally {
+    updatedGameConsole = saved;
+  }
+  const block = generated.match(/Monsters in Room:[\s\S]*?(?=Rooms Visited:|$)/);
+  return block ? block[0].trim() : 'Monsters in Room: None';
+}
+
 async function generateMonstersForRoomUsingGPT($, roomName, roomDescription, roomCoordinates) {
     
 // Extract Boss Room Coordinates if they exist
@@ -2102,7 +2151,7 @@ if (currentCoordinatesMatch) {
         return; // No monsters generated in the starting room when NPCs are in the party
     } else {
         // 67% chance to generate monsters if not in the boss room or starting room with NPCs
-        if (Math.random() > 0.67) {
+        if (Math.random() > 1.00) {
             console.log("No monsters encountered this time.");
             return; // Exit function if no monsters are to be generated
         } else {
@@ -3948,7 +3997,22 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     console.error('Failed to enforce first-exit outdoor rule in dungeon test mode:', e);
   }
 
+  let reusedTestDungeon = null;
   if (isNewGeoRoom && roomDescription) {
+    try {
+      reusedTestDungeon = loadStoredRoom(geoKey, buildSceneSpec(sceneInputFromConsole(updatedGameConsole, { coords: geoCoords })));
+    } catch (e) {
+      console.warn('[SceneGfx] reuse probe failed', e.message);
+    }
+  }
+  if (reusedTestDungeon) {
+    console.log('[SceneGfx] reusing stored dungeon for', geoKey);
+    dungeon = reusedTestDungeon;
+    dungeon.geoKey = geoKey;
+    sharedState.setRoomDungeon(geoCoords, dungeon, dungeon.customTiles || []);
+    sharedState.setLastCoords(geoCoords);
+    broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
+  } else if (isNewGeoRoom && roomDescription) {
     console.log('Dungeon testing mode: building dungeon for', geoKey);
     const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
 
@@ -4006,7 +4070,22 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       console.error('Failed to persist classification for', geoKeyString, ':', persistErr);
     }
 
-    const isOutdoor = classification && classification.indoor === false;
+    // Room text is the source of truth: parse name/description/exits/objects into a scene spec
+  // that overrides the classifier wherever the text is explicit.
+  const sceneSpec = buildSceneSpec(sceneInputFromConsole(updatedGameConsole, {
+    coords: geoCoords,
+    indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
+  }));
+  classification = applySceneSpecToClassification(sceneSpec, classification);
+  if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
+  console.log('[SceneSpec]', geoKey, describeSceneSpec(sceneSpec));
+  try {
+    const levelSpec = await getLevelSpec(sceneSpec.source || {});
+    applyLevelSpecToScene(sceneSpec, levelSpec);
+    console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
+  } catch (e) { console.warn('[LevelSpec] failed', e.message); }
+
+  const isOutdoor = classification && classification.indoor === false;
     const requestedSize = (classification && typeof classification.size === 'number')
       ? classification.size
       : 32;
@@ -4022,7 +4101,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     const startX = Math.floor(size / 2);
     const startY = size - Math.floor(size / 4);
 
-    const visualStyle = await generateRoomVisualStyle($, roomDescription, geoKey, classification);
+    const visualStyle = applySceneSpecToVisualStyle(sceneSpec, await generateRoomVisualStyle($, roomDescription, geoKey, classification));
     if (!visualStyle) {
       console.error("Could not generate style JSON. Using fallback.");
     }
@@ -4034,7 +4113,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
           .filter(f => !['pillars', 'mountains'].includes(f))
       : [];
     let customTiles = [];
-    customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, requiredCustomTypes);
+    customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, Array.from(new Set([...requiredCustomTypes, ...sceneRequiredCustomTypes(sceneSpec)])));
     console.log('[Custom Tiles] Generated:', customTiles);
 
     const blueprint = await generateDungeonBlueprint(
@@ -4090,7 +4169,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     };
 
     dungeon.tiles.floor = {
-      url: generateSpriteFromStyle(visualStyle, "floor", `${geoKey}_floor`)
+      url: generateSpriteFromStyle(visualStyle && visualStyle.floorPalette ? { ...visualStyle, palette: visualStyle.floorPalette } : visualStyle, "floor", `${geoKey}_floor`)
     };
     dungeon.tiles.wall = {
       url: generateSpriteFromStyle(visualStyle, "wall", `${geoKey}_wall`)
@@ -4171,6 +4250,14 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
         }
       };
     });
+    dungeon.geoKey = geoKey;
+    try {
+      const sceneGfx = applySceneGraphics(dungeon, sceneSpec, { geoKey, customTiles });
+      customTiles = dungeon.customTiles;
+      console.log('[SceneGfx]', geoKey, JSON.stringify(sceneGfx));
+    } catch (e) {
+      console.error('[SceneGfx] graphics failed, keeping LLM sprites:', e);
+    }
 
     if (blueprint) {
       buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles);
@@ -4251,8 +4338,20 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     }
 
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
+    try {
+      const placement = placeSceneLandmarks(dungeon, sceneSpec);
+      console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
+      console.log('[SceneGfx] objects placed', geoKey, JSON.stringify(placeSceneObjects(dungeon, sceneSpec)));
+    } catch (e) {
+      console.error('[SceneGfx] landmark placement failed:', e);
+    }
 
+    dungeon.sceneSpec = sceneSpec;
+    dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
+    console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
+    roomNameDbString = storeSceneSpecInRoomDb(roomNameDbString, geoKey, sceneSpec);
     sharedState.setRoomDungeon(geoCoords, dungeon, customTiles);
+    saveStoredRoom(geoKey, dungeon);
     sharedState.setLastCoords(geoCoords);
     broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
   }
@@ -6312,8 +6411,10 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
     try {
       // Stuff the exclude guidance into the desc for the GPT-based generator
       const desc = `${roomMeta?.desc || 'A room'}\n\nIMPORTANT: Do NOT use these NPC names as monsters (they are allies in party): ${excludeNames.join(', ') || '(none)'}.`;
-      const shadow = await generateMonstersForRoomUsingGPT($, roomMeta?.name || "Room", desc, placement);
-      return (typeof shadow === 'string') ? shadow : (sharedState.getUpdatedGameConsole?.() || '');
+      // Was: returned the whole current console when the generator returned nothing, so the
+      // current room's monsters were copied into the placement room's DB entry (and the
+      // generator's own output landed in the current room). Now isolated to a monsters block.
+      return await generateMonstersBlockIsolated($, roomMeta?.name || "Room", desc, placement);
     } catch (e) {
       console.warn('[seed] ultimate fallback: empty monsters block', e);
       return 'Monsters in Room: None';
@@ -6329,16 +6430,17 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
   let roomNameDatabasePlain;
   try { roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase() || "{}"); }
   catch { roomNameDatabasePlain = {}; }
+  // Current room key is needed after this block too (quest seeding below), so compute it here.
+  const coordMatch = consoleText.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
+  const currentCoords = coordMatch
+    ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
+    : { x: 0, y: 0, z: 0 };
+  const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
   if (!isAutoForSeed) {
     // Canonicalize once per turn to merge rogue keys
     roomNameDatabasePlain = canonicalizeRoomDb(roomNameDatabasePlain);
     // Ensure the start room never loses its name
     ensureRoom(roomNameDatabasePlain, "0,0,0", { name: "Ruined Temple Entrance" });
-    const coordMatch = consoleText.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
-    const currentCoords = coordMatch
-      ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
-      : { x: 0, y: 0, z: 0 };
-    const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
     // After ensureRoom(...) + setRoomNameDatabase(...), compute currentRoomKey
     ensureRoom(roomNameDatabasePlain, currentRoomKey);
     sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
@@ -11196,12 +11298,35 @@ const lastGeoKey =
     : null;
 
 // Final room-entry decision
+// lastCoords is already updated earlier this turn (music + coords bookkeeping), so a plain
+// coordinate comparison misses real moves. Also treat "no dungeon built for this room yet" as new.
+let hasRoomDungeon = false;
+try { hasRoomDungeon = !!(sharedState.getRoomDungeon && sharedState.getRoomDungeon(geoCoords)); } catch (_) {}
 const isNewGeoRoom =
   isFirstTurn ||
   !lastGeoKey ||
-  geoKey !== lastGeoKey;
+  geoKey !== lastGeoKey ||
+  !hasRoomDungeon;
 
+// Generate each coordinate once: if this room's text is unchanged, reuse the stored dungeon
+// (same layout, textures and landmark props) instead of regenerating it.
+let reusedSceneDungeon = null;
 if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
+  try {
+    const probeSpec = buildSceneSpec(sceneInputFromConsole(updatedGameConsole, { coords: geoCoords }));
+    reusedSceneDungeon = loadStoredRoom(geoKey, probeSpec);
+  } catch (e) {
+    console.warn('[SceneGfx] reuse probe failed', e.message);
+  }
+}
+if (reusedSceneDungeon) {
+  console.log('[SceneGfx] reusing stored dungeon for', geoKey);
+  reusedSceneDungeon.geoKey = geoKey;
+  sharedState.setRoomDungeon(geoCoords, reusedSceneDungeon, reusedSceneDungeon.customTiles || []);
+  sharedState.setLastCoords(geoCoords);
+  broadcast({ type: 'dungeonLoaded', geoKey, dungeon: reusedSceneDungeon });
+  returnObj.dungeon = reusedSceneDungeon;
+} else if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
   console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
   const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
   // 🧭 STEP 0 — classify biome & size
@@ -11271,6 +11396,21 @@ try {
 }
 
 // === AFTER (existing code continues) ===
+  // Room text is the source of truth: parse name/description/exits/objects into a scene spec
+  // that overrides the classifier wherever the text is explicit.
+  const sceneSpec = buildSceneSpec(sceneInputFromConsole(updatedGameConsole, {
+    coords: geoCoords,
+    indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
+  }));
+  classification = applySceneSpecToClassification(sceneSpec, classification);
+  if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
+  console.log('[SceneSpec]', geoKey, describeSceneSpec(sceneSpec));
+  try {
+    const levelSpec = await getLevelSpec(sceneSpec.source || {});
+    applyLevelSpecToScene(sceneSpec, levelSpec);
+    console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
+  } catch (e) { console.warn('[LevelSpec] failed', e.message); }
+
   const isOutdoor = classification && classification.indoor === false;
   const requestedSize = (classification && typeof classification.size === 'number')
     ? classification.size
@@ -11288,7 +11428,7 @@ try {
   const startY = size - Math.floor(size / 4);
   
   // 🔴 STEP 1 — Ask the LLM to describe how this room should LOOK, with biome hints
-    const visualStyle = await generateRoomVisualStyle($, roomDescription, geoKey, classification);
+    const visualStyle = applySceneSpecToVisualStyle(sceneSpec, await generateRoomVisualStyle($, roomDescription, geoKey, classification));
     if (!visualStyle) {
       console.error("⚠️ Could not generate style JSON. Using fallback.");
     }
@@ -11300,7 +11440,7 @@ try {
             .filter(f => !['pillars', 'mountains'].includes(f))
         : [];
       let customTiles = [];
-      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, requiredCustomTypes);
+      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, Array.from(new Set([...requiredCustomTypes, ...sceneRequiredCustomTypes(sceneSpec)])));
       console.log('[Custom Tiles] Generated:', customTiles);
       const blueprint = await generateDungeonBlueprint(
         $,
@@ -11355,7 +11495,7 @@ try {
   };
     // 🔴 STEP 2 — Generate textures ONCE per room
     dungeon.tiles.floor = {
-      url: generateSpriteFromStyle(visualStyle, "floor", `${geoKey}_floor`)
+      url: generateSpriteFromStyle(visualStyle && visualStyle.floorPalette ? { ...visualStyle, palette: visualStyle.floorPalette } : visualStyle, "floor", `${geoKey}_floor`)
     };
   dungeon.tiles.wall = {
     url: generateSpriteFromStyle(visualStyle, "wall", `${geoKey}_wall`)
@@ -11436,6 +11576,15 @@ try {
     }
   };
     });
+    // 🔴 STEP 3b — scene-spec graphics: material textures + pixel-art landmark sprites
+    dungeon.geoKey = geoKey;
+    try {
+      const sceneGfx = applySceneGraphics(dungeon, sceneSpec, { geoKey, customTiles });
+      customTiles = dungeon.customTiles;
+      console.log('[SceneGfx]', geoKey, JSON.stringify(sceneGfx));
+    } catch (e) {
+      console.error('[SceneGfx] graphics failed, keeping LLM sprites:', e);
+    }
 
     // 🔴 STEP 4 — Build layout using blueprint (fallback to legacy if missing)
     if (blueprint) {
@@ -11488,8 +11637,21 @@ try {
   }
     // spawn safe square
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
+  // 🔴 STEP 6 — put the landmarks the text names into the room
+  try {
+    const placement = placeSceneLandmarks(dungeon, sceneSpec);
+    console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
+    console.log('[SceneGfx] objects placed', geoKey, JSON.stringify(placeSceneObjects(dungeon, sceneSpec)));
+  } catch (e) {
+    console.error('[SceneGfx] landmark placement failed:', e);
+  }
   // UPDATED: Pass customTiles to sharedState
+  dungeon.sceneSpec = sceneSpec;
+  dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
+  console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
+  roomNameDatabaseString = storeSceneSpecInRoomDb(roomNameDatabaseString, geoKey, sceneSpec);
   sharedState.setRoomDungeon(geoCoords, dungeon, customTiles);
+  saveStoredRoom(geoKey, dungeon);
   sharedState.setLastCoords(geoCoords);
   broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
   returnObj.dungeon = dungeon;
