@@ -33,8 +33,15 @@ const {
 // Save the room's scene spec in the room-name database under its coordinates so
 // prose checks and later visits read the same structured scene.
 const { applySceneGraphics, placeSceneLandmarks, placeSceneObjects } = require('./sceneRoomBuilder.js');
+const { applySceneArchitecture } = require('./sceneArchitecture.js');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
 const { logDungeonConstruction, saveDungeonDiagnostic } = require('../dungeonDiagnostics');
+const { actionDice } = require('./actionDice');
+const { createCombatSpace } = require('./dungeonReach');
+const { parseSheets } = require('../assets/partyRoster');
+const { doorIntent, prepareDoorAction, applyDoorAction } = require('./dungeonActions');
+const { buildEnvironment } = require('../assets/dungeonEnvironment');
+const LivingEnvironments = require('../assets/livingEnvironments');
 
 function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
   try {
@@ -78,6 +85,7 @@ function computeDungeonGeometryStamp(dungeon, geoKey) {
 
 function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   if (!dungeon) return dungeon;
+  if (!dungeon.environment) dungeon.environment = buildEnvironment(dungeon);
   dungeon.geoKey = geoKey;
   dungeon.customTiles = Array.isArray(customTiles) ? customTiles : (dungeon.customTiles || []);
   const geometryStamp = computeDungeonGeometryStamp(dungeon, geoKey);
@@ -4117,6 +4125,8 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
   } catch (e) { console.warn('[LevelSpec] failed', e.message); }
 
+  LivingEnvironments.enrichSceneSpec(sceneSpec);
+
   const isOutdoor = classification && classification.indoor === false;
     const requestedSize = (classification && typeof classification.size === 'number')
       ? classification.size
@@ -4301,6 +4311,10 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     }
 
     logDungeonConstruction('layout', dungeon);
+    applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+    dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
+    console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
+    logDungeonConstruction('architecture', dungeon);
     try {
       const cellsArray = [];
       for (const [key, cell] of Object.entries(dungeon.cells || {})) {
@@ -4337,7 +4351,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       for (let x = 1; x < dungeon.layout.width - 1; x++) {
         const key = `${x},${y}`;
         const cell = dungeon.cells[key];
-        if (!cell || cell.tile !== "wall") continue;
+        if (!cell || cell.tile !== "wall" || cell.architectureRole) continue;
         const N = dungeon.cells[`${x},${y-1}`];
         const S = dungeon.cells[`${x},${y+1}`];
         const E = dungeon.cells[`${x+1},${y}`];
@@ -7391,7 +7405,74 @@ function dropMonsterItemsToRoom(targetMonster) {
     updatedGameConsole = updatedGameConsole.replace(equippedLineRegex, `$1 ${newEquippedLine}`);
 }
 
+async function tryDungeonDoorAction(userInput) {
+    if (!doorIntent(userInput)) return null;
+    const coords = sharedState.getLastCoords();
+    const geoKey = `${coords.x},${coords.y},${coords.z}`;
+    const dungeon = sharedState.getRoomDungeon(coords);
+    if (!dungeon) return null;
+    const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+    const pc = roster.find(c => c.type === 'pc');
+    const namedNpcs = roster.filter(c => c.type === 'npc' && userInput.toLowerCase().includes(c.name.toLowerCase()));
+    if (namedNpcs.length > 1) return { content: 'Choose one party member to attempt the door action.', actionOnly: true };
+    const actor = namedNpcs[0] || pc;
+    const inventory = updatedGameConsole.match(/^Inventory:\s*(.*)$/m)?.[1] || '';
+    const plan = prepareDoorAction({ input: userInput, dungeon, actor, geoKey, inventory });
+    if (!plan.allowed) return { content: plan.message, actionOnly: true };
+    actionDice.begin('exploration', geoKey, broadcast);
+    try {
+        const roll = plan.check ? await actionDice.roll({ actor: actor.name, player: actor === pc, label: plan.label, target: `door ${plan.key}`, difficulty: plan.difficulty }) : null;
+        if (plan.check && !roll) return { content: 'No roll was made. The door is unchanged.', actionOnly: true };
+        const latestCoords = sharedState.getLastCoords();
+        const latestDungeon = sharedState.getRoomDungeon(coords);
+        if (`${latestCoords.x},${latestCoords.y},${latestCoords.z}` !== geoKey ||
+            latestDungeon?._geometryStamp !== dungeon._geometryStamp ||
+            JSON.stringify(latestDungeon?.actionAttempts) !== JSON.stringify(dungeon.actionAttempts)) {
+            return { content: 'The room changed while that action was pending. The door was not changed.', actionOnly: true };
+        }
+        const success = !plan.check || roll.success;
+        const next = applyDoorAction(dungeon, plan, success);
+        const finalized = finalizeRoomDungeon(geoKey, next, dungeon.customTiles || []);
+        sharedState.setRoomDungeon(coords, finalized, finalized.customTiles || []);
+        broadcast({ type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp, geometryStamp: finalized._geometryStamp, cells: { [plan.key]: finalized.cells[plan.key] }, actionAttempts: finalized.actionAttempts });
+        console.info('[DungeonAction]', JSON.stringify({ geoKey, actor: actor.name, kind: plan.kind, target: plan.key, roll, success, geometryStamp: finalized._geometryStamp }));
+        return { content: `${actor.name}: ${plan.label}.${roll ? ` d20 ${roll.natural} against DC ${plan.difficulty}.` : ''} ${success ? plan.success : plan.failure}`, actionOnly: true };
+    } finally {
+        actionDice.end();
+    }
+}
+
+let combatSpace = null;
 async function handleCombatRound($, userInput, combatMode) {
+    const coords = sharedState.getLastCoords();
+    const geoKey = `${coords.x},${coords.y},${coords.z}`;
+    const dungeon = sharedState.getRoomDungeon(coords);
+    const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+    combatSpace = dungeon ? createCombatSpace(dungeon, roster, geoKey) : null;
+    actionDice.begin('combat', geoKey, broadcast);
+    try {
+        return await resolveCombatRound($, userInput, combatMode);
+    } finally {
+        combatSpace = null;
+        actionDice.end();
+    }
+}
+
+async function rollCombatAttack(combatant, target, pc, combatLog) {
+    if (combatSpace && !combatSpace.canAttack(combatant, target)) {
+        combatLog.push(`${combatant.name} cannot reach ${target.name} with a clear attack. Reposition before attacking.`);
+        return null;
+    }
+    const result = await actionDice.roll({
+        actor: combatant.name, player: combatant.name === pc?.name,
+        label: 'Attack', target: target.name, modifier: combatant.attack, difficulty: target.ac
+    });
+    if (!result) combatLog.push(`${combatant.name} did not roll in time and holds the attack.`);
+    else combatLog.push(`${combatant.name}: d20 ${result.natural} + ${combatant.attack} = ${result.total}.`);
+    return result;
+}
+
+async function resolveCombatRound($, userInput, combatMode) {
     console.log('Combat mode in handleCombatRound:', combatMode);
     const combatLog = [];
     
@@ -7554,7 +7635,9 @@ async function handleCombatRound($, userInput, combatMode) {
             }
         }
 
-        const attackRoll = roll1d20() + combatant.attack;
+        const diceResult = await rollCombatAttack(combatant, target, pc, combatLog);
+        if (!diceResult) continue;
+        const attackRoll = diceResult.total;
         const attackSuccess = attackRoll >= target.ac;
         combatLog.push(`${combatant.name} rolls ${attackRoll} to hit ${target.name} (AC ${target.ac}).`);
 
@@ -7566,7 +7649,7 @@ async function handleCombatRound($, userInput, combatMode) {
             combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
             // Live patch after every damage so the console text (and thus Game Console panel after round) has the intermediate HP.
-            const monstersForPatchMid = [...(aliveMonsters || []), ...(killedThisRound || [])];
+            const monstersForPatchMid = aliveMonsters || [];
             updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monstersForPatchMid);
             needsUpdate = true;
 
@@ -7907,7 +7990,9 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             const matchingMonsters = targets.filter(monster => 
                 monster.name.toLowerCase().startsWith(specifiedTargetName.toLowerCase())
             );
-            if (matchingMonsters.length > 0) {
+            if (matchingMonsters.length > 0 && combatSpace) {
+                target = matchingMonsters[0];
+            } else if (matchingMonsters.length > 0) {
                 // Check if the specified monster is reachable on the map
                 const specifiedMonster = matchingMonsters[0];
                 const monsterInOrder = initiativeOrder.find(c => c.name === specifiedMonster.name);
@@ -7932,8 +8017,9 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             target = targets.reduce((closest, targetCandidate) => {
                 const targetInOrder = initiativeOrder.find(c => c.name === targetCandidate.name);
                 if (targetCandidate.hp <= 0 || !targetInOrder || alreadyKilled.has(targetCandidate.name)) return closest;
-                const dist = Math.abs(combatant.x - targetInOrder.x) + Math.abs(combatant.y - targetInOrder.y);
-                return !closest || dist < Math.abs(combatant.x - closest.x) + Math.abs(combatant.y - closest.y) ? targetInOrder : closest;
+                const dist = combatSpace ? combatSpace.distance(combatant, targetInOrder) : Math.abs(combatant.x - targetInOrder.x) + Math.abs(combatant.y - targetInOrder.y);
+                const closestDist = closest && (combatSpace ? combatSpace.distance(combatant, closest) : Math.abs(combatant.x - closest.x) + Math.abs(combatant.y - closest.y));
+                return !closest || dist < closestDist ? targetInOrder : closest;
             }, null);
 
             if (!target) {
@@ -7946,7 +8032,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
         const isAdjacent = getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y);
         
-        if (!isAdjacent) {
+        if (!isAdjacent && !combatSpace) {
             const path = findPath(combatant.x, combatant.y, target.x, target.y, currentOccupiedPositions);
             if (path.length > 1) {
                 // Check if the final position is occupied before moving
@@ -7986,8 +8072,10 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             }
         }
 
-        if (getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y)) {
-            const attackRoll = roll1d20() + combatant.attack;
+        if (combatSpace || getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y)) {
+            const diceResult = await rollCombatAttack(combatant, target, pc, combatLog);
+            if (!diceResult) continue;
+            const attackRoll = diceResult.total;
             combatLog.push(`${combatant.name} rolls ${attackRoll} to hit ${target.name} (AC ${target.ac}).`);
             const attackSuccess = attackRoll >= target.ac;
 
@@ -8277,7 +8365,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     });
 
     combatCharacters = allCombatants.map(c => {
-      const entry = { name: c.name, type: c === pc ? 'pc' : npcs.some(n => n.name === c.name) ? 'npc' : 'monster', x: c.x, y: c.y };
+      const entry = { ...combatCharacters.find(old => old.name === c.name), name: c.name, type: c === pc ? 'pc' : npcs.some(n => n.name === c.name) ? 'npc' : 'monster', x: c.x, y: c.y };
       if (c === pc && pc && pc.sprite) entry.sprite = pc.sprite;
       return entry;
     });
@@ -8363,6 +8451,18 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             }).filter(t => t.hp > 0 && !alreadyKilled.has(t.name));
 
             const targetNames = validTargets.map(t => t.name);
+            let timer;
+            const finish = target => {
+                clearTimeout(timer);
+                sharedState.emitter.removeListener(`target_response_${combatant.name}`, handleTargetResponse);
+                resolve(target);
+            };
+            const handleTargetResponse = response => {
+                const selectedTarget = validTargets.find(t => t.name.toLowerCase() === String(response.target).toLowerCase());
+                if (selectedTarget) finish(selectedTarget);
+            };
+            sharedState.emitter.on(`target_response_${combatant.name}`, handleTargetResponse);
+            timer = setTimeout(() => finish(null), 180000);
             broadcast({
                 type: 'target_prompt',
                 combatant: combatant.name,
@@ -8370,12 +8470,6 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                 positions: validTargets.map(t => ({ name: t.name, x: t.x, y: t.y }))
             });
 
-            const handleTargetResponse = (response) => {
-                const selectedTarget = validTargets.find(t => t.name.toLowerCase() === response.target.toLowerCase());
-                resolve(selectedTarget || validTargets[Math.floor(Math.random() * validTargets.length)]);
-            };
-
-            sharedState.emitter.once(`target_response_${combatant.name}`, handleTargetResponse);
         });
     }
 
@@ -8398,9 +8492,10 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
         }
 
         let target;
-        if (combatant === pc || npcs.some(n => n.name === combatant.name)) {
+        if (combatant.name === pc?.name || npcs.some(n => n.name === combatant.name)) {
             combatLog.push(`Waiting for player to select a target for ${combatant.name}.`);
             target = await promptForTarget(combatant, targets);
+            if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
             combatLog.push(`${combatant.name} targets ${target.name} at (${target.x}, ${target.y}).`);
         } else {
             // Monster: select the nearest living target using real-time positions
@@ -8419,7 +8514,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
 
         const isAdjacent = getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y);
 
-        if (!isAdjacent) {
+        if (!isAdjacent && !combatSpace) {
             const path = findPath(combatant.x, combatant.y, target.x, target.y, currentOccupiedPositions);
             if (path.length > 1) {
                 const finalPosition = path[path.length - 1];
@@ -8457,8 +8552,10 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             }
         }
 
-        if (getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y)) {
-            const attackRoll = roll1d20() + combatant.attack;
+        if (combatSpace || getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y)) {
+            const diceResult = await rollCombatAttack(combatant, target, pc, combatLog);
+            if (!diceResult) continue;
+            const attackRoll = diceResult.total;
             combatLog.push(`${combatant.name} rolls ${attackRoll} to hit ${target.name} (AC ${target.ac}).`);
             const attackSuccess = attackRoll >= target.ac;
 
@@ -8836,7 +8933,11 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
     }
   }
 
-  const selectedCharacters = [...pcs, ...npcs, ...monsters];
+  // Only the acting party members roll, not every observer and creature in the room.
+  pcs = parseSheets(pcDetails?.[1], 'pc').map(c => c.name);
+  npcs = parseSheets(npcsDetails?.[1], 'npc').map(c => c.name);
+  const commandedNpcs = npcs.filter(name => userInput.toLowerCase().includes(name.toLowerCase()));
+  const selectedCharacters = commandedNpcs.length ? commandedNpcs : pcs;
   if (selectedCharacters.length === 0) {
     console.error("No characters were selected for dice rolls.");
     return { error: "No characters to process." };
@@ -8982,14 +9083,16 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
   });
 
   // Roll and select
-  selectedCharacters.forEach((character, index) => {
-    const diceRoll = Math.floor(Math.random() * 20) + 1;
+  for (const [index, character] of selectedCharacters.entries()) {
+    const rolled = await actionDice.roll({ actor: character, player: pcs.includes(character), label: action, target: userInput.slice(0, 180) });
+    if (!rolled) return { cancelled: true, reason: 'No roll was made. The attempted action has not taken place.' };
+    const diceRoll = rolled.natural;
     const characterOutcomes = outcomeRangesList[index] || [];
     characterOutcomes.sort((a,b) => a.low - b.low);
     const selected = characterOutcomes.find(r => diceRoll >= r.low && diceRoll <= r.high);
     diceRolls.push({ character, roll: diceRoll });
     outcomes.push({ character, outcome: selected ? selected.outcome : `No outcome for ${character} at ${diceRoll}.` });
-  });
+  }
 
   const initialOutcomes = {
     "Selected Characters": selectedCharacters,
@@ -9851,6 +9954,16 @@ async function generatePythonCode($, userInput, updatedGameConsole, errorLogs = 
 }
 
 async function adjudicateActionWithSimulation($, userInput, updatedGameConsole, activeTask = null, maxRetries = 3, delayMs = 1000) {
+  const coords = sharedState.getLastCoords();
+  actionDice.begin('exploration', `${coords.x},${coords.y},${coords.z}`, broadcast);
+  try {
+    return await resolveActionWithSimulation($, userInput, updatedGameConsole, activeTask, maxRetries, delayMs);
+  } finally {
+    actionDice.end();
+  }
+}
+
+async function resolveActionWithSimulation($, userInput, updatedGameConsole, activeTask = null, maxRetries = 3, delayMs = 1000) {
   if (!activeTask) {
     const tasks = sharedState.getCurrentTasks?.() || [];
     const idx   = sharedState.getCurrentTaskIndex?.() || 0;
@@ -9867,7 +9980,8 @@ async function adjudicateActionWithSimulation($, userInput, updatedGameConsole, 
 
             // Step 1: Generate initial outcomes
             console.log("Generating outcomes...");
-            const outcomesResult = await generateOutcomes($, userInput, updatedGameConsole, activeTask);
+            const outcomesResult = initialOutcomes || await generateOutcomes($, userInput, updatedGameConsole, activeTask);
+            if (outcomesResult.cancelled) return { narrative: outcomesResult.reason, updatedGameConsole };
 
             // Validate outcomes result
             if (outcomesResult.error) {
@@ -10970,6 +11084,10 @@ If there are monsters in the room, they may not know who Suzerain is or understa
         //$.temperature = 1.0;
         $.user`There are no monsters in the ${roomName}. Store this information in memory and await the next prompt.`        
     }
+    if (!roomDescriptionGenerated) {
+        const doorAction = await tryDungeonDoorAction(userInput);
+        if (doorAction) return doorAction;
+    }
     let combatLog = ''; // Declare combatLog with an empty string as the initial value
 
 let charactersAttackResult = '';
@@ -11033,7 +11151,8 @@ if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") &&
   const { runSimulation } = await shouldRunAdjudication($, userInput, updatedGameConsole);
 
   if (runSimulation) {
-    currentSituation = await adjudicateActionWithSimulation($, userInput, updatedGameConsole, maxRetries = 3, delayMs = 1000);
+    currentSituation = await adjudicateActionWithSimulation($, userInput, updatedGameConsole);
+    formattedCurrentSituation = currentSituation?.narrative || '';
 
     if (currentSituation == null) {
       console.warn("currentSituation is null or undefined.");
@@ -11431,6 +11550,8 @@ try {
     console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
   } catch (e) { console.warn('[LevelSpec] failed', e.message); }
 
+  LivingEnvironments.enrichSceneSpec(sceneSpec);
+
   const isOutdoor = classification && classification.indoor === false;
   const requestedSize = (classification && typeof classification.size === 'number')
     ? classification.size
@@ -11616,12 +11737,16 @@ try {
       buildIndoorLayout(dungeon, classification);
     }
   logDungeonConstruction('layout', dungeon);
+  applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+  dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
+  console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
+  logDungeonConstruction('architecture', dungeon);
   // 🔴 STEP 4 — insert doors between floors
   for (let y = 1; y < dungeon.layout.height - 1; y++) {
     for (let x = 1; x < dungeon.layout.width - 1; x++) {
       const key = `${x},${y}`;
       const cell = dungeon.cells[key];
-      if (!cell || cell.tile !== "wall") continue;
+      if (!cell || cell.tile !== "wall" || cell.architectureRole) continue;
       const N = dungeon.cells[`${x},${y-1}`];
       const S = dungeon.cells[`${x},${y+1}`];
       const E = dungeon.cells[`${x+1},${y}`];
@@ -12196,6 +12321,7 @@ async function generateFullCharacterWithRetortSprite(baseCharacter) {
 
 // Export everything the rest of the app needs
 module.exports = {
+  finalizeRoomDungeon,
   retortWithUserInput,
   runNpcAutonomyTick,
   generateCharacterSpriteSpecWithRetort,

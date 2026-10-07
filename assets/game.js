@@ -562,6 +562,30 @@ eventSource.onmessage = function(event) {
   let data;
   try { data = JSON.parse(event.data); } catch { return; }
 
+  if (data.type === 'dice_state') {
+    window.receiveDiceState?.(data);
+    if (!data.active) window._combatRoundActiveUntil = 0;
+    return;
+  }
+
+  if (data.type === 'dungeonCellUpdate') {
+    if (!currentDungeon || currentDungeon.geoKey !== data.geoKey) return;
+    if (currentDungeon._geometryStamp !== data.previousStamp && currentDungeon._geometryStamp !== data.geometryStamp) {
+      console.error('[DungeonAction] Geometry revision mismatch; ignoring stale door update.', data);
+      return;
+    }
+    Object.assign(currentDungeon.cells, data.cells);
+    currentDungeon.actionAttempts = data.actionAttempts;
+    if (data.livingEncounter) currentDungeon.livingEncounter = data.livingEncounter;
+    currentDungeon._geometryStamp = data.geometryStamp;
+    currentDungeon._meta = { ...currentDungeon._meta, geometryStamp: data.geometryStamp };
+    delete currentDungeon._lodCache;
+    idbSetDungeon(data.geoKey, currentDungeon).catch(console.error);
+    renderDungeonView();
+    window.combatGame?.scene?.getScene('CombatScene')?.redrawCombatRT?.();
+    return;
+  }
+
   // Room music
   if (data?.type === 'roomMusicReady' && data?.wav) {
     playRoomWavFresh(data.wav, data.token || Date.now());
@@ -658,7 +682,7 @@ eventSource.onmessage = function(event) {
     });
   } else if (data.type === 'final') {
         const { combatCharactersString } = data;
-        const newCombatCharacters = JSON.parse(combatCharactersString);
+        let newCombatCharacters = JSON.parse(combatCharactersString);
         // Restore selected sprite on PC if the update stripped it, to keep the reviewed image as the PC visual.
         const pending = window._pendingStartingCharacter;
         const selectedSprite = (pending && pending.sprite && pending.sprite.dataUrl ? pending.sprite : (window._selectedPCSprite && window._selectedPCSprite.dataUrl ? window._selectedPCSprite : null));
@@ -673,8 +697,9 @@ eventSource.onmessage = function(event) {
                 ensureKnownSpritesInCombatList(window.combatCharacters);
         syncPartyMazeToCombatPositions(false);
         newCombatCharacters = window.combatCharacters;
-        const combatScene = window.combatGame.scene.getScene('CombatScene');
+        const combatScene = window.combatGame?.scene?.getScene('CombatScene');
         if (combatScene) combatScene.updatePositions(newCombatCharacters);
+        window.renderPartyIconDock?.();
     } else if (data.type === 'target_prompt') {
         const { combatant, targets, positions } = data;
         showTargetSelectionPopup(combatant, targets, positions);
@@ -799,6 +824,7 @@ function updateCharacterPosition(characterName, x, y) {
 
 // Move the player by a delta — DUNGEON-CENTRIC (player stays centered in combat map)
 function movePlayerByDelta(dx, dy) {
+  if (window.actionDiceState?.active) return;
   const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
   if (!combatScene || !combatScene.pcName || !combatScene.characters[combatScene.pcName]) {
     console.warn('movePlayerByDelta: no combatScene/pc yet');
@@ -1628,6 +1654,11 @@ function getCombatMapRotationAngle() {
 }
 
 function updateDungeonMovement(now) {
+  if (window.actionDiceState?.active) {
+    DUNGEON_MOVE.lastTime = now;
+    DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
+    return false;
+  }
   if (!currentDungeon) return false;
   if (ensurePlayerOnValidTile()) {
     renderDungeonView();
@@ -6420,7 +6451,10 @@ return;
 
 // Function to display PC data in the PC column
 function displayPCData(charactersString) {
+  window._partyInfoPCString = charactersString || '';
+  window.renderPartyIconDock?.();
   const pcColumn = document.querySelector('.character-column:nth-child(1)');
+  if (!pcColumn) return;
 
   // Clear the PC column first
   pcColumn.innerHTML = '';
@@ -6438,6 +6472,14 @@ function displayAllNPCData(npcsString, npcNumber, removedCharacterName, npcsStri
   if (npcsStringUpdated) {
     npcsString = npcsStringUpdated;
   }
+  window._partyInfoNPCString = npcsString || '';
+  if (window.PartyRoster && Array.isArray(window.combatCharacters)) {
+    const members = new Set(window.PartyRoster.parseSheets(npcsString, 'npc').map(c => c.name.toLowerCase()));
+    window.combatCharacters.forEach(c => {
+      if (members.has(String(c.name || c.Name).toLowerCase()) && c.type === 'monster') c.type = 'npc';
+    });
+  }
+  window.renderPartyIconDock?.();
 
   // Split the NPCs' data by lines
   let npcDataLines = npcsString.split('\n');
@@ -6447,6 +6489,7 @@ function displayAllNPCData(npcsString, npcNumber, removedCharacterName, npcsStri
 
   // Find the corresponding <td> element by index
   const npcDataElement = document.querySelectorAll('.character-column')[npcNumber + 1]; // +1 to account for the PC column
+  if (!npcDataElement) return;
 
   // Clear the HTML content of the NPC slot
   npcDataElement.innerHTML = '';
@@ -8091,7 +8134,7 @@ function markCombatRoundActive(ms = 90000) {
   window._combatRoundActiveUntil = Date.now() + ms;
 }
 function isCombatRoundActive() {
-  return Date.now() < (window._combatRoundActiveUntil || 0);
+  return !!window.actionDiceState?.active || Date.now() < (window._combatRoundActiveUntil || 0);
 }
 if (typeof window !== 'undefined') window.markCombatRoundActive = markCombatRoundActive;
 
@@ -8831,6 +8874,7 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
 window.updateMonsterWandering = updateMonsterWandering;
 
 function updatePartyMazeLocomotion(force = false) {
+  if (window.actionDiceState?.active) return false;
   if (!shouldUsePartyMazeAnchors()) return false;
   const now = Date.now();
   if (!force && now - _partyMazeStepAt < NPC_MOVE_THINK_MS) return false;
@@ -9448,6 +9492,10 @@ function startKeepAliveInterval(chatLog) {
 }
 
 async function chatbotprocessinput(textin) {
+  if (window.actionDiceState?.active) {
+    updateChatLog('<br>Finish the current action and any pending d20 roll first.<br>');
+    return;
+  }
   
     let userInput = document.getElementById("chatuserinput").value;
   document.getElementById("chatuserinput").value = "";
@@ -12081,10 +12129,10 @@ function fetchWithTimeout2(resource, options = {}, timeout = TIMEOUT_DURATION2) 
 
 const combatMode = window.combatMode;
 
-fetchWithTimeout('/updateState7', {
+await fetchWithTimeout('/updateState7', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode }),
+    body: JSON.stringify({ personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString: JSON.stringify(window.combatCharacters || []), combatMode }),
 })
     .then(response => response.json())
     .then(data => console.log(data))

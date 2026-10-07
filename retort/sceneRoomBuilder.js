@@ -13,6 +13,7 @@ const path = require('path');
 const { createCanvas } = require('canvas');
 const { drawLandmarkSprite, resolveLandmarkDrawer, landmarkSpriteSpec } = require('../assets/renderSceneProps.js');
 const { drawSceneSurface, hasMaterial } = require('../assets/renderSceneTextures.js');
+const { select: selectVoxelShape } = require('../assets/scenePropVoxels.js');
 
 const SPRITE_DIR = process.env.HOLODEK_SPRITE_DIR || path.join(__dirname, '../sid/sprites');
 const LIBRARY_FILE = path.join(SPRITE_DIR, '_library.json');
@@ -157,11 +158,15 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const prevSpec = dungeon.tiles[name] && dungeon.tiles[name].spriteSpec;
     dungeon.tiles[name] = {
       url: r.url,
-      // pixel billboards need a flat/slab profile; keep the LLM's collision size if it gave one
-      spriteSpec: { ...landmarkSpriteSpec(drawer, prim), ...(prevSpec && prevSpec.collisionRadius ? { collisionRadius: prevSpec.collisionRadius } : {}) },
+      // Retain sprites for the map/Canvas fallback; solid props use the GPU voxel pass.
+      spriteSpec: { ...landmarkSpriteSpec(drawer, prim),
+        ...(selectVoxelShape(tile.type, assembly, prim) ? {
+          voxelShape: selectVoxelShape(tile.type, assembly, prim), material: material || (['dead_tree', 'roots'].includes(selectVoxelShape(tile.type, assembly, prim)) ? 'wood' : 'stone')
+        } : {}),
+        ...(prevSpec && prevSpec.collisionRadius ? { collisionRadius: prevSpec.collisionRadius } : {}) },
       landmark: { type: lm.type, drawer, material, condition, shape: prim ? prim.shape : null, label: lm.label || null }
     };
-    report.landmarks.push({ tile: name, drawer, material, condition, reused: r.reused });
+    report.landmarks.push({ tile: name, drawer, material, condition, voxelShape: dungeon.tiles[name].spriteSpec.voxelShape || null, reused: r.reused });
   });
   dungeon.customTiles = tiles;
   return report;
@@ -255,7 +260,7 @@ function placeSceneLandmarks(dungeon, spec) {
   const maxD = Math.max(w, h);
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
     const c = cells[`${x},${y}`];
-    if (!c || c.tile !== 'floor') continue;
+    if (!c || c.tile !== 'floor' || c.navigationReserved) continue;
     if (!base.seen[x + y * w]) continue;
     if (Math.max(Math.abs(x - sx), Math.abs(y - sy)) < 2) continue;
     if (nearDoor(cells, x, y)) continue;
@@ -273,7 +278,7 @@ function placeSceneLandmarks(dungeon, spec) {
   let wallPool = [];
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
     const c = cells[`${x},${y}`];
-    if (!c || c.tile !== 'floor' || !base.seen[x + y * w]) continue;
+    if (!c || c.tile !== 'floor' || c.navigationReserved || !base.seen[x + y * w]) continue;
     if (Math.max(Math.abs(x - sx), Math.abs(y - sy)) < 2 || nearDoor(cells, x, y)) continue;
     const p = { x, y, d: Math.hypot(x - sx, y - sy) };
     if (p.d > viewR) continue;
@@ -283,7 +288,7 @@ function placeSceneLandmarks(dungeon, spec) {
   const rubbleTile = rubbleIdx >= 0 ? `custom_${tiles[rubbleIdx].type}_${rubbleIdx}` : null;
   const tryPlace = (p, tileName) => {
     const c = cells[`${p.x},${p.y}`];
-    if (!c || c.tile !== 'floor') return false;
+    if (!c || c.tile !== 'floor' || c.navigationReserved) return false;
     const prev = { tile: c.tile, feature: c.feature };
     c.tile = tileName; c.feature = tileName;
     const after = bfsCount(cells, w, h, sx, sy);
@@ -313,7 +318,14 @@ function placeSceneLandmarks(dungeon, spec) {
     let guard = 0;
     while (have < want && guard++ < 40 && (pool.length || wallPool.length)) {
       let choice = null;
-      if (lm.placement === 'rows') {
+      const role = /sarcophag|coffin|tomb/.test(lm.type) ? 'tomb' : drawer;
+      const structureAnchors = (dungeon.sceneArchitecture?.anchors || []).filter(a => a.role === role);
+      if (structureAnchors.length) {
+        const anchor = structureAnchors[have % structureAnchors.length];
+        choice = pool.slice().sort((a, b) => Math.hypot(a.x - anchor.x, a.y - anchor.y) - Math.hypot(b.x - anchor.x, b.y - anchor.y))[0] || null;
+      }
+      if (choice) { /* The room plan provides a physical destination for this landmark. */ }
+      else if (lm.placement === 'rows') {
         // colonnade / arcade: two parallel rows along the room's long axis, evenly spaced (multi-cell structure)
         const horiz = w >= h;
         const lineA = Math.round((horiz ? h : w) / 3), lineB = Math.round((horiz ? h : w) * 2 / 3);

@@ -11,9 +11,15 @@
 <audio id="room-music" src="/sid/current_room.wav" loop autoplay></audio>
  <script src="/assets/renderCharacterProcedural.js"></script>
  <script src="/assets/renderSceneItems.js"></script>
+ <script src="/assets/dungeonEnvironment.js"></script>
+ <script src="/assets/livingEnvironments.js"></script>
+ <script defer src="/assets/livingEnvironmentUi.js"></script>
  <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js"></script>
+ <script src="/assets/partyRoster.js"></script>
+ <script src="/assets/actionDiceUi.js"></script>
 <script src="/assets/game.js"></script>
+ <script src="/assets/scenePropVoxels.js"></script>
  <script src="/assets/rendererWebGL.js"></script>
  <script src="/assets/rendererWebGPU.js"></script>
    <script>
@@ -419,6 +425,9 @@ function toggleCombatMode() {
     }
 
     function getCombatRosterForUi() {
+      if (window.PartyRoster) {
+        return window.PartyRoster.partyRoster(window._partyInfoPCString, window._partyInfoNPCString, window.combatCharacters || []);
+      }
       const baseRoster = Array.isArray(window.combatCharacters)
         ? window.combatCharacters.filter(entry => entry && (entry.type === 'pc' || entry.type === 'npc'))
         : [];
@@ -510,6 +519,17 @@ function toggleCombatMode() {
     }
 
     function getPartyInfoEntries() {
+      if (window.PartyRoster && (window._partyInfoPCString !== undefined || window._partyInfoNPCString !== undefined)) {
+        const lookup = getPartyInfoSpriteLookup();
+        const escape = text => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        return window.PartyRoster.partyRoster(window._partyInfoPCString, window._partyInfoNPCString, window.combatCharacters || []).map(source => ({
+          label: source.name,
+          html: escape(source.sheet || '').replace(/\n/g, '<br>'),
+          hp: `${source.hp ?? source.HP ?? '--'}/${source.maxhp ?? source.maxHP ?? source.MaxHP ?? '--'}`,
+          sprite: source.sprite || lookup.get(source.name.toLowerCase())?.sprite || null,
+          source
+        }));
+      }
       const columns = Array.from(document.querySelectorAll('.character-column'));
       const spriteLookup = getPartyInfoSpriteLookup();
       const isPlaceholderLabel = (label) => {
@@ -550,7 +570,7 @@ function toggleCombatMode() {
       rosterEntries.forEach((entry, index) => {
         const label = String(entry.name || entry.Name || `Member ${index + 1}`).trim();
         const key = label.toLowerCase();
-        const textEntry = textByName.get(key) || columnEntries[index] || null;
+        const textEntry = textByName.get(key) || null;
         const supplemental = spriteLookup.get(key) || null;
         const source = {
           ...(supplemental && supplemental.source ? supplemental.source : {}),
@@ -676,6 +696,7 @@ function toggleCombatMode() {
       const entries = getPartyInfoEntries();
       if (!entries.length) {
         dock.innerHTML = '';
+        window.renderPartyDice?.(dock, entries);
         return;
       }
       const activeIndex = Math.max(0, Math.min(entries.length - 1, window._partyPanelIndex || 0));
@@ -683,16 +704,17 @@ function toggleCombatMode() {
         const safeLabel = String(entry.label || `Member ${index + 1}`)
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;');
-        return `<button class="party-icon-button${index === activeIndex ? ' active' : ''}" onclick="openPartySheet(${index})" title="${safeLabel}">
+          .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        return `<div class="party-icon-slot" data-party-slot="${index}"><button class="party-icon-button${index === activeIndex ? ' active' : ''}" onclick="openPartySheet(${index})" title="${safeLabel}">
           <canvas class="party-icon-canvas" id="party-icon-canvas-${index}" width="28" height="28"></canvas>
           <span class="party-icon-name">${safeLabel.slice(0, 8)}</span>
           <span class="party-icon-hp">${entry.hp || '--/--'}</span>
-        </button>`;
+        </button></div>`;
       }).join('');
       entries.forEach((entry, index) => {
         drawPartySpriteCanvas(document.getElementById(`party-icon-canvas-${index}`), entry);
       });
+      window.renderPartyDice?.(dock, entries);
     }
 
     function renderPartyInfoPopup() {
@@ -1084,6 +1106,18 @@ function toggleCombatMode() {
         box-shadow: none;
         cursor: pointer;
     }
+
+    .party-icon-slot { display: flex; align-items: center; }
+    .party-d20 {
+        width: 32px; height: 34px; padding: 0; border: 1px solid #ae9968;
+        background: #242018; color: #e4d4ac; font: bold 10px monospace;
+        clip-path: polygon(50% 0, 100% 25%, 92% 78%, 50% 100%, 8% 78%, 0 25%);
+    }
+    .party-d20:disabled { opacity: .7; }
+    .party-d20.awaiting-roll { background: #f0cc71; color: #201a0d; cursor: pointer; }
+    .party-d20:focus-visible { outline: 3px solid white; outline-offset: -5px; }
+    .party-roll-status { width: 100%; color: #f0dda4; background: #17130ee8; font: 11px monospace; }
+    .party-roll-status:empty { display: none; }
 
     .party-icon-button.active {
         box-shadow: 0 0 8px rgba(240, 240, 240, 0.18);

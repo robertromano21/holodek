@@ -298,6 +298,17 @@ DRAW.campfire = (P, pal, o) => {
   const c = o.light || '#ff8a20';
   flame(P, 14, 26, 8, c); flame(P, 17, 26, 11, c); flame(P, 19, 26, 7, c);
 };
+DRAW.furnace = (P, pal, o) => {
+  const stone = MATERIAL_PALETTES.stone, metal = MATERIAL_PALETTES.metal;
+  P.groundShadow(16, 14);
+  P.block(7, 10, 19, 21, stone);
+  P.block(18, 1, 6, 11, metal);
+  P.rect(10, 18, 13, 11, '#25140c');
+  P.rect(11, 24, 11, 4, '#b84616');
+  flame(P, 14, 26, 6, o.light || '#ffae42');
+  flame(P, 19, 26, 8, o.light || '#ffae42');
+  for (let x = 10; x <= 22; x += 3) P.vline(x, 18, 29, metal.dark);
+};
 DRAW.torch_stand = (P, pal, o) => {
   const m = MATERIAL_PALETTES.metal;
   P.groundShadow(16, 10);
@@ -813,6 +824,7 @@ function landmarkSpriteSpec(type, prim) {
     banner: { profile: 'flat', heightRatio: 1.0, baseWidth: 0.6, gridWidth: 0.6, depth: 0.1, collisionRadius: 0.1 },
     chains: { profile: 'flat', heightRatio: 1.0, baseWidth: 0.6, gridWidth: 0.6, depth: 0.1, collisionRadius: 0.1 },
     brazier: { profile: 'flat', heightRatio: 0.7, baseWidth: 0.5, gridWidth: 0.5, depth: 0.4, collisionRadius: 0.18 },
+    furnace: { profile: 'flat', heightRatio: 1.1, baseWidth: 0.85, gridWidth: 0.85, depth: 0.7, collisionRadius: 0.3 },
     _generic: { profile: 'slab', heightRatio: 0.7, baseWidth: 0.6, gridWidth: 0.6, depth: 0.5 }
   };
   const s = specs[key] || specs._generic;

@@ -142,6 +142,7 @@ const LANDMARKS = {
   fountain: ['fountain', 'basin'],
   well: ['well\\b'],
   brazier: ['brazier'],
+  furnace: ['furnace', 'kiln', 'smelter'],
   crystal_cluster: ['crystal', 'crystals', 'geode'],
   bookshelf: ['bookshel', 'bookcase', 'shelves of books', 'tome', 'library'],
   table: ['table', 'desk', 'workbench'],
@@ -653,7 +654,7 @@ function checkSceneAgainstDungeon(spec, dungeon) {
     const entry = { kind: 'landmark', type: l.type, want: l.count, have };
     if (have >= l.count) result.present.push(entry); else result.missing.push(entry);
   }
-  const placed = Array.isArray(dungeon.props) ? dungeon.props : [];
+  const placed = Array.isArray(dungeon.sceneObjects) ? dungeon.sceneObjects : (Array.isArray(dungeon.props) ? dungeon.props : []);
   for (const p of spec.props || []) {
     const hit = placed.find(q => q && (q.id === p.id || norm(q.name) === norm(p.name)));
     const entry = { kind: 'object', name: p.name, have: hit ? 1 : 0, want: 1 };

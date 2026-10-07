@@ -803,6 +803,9 @@
     },
 
     buildVoxelGrid(tileName, dungeon, size = 16) {
+      const shape = dungeon.tiles?.[tileName]?.spriteSpec?.voxelShape;
+      const shaped = shape && window.ScenePropVoxels?.build(shape, size);
+      if (shaped) return shaped;
       const voxels = new Uint8Array(size * size * size);
       const setVoxel = (x, y, z) => {
         if (x < 0 || y < 0 || z < 0 || x >= size || y >= size || z >= size) return;
@@ -1325,7 +1328,7 @@
       const spec = dungeon.tiles[tileName]?.spriteSpec || {};
       const detail = spec.detail || {};
       const tileMeta = this.getCustomTileMeta(tileName, dungeon);
-      const material = tileMeta?.procedure?.material || spec.material || null;
+      const material = (spec.voxelShape && spec.material) || tileMeta?.procedure?.material || spec.material || null;
       const palette = dungeon.visualStyle?.palette || {};
       const matPalette = this.getMaterialPalette(material, palette);
 

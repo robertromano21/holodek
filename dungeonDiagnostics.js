@@ -24,6 +24,7 @@ function summarizeDungeon(dungeon) {
     layout: dungeon.layout,
     start: dungeon.start,
     classification: dungeon.classification,
+    architecture: dungeon.sceneArchitecture || null,
     scene: dungeon.sceneSpec ? {
       biome: dungeon.sceneSpec.biome,
       indoor: dungeon.sceneSpec.indoor,

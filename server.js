@@ -10,6 +10,7 @@ const path = require('path');
 const { renderArrangementToWav } = require('./retort/renderAudio');
 const characterTraits = require('./retort/characterTraitSpec');
 const { summarizeDungeon } = require('./dungeonDiagnostics');
+const { actionDice } = require('./retort/actionDice');
 const app = express();
 const port = 3000;
 
@@ -54,6 +55,7 @@ app.get('/combat-updates2', (req, res) => {
         }
     };
     clients.push(client);
+    client.send(actionDice.snapshot());
 
     req.on('close', () => {
         clearInterval(keepAlive);
@@ -167,10 +169,22 @@ app.post('/submit-target2', (req, res) => {
 });
 
 const tasks = new Map();  // { taskId: { status: 'processing', result: null } }
+let inputTaskInFlight = false;
+
+app.post('/action-dice/roll', (req, res) => {
+  try {
+    const { id, actionId, geoKey } = req.body || {};
+    const result = actionDice.submit(id, actionId, geoKey);
+    res.json({ result, state: actionDice.snapshot() });
+  } catch (error) {
+    res.status(409).json({ error: error.message });
+  }
+});
 const NPC_AUTONOMY_TICK_MS = 45000; // changed to 45s; main story simulation now also driven via client chatbotprocessinput(every 45s) with char positions for narrative continuity
 let npcAutonomyTickInFlight = false;
 
 app.post('/processInput7', async (req, res) => {
+  if (inputTaskInFlight) return res.status(409).json({ error: 'The previous action is still resolving.' });
   // If we're still in the character generation / review phase, don't let the main Retort flow
   // (which triggers full dungeon creation) run yet. The client should be showing the Save/Reroll menu.
   if (sharedState.isCharacterGenerationInProgress && sharedState.isCharacterGenerationInProgress()) {
@@ -189,6 +203,7 @@ app.post('/processInput7', async (req, res) => {
 
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
+  inputTaskInFlight = true;
 
   // Background process
   (async () => {
@@ -219,7 +234,7 @@ app.post('/processInput7', async (req, res) => {
         imageUrl: result.imageUrl,
         musicArrangement: result.musicArrangement || null,
         npcDirectives: Array.isArray(result.npcDirectives) ? result.npcDirectives : [],
-        combatRoundOnly: !!result.combatRoundOnly
+        combatRoundOnly: !!(result.combatRoundOnly || result.actionOnly)
       };
       tasks.set(taskId, { 
         status: 'complete', 
@@ -229,6 +244,9 @@ app.post('/processInput7', async (req, res) => {
     } catch (err) {
       console.error('Background task error for taskId ' + taskId + ':', err);
       tasks.set(taskId, { status: 'error', result: err.message });
+    } finally {
+      actionDice.end();
+      inputTaskInFlight = false;
     }
   })();
 
@@ -238,6 +256,7 @@ app.post('/processInput7', async (req, res) => {
 // New endpoint: Client calls this after the user clicks "Save" on the character sprite review menu.
 // This tells the Retort session "the player has finalized their starting character (with sprite) — now proceed with dungeon generation".
 app.post('/startGameWithCharacter', async (req, res) => {
+  if (inputTaskInFlight) return res.status(409).json({ error: 'Finish the pending action before starting another game.' });
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
 
@@ -372,6 +391,7 @@ Magic: ${npc.Magic || npc.magic || 0}`;
 // This triggers a *focused* Retort-assisted character + sprite generation
 // BEFORE the main dungeon creation logic ever runs.
 app.post('/beginCharacterGeneration', async (req, res) => {
+  if (inputTaskInFlight) return res.status(409).json({ error: 'Finish the pending action before creating another character.' });
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
 
@@ -543,6 +563,7 @@ app.get('/poll-task2/:taskId', (req, res) => {
 });
 
 app.post('/updateState7', async (req, res) => {
+    if (inputTaskInFlight) return res.status(409).json({ error: 'Cannot replace state during an action.' });
     const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest, liveWorldState } = req.body; // New: currentQuest
 
     if (personalNarrative !== undefined) sharedState.setPersonalNarrative(personalNarrative);

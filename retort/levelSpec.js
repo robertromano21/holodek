@@ -16,7 +16,7 @@ const AV = require('./assemblyVocab.js');
 const MODEL = process.env.HOLODEK_LEVEL_MODEL || 'gpt-4.1-mini';
 const CACHE_FILE = process.env.HOLODEK_LEVEL_CACHE || path.join(__dirname, '..', '.retort-data', 'level-specs.json');
 const MAX_ATTEMPTS = 3;
-const LEVEL_SPEC_VERSION = 2; // v2: assembly-option vocabulary (kit/state/base/ornament/material)
+const LEVEL_SPEC_VERSION = 3; // v3: concrete voxel scenery and bounded local points of interest
 const SHAPES = ['column', 'broken_column', 'arch', 'block', 'slab', 'statue', 'mound', 'spire', 'cluster', 'tree', 'orb', 'pool', 'bowl', 'frame', 'hanging', 'banner', 'pile', 'crystal', 'stalagmite', 'table', 'barrel'];
 const PLACEMENTS = ['center', 'far_end', 'walls', 'corners', 'scattered', 'rows', 'entrance'];
 const PARTICLES = ['none', 'dust', 'sand', 'snow', 'rain', 'spores', 'embers', 'mist', 'ash', 'bubbles'];
@@ -211,7 +211,10 @@ function getClient() {
   return client;
 }
 function buildMessages(input, problems) {
-  const sys = ['You are the level designer for a retro first-person dungeon crawler (Wolfenstein/Doom-style grid levels with pixel-art billboard props).',
+  const sys = ['You are the level designer for a retro first-person dungeon crawler with real voxel scenery on a heightfield grid.',
+    'Use physical architecture and recognizable objects, not only walls, torches and pillars. When justified by the text, prioritize dead trees, gravestones, furnaces, roots, broken arches, altars, rubble and basins.',
+    'Keep each landmark count modest (1-6), clustered into a local point of interest. Do not turn a single object into thousands of repeated tiles. Use a recognizable canonical noun in every structure name.',
+    'The engine supports one walkable height per XY cell. Do not promise stacked rooms, a passable arch inside a blocking prop tile, rope physics or moving platforms. Interactive seal puzzles are supplied by code; do not invent new puzzle commands or rewards.',
     'Turn the room text into a JSON level spec. Read BOTH the room description and the puzzle text; the puzzle text often holds the most',
     'physical detail. List EVERY physical structure the text mentions, with realistic counts and a placement hint, and invent 1-3 fitting extras',
     'if the room would feel empty. For EACH structure fill "assembly" by PICKING from the given enums (kit, state, base, ornament, material, size)',
