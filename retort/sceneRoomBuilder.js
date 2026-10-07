@@ -15,9 +15,8 @@ const { drawLandmarkSprite, resolveLandmarkDrawer, landmarkSpriteSpec } = requir
 const { drawSceneSurface, hasMaterial } = require('../assets/renderSceneTextures.js');
 
 const SPRITE_DIR = process.env.HOLODEK_SPRITE_DIR || path.join(__dirname, '../sid/sprites');
-const ROOM_DIR = process.env.HOLODEK_ROOM_DIR || path.join(__dirname, '../sid/rooms');
 const LIBRARY_FILE = path.join(SPRITE_DIR, '_library.json');
-const SCENE_GFX_VERSION = 2; // v2: level-spec primitives, decals, scatter, placement hints
+const SCENE_GFX_VERSION = 3; // v3: invalidate persisted scene rooms after WebGL/scene sync fixes
 const OUT_SIZE = 320;
 
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
@@ -437,15 +436,11 @@ function layoutKey(spec) {
   const s = spec && spec.source ? spec.source : {};
   return hash(`${SCENE_GFX_VERSION}|${s.roomName || ''}|${s.description || ''}|${(s.exits || []).join(',')}`);
 }
-function roomFile(geoKey) { return path.join(ROOM_DIR, `${safeKey(geoKey)}.json`); }
 
 function saveStoredRoom(geoKey, dungeon) {
-  try {
-    ensureDir(ROOM_DIR);
-    const payload = { geoKey, layoutKey: layoutKey(dungeon.sceneSpec), savedAt: new Date().toISOString(), dungeon };
-    fs.writeFileSync(roomFile(geoKey), JSON.stringify(payload));
-    return true;
-  } catch (e) { console.warn('[SceneGfx] could not persist room', geoKey, e.message); return false; }
+  // Room layouts are authoritative from the active generation turn and cached in browser IndexedDB.
+  // Keep this helper inert so scene building can stay without persisting server-side layout JSON.
+  return false;
 }
 
 function spriteExists(url) {
@@ -454,18 +449,9 @@ function spriteExists(url) {
   return fs.existsSync(path.join(SPRITE_DIR, rel));
 }
 
-/** Stored dungeon for this coordinate if the room text is unchanged and its PNGs still exist. */
+/** Server-side room layout reuse is disabled; browser IndexedDB owns room layout caching. */
 function loadStoredRoom(geoKey, spec) {
-  try {
-    const f = roomFile(geoKey);
-    if (!fs.existsSync(f)) return null;
-    const payload = JSON.parse(fs.readFileSync(f, 'utf8'));
-    if (!payload || !payload.dungeon || payload.layoutKey !== layoutKey(spec)) return null;
-    const tiles = payload.dungeon.tiles || {};
-    for (const t of Object.values(tiles)) if (t && t.url && !spriteExists(t.url)) return null;
-    if (!Array.isArray(payload.dungeon.sceneObjects)) { try { placeSceneObjects(payload.dungeon, spec); } catch (_) { /* ignore */ } }
-    return payload.dungeon;
-  } catch (e) { console.warn('[SceneGfx] stored room unreadable', geoKey, e.message); return null; }
+  return null;
 }
 
 module.exports = { applySceneGraphics, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom, layoutKey, SCENE_GFX_VERSION };

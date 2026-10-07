@@ -20,6 +20,15 @@ let roomDungeonDatabase = {};   // ← NEW: 3D dungeon per geo-room
 
 let lastCoords = { x: 0, y: 0, z: 0 };
 
+function cloneDungeonForStorage(dungeon) {
+  if (!dungeon) return null;
+  return JSON.parse(JSON.stringify(dungeon, (key, value) => {
+    // Renderer/runtime caches are client-local and can desync stored room geometry.
+    if (key === '_lodCache' || key === '_minFloor') return undefined;
+    return value;
+  }));
+}
+
 let currentPC = null;   // The finalized player character (with sprite) chosen at the start menu
 
 // Character generation phase (separate from main dungeon Retort flow)
@@ -165,7 +174,7 @@ module.exports = {
       // Ensure customTiles is attached (backward compat)
       dungeon.customTiles = dungeon.customTiles || [];
     }
-    return dungeon;
+    return cloneDungeonForStorage(dungeon);
   },
   setRoomDungeon: (coords, dungeon, customTiles = []) => {
     if (!coords || typeof coords !== 'object') return;
@@ -173,8 +182,9 @@ module.exports = {
     if (dungeon) {
       // Attach customTiles to dungeon for caching/reuse
       dungeon.customTiles = customTiles || [];
-      roomDungeonDatabase[key] = dungeon;
-      sharedStateEmitter.emit('dungeon:update', { key, dungeon });
+      const storedDungeon = cloneDungeonForStorage(dungeon);
+      roomDungeonDatabase[key] = storedDungeon;
+      sharedStateEmitter.emit('dungeon:update', { key, dungeon: cloneDungeonForStorage(storedDungeon) });
       console.log('DUNGEON SEEDED FOR', key, `with ${customTiles.length} custom tiles`);
     }
   },

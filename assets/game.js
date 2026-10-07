@@ -14,9 +14,46 @@ const MUSIC_STORE   = 'rooms';
 // --- IndexedDB for dungeon layouts ---
 const DUNGEON_DB_NAME = 'cotg-dungeons';
 const DUNGEON_STORE   = 'rooms';
-const DUNGEON_CACHE_VERSION = 4; // v4: level spec (description + puzzle) structures/decals/scatter + Objects in Room items
+const DUNGEON_CACHE_VERSION = 7; // v7: geometry-stamped scene rooms for accelerated render cache invalidation
 let dungeonDBPromise = null;
 let lastDungeonGeoKey = null;
+
+function computeDungeonGeometryStamp(dungeon, geoKey) {
+  if (!dungeon || !dungeon.cells) return `${geoKey || 'unknown'}:empty`;
+  let hash = 2166136261 >>> 0;
+  const mix = (value) => {
+    const text = String(value);
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  };
+  const layout = dungeon.layout || {};
+  mix(geoKey || dungeon.geoKey || '');
+  mix(layout.width || 0);
+  mix(layout.height || 0);
+  const keys = Object.keys(dungeon.cells).sort();
+  for (const key of keys) {
+    const cell = dungeon.cells[key] || {};
+    mix(key);
+    mix(cell.tile || 'floor');
+    mix(Number.isFinite(cell.floorHeight) ? Math.round(cell.floorHeight * 1000) : 0);
+    mix(Number.isFinite(cell.ceilHeight) ? Math.round(cell.ceilHeight * 1000) : 0);
+    if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
+  }
+  return `${keys.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function ensureDungeonGeometryStamp(dungeon, geoKey) {
+  if (!dungeon) return dungeon;
+  const stamp = computeDungeonGeometryStamp(dungeon, geoKey);
+  dungeon._geometryStamp = stamp;
+  dungeon._meta = {
+    ...(dungeon._meta || {}),
+    geometryStamp: stamp
+  };
+  return dungeon;
+}
 
 function openDungeonDB() {
   if (dungeonDBPromise) return dungeonDBPromise;
@@ -183,7 +220,7 @@ async function switchDungeonForCoordinates(coordString) {
 
   console.log('Switching dungeon due to coordinate change:', geoKey);
 
-  currentDungeon = cached;
+  currentDungeon = ensureDungeonGeometryStamp(cached, geoKey);
   currentDungeon.geoKey = geoKey;
 
   const rawStart  = currentDungeon.start || { x: 10, y: 18 };
@@ -545,29 +582,31 @@ eventSource.onmessage = function(event) {
     
         if (!geoKey) {
           console.warn('dungeonLoaded with no geoKey; using transient dungeon');
+          currentDungeon = ensureDungeonGeometryStamp(dungeon, geoKey);
+        } else if (dungeon) {
+          console.log('Using fresh server dungeon:', geoKey);
+          dungeon.geoKey = geoKey;
+          dungeon._meta = {
+            ...(dungeon._meta || {}),
+            version: DUNGEON_CACHE_VERSION,
+            cachedAt: Date.now()
+          };
+          ensureDungeonGeometryStamp(dungeon, geoKey);
+          await idbSetDungeon(geoKey, dungeon);
           currentDungeon = dungeon;
         } else {
-          // 1️⃣ Check IndexedDB first
+          // Browser cache is a fallback only; it should not override fresh server-built rooms.
           const cached = await idbGetDungeon(geoKey);
           const cachedVersion = cached?._meta?.version || 0;
-    
           if (cached && cachedVersion >= DUNGEON_CACHE_VERSION) {
-            console.log('Loaded dungeon from IndexedDB:', geoKey);
-            currentDungeon = cached;
+            console.log('Loaded fallback dungeon from IndexedDB:', geoKey);
+            currentDungeon = ensureDungeonGeometryStamp(cached, geoKey);
           } else {
             if (cached) {
               console.log('Discarding outdated dungeon cache:', geoKey, 'version', cachedVersion);
             }
-            console.log('Caching newly generated dungeon:', geoKey);
-    
-            dungeon.geoKey = geoKey;   // 🔑 attach before caching
-            dungeon._meta = {
-              version: DUNGEON_CACHE_VERSION,
-              cachedAt: Date.now()
-            };
-    
-            await idbSetDungeon(geoKey, dungeon);
-            currentDungeon = dungeon;
+            console.warn('No usable dungeon for', geoKey);
+            return;
           }
         }
     
@@ -901,7 +940,6 @@ const DUNGEON_MOVE = {
     run: false
   }
 };
-
 function stopPartyMazeIdleInterval() {
   if (window._partyMazeIdleInterval) {
     clearInterval(window._partyMazeIdleInterval);
@@ -1492,7 +1530,48 @@ function getOccupancyBlockReason(nextX, nextY, excludeName = null) {
   return null;
 }
 
+let dungeonDiagnosticTimer = null;
+let lastDungeonDiagnosticVersion = null;
+
+function scheduleDungeonRenderingDiagnostic() {
+  if (window.DUNGEON_DIAGNOSTICS === false) return;
+  const renderer = window.webglDungeonRendererLegacy || window.webglDungeonRenderer;
+  const version = renderer?.sceneResourceVersion;
+  if (!version || version === lastDungeonDiagnosticVersion) return;
+  lastDungeonDiagnosticVersion = version;
+  clearTimeout(dungeonDiagnosticTimer);
+  dungeonDiagnosticTimer = setTimeout(() => window.debugDungeonRendering('room-upload'), 750);
+}
+
 if (typeof window !== 'undefined') {
+  window.debugDungeonRendering = async function debugDungeonRendering(reason = 'manual') {
+    try {
+      const renderer = window.webglDungeonRendererLegacy || window.webglDungeonRenderer;
+      if (!renderer?.getRenderingDiagnostics) throw new Error('Renderer diagnostics unavailable');
+      const report = renderer.getRenderingDiagnostics(currentDungeon);
+      if (report.error) throw new Error(report.error);
+      report.reason = reason;
+      report.position = getDungeonPositionDebug();
+      const combatScene = window.combatGame?.scene?.getScene('CombatScene');
+      report.combatMap = combatScene?.getDungeonDrawDiagnostics
+        ? combatScene.getDungeonDrawDiagnostics(report.samples.map(sample => sample.key))
+        : { ready: false };
+      const gpu = window.webgpuDungeonRenderer;
+      report.backend = window.forceCanvasDungeon ? 'canvas' : (gpu?.mode || 'webgl');
+      report.webgpu = gpu ? { mode: gpu.mode, nativeWorld: gpu.shouldUseNativeWorld(), resourceVersion: gpu._sceneResourceVersion } : null;
+      console.log('[DungeonRendering]', report);
+      const response = await fetch('/debug/dungeon-rendering', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report)
+      });
+      if (!response.ok) throw new Error(`Diagnostic logging returned HTTP ${response.status}`);
+      const result = await response.json();
+      console.log('[DungeonRendering] server comparison:', result.comparison);
+      return { ...report, comparison: result.comparison };
+    } catch (error) {
+      console.warn('[DungeonRendering] diagnostic failed:', error.message);
+      return { error: error.message };
+    }
+  };
   window.debugDungeonPosition = function debugDungeonPosition() {
     const info = getDungeonPositionDebug();
     console.table({
@@ -2784,6 +2863,39 @@ class CombatScene extends Phaser.Scene {
         });
     }
     
+    getDungeonDrawDiagnostics(keys) {
+        const draw = this._lastDungeonDraw;
+        if (!draw) return { ready: false };
+        const { dungeon, pos, combatAngle, cs, centerX, centerY, viewRadius } = draw;
+        const samples = [];
+        for (const key of keys) {
+            const cell = dungeon.cells[key];
+            if (!cell) continue;
+            const [x, y] = key.split(',').map(Number);
+            const tile = String(cell.tile || '');
+            const lower = tile.toLowerCase();
+            const localX = (x + 1 - pos.x) * cs;
+            const localY = (y + 1 - pos.y) * cs;
+            samples.push({
+                key, tile,
+                floor: Number.isFinite(cell.floorHeight) ? cell.floorHeight : 0,
+                ceil: Number.isFinite(cell.ceilHeight) ? cell.ceilHeight : (cell.floorHeight || 0) + 2,
+                wallMarker: isBlockedDungeonCell(cell) || ['wall', 'door', 'torch'].includes(tile) || lower === 'wall' || lower.endsWith('_wall'),
+                torchMarker: lower.includes('torch'),
+                visible: Math.abs(x - Math.floor(pos.x)) <= viewRadius && Math.abs(y - Math.floor(pos.y)) <= viewRadius,
+                renderTargetPosition: {
+                    x: centerX + localX * Math.cos(combatAngle) - localY * Math.sin(combatAngle),
+                    y: centerY + localX * Math.sin(combatAngle) + localY * Math.cos(combatAngle)
+                }
+            });
+        }
+        return {
+            ready: true, geoKey: dungeon.geoKey, geometryStamp: dungeon._geometryStamp,
+            sameDungeonObject: dungeon === currentDungeon,
+            player: pos, angle: combatAngle, tileSize: cs, center: { x: centerX, y: centerY }, samples
+        };
+    }
+
     redrawCombatRT() {
         if (!this.renderRT) return;
         this.renderRT.clear();
@@ -2812,6 +2924,9 @@ class CombatScene extends Phaser.Scene {
         const fracX = pos.x - Math.floor(pos.x) - 0.5;
         const fracY = pos.y - Math.floor(pos.y) - 0.5;
         const viewRadius = half;
+        this._lastDungeonDraw = {
+          dungeon: currentDungeon, pos, combatAngle, cs, centerX, centerY, viewRadius
+        };
 
         // Base floor squares + reddish wall blocks (batched in local space, rotated together).
         // Walls drawn AFTER the grid so they sit on top solid (no grid lines showing through).
@@ -14567,7 +14682,6 @@ if (!hit) continue;
 }
 
 function renderDungeonView() {
-  window.DEBUG_VOXEL_SOLID = true;
   window.currentDungeon = currentDungeon;
   window.dungeonTextures = dungeonTextures;
   window.dungeonTexturesMeta = dungeonTexturesMeta;
@@ -14610,6 +14724,7 @@ function renderDungeonView() {
   if (!window.forceCanvasDungeon && hasWebGLRenderer) {
       if (typeof window.webglDungeonRenderer.renderScene === 'function') {
         window.webglDungeonRenderer.renderScene();
+        scheduleDungeonRenderingDiagnostic();
         if (window.combatGame) {
           const scene = window.combatGame.scene.getScene('CombatScene');
           // Route to redrawCombatRT on every render so turns always spin the RT world (floor planes + billboards + grid) around player.

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Dungeon GPU Upload Probe</title>
+<canvas id="gpu"></canvas>
+<pre id="results">Running...</pre>
+<script src="../assets/rendererWebGL.js"></script>
+<script>
+try {
+  const renderer = window.webglDungeonRenderer;
+  const gl = document.getElementById('gpu').getContext('webgl2');
+  if (!gl) throw new Error('WebGL2 unavailable');
+  renderer.gl = gl;
+  for (const property of ['cellTex', 'floorTex', 'wallAtlasTex']) {
+    renderer[property] = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, renderer[property]);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+  const results = [];
+  for (const incomingFlip of [false, true]) {
+    // Sprite uploads leave this global WebGL state enabled before the next room.
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, incomingFlip);
+    const dungeon = {
+      geoKey: incomingFlip ? '0,0,1' : '0,0,0',
+      _geometryStamp: String(incomingFlip),
+      layout: { width: 3, height: 4 },
+      cells: {
+        '1,0': { tile: 'torch', floorHeight: 0, ceilHeight: 2.5 },
+        '1,3': { tile: 'floor', floorHeight: 0.5, ceilHeight: 3 }
+      }
+    };
+    renderer.rebuildDungeonTextures(dungeon, {});
+    const report = renderer.getRenderingDiagnostics(dungeon);
+    results.push({ incomingFlip, ...report });
+  }
+  document.getElementById('results').textContent = JSON.stringify({
+    pass: results.every(result => result.gpuUploadByteMismatches === 0), results
+  });
+} catch (error) {
+  document.getElementById('results').textContent = JSON.stringify({ error: error.message });
+}
+</script>
+</html>

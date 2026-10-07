@@ -1,3 +1,5 @@
+require('./serverLogger').installServerLogger();
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
@@ -7,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const { renderArrangementToWav } = require('./retort/renderAudio');
 const characterTraits = require('./retort/characterTraitSpec');
+const { summarizeDungeon } = require('./dungeonDiagnostics');
 const app = express();
 const port = 3000;
 
@@ -61,8 +64,49 @@ app.get('/combat-updates2', (req, res) => {
 
 // Function to broadcast to all connected clients
 function broadcast(data) {
+    if (data.type === 'dungeonLoaded' && data.dungeon) {
+        console.info('[DungeonDelivered]', JSON.stringify(summarizeDungeon(data.dungeon)));
+    }
     clients.forEach(client => client.send(data));
 }
+
+app.post('/debug/dungeon-rendering', (req, res) => {
+    const report = req.body;
+    if (!report || typeof report.geoKey !== 'string' || !/^-?\d+,-?\d+,-?\d+$/.test(report.geoKey) ||
+        !Array.isArray(report.samples) || report.samples.length > 100 ||
+        report.samples.some(sample => !sample || typeof sample.key !== 'string') ||
+        (report.combatMap?.samples && (!Array.isArray(report.combatMap.samples) ||
+            report.combatMap.samples.length > 100 || report.combatMap.samples.some(sample => !sample || typeof sample.key !== 'string')))) {
+        return res.status(400).json({ error: 'Invalid dungeon diagnostic report' });
+    }
+    const [x, y, z] = report.geoKey.split(',').map(Number);
+    const dungeon = sharedState.getRoomDungeon({ x, y, z });
+    const mismatches = [];
+    for (const sample of report.samples) {
+        const cell = dungeon?.cells?.[sample.key];
+        const source = sample.source;
+        if (!source || !cell || source.tile !== cell.tile ||
+            source.floor !== (Number.isFinite(cell.floorHeight) ? cell.floorHeight : 0) ||
+            source.ceil !== (Number.isFinite(cell.ceilHeight) ? cell.ceilHeight : (cell.floorHeight || 0) + 2)) {
+            mismatches.push({ key: sample.key, browser: source, server: cell || null });
+        }
+    }
+    const comparison = {
+        serverPid: process.pid,
+        serverDungeonPresent: !!dungeon,
+        serverGeometryStamp: dungeon?._geometryStamp || null,
+        matchingGeometryStamp: !!dungeon && dungeon._geometryStamp === report.geometryStamp,
+        serverToBrowserMismatches: mismatches
+    };
+    comparison.serverToCombatMapMismatches = (report.combatMap?.samples || []).filter(sample => {
+        const cell = dungeon?.cells?.[sample.key];
+        return !cell || sample.tile !== cell.tile ||
+            sample.floor !== (Number.isFinite(cell.floorHeight) ? cell.floorHeight : 0) ||
+            sample.ceil !== (Number.isFinite(cell.ceilHeight) ? cell.ceilHeight : (cell.floorHeight || 0) + 2);
+    }).map(sample => ({ key: sample.key, combatMap: sample, server: dungeon?.cells?.[sample.key] || null }));
+    console.info('[DungeonRendering]', JSON.stringify({ ...report, comparison }));
+    res.json({ recorded: true, comparison });
+});
 
 // Procedural character sprites: structured visual trait specs (one cheap LLM call per new character, cached by name).
 // Body: { sheets: [{name, sex, race, class, level, equipped, isMonster}], wait?: boolean, reroll?: boolean }

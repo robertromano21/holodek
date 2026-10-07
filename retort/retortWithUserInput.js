@@ -32,8 +32,9 @@ const {
 
 // Save the room's scene spec in the room-name database under its coordinates so
 // prose checks and later visits read the same structured scene.
-const { applySceneGraphics, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom } = require('./sceneRoomBuilder.js');
+const { applySceneGraphics, placeSceneLandmarks, placeSceneObjects } = require('./sceneRoomBuilder.js');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
+const { logDungeonConstruction, saveDungeonDiagnostic } = require('../dungeonDiagnostics');
 
 function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
   try {
@@ -47,6 +48,52 @@ function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
     console.error('[SceneSpec] failed to store spec for', coordKey, e);
     return dbString;
   }
+}
+
+function computeDungeonGeometryStamp(dungeon, geoKey) {
+  if (!dungeon || !dungeon.cells) return `${geoKey || 'unknown'}:empty`;
+  let hash = 2166136261 >>> 0;
+  const mix = (value) => {
+    const text = String(value);
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  };
+  const layout = dungeon.layout || {};
+  mix(geoKey || dungeon.geoKey || '');
+  mix(layout.width || 0);
+  mix(layout.height || 0);
+  const keys = Object.keys(dungeon.cells).sort();
+  for (const key of keys) {
+    const cell = dungeon.cells[key] || {};
+    mix(key);
+    mix(cell.tile || 'floor');
+    mix(Number.isFinite(cell.floorHeight) ? Math.round(cell.floorHeight * 1000) : 0);
+    mix(Number.isFinite(cell.ceilHeight) ? Math.round(cell.ceilHeight * 1000) : 0);
+    if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
+  }
+  return `${keys.length}:${(hash >>> 0).toString(16)}`;
+}
+
+function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
+  if (!dungeon) return dungeon;
+  dungeon.geoKey = geoKey;
+  dungeon.customTiles = Array.isArray(customTiles) ? customTiles : (dungeon.customTiles || []);
+  const geometryStamp = computeDungeonGeometryStamp(dungeon, geoKey);
+  dungeon._geometryStamp = geometryStamp;
+  dungeon._meta = {
+    ...(dungeon._meta || {}),
+    geometryStamp,
+    finalizedAt: Date.now()
+  };
+  const finalized = JSON.parse(JSON.stringify(dungeon, (key, value) => {
+    if (key === '_lodCache' || key === '_minFloor') return undefined;
+    return value;
+  }));
+  logDungeonConstruction('finalized', finalized);
+  saveDungeonDiagnostic(finalized).catch(error => console.warn('[DungeonSnapshot] failed:', error.message));
+  return finalized;
 }
 
 // Helper to attach a generated sprite to a character object (used for initial PCs and rerolls)
@@ -3997,22 +4044,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     console.error('Failed to enforce first-exit outdoor rule in dungeon test mode:', e);
   }
 
-  let reusedTestDungeon = null;
   if (isNewGeoRoom && roomDescription) {
-    try {
-      reusedTestDungeon = loadStoredRoom(geoKey, buildSceneSpec(sceneInputFromConsole(updatedGameConsole, { coords: geoCoords })));
-    } catch (e) {
-      console.warn('[SceneGfx] reuse probe failed', e.message);
-    }
-  }
-  if (reusedTestDungeon) {
-    console.log('[SceneGfx] reusing stored dungeon for', geoKey);
-    dungeon = reusedTestDungeon;
-    dungeon.geoKey = geoKey;
-    sharedState.setRoomDungeon(geoCoords, dungeon, dungeon.customTiles || []);
-    sharedState.setLastCoords(geoCoords);
-    broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
-  } else if (isNewGeoRoom && roomDescription) {
     console.log('Dungeon testing mode: building dungeon for', geoKey);
     const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
 
@@ -4259,6 +4291,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       console.error('[SceneGfx] graphics failed, keeping LLM sprites:', e);
     }
 
+    logDungeonConstruction('scene-graphics', dungeon);
     if (blueprint) {
       buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles);
     } else if (classification && classification.indoor === false) {
@@ -4267,6 +4300,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       buildIndoorLayout(dungeon, classification);
     }
 
+    logDungeonConstruction('layout', dungeon);
     try {
       const cellsArray = [];
       for (const [key, cell] of Object.entries(dungeon.cells || {})) {
@@ -4319,6 +4353,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       }
     }
 
+    logDungeonConstruction('doors', dungeon);
     for (let y = 1; y < dungeon.layout.height - 1; y++) {
       for (let x = 1; x < dungeon.layout.width - 1; x++) {
         const key = `${x},${y}`;
@@ -4337,6 +4372,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       }
     }
 
+    logDungeonConstruction('torch-walls', dungeon);
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
     try {
       const placement = placeSceneLandmarks(dungeon, sceneSpec);
@@ -4346,14 +4382,16 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       console.error('[SceneGfx] landmark placement failed:', e);
     }
 
+    logDungeonConstruction('landmarks-and-objects', dungeon);
     dungeon.sceneSpec = sceneSpec;
     dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
     console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
     roomNameDbString = storeSceneSpecInRoomDb(roomNameDbString, geoKey, sceneSpec);
-    sharedState.setRoomDungeon(geoCoords, dungeon, customTiles);
-    saveStoredRoom(geoKey, dungeon);
+    const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
+    dungeon = finalDungeon;
+    sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
     sharedState.setLastCoords(geoCoords);
-    broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
+    broadcast({ type: 'dungeonLoaded', geoKey, dungeon: finalDungeon });
   }
 
   const content = dungeon
@@ -11308,25 +11346,7 @@ const isNewGeoRoom =
   geoKey !== lastGeoKey ||
   !hasRoomDungeon;
 
-// Generate each coordinate once: if this room's text is unchanged, reuse the stored dungeon
-// (same layout, textures and landmark props) instead of regenerating it.
-let reusedSceneDungeon = null;
 if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
-  try {
-    const probeSpec = buildSceneSpec(sceneInputFromConsole(updatedGameConsole, { coords: geoCoords }));
-    reusedSceneDungeon = loadStoredRoom(geoKey, probeSpec);
-  } catch (e) {
-    console.warn('[SceneGfx] reuse probe failed', e.message);
-  }
-}
-if (reusedSceneDungeon) {
-  console.log('[SceneGfx] reusing stored dungeon for', geoKey);
-  reusedSceneDungeon.geoKey = geoKey;
-  sharedState.setRoomDungeon(geoCoords, reusedSceneDungeon, reusedSceneDungeon.customTiles || []);
-  sharedState.setLastCoords(geoCoords);
-  broadcast({ type: 'dungeonLoaded', geoKey, dungeon: reusedSceneDungeon });
-  returnObj.dungeon = reusedSceneDungeon;
-} else if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
   console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
   const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
   // 🧭 STEP 0 — classify biome & size
@@ -11586,6 +11606,7 @@ try {
       console.error('[SceneGfx] graphics failed, keeping LLM sprites:', e);
     }
 
+    logDungeonConstruction('scene-graphics', dungeon);
     // 🔴 STEP 4 — Build layout using blueprint (fallback to legacy if missing)
     if (blueprint) {
       buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles);
@@ -11594,6 +11615,7 @@ try {
     } else {
       buildIndoorLayout(dungeon, classification);
     }
+  logDungeonConstruction('layout', dungeon);
   // 🔴 STEP 4 — insert doors between floors
   for (let y = 1; y < dungeon.layout.height - 1; y++) {
     for (let x = 1; x < dungeon.layout.width - 1; x++) {
@@ -11617,6 +11639,7 @@ try {
     }
   }
  
+  logDungeonConstruction('doors', dungeon);
   // 🔴 STEP 5 — upgrade some walls to torch-walls
   for (let y = 1; y < dungeon.layout.height - 1; y++) {
     for (let x = 1; x < dungeon.layout.width - 1; x++) {
@@ -11635,6 +11658,7 @@ try {
       }
     }
   }
+  logDungeonConstruction('torch-walls', dungeon);
     // spawn safe square
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
   // 🔴 STEP 6 — put the landmarks the text names into the room
@@ -11645,16 +11669,17 @@ try {
   } catch (e) {
     console.error('[SceneGfx] landmark placement failed:', e);
   }
+  logDungeonConstruction('landmarks-and-objects', dungeon);
   // UPDATED: Pass customTiles to sharedState
   dungeon.sceneSpec = sceneSpec;
   dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
   console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
   roomNameDatabaseString = storeSceneSpecInRoomDb(roomNameDatabaseString, geoKey, sceneSpec);
-  sharedState.setRoomDungeon(geoCoords, dungeon, customTiles);
-  saveStoredRoom(geoKey, dungeon);
+  const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
+  sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
   sharedState.setLastCoords(geoCoords);
-  broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
-  returnObj.dungeon = dungeon;
+  broadcast({ type: 'dungeonLoaded', geoKey, dungeon: finalDungeon });
+  returnObj.dungeon = finalDungeon;
   console.log('Dungeon built with VISUAL STYLE → SPRITE → RAYCASTER');
 }
 

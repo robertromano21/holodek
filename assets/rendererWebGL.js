@@ -216,6 +216,9 @@
     atlasInfo: null,
     atlasKey: '',
     dungeonKey: null,
+    dungeonObject: null,
+    dungeonGeometryStamp: null,
+    sceneObjectRevision: 0,
     heightMin: 0,
     heightRange: 1,
     gridW: 0,
@@ -261,30 +264,6 @@
       return dungeon.customTiles.find((t) => t && t.type === type) || null;
     },
 
-    getDungeonCellSignature(dungeon) {
-      const cells = dungeon && dungeon.cells ? dungeon.cells : {};
-      let hash = 2166136261;
-      let count = 0;
-      const mix = (value) => {
-        const text = String(value);
-        for (let i = 0; i < text.length; i++) {
-          hash ^= text.charCodeAt(i);
-          hash = Math.imul(hash, 16777619);
-        }
-      };
-      const keys = Object.keys(cells).sort();
-      for (const key of keys) {
-        const cell = cells[key] || {};
-        count++;
-        mix(key);
-        mix(cell.tile || 'floor');
-        mix(typeof cell.floorHeight === 'number' ? Math.round(cell.floorHeight * 1000) : 0);
-        mix(typeof cell.ceilHeight === 'number' ? Math.round(cell.ceilHeight * 1000) : 0);
-        if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
-      }
-      return `${count}:${(hash >>> 0).toString(16)}`;
-    },
-
     getSceneResourceSnapshot() {
       if (!this.sceneCellData) return null;
       return {
@@ -301,6 +280,103 @@
         wallFallback: this.sceneWallFallback,
         floorFallback: this.sceneFloorFallback
       };
+    },
+
+    getRenderingDiagnostics(dungeon = window.currentDungeon) {
+      const gl = this.gl;
+      if (!gl || !this.sceneCellData || !dungeon) return { error: 'No uploaded dungeon texture' };
+      const flipY = this.program ? gl.getUniform(this.program, this.uniformLocations.flipY) : null;
+      const report = {
+        geoKey: dungeon.geoKey,
+        geometryStamp: dungeon._geometryStamp,
+        rendererGeoKey: this.dungeonKey,
+        rendererGeometryStamp: this.dungeonGeometryStamp,
+        sameDungeonObject: this.dungeonObject === dungeon,
+        resourceVersion: this.sceneResourceVersion,
+        layout: dungeon.layout,
+        grid: { width: this.gridW, height: this.gridH },
+        flipY,
+        voxelFlipY: this.voxelProgram ? gl.getUniform(this.voxelProgram, this.voxelUniforms.flipY) : null,
+        heightMin: this.heightMin,
+        heightRange: this.heightRange,
+        unpackFlipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
+        uploadState: this.cellUploadState,
+        cpuToPackedMismatches: 0,
+        gpuUploadByteMismatches: null,
+        gpuMirroredByteMismatches: null,
+        samples: []
+      };
+      // Read the actual GPU texture on demand, preserving the render framebuffer.
+      const previous = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+      const framebuffer = gl.createFramebuffer();
+      let gpuCells = null;
+      try {
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.cellTex, 0);
+        if (gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+          const errorsBeforeRead = [];
+          for (let i = 0, error; i < 8 && (error = gl.getError()) !== gl.NO_ERROR; i++) errorsBeforeRead.push(error);
+          report.errorsBeforeRead = errorsBeforeRead;
+          const pixels = new Uint8Array(this.sceneCellData.length);
+          gl.readPixels(0, 0, this.gridW, this.gridH, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const error = gl.getError();
+          if (error === gl.NO_ERROR) gpuCells = pixels;
+          else report.readbackError = error;
+        } else report.readbackError = 'Incomplete cell-texture framebuffer';
+      } finally {
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previous);
+        gl.deleteFramebuffer(framebuffer);
+      }
+      if (gpuCells) {
+        let same = 0, mirrored = 0;
+        for (let y = 0; y < this.gridH; y++) {
+          for (let x = 0; x < this.gridW * 4; x++) {
+            const index = y * this.gridW * 4 + x;
+            if (gpuCells[index] !== this.sceneCellData[index]) same++;
+            if (gpuCells[index] !== this.sceneCellData[(this.gridH - 1 - y) * this.gridW * 4 + x]) mirrored++;
+          }
+        }
+        report.gpuUploadByteMismatches = same;
+        report.gpuMirroredByteMismatches = mirrored;
+      }
+      const playerX = Math.floor(window.playerPosX ?? window.playerDungeonX ?? 0);
+      const playerY = Math.floor(window.playerPosY ?? window.playerDungeonY ?? 0);
+      const sampleKeys = new Set();
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) sampleKeys.add(`${playerX + dx},${playerY + dy}`);
+      const nearestTorches = Object.keys(dungeon.cells).filter(key => dungeon.cells[key]?.tile === 'torch')
+        .sort((a, b) => {
+          const distance = key => { const [x, y] = key.split(',').map(Number); return (x - playerX) ** 2 + (y - playerY) ** 2; };
+          return distance(a) - distance(b);
+        }).slice(0, 16);
+      for (const key of nearestTorches) sampleKeys.add(key);
+      const decode = (bytes, index) => bytes ? {
+        solid: bytes[index + 3] === 255,
+        floor: this.heightMin + bytes[index + 1] / 255 * this.heightRange,
+        ceil: this.heightMin + bytes[index + 2] / 255 * this.heightRange,
+        rgba: Array.from(bytes.slice(index, index + 4))
+      } : null;
+      for (const [key, cell] of Object.entries(dungeon.cells)) {
+        const [x, y] = key.split(',').map(Number);
+        const index = (y * this.gridW + x) * 4;
+        const floor = Number.isFinite(cell.floorHeight) ? cell.floorHeight : 0;
+        const ceil = Number.isFinite(cell.ceilHeight) ? cell.ceilHeight : floor + 2;
+        const solid = cell.tile === 'wall' || cell.tile === 'torch' || (cell.tile === 'door' && cell.door?.isOpen === false);
+        const packed = x >= 0 && y >= 0 && x < this.gridW && y < this.gridH
+          ? decode(this.sceneCellData, index) : null;
+        const mismatch = !packed || packed.solid !== solid ||
+          Math.abs(packed.floor - floor) > this.heightRange / 255 + 1e-6 ||
+          Math.abs(packed.ceil - ceil) > this.heightRange / 255 + 1e-6;
+        if (mismatch) report.cpuToPackedMismatches++;
+        if (sampleKeys.has(key) || (mismatch && report.samples.length < 12)) {
+          const sampledY = flipY === 1 ? this.gridH - 1 - y : y;
+          report.samples.push({
+            key, source: { tile: cell.tile, solid, floor, ceil, torchFacing: cell.torchFacing || null },
+            packed, gpu: decode(gpuCells, (sampledY * this.gridW + x) * 4),
+            shaderSampleKey: `${x},${sampledY}`
+          });
+        }
+      }
+      return report;
     },
 
     // Spec that drives the 3D world figure. Built-in presets (Mortacia, Suzerain) keep their original hand-made
@@ -381,6 +457,23 @@
       return this._getVisibleCharacterVoxelActors().length > 0;
     },
 
+    uploadDungeonCells(data, width, height, stage = 'dynamic') {
+      const gl = this.gl;
+      if (stage === 'room') {
+        this.cellUploadState = {
+          previousUnpackFlipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
+          previousUnpackPremultiplyAlpha: gl.getParameter(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL),
+          unpackFlipY: false,
+          unpackPremultiplyAlpha: false
+        };
+      }
+      // Sprite/image uploads share this state. Cell rows and encoded bytes must stay unchanged.
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    },
+
     // Temporarily mark floor cells under visible actors as soft casters (same path as pillars)
     // so torch floor/wall shadows pick up character silhouettes. a≈0.16 < 0.5 so camera rays stay clear.
     _syncActorShadowCasters(actors) {
@@ -396,8 +489,7 @@
       const list = Array.isArray(actors) ? actors : [];
       if (!list.length) {
         // Still re-upload if we restored patches
-        gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.gridW, this.gridH, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.sceneCellData);
+        this.uploadDungeonCells(this.sceneCellData, this.gridW, this.gridH);
         return;
       }
       const patches = [];
@@ -420,8 +512,7 @@
         data[aIdx] = radiusByte;
       }
       this._actorShadowPatches = patches;
-      gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      this.uploadDungeonCells(data, W, H);
     },
 
     _clearCharacterVoxelCaches() {
@@ -3339,10 +3430,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         ? Object.keys(atlasCandidate.map || {}).sort().join('|')
         : 'none';
       const paletteKey = JSON.stringify(dungeon.visualStyle?.palette || {});
-      const cellSignature = this.getDungeonCellSignature(dungeon);
+      const geometryStamp = dungeon._geometryStamp || dungeon._meta?.geometryStamp || 'unstamped';
       const dungeonObjectChanged = this.dungeonObject !== dungeon;
-      const cellsChanged = this.cellSignature !== cellSignature;
-      const needsVoxelReset = (dungeonObjectChanged || cellsChanged || this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
+      const geometryChanged = this.dungeonGeometryStamp !== geometryStamp;
+      const needsVoxelReset = (dungeonObjectChanged || geometryChanged || this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
       if (needsVoxelReset) {
         this.voxelMeshes = {};
         this.voxelPaletteKey = paletteKey;
@@ -3355,7 +3446,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (
         this.dungeonObject === dungeon &&
         this.dungeonKey === key &&
-        this.cellSignature === cellSignature &&
+        this.dungeonGeometryStamp === geometryStamp &&
         this.atlasReady === atlasReady &&
         this.atlasKey === atlasKey &&
         this.floorTexReady === floorReady
@@ -3469,8 +3560,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
 
       const gl = this.gl;
-      gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, layoutW, layoutH, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      this.uploadDungeonCells(data, layoutW, layoutH, 'room');
 
       if (this.atlasInfo.canvas) {
         gl.bindTexture(gl.TEXTURE_2D, this.wallAtlasTex);
@@ -3492,14 +3582,18 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
 
       this.dungeonKey = key;
+      if (dungeonObjectChanged || geometryChanged) {
+        this.sceneObjectRevision = (this.sceneObjectRevision || 0) + 1;
+      }
       this.dungeonObject = dungeon;
-      this.cellSignature = cellSignature;
+      this.dungeonGeometryStamp = geometryStamp;
       this.atlasReady = atlasReady;
       this.atlasKey = atlasKey;
       this.floorTexReady = floorReady;
       this.sceneResourceVersion = [
         key,
-        cellSignature,
+        geometryStamp,
+        `rev:${this.sceneObjectRevision || 0}`,
         atlasKey,
         floorReady ? 'floor:ready' : 'floor:fallback',
         `${layoutW}x${layoutH}`,
@@ -4285,9 +4379,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform2i(this.uniformLocations.gridSize, this.gridW, this.gridH);
       gl.uniform2i(this.uniformLocations.playerTile, playerX, playerY);
       gl.uniform1i(this.uniformLocations.skipBackCell, 1);
-      // WebGL texture coordinates are bottom-origin relative to the dungeon grid.
-      // Keep the old working Y-flip so the raycast samples the same cells as collision/combat.
-      gl.uniform1i(this.uniformLocations.flipY, 1);
+      // Packed cell row y represents dungeon y, unlike an image texture.
+      gl.uniform1i(this.uniformLocations.flipY, 0);
       //gl.uniform1i(this.uniformLocations.skipBackCell, window.DEBUG_WEBGL_SKIP_BACK === false ? 0 : 1);
       gl.uniform1f(this.uniformLocations.heightMin, this.heightMin);
       gl.uniform1f(this.uniformLocations.heightRange, this.heightRange);
@@ -4879,7 +4972,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           gl.uniform2i(this.voxelUniforms.gridSize, this.gridW, this.gridH);
         }
         if (this.voxelUniforms.flipY) {
-          gl.uniform1i(this.voxelUniforms.flipY, 1);
+          gl.uniform1i(this.voxelUniforms.flipY, 0);
         }
         let baseVoxelDepthBias = 0.0;
         if (this.voxelUniforms.depthBias) {
