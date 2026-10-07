@@ -3,7 +3,7 @@
 // Add this at the top of game (8).js
 window.roomImages = {};
 
-// Temporary: force the original canvas renderer while debugging sync issues.
+// Set true in the console to force the original canvas raycaster for diagnostics.
 window.forceCanvasDungeon = false;
 
 window.currentCoordinates = "X: 0, Y: 0, Z: 0";
@@ -195,6 +195,8 @@ async function switchDungeonForCoordinates(coordString) {
   playerZInitialized = false;
   playerPosX = playerDungeonX + 0.5;
   playerPosY = playerDungeonY + 0.5;
+  playerAngle = choosePlayerSpawnAngle(currentDungeon, playerDungeonX, playerDungeonY, playerAngle);
+  window.playerAngle = playerAngle;
 
   ensurePartyMazeIdleInterval();
   preloadDungeonTextures();
@@ -449,6 +451,74 @@ function logDungeonCombatSync(reason) {
   //console.log('[Sync]', state);
 }
 
+function cardinalFromAngle(angle) {
+  const dirs = [
+    { dx: 1, dy: 0, angle: 0 },
+    { dx: 0, dy: 1, angle: Math.PI / 2 },
+    { dx: -1, dy: 0, angle: Math.PI },
+    { dx: 0, dy: -1, angle: -Math.PI / 2 }
+  ];
+  let best = dirs[0];
+  let bestDot = -Infinity;
+  const ax = Math.cos(angle);
+  const ay = Math.sin(angle);
+  for (const dir of dirs) {
+    const dot = ax * dir.dx + ay * dir.dy;
+    if (dot > bestDot) {
+      bestDot = dot;
+      best = dir;
+    }
+  }
+  return best;
+}
+
+function isDungeonFacingOpen(dungeon, fromX, fromY, dx, dy) {
+  if (!dungeon || !dungeon.cells) return false;
+  const from = dungeon.cells[`${fromX},${fromY}`] || {};
+  const to = dungeon.cells[`${fromX + dx},${fromY + dy}`];
+  if (!to || isSpawnBlockedCell(to)) return false;
+  const fromFloor = typeof from.floorHeight === 'number' ? from.floorHeight : 0;
+  const toFloor = typeof to.floorHeight === 'number' ? to.floorHeight : 0;
+  return Math.abs(toFloor - fromFloor) <= MAX_STEP;
+}
+
+function scoreDungeonFacing(dungeon, fromX, fromY, dx, dy) {
+  let score = 0;
+  let prevX = fromX;
+  let prevY = fromY;
+  for (let i = 1; i <= 8; i++) {
+    const x = fromX + dx * i;
+    const y = fromY + dy * i;
+    if (!isDungeonFacingOpen(dungeon, prevX, prevY, dx, dy)) break;
+    score += 2;
+    const leftOpen = isDungeonFacingOpen(dungeon, x, y, -dy, dx) ? 1 : 0;
+    const rightOpen = isDungeonFacingOpen(dungeon, x, y, dy, -dx) ? 1 : 0;
+    score += leftOpen + rightOpen;
+    prevX = x;
+    prevY = y;
+  }
+  return score;
+}
+
+function choosePlayerSpawnAngle(dungeon, tileX, tileY, fallbackAngle = playerAngle) {
+  const current = cardinalFromAngle(fallbackAngle);
+  if (isDungeonFacingOpen(dungeon, tileX, tileY, current.dx, current.dy)) {
+    return fallbackAngle;
+  }
+  const candidates = [
+    { dx: 1, dy: 0, angle: 0 },
+    { dx: 0, dy: 1, angle: Math.PI / 2 },
+    { dx: -1, dy: 0, angle: Math.PI },
+    { dx: 0, dy: -1, angle: -Math.PI / 2 }
+  ].map(dir => ({
+    ...dir,
+    score: scoreDungeonFacing(dungeon, tileX, tileY, dir.dx, dir.dy)
+  })).filter(dir => dir.score > 0);
+  if (!candidates.length) return fallbackAngle;
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].angle;
+}
+
 // SSE handler
 const eventSource = new EventSource('/combat-updates2');
 eventSource.onmessage = function(event) {
@@ -517,6 +587,8 @@ eventSource.onmessage = function(event) {
         playerZInitialized = false;
         playerPosX = playerDungeonX + 0.5;
         playerPosY = playerDungeonY + 0.5;
+        playerAngle = choosePlayerSpawnAngle(currentDungeon, playerDungeonX, playerDungeonY, playerAngle);
+        window.playerAngle = playerAngle;
         ensurePartyMazeIdleInterval();
     
         preloadDungeonTextures();
@@ -975,7 +1047,7 @@ function findRecoveryAnchorInTile(tileX, tileY) {
     [tileX + 1 - inset, tileY + 1 - inset]
   ];
   for (const [x, y] of candidates) {
-    if (!isObstacleAtPos(x, y)) return { x, y };
+    if (canOccupyPos(x, y)) return { x, y };
   }
   return null;
 }
@@ -1110,6 +1182,16 @@ function canEnterTile(fromX, fromY, toX, toY, excludeName = null) {
   return Math.abs(targetFloor - currentFloor) <= MAX_STEP;
 }
 
+function getDungeonCellFloorHeight(cell) {
+  return cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+}
+
+function isDungeonCliffEdge(cellA, cellB) {
+  if (!cellA || !cellB) return false;
+  if (isBlockedDungeonCell(cellA) || isBlockedDungeonCell(cellB)) return false;
+  return Math.abs(getDungeonCellFloorHeight(cellA) - getDungeonCellFloorHeight(cellB)) > MAX_STEP;
+}
+
 function findNearestUnblockedTile(dungeon, start, maxRadius = 25) {
   if (!dungeon || !dungeon.cells) return start || { x: 0, y: 0 };
   const sx = (start && Number.isFinite(start.x)) ? start.x : 0;
@@ -1176,11 +1258,28 @@ function ensurePlayerOnValidTile() {
 
   const tileX = Math.floor(playerPosX);
   const tileY = Math.floor(playerPosY);
+  const posCell = currentDungeon.cells[`${tileX},${tileY}`];
   if (tileX !== playerDungeonX || tileY !== playerDungeonY) {
-    const anchor = findRecoveryAnchorInTile(playerDungeonX, playerDungeonY);
+    if (posCell && !isBlockedDungeonCell(posCell) && !isObstacleAtPos(playerPosX, playerPosY)) {
+      playerDungeonX = tileX;
+      playerDungeonY = tileY;
+      updatePlayerHeightFromCell();
+      syncCombatPlayerCenter();
+      return true;
+    }
+  }
+  const cell = posCell;
+
+  const radiusBlock = cell && !isBlockedDungeonCell(cell)
+    ? getOccupancyBlockReason(playerPosX, playerPosY)
+    : null;
+  if (radiusBlock) {
+    const anchor = findRecoveryAnchorInTile(tileX, tileY);
     if (anchor) {
       playerPosX = anchor.x;
       playerPosY = anchor.y;
+      playerDungeonX = tileX;
+      playerDungeonY = tileY;
       DUNGEON_MOVE.velX = 0;
       DUNGEON_MOVE.velY = 0;
       updatePlayerHeightFromCell();
@@ -1188,7 +1287,6 @@ function ensurePlayerOnValidTile() {
       return true;
     }
   }
-  const cell = currentDungeon.cells[`${tileX},${tileY}`];
 
   if (!cell || isBlockedDungeonCell(cell) || isObstacleAtPos(playerPosX, playerPosY)) {
     const safe = findNearestUnblockedTile(currentDungeon, { x: tileX, y: tileY });
@@ -1288,6 +1386,7 @@ function getDungeonPositionDebug() {
       ceilHeight: cell && typeof cell.ceilHeight === 'number' ? cell.ceilHeight : null
     };
   };
+  const currentRadiusBlock = getOccupancyBlockReason(posX, posY);
   return {
     geoKey: dungeon && dungeon.geoKey,
     playerDungeon: { x: playerDungeonX, y: playerDungeonY },
@@ -1298,6 +1397,7 @@ function getDungeonPositionDebug() {
     cameraTile: tileInfo(Math.floor(camX), Math.floor(camY)),
     angle: Number(playerAngle.toFixed(3)),
     eyeBack,
+    currentRadiusBlock,
     z: Number(playerZ.toFixed(3)),
     zTarget: Number(playerZTarget.toFixed(3))
   };
@@ -1432,6 +1532,14 @@ if (typeof window !== 'undefined') {
     console.table(samples);
     console.log('[DungeonBlocker] clear for', maxDistance, 'tiles', getDungeonPositionDebug());
     return null;
+  };
+  window.reorientDungeonFacing = function reorientDungeonFacing() {
+    playerAngle = choosePlayerSpawnAngle(currentDungeon, playerDungeonX, playerDungeonY, playerAngle);
+    window.playerAngle = playerAngle;
+    renderDungeonView();
+    const info = getDungeonPositionDebug();
+    console.log('[DungeonFacing] reoriented', info);
+    return info;
   };
 }
 
@@ -2715,6 +2823,9 @@ class CombatScene extends Phaser.Scene {
         const wallGfx = this.make.graphics({ add: false });
         wallGfx.fillStyle(0x550000, 0.7);   // walls on top of grid, strong enough to obscure lines (grid only faintly visible through walls when they are present)
 
+        const cliffGfx = this.make.graphics({ add: false });
+        cliffGfx.fillStyle(0x771111, 0.85);
+
         const torchGfx = this.make.graphics({ add: false });
         torchGfx.fillStyle(0xffdd44, 0.95); // bright for torches
 
@@ -2754,6 +2865,18 @@ class CombatScene extends Phaser.Scene {
                 if (isWallCell) {
                     // Full cell size + drawn after grid = solid walls, no gaps or lines showing through
                     wallGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
+                }
+
+                // 3D renders steep floor-height transitions as vertical faces. Mark those
+                // edges on the combat map so collision/terrain walls are not invisible in 2D.
+                const edgeW = Math.max(3, Math.round(cs * 0.16));
+                const eastCell = currentDungeon.cells[`${wx + 1},${wy}`];
+                if (isDungeonCliffEdge(cell, eastCell)) {
+                    cliffGfx.fillRect(localX + cs / 2 - edgeW / 2, localY - cs / 2, edgeW, cs);
+                }
+                const southCell = currentDungeon.cells[`${wx},${wy + 1}`];
+                if (isDungeonCliffEdge(cell, southCell)) {
+                    cliffGfx.fillRect(localX - cs / 2, localY + cs / 2 - edgeW / 2, cs, edgeW);
                 }
 
                 if (tileLower.includes('torch')) {
@@ -2812,6 +2935,11 @@ class CombatScene extends Phaser.Scene {
         wallGfx.setRotation(+combatAngle);
         this.renderRT.draw(wallGfx);
         wallGfx.destroy();
+
+        cliffGfx.setPosition(centerX, centerY);
+        cliffGfx.setRotation(+combatAngle);
+        this.renderRT.draw(cliffGfx);
+        cliffGfx.destroy();
 
         torchGfx.setPosition(centerX, centerY);
         torchGfx.setRotation(+combatAngle);
@@ -3038,12 +3166,24 @@ class CombatScene extends Phaser.Scene {
         const gx = (dx + half) * cs - offsetX;
         const gy = (dy + half) * cs - offsetY;
 
-          if (tile === 'wall' || tile === 'door' || tile === 'torch') {
+        if (tile === 'wall' || tile === 'door' || tile === 'torch') {
           gfx.fillStyle(wallColor, 1);
           gfx.fillRect(gx, gy, cs, cs);
         } else {
           gfx.fillStyle(floorColor, 0.35);
           gfx.fillRect(gx, gy, cs, cs);
+        }
+
+        const edgeW = Math.max(3, Math.round(cs * 0.16));
+        const eastCell = currentDungeon.cells[`${cx + dx + 1},${cy + dy}`];
+        if (isDungeonCliffEdge(cell, eastCell)) {
+          gfx.fillStyle(wallColor, 0.85);
+          gfx.fillRect(gx + cs - edgeW / 2, gy, edgeW, cs);
+        }
+        const southCell = currentDungeon.cells[`${cx + dx},${cy + dy + 1}`];
+        if (isDungeonCliffEdge(cell, southCell)) {
+          gfx.fillStyle(wallColor, 0.85);
+          gfx.fillRect(gx, gy + cs - edgeW / 2, cs, edgeW);
         }
 
         // Use the cute 2D generated sprites (shrunk) for pillars and custom objects
@@ -3133,6 +3273,18 @@ class CombatScene extends Phaser.Scene {
                         size + WALL_PIXEL_SCALE,
                         size + WALL_PIXEL_SCALE
                     );
+                }
+
+                const edgeW = Math.max(WALL_PIXEL_SCALE, Math.round(cellSize * 0.16));
+                const eastCell = currentDungeon.cells[`${centerX + dx + 1},${centerY + dy}`];
+                if (isDungeonCliffEdge(cell, eastCell)) {
+                    this.dungeonGraphics.fillStyle(wallColor, 0.85);
+                    this.dungeonGraphics.fillRect(gx + cellSize - edgeW / 2, gy, edgeW, cellSize);
+                }
+                const southCell = currentDungeon.cells[`${centerX + dx},${centerY + dy + 1}`];
+                if (isDungeonCliffEdge(cell, southCell)) {
+                    this.dungeonGraphics.fillStyle(wallColor, 0.85);
+                    this.dungeonGraphics.fillRect(gx, gy + cellSize - edgeW / 2, cellSize, edgeW);
                 }
 
                 // Optional: distinct markers for non-solid objects (better match 3D sprites)
@@ -12815,6 +12967,19 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
       container.appendChild(displayCanvas);
     }
     displayCtx = displayCanvas.getContext('2d');
+    if (!displayCtx) {
+      const oldCanvas = displayCanvas;
+      displayCanvas = document.createElement('canvas');
+      displayCanvas.width = oldCanvas && oldCanvas.width ? oldCanvas.width : 640;
+      displayCanvas.height = oldCanvas && oldCanvas.height ? oldCanvas.height : 480;
+      if (oldCanvas && oldCanvas.style) {
+        displayCanvas.style.width = oldCanvas.style.width;
+        displayCanvas.style.height = oldCanvas.style.height;
+      }
+      container.innerHTML = '';
+      container.appendChild(displayCanvas);
+      displayCtx = displayCanvas.getContext('2d');
+    }
   }
 
   const PIXEL_SCALE = 4;
@@ -12834,6 +12999,10 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
       webglCanvas: !!webglCanvas,
       webglContext: !!(window.webglDungeonRenderer && window.webglDungeonRenderer.gl)
     });
+  }
+  if (!ctx || !displayCtx) {
+    console.warn('[Raycast] cannot render canvas fallback without 2D contexts');
+    return displayCanvas;
   }
   ctx.imageSmoothingEnabled = false;
   displayCtx.imageSmoothingEnabled = false;

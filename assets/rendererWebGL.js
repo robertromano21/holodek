@@ -261,6 +261,30 @@
       return dungeon.customTiles.find((t) => t && t.type === type) || null;
     },
 
+    getDungeonCellSignature(dungeon) {
+      const cells = dungeon && dungeon.cells ? dungeon.cells : {};
+      let hash = 2166136261;
+      let count = 0;
+      const mix = (value) => {
+        const text = String(value);
+        for (let i = 0; i < text.length; i++) {
+          hash ^= text.charCodeAt(i);
+          hash = Math.imul(hash, 16777619);
+        }
+      };
+      const keys = Object.keys(cells).sort();
+      for (const key of keys) {
+        const cell = cells[key] || {};
+        count++;
+        mix(key);
+        mix(cell.tile || 'floor');
+        mix(typeof cell.floorHeight === 'number' ? Math.round(cell.floorHeight * 1000) : 0);
+        mix(typeof cell.ceilHeight === 'number' ? Math.round(cell.ceilHeight * 1000) : 0);
+        if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
+      }
+      return `${count}:${(hash >>> 0).toString(16)}`;
+    },
+
     getSceneResourceSnapshot() {
       if (!this.sceneCellData) return null;
       return {
@@ -3315,7 +3339,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         ? Object.keys(atlasCandidate.map || {}).sort().join('|')
         : 'none';
       const paletteKey = JSON.stringify(dungeon.visualStyle?.palette || {});
-      const needsVoxelReset = (this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
+      const cellSignature = this.getDungeonCellSignature(dungeon);
+      const dungeonObjectChanged = this.dungeonObject !== dungeon;
+      const cellsChanged = this.cellSignature !== cellSignature;
+      const needsVoxelReset = (dungeonObjectChanged || cellsChanged || this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
       if (needsVoxelReset) {
         this.voxelMeshes = {};
         this.voxelPaletteKey = paletteKey;
@@ -3326,7 +3353,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
       }
       if (
+        this.dungeonObject === dungeon &&
         this.dungeonKey === key &&
+        this.cellSignature === cellSignature &&
         this.atlasReady === atlasReady &&
         this.atlasKey === atlasKey &&
         this.floorTexReady === floorReady
@@ -3463,11 +3492,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
 
       this.dungeonKey = key;
+      this.dungeonObject = dungeon;
+      this.cellSignature = cellSignature;
       this.atlasReady = atlasReady;
       this.atlasKey = atlasKey;
       this.floorTexReady = floorReady;
       this.sceneResourceVersion = [
         key,
+        cellSignature,
         atlasKey,
         floorReady ? 'floor:ready' : 'floor:fallback',
         `${layoutW}x${layoutH}`,
@@ -4253,9 +4285,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform2i(this.uniformLocations.gridSize, this.gridW, this.gridH);
       gl.uniform2i(this.uniformLocations.playerTile, playerX, playerY);
       gl.uniform1i(this.uniformLocations.skipBackCell, 1);
-      // The dungeon model, movement/collision, and 2D combat map all use currentDungeon.cells[x,y]
-      // directly. Do not mirror the cell texture in WebGL or the 3D view renders a different row.
-      gl.uniform1i(this.uniformLocations.flipY, 0);
+      // WebGL texture coordinates are bottom-origin relative to the dungeon grid.
+      // Keep the old working Y-flip so the raycast samples the same cells as collision/combat.
+      gl.uniform1i(this.uniformLocations.flipY, 1);
       //gl.uniform1i(this.uniformLocations.skipBackCell, window.DEBUG_WEBGL_SKIP_BACK === false ? 0 : 1);
       gl.uniform1f(this.uniformLocations.heightMin, this.heightMin);
       gl.uniform1f(this.uniformLocations.heightRange, this.heightRange);
@@ -4847,7 +4879,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           gl.uniform2i(this.voxelUniforms.gridSize, this.gridW, this.gridH);
         }
         if (this.voxelUniforms.flipY) {
-          gl.uniform1i(this.voxelUniforms.flipY, 0);
+          gl.uniform1i(this.voxelUniforms.flipY, 1);
         }
         let baseVoxelDepthBias = 0.0;
         if (this.voxelUniforms.depthBias) {
