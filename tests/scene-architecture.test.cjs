@@ -26,7 +26,7 @@ function reachable(dungeon) {
   return seen;
 }
 
-for (const [name, family] of [['Ruined Temple Entrance', 'temple'], ['Forgotten Catacombs', 'catacomb'], ['Broken Ruins', 'ruins']]) {
+for (const [name, family] of [['Castle Gatehouse', 'castle'], ['Roman Bathhouse', 'bathhouse'], ['Ruined Temple Entrance', 'temple'], ['Forgotten Catacombs', 'catacomb'], ['Broken Ruins', 'ruins']]) {
   test(`${family} builds connected spaces and survives landmark placement and serialization`, () => {
     const dungeon = room();
     const spec = { source: { roomName: name }, textHash: 'fixed', landmarks: [{ type: 'pillar', count: 12 }] };
@@ -85,4 +85,23 @@ test('prose checks inspect sceneObjects with legacy fallback and report absent i
   assert.equal(checkSceneAgainstDungeon(spec, { sceneObjects: [{ id: 'key-1', name: 'bronze key' }] }).ok, true);
   assert.equal(checkSceneAgainstDungeon(spec, { props: [{ id: 'key-1', name: 'bronze key' }] }).ok, true);
   assert.equal(checkSceneAgainstDungeon(spec, { sceneObjects: [] }).ok, false);
+});
+
+test('landmark placement chooses the exact rock face tile before a boulder sharing its sprite drawer', () => {
+  for (const types of [['boulder', 'rock_face'], ['rock_face', 'boulder']]) {
+    const d = room();
+    d.customTiles = types.map(type => ({ type }));
+    const result = placeSceneLandmarks(d, { indoor: false, textHash: 'rock-face-regression', landmarks: [
+      { type: 'boulder', count: 3 }, { type: 'rock_face', count: 2 }
+    ] });
+    assert.deepEqual(result.missing, []);
+    for (const lm of result.placed) assert.equal(lm.tile, `custom_${lm.type}_${types.indexOf(lm.type)}`);
+    assert.equal(result.placed.filter(lm => lm.type === 'boulder').length, 3);
+    assert.equal(result.placed.filter(lm => lm.type === 'rock_face').length, 2);
+  }
+  const d = room();
+  d.customTiles = [{ type: 'boulder' }];
+  const result = placeSceneLandmarks(d, { landmarks: [{ type: 'rock_face', count: 1 }], textHash: 'missing-rock-face' });
+  assert.equal(result.placed.length, 0, 'Do not downgrade a missing canonical voxel to another shape');
+  assert.deepEqual(result.missing, ['rock_face']);
 });

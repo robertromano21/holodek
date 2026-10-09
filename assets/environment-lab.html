@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tartarus Environment Lab</title>
+  <style>
+    :root { color-scheme: dark; --ink: #eee0bf; --edge: #806846; --panel: #211e1a; }
+    body { margin: 0; padding: 20px; background: radial-gradient(at top left,#3d3324,#151512 65%); color: var(--ink); font: 16px Georgia,serif; }
+    header,main { max-width: 1180px; margin: auto; }
+    h1 { margin: 0 0 6px; font-size: 30px; font-weight: normal; }
+    p { line-height: 1.45; }
+    nav { display:flex; gap: 12px; flex-wrap:wrap; align-items:center; margin: 16px 0; }
+    select,button,input[type="text"] { font: inherit; padding: 8px; background: var(--panel); color: var(--ink); border: 1px solid var(--edge); max-width:100%; }
+    button:disabled { opacity: .45; }
+    main { display:grid; grid-template-columns:minmax(0,3fr) minmax(220px,1fr); gap: 20px; }
+    #dungeon-container { position:relative; aspect-ratio:4/3; border:1px solid var(--edge); background:#000; overflow:hidden; }
+    #dungeon-container canvas { width:100% !important; height:100% !important; image-rendering:pixelated; }
+    #map { width:100%; max-width:280px; image-rendering:pixelated; }
+    #status { min-height: 2em; }
+    #seals { display:flex; flex-wrap:wrap; gap:5px; }
+    small { display:block; margin:10px 0; color:#c4bda9; }
+    @media(max-width:720px) { main {grid-template-columns:1fr;} body {padding:12px;} }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Tartarus / Environment Lab</h1>
+    <p>Production voxel rendering, isolated exhibits. This page does not change your campaign or browser room database.</p>
+    <nav>
+      <label>Exhibit <select id="exhibit">
+        <option value="gallery">Trees &amp; props</option><option value="castle">Castle gatehouse</option>
+        <option value="citadel">Citadel stairs &amp; elevated landings</option>
+        <option value="geography">Mountain &amp; canyon heightfields</option>
+        <option value="deadwood">Seven dead trees &amp; thorn scrub</option>
+        <option value="exteriors">Outdoor temple return &amp; gatehouse</option>
+        <option value="bathhouse">Roman bathhouse</option><option value="rubble">Rubble &amp; ruins</option>
+        <option value="temple">Pedimented temple &amp; shrine</option><option value="gothic">Gothic vaults</option>
+        <option value="rotunda">Domed rotunda</option><option value="obelisks">Obelisk court</option>
+        <option value="byzantine">Byzantine pendentive dome</option><option value="squinch">Squinch dome</option>
+        <option value="fan">Fan vaults &amp; flying buttresses</option><option value="groin">Romanesque groin vaults</option>
+        <option value="hammerbeam">Hammerbeam basilica</option><option value="boarded">Boarded timber ceilings</option><option value="gold">Gold coffers</option>
+        <option value="motte">Motte &amp; bailey</option><option value="shellkeep">Shell keep</option>
+        <option value="stonekeep">Stone keep</option><option value="concentric">Concentric castle</option>
+        <option value="amphitheater">Roman amphitheater</option><option value="theater">Roman theater</option>
+        <option value="circus">Chariot circus</option><option value="forum">Roman forum</option>
+        <option value="warehouse">Horreum / stores</option><option value="domus">Atrium house</option>
+        <option value="villa">Roman villa</option><option value="insula">Insula ground floor</option><option value="aqueduct">Aqueduct arcade</option>
+        <option value="forge">Furnace court</option><option value="graves">Grave shrine</option><option value="grove">Dead grove</option>
+        <optgroup label="Seeded biome compositions">
+          <option value="badlands">Badlands / mesa canyon</option>
+          <option value="caldera">Volcanic caldera / rim circuit</option>
+          <option value="uplands">Icy uplands / snow shelf</option>
+          <option value="leafless">Leafless forest / branching trails</option>
+          <option value="modular-sanctuary">Modular sanctuary / courtyard loop</option>
+          <option value="modular-foundry">Modular foundry / stepped gallery</option>
+        </optgroup>
+      </select></label>
+      <button id="reset">Reset exhibit</button>
+      <label>Seed <input id="lab-seed" type="text" maxlength="160" size="20" disabled></label>
+      <button id="new-variant" disabled>New variant</button>
+      <label><input id="textures" type="checkbox" checked> Material textures</label>
+      <label><input id="terrain-assist" type="checkbox" checked> Downhill view assist</label>
+    </nav>
+    <p id="status" role="status">Loading exhibit...</p>
+  </header>
+  <main>
+    <section><div id="dungeon-popup" style="display:block"><div id="dungeon-container" tabindex="0" aria-label="Dungeon viewport"></div></div>
+      <p>Click the view, then W/S to move, A/D to strafe, and Left/Right to turn. Map clicks move to an open floor tile for inspection.</p>
+      <small>Architecture pieces in this exhibit are solid props, not animated doors. Roofs are explicit; unroofed space shows sky.</small>
+      <small>Seeded compositions use bounded production heightfields and modular room graphs, not campaign rooms. Reset replays the seed; New variant changes it. Lava crust is visual geometry, not a damage trigger. Downhill assist gently lowers the view while walking forward.</small>
+      <small>Outdoor temple return &amp; gatehouse: walk through each green entrance marker or circle its closed rear and side walls on the two-cell walking ring. Only that entrance links to the destination; markers are inspection-only here, not campaign travel.</small>
+      <small>Exterior shells are at most 21 by 21 cells, with tops capped at 18 and walking sites at most 25 by 25. Voxel roofs do not change the map's gray-floor sky label.</small>
+    </section>
+    <aside>
+      <canvas id="map" width="280" height="280" aria-label="Exhibit map"></canvas>
+      <small>Gold: props. Red: walls. Blue floor: covered. Gray floor: sky above. In biome compositions, outdoor shading shows elevation and pale trails mark graded walking lanes.</small>
+      <label>Inspect <select id="viewpoint" disabled aria-label="Inspection viewpoint"><option value="">Spawn</option></select></label>
+      <small id="composition"></small>
+      <p id="description"></p><p id="clue"></p><div id="seals"></div>
+      <p id="inspection"></p>
+    </aside>
+  </main>
+  <script src="/assets/scenePropVoxels.js"></script>
+  <script src="/assets/voxelCollision.js"></script>
+  <script src="/assets/terrainCamera.js"></script>
+  <script src="/assets/masonryPatterns.js"></script>
+  <script src="/assets/voxelMaterials.js"></script>
+  <script src="/assets/livingEnvironments.js"></script>
+  <script src="/assets/rendererWebGL.js"></script>
+  <script src="/assets/environment-lab.js"></script>
+</body>
+</html>

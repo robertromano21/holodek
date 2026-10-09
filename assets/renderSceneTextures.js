@@ -7,6 +7,7 @@
 'use strict';
 
 const BASE = 32;
+const Masonry = require('./masonryPatterns');
 
 function seedFrom(str) {
   let h = 2166136261 >>> 0;
@@ -262,6 +263,14 @@ const WALL = {
 };
 WALL.lava = WALL.obsidian;
 WALL.sand = WALL.sandstone;
+for (const name of Masonry.names) {
+  MAT[name] = ['roman_brick', 'mixed_masonry', 'herringbone'].includes(name)
+    ? ['#a56950', '#754c3e', '#c89068', '#423c32'] : MAT.stone;
+  WALL[name] = FLOOR[name] = (P, c) => {
+    const tones = [c[3], c[1], c[0], c[2]];
+    for (let y = 0; y < BASE; y++) for (let x = 0; x < BASE; x++) P.px(x, y, tones[Masonry.sample(name, x, y)]);
+  };
+}
 
 // ---------------- overlays ----------------
 function overlayGroundCover(P, cover, rng, colors) {
@@ -358,6 +367,35 @@ function hasMaterial(kind, material) {
  * @param kind 'floor' | 'wall'
  * @param opts { material, palette, groundCover:[...], seed }
  */
+function drawStonePattern(P, colors, rng, style = {}) {
+  if (style.pattern === 'planks') { FLOOR.wood(P, colors, rng); return; }
+  if (style.pattern === 'organic') { FLOOR.earth(P, colors, rng); return; }
+  if (!['hex_tiles', 'rough_plates'].includes(style.pattern)) { FLOOR.stone(P, colors, rng); return; }
+  const rough = style.pattern === 'rough_plates', points = [];
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) points.push({
+    x: x * 8 + (rough ? rng() * 5 + 1 : (y % 2) * 4), y: y * 8 + (rough ? rng() * 5 + 1 : 0),
+    tone: rng() < (style.variation ?? 0.3) ? colors[1] : colors[0] });
+  for (let y = 0; y < BASE; y++) for (let x = 0; x < BASE; x++) {
+    let first = Infinity, second = Infinity, tone = colors[0];
+    for (const p of points) {
+      const dx = Math.abs(x - p.x), dy = Math.abs(y - p.y);
+      const d = Math.hypot(Math.min(dx, BASE - dx), Math.min(dy, BASE - dy));
+      if (d < first) { second = first; first = d; tone = p.tone; } else if (d < second) second = d;
+    }
+    P.px(x, y, second - first < 0.6 ? colors[3] : second - first < 1 ? colors[2] : tone);
+  }
+}
+
+function drawWallBlocks(P, colors, rng, style) {
+  const [w, h] = { small: [8, 4], medium: [16, 8], large: [32, 16] }[style.brickSize] || [16, 8];
+  P.fill(/^#[0-9a-f]{6}$/i.test(style.mortarColor || '') ? style.mortarColor : colors[3]);
+  for (let y = 0, row = 0; y < BASE; y += h, row++) for (let x = -w; x < BASE; x += w) {
+    const offset = x + (row % 2) * w / 2;
+    P.rect(offset + 1, y + 1, w - 1, h - 1, rng() < 0.25 ? colors[1] : colors[0]);
+    P.rect(offset + 1, y + 1, w - 1, 1, colors[2]);
+  }
+}
+
 function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
   const material = opts.material || 'stone';
   const table = kind === 'wall' ? WALL : FLOOR;
@@ -367,7 +405,9 @@ function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
   const P = painter(sctx);
   const rng = makeRng(seedFrom(`${kind}|${material}|${opts.seed || ''}`));
   const colors = materialColors(MAT[material] ? material : 'stone', opts.palette, opts.paletteStrength ?? 0.35);
-  fn(P, colors, rng);
+  if (material === 'stone' && kind === 'floor' && opts.style?.pattern) drawStonePattern(P, colors, rng, opts.style);
+  else if (['stone', 'brick'].includes(material) && kind === 'wall' && opts.style?.brickSize) drawWallBlocks(P, colors, rng, opts.style);
+  else fn(P, colors, rng);
   const cover = Array.isArray(opts.groundCover) ? opts.groundCover : [];
   if (kind === 'floor') { overlayGroundCover(P, cover, rng, colors); overlayScatter(P, opts.scatter, rng); }
   else { overlayWallCover(P, cover, rng); overlayDecals(P, opts.decals, rng); }
@@ -375,4 +415,20 @@ function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
   return material;
 }
 
-module.exports = { drawSceneSurface, hasMaterial, materialColors, overlayDecals, overlayScatter };
+// Undersides use subdued masonry/grain, not the bright decorated floor tile.
+function drawRoofSurface(ctx, createCanvas, opts = {}) {
+  const small = createCanvas(BASE, BASE), P = painter(small.getContext('2d'));
+  const material = opts.material || 'stone';
+  const colors = materialColors(MAT[material] ? material : 'stone', opts.palette, 0.65)
+    .map(c => shade(c, 0.72));
+  const rng = makeRng(seedFrom(`roof|${material}|${opts.style || 'stone'}|${opts.seed || ''}`));
+  P.fill(colors[0]);
+  for (let y = 0; y < BASE; y++) for (let x = 0; x < BASE; x++) {
+    if (rng() < 0.09) P.px(x, y, mix(colors[0], colors[1], 0.4));
+    if (material === 'wood' && x % 8 === 0) P.px(x, y, colors[1]);
+    else if (material !== 'wood' && y % 16 === 0 && rng() > 0.15) P.px(x, y, colors[1]);
+  }
+  upscale(small, ctx);
+}
+
+module.exports = { drawSceneSurface, drawRoofSurface, hasMaterial, materialColors, overlayDecals, overlayScatter };

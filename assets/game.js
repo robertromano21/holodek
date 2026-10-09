@@ -14,9 +14,11 @@ const MUSIC_STORE   = 'rooms';
 // --- IndexedDB for dungeon layouts ---
 const DUNGEON_DB_NAME = 'cotg-dungeons';
 const DUNGEON_STORE   = 'rooms';
+window.dungeonRunId = null;
 const DUNGEON_CACHE_VERSION = 7; // v7: geometry-stamped scene rooms for accelerated render cache invalidation
 let dungeonDBPromise = null;
 let lastDungeonGeoKey = null;
+let dungeonSwitchRequest = 0;
 
 function computeDungeonGeometryStamp(dungeon, geoKey) {
   if (!dungeon || !dungeon.cells) return `${geoKey || 'unknown'}:empty`;
@@ -39,6 +41,7 @@ function computeDungeonGeometryStamp(dungeon, geoKey) {
     mix(cell.tile || 'floor');
     mix(Number.isFinite(cell.floorHeight) ? Math.round(cell.floorHeight * 1000) : 0);
     mix(Number.isFinite(cell.ceilHeight) ? Math.round(cell.ceilHeight * 1000) : 0);
+    if (cell.roof) mix(`roof:${cell.roof.style}:${cell.roof.height}`);
     if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
   }
   return `${keys.length}:${(hash >>> 0).toString(16)}`;
@@ -76,22 +79,44 @@ function openDungeonDB() {
 }
 
 async function idbGetDungeon(coordsKey) {
+  if (!window.dungeonRunId) return null;
+  const cacheKey = `${window.dungeonRunId}:${coordsKey}`;
   const db = await openDungeonDB();
   return new Promise((resolve, reject) => {
     const tx  = db.transaction(DUNGEON_STORE, 'readonly');
-    const req = tx.objectStore(DUNGEON_STORE).get(coordsKey);
+    const req = tx.objectStore(DUNGEON_STORE).get(cacheKey);
     req.onsuccess = () => resolve(req.result || null);
     req.onerror   = () => reject(req.error);
   });
 }
 
 async function idbSetDungeon(coordsKey, dungeon) {
+  const runId = dungeon?._meta?.runId || window.dungeonRunId;
+  if (!runId) return;
+  const cacheKey = `${runId}:${coordsKey}`;
   const db = await openDungeonDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(DUNGEON_STORE, 'readwrite');
-    tx.objectStore(DUNGEON_STORE).put(dungeon, coordsKey);
+    tx.objectStore(DUNGEON_STORE).put(dungeon, cacheKey);
     tx.oncomplete = () => resolve();
     tx.onerror    = () => reject(tx.error);
+  });
+}
+
+async function discardPreviousDungeonRuns(runId) {
+  const db = await openDungeonDB();
+  if (window.dungeonRunId !== runId) return;
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(DUNGEON_STORE, 'readwrite');
+    const request = tx.objectStore(DUNGEON_STORE).openKeyCursor();
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (!String(cursor.key).startsWith(`${runId}:`)) cursor.delete();
+      cursor.continue();
+    };
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
   });
 }
 
@@ -206,16 +231,26 @@ async function switchDungeonForCoordinates(coordString) {
   const geoKey = `${match[1]},${match[2]},${match[3]}`;
 
   if (currentDungeon?.geoKey === geoKey) return;
-
-  const cached = await idbGetDungeon(geoKey);
-  if (!cached) {
-    console.log('No cached dungeon yet for', geoKey);
-    return; // server will generate it
+  const request = ++dungeonSwitchRequest;
+  let cached = null;
+  try { cached = await idbGetDungeon(geoKey); }
+  catch (error) { console.warn('[DungeonCache] Read failed:', geoKey, error); }
+  if (!cached || (cached._meta?.version || 0) < DUNGEON_CACHE_VERSION) {
+    try {
+      const response = await fetch(`/get-room-dungeon?coords=${encodeURIComponent(geoKey)}`);
+      if (!response.ok) throw new Error(`Room lookup failed (HTTP ${response.status}).`);
+      const result = await response.json();
+      cached = result.dungeon;
+      if (cached) {
+        cached._meta = { ...cached._meta, version: DUNGEON_CACHE_VERSION, cachedAt: Date.now() };
+        idbSetDungeon(geoKey, cached).catch(error => console.warn('[DungeonCache] Write failed; displaying room in memory:', geoKey, error));
+      }
+    } catch (error) { console.error('[DungeonLoad] Recovery failed:', geoKey, error); }
   }
-  const cachedVersion = cached?._meta?.version || 0;
-  if (cachedVersion < DUNGEON_CACHE_VERSION) {
-    console.log('Discarding outdated dungeon cache on switch:', geoKey, 'version', cachedVersion);
-    return; // allow server to generate a fresh dungeon
+  if (request !== dungeonSwitchRequest) return;
+  if (!cached) {
+    console.warn('[DungeonLoad] Waiting for construction:', geoKey);
+    return;
   }
 
   console.log('Switching dungeon due to coordinate change:', geoKey);
@@ -556,11 +591,46 @@ function choosePlayerSpawnAngle(dungeon, tileX, tileY, fallbackAngle = playerAng
   return candidates[0].angle;
 }
 
+window.applyLivingEnvironmentDelta = function(data) {
+  if (!currentDungeon || currentDungeon.geoKey !== data.geoKey) return;
+  if (currentDungeon._geometryStamp !== data.previousStamp && currentDungeon._geometryStamp !== data.geometryStamp) {
+    console.error('[DungeonAction] Geometry revision mismatch; ignoring stale update.', data);
+    return;
+  }
+  Object.assign(currentDungeon.cells, data.cells);
+  if (data.actionAttempts) currentDungeon.actionAttempts = data.actionAttempts;
+  if (data.livingEncounter) currentDungeon.livingEncounter = data.livingEncounter;
+  currentDungeon._geometryStamp = data.geometryStamp;
+  currentDungeon._meta = { ...currentDungeon._meta, geometryStamp: data.geometryStamp };
+  delete currentDungeon._lodCache;
+  idbSetDungeon(data.geoKey, currentDungeon).catch(console.error);
+  renderDungeonView();
+  window.combatGame?.scene?.getScene('CombatScene')?.redrawCombatRT?.();
+};
+
 // SSE handler
 const eventSource = new EventSource('/combat-updates2');
 eventSource.onmessage = function(event) {
   let data;
   try { data = JSON.parse(event.data); } catch { return; }
+  if (data.type === 'dungeonRun') {
+    if (window.dungeonRunId !== data.runId) {
+      window.dungeonRunId = data.runId;
+      ++dungeonSwitchRequest;
+      currentDungeon = null;
+      window.DungeonExplorationMap?.reset();
+      window.InventoryUi?.reset();
+      window.ItemInteractionUi?.reset();
+      window.DungeonCompass?.setNavigation(null, null);
+      window.questProgressText = '';
+      window.lastServerGameConsole = '';
+      window.dungeonItemConsole = null;
+      roomDatabaseSyncClient.reset();
+      discardPreviousDungeonRuns(data.runId).catch(error => console.warn('[DungeonCache] Previous-game cleanup failed:', error));
+      console.info('[DungeonRunStarted]', { runId: data.runId });
+    }
+    return;
+  }
 
   if (data.type === 'dice_state') {
     window.receiveDiceState?.(data);
@@ -569,20 +639,7 @@ eventSource.onmessage = function(event) {
   }
 
   if (data.type === 'dungeonCellUpdate') {
-    if (!currentDungeon || currentDungeon.geoKey !== data.geoKey) return;
-    if (currentDungeon._geometryStamp !== data.previousStamp && currentDungeon._geometryStamp !== data.geometryStamp) {
-      console.error('[DungeonAction] Geometry revision mismatch; ignoring stale door update.', data);
-      return;
-    }
-    Object.assign(currentDungeon.cells, data.cells);
-    currentDungeon.actionAttempts = data.actionAttempts;
-    if (data.livingEncounter) currentDungeon.livingEncounter = data.livingEncounter;
-    currentDungeon._geometryStamp = data.geometryStamp;
-    currentDungeon._meta = { ...currentDungeon._meta, geometryStamp: data.geometryStamp };
-    delete currentDungeon._lodCache;
-    idbSetDungeon(data.geoKey, currentDungeon).catch(console.error);
-    renderDungeonView();
-    window.combatGame?.scene?.getScene('CombatScene')?.redrawCombatRT?.();
+    window.applyLivingEnvironmentDelta(data);
     return;
   }
 
@@ -600,8 +657,13 @@ eventSource.onmessage = function(event) {
 
     // DUNGEON LOADED — THE DEMON HAS SPOKEN
     if (data.type === 'dungeonLoaded') {
+      ++dungeonSwitchRequest;
       (async () => {
         const dungeon = data.dungeon;
+        if (dungeon?._meta?.runId && window.dungeonRunId && dungeon._meta.runId !== window.dungeonRunId) {
+          console.warn('[DungeonLoad] Ignoring room from a previous game:', data.geoKey);
+          return;
+        }
         const geoKey  = data.geoKey || currentDungeon?.geoKey;
     
         if (!geoKey) {
@@ -616,7 +678,8 @@ eventSource.onmessage = function(event) {
             cachedAt: Date.now()
           };
           ensureDungeonGeometryStamp(dungeon, geoKey);
-          await idbSetDungeon(geoKey, dungeon);
+          // A cache quota/write failure must not prevent a completed room from displaying.
+          idbSetDungeon(geoKey, dungeon).catch(error => console.warn('[DungeonCache] Write failed; displaying room in memory:', geoKey, error));
           currentDungeon = dungeon;
         } else {
           // Browser cache is a fallback only; it should not override fresh server-built rooms.
@@ -675,7 +738,9 @@ eventSource.onmessage = function(event) {
   }
 
   // Existing combat map movement
-  if (data.type === 'movement') {
+  if (data.type === 'combat_maze_step') {
+    applyCombatMazeStep(data);
+  } else if (data.type === 'movement') {
     const { character, path } = data;
     path.forEach((step, index) => {
       setTimeout(() => updateCharacterPosition(character, step.x, step.y), index * 500);
@@ -701,8 +766,8 @@ eventSource.onmessage = function(event) {
         if (combatScene) combatScene.updatePositions(newCombatCharacters);
         window.renderPartyIconDock?.();
     } else if (data.type === 'target_prompt') {
-        const { combatant, targets, positions } = data;
-        showTargetSelectionPopup(combatant, targets, positions);
+        const { combatant, targets, positions, actionId } = data;
+        showTargetSelectionPopup(combatant, targets, positions, actionId);
     } else if (data.type === 'combat_log') {
         const { log } = data;
         updateChatLog("<br><br>" + log.replace(/\n/g, "<br>"));
@@ -711,70 +776,9 @@ eventSource.onmessage = function(event) {
 
 
 
-// Function to show target selection popup
-function showTargetSelectionPopup(combatant, targets, positions) {
-    // Remove any existing popup
-    const existingPopup = document.querySelector('.target-selection-popup');
-    if (existingPopup) {
-        existingPopup.remove();
-    }
-
-    // Create popup container
-    const popup = document.createElement('div');
-    popup.classList.add('target-selection-popup');
-    popup.style.position = 'absolute';
-    popup.style.top = '50%';
-    popup.style.left = '50%';
-    popup.style.transform = 'translate(-50%, -50%)';
-    popup.style.backgroundColor = 'rgba(0, 0, 0, 0.9)';
-    popup.style.color = 'white';
-    popup.style.padding = '20px';
-    popup.style.border = '1px solid white';
-    popup.style.borderRadius = '8px';
-    popup.style.zIndex = '3000';
-    popup.style.textAlign = 'center';
-
-    // Add content
-    popup.innerHTML = `
-        <p>Select a target for ${combatant}:</p>
-        <select id="target-select">
-            ${targets.map((target, index) => {
-                const pos = positions[index];
-                return `<option value="${target}">${target} (x: ${pos.x}, y: ${pos.y})</option>`;
-            }).join('')}
-        </select>
-        <br>
-        <button class="popup-button" id="confirm-target">Confirm</button>
-        <button class="popup-button" id="cancel-target">Cancel</button>
-    `;
-
-    document.body.appendChild(popup);
-
-    // Style buttons
-    const buttons = popup.querySelectorAll('.popup-button');
-    buttons.forEach(button => {
-        button.style.backgroundColor = '#444';
-        button.style.color = 'white';
-        button.style.border = 'none';
-        button.style.padding = '5px 10px';
-        button.style.margin = '5px';
-        button.style.cursor = 'pointer';
-        button.style.borderRadius = '5px';
-    });
-
-    // Event listeners
-    document.getElementById('confirm-target').addEventListener('click', () => {
-        const selectedTarget = document.getElementById('target-select').value;
-        sendTargetSelection(combatant, selectedTarget);
-        popup.remove();
-    });
-
-    document.getElementById('cancel-target').addEventListener('click', () => {
-        // Select a random target as fallback
-        const randomTarget = targets[Math.floor(Math.random() * targets.length)];
-        sendTargetSelection(combatant, randomTarget);
-        popup.remove();
-    });
+// Retain the combat event entry point, but place controls beside the party instead of in a popup.
+function showTargetSelectionPopup(combatant, targets, positions, actionId) {
+    window.showCombatTargetPrompt?.({ combatant, targets, positions, actionId });
 }
 
 // Function to send target selection to the server
@@ -824,7 +828,7 @@ function updateCharacterPosition(characterName, x, y) {
 
 // Move the player by a delta — DUNGEON-CENTRIC (player stays centered in combat map)
 function movePlayerByDelta(dx, dy) {
-  if (window.actionDiceState?.active) return;
+  if (window.actionDiceState?.active || isCombatRoundActive()) return;
   const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
   if (!combatScene || !combatScene.pcName || !combatScene.characters[combatScene.pcName]) {
     console.warn('movePlayerByDelta: no combatScene/pc yet');
@@ -1182,12 +1186,18 @@ function isObstacleAtPos(x, y, excludeName = null) {
   if (!currentDungeon || !currentDungeon.cells) return false;
   const cx = Math.floor(x);
   const cy = Math.floor(y);
+  const standingHeight = getDungeonSurfaceAt(x, y).height;
   for (let oy = -1; oy <= 1; oy++) {
     for (let ox = -1; ox <= 1; ox++) {
       const cell = currentDungeon.cells[`${cx + ox},${cy + oy}`];
       if (!cell) continue;
       const tile = String(cell.tile || '');
       if (!isObstacleTile(tile)) continue;
+      const voxel = window.VoxelCollision?.testCell(currentDungeon, cx + ox, cy + oy, x, y, PLAYER_RADIUS, PLAYER_EYE_HEIGHT, MAX_STEP, standingHeight);
+      if (voxel) {
+        if (voxel.blocked) return true;
+        continue;
+      }
       const radius = getObstacleRadiusForTile(tile);
       if (radius <= 0) continue;
       const centerX = cx + ox + 0.5;
@@ -1201,19 +1211,16 @@ function isObstacleAtPos(x, y, excludeName = null) {
   return false;
 }
 
-// Objects in Room placed by the server (dungeon.sceneObjects), minus anything no longer listed in the latest
-// console's "Objects in Room" line (taken / dropped elsewhere). Used by the 2D combat map and the 3D renderer.
+// Reconcile mutable items only; taking or discovering an item must not rebuild room geometry.
 function getVisibleSceneObjects() {
-  const list = currentDungeon && Array.isArray(currentDungeon.sceneObjects) ? currentDungeon.sceneObjects : [];
-  if (!list.length) return list;
-  const SI = window.SceneItems;
-  const cur = SI && typeof SI.parseRoomObjects === 'function' ? SI.parseRoomObjects(window.lastServerGameConsole) : null;
-  if (!cur) return list;
-  const present = cur.map((o) => SI.normName(o.name));
-  return list.filter((o) => {
-    const n = SI.normName(o.name);
-    return present.some((p) => p === n || (p.length > 3 && (p.includes(n) || n.includes(p))));
-  });
+  const result = window.SceneObjectSync?.sync(currentDungeon, window.dungeonItemConsole ?? window.lastServerGameConsole,
+    { player: { x: playerPosX, y: playerPosY } });
+  if (result?.changed) {
+    scheduleLodCachePersist();
+    console.info('[SceneObjectsSynced]', { geoKey: currentDungeon.geoKey, added: result.added,
+      removed: result.removed, updated: result.updated, pending: result.pending.length });
+  }
+  return result?.objects || currentDungeon?.sceneObjects || [];
 }
 window.getVisibleSceneObjects = getVisibleSceneObjects;
 
@@ -1248,6 +1255,12 @@ function canEnterTile(fromX, fromY, toX, toY, excludeName = null) {
 
 function getDungeonCellFloorHeight(cell) {
   return cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+}
+
+function getDungeonSurfaceAt(x, y) {
+  return window.VoxelCollision?.surfaceAt(currentDungeon, x, y, PLAYER_RADIUS) || {
+    height: getDungeonCellFloorHeight(currentDungeon?.cells?.[`${Math.floor(x)},${Math.floor(y)}`]), kind: 'floor'
+  };
 }
 
 function isDungeonCliffEdge(cellA, cellB) {
@@ -1289,6 +1302,7 @@ function findNearestUnblockedTile(dungeon, start, maxRadius = 25) {
 function canOccupyPos(nextX, nextY, excludeName = null) {
   const currX = playerPosX;
   const currY = playerPosY;
+  if (Math.abs(getDungeonSurfaceAt(nextX, nextY).height - getDungeonSurfaceAt(currX, currY).height) > MAX_STEP) return false;
   const offsets = [
     [PLAYER_RADIUS, PLAYER_RADIUS],
     [-PLAYER_RADIUS, PLAYER_RADIUS],
@@ -1462,6 +1476,7 @@ function getDungeonPositionDebug() {
     angle: Number(playerAngle.toFixed(3)),
     eyeBack,
     currentRadiusBlock,
+    standingSurface: getDungeonSurfaceAt(posX, posY),
     z: Number(playerZ.toFixed(3)),
     zTarget: Number(playerZTarget.toFixed(3))
   };
@@ -1485,6 +1500,7 @@ function getObstacleAtPosDetail(x, y) {
   if (!currentDungeon || !currentDungeon.cells) return null;
   const cx = Math.floor(x);
   const cy = Math.floor(y);
+  const standingHeight = getDungeonSurfaceAt(x, y).height;
   for (let oy = -1; oy <= 1; oy++) {
     for (let ox = -1; ox <= 1; ox++) {
       const tileX = cx + ox;
@@ -1493,6 +1509,11 @@ function getObstacleAtPosDetail(x, y) {
       if (!cell) continue;
       const tile = String(cell.tile || '');
       if (!isObstacleTile(tile)) continue;
+      const voxel = window.VoxelCollision?.testCell(currentDungeon, tileX, tileY, x, y, PLAYER_RADIUS, PLAYER_EYE_HEIGHT, MAX_STEP, standingHeight);
+      if (voxel) {
+        if (voxel.blocked) return { reason: 'prop collision', tile, key: `${tileX},${tileY}`, ...voxel };
+        continue;
+      }
       const radius = getObstacleRadiusForTile(tile);
       if (radius <= 0) continue;
       const centerX = tileX + 0.5;
@@ -1518,6 +1539,11 @@ function getObstacleAtPosDetail(x, y) {
 function getOccupancyBlockReason(nextX, nextY, excludeName = null) {
   const currX = playerPosX;
   const currY = playerPosY;
+  const fromSurface = getDungeonSurfaceAt(currX, currY), toSurface = getDungeonSurfaceAt(nextX, nextY);
+  if (Math.abs(toSurface.height - fromSurface.height) > MAX_STEP) {
+    return { reason: toSurface.kind === 'column-plinth' ? 'plinth step too steep' : 'height step too steep',
+      fromSurface, toSurface, maxStep: MAX_STEP };
+  }
   const offsets = [
     [PLAYER_RADIUS, PLAYER_RADIUS],
     [-PLAYER_RADIUS, PLAYER_RADIUS],
@@ -1574,7 +1600,7 @@ if (typeof window !== 'undefined') {
     try {
       const renderer = window.webglDungeonRendererLegacy || window.webglDungeonRenderer;
       if (!renderer?.getRenderingDiagnostics) throw new Error('Renderer diagnostics unavailable');
-      const report = renderer.getRenderingDiagnostics(currentDungeon);
+      const report = renderer.getRenderingDiagnostics(currentDungeon, { gpuReadback: reason !== 'room-upload' });
       if (report.error) throw new Error(report.error);
       report.reason = reason;
       report.position = getDungeonPositionDebug();
@@ -1654,7 +1680,7 @@ function getCombatMapRotationAngle() {
 }
 
 function updateDungeonMovement(now) {
-  if (window.actionDiceState?.active) {
+  if (window.actionDiceState?.active || isCombatRoundActive()) {
     DUNGEON_MOVE.lastTime = now;
     DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
     return false;
@@ -1728,7 +1754,14 @@ function updateDungeonMovement(now) {
 
   playerPosX = nextX;
   playerPosY = nextY;
+  updatePlayerHeightFromCell();
   const movedThisFrame = Math.hypot(playerPosX - prevX, playerPosY - prevY) > 0.002;
+  const previousViewShift = window.dungeonViewShift || 0;
+  window.dungeonViewShift = window.TerrainCamera?.update(currentDungeon, {
+    x: playerPosX, y: playerPosY, angle: playerAngle,
+    vx: dt > 0 ? (playerPosX - prevX) / dt : 0, vy: dt > 0 ? (playerPosY - prevY) / dt : 0
+  }, dt, window.DUNGEON_AUTO_LOOK_DOWN !== false) || 0;
+  const viewSettling = Math.abs(window.dungeonViewShift) > .0002 || Math.abs(window.dungeonViewShift - previousViewShift) > .00001;
   const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
   const pcGlobal = Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.type === 'pc') : null;
   if (pcGlobal) {
@@ -1749,10 +1782,7 @@ function updateDungeonMovement(now) {
     const zSmooth = Number.isFinite(window.WEBGL_Z_SMOOTH) ? window.WEBGL_Z_SMOOTH : Z_SMOOTH;
     const zLerp = 1 - Math.exp(-zSmooth * dt);
     playerZ += (playerZTarget - playerZ) * zLerp;
-    const footCell = currentDungeon && currentDungeon.cells
-      ? currentDungeon.cells[`${Math.floor(playerPosX)},${Math.floor(playerPosY)}`]
-      : null;
-    const floorHeight = footCell && typeof footCell.floorHeight === 'number' ? footCell.floorHeight : null;
+    const floorHeight = getDungeonSurfaceAt(playerPosX, playerPosY).height;
     if (Number.isFinite(floorHeight) && playerZ < floorHeight + 0.12) {
       playerZ = floorHeight + 0.12;
     }
@@ -1811,7 +1841,8 @@ function updateDungeonMovement(now) {
     speedAfter > STOP_EPS ||
     turnInput !== 0 ||
     stillSnapping ||
-    zDelta > 0.001
+    zDelta > 0.001 ||
+    viewSettling
   );
 }
 
@@ -1847,6 +1878,61 @@ function startDungeonMovementLoop() {
   DUNGEON_MOVE.raf = requestAnimationFrame(step);
 }
 
+let dungeonExitPromptKey = null;
+let dungeonExitPromptRoom = null;
+function syncDungeonExitNavigation() {
+  if (!currentDungeon || !window.DungeonExits) return;
+  const consoleExits = window.dungeonConsoleExits;
+  const raw = consoleExits?.geoKey === currentDungeon.geoKey ? consoleExits.exits :
+    currentDungeon.sceneSpec?.exits ?? currentDungeon.sceneSpec?.source?.exits ?? [];
+  const report = window.DungeonExits.install(currentDungeon, raw);
+  if (dungeonExitPromptRoom !== currentDungeon) {
+    dungeonExitPromptRoom = currentDungeon; dungeonExitPromptKey = null;
+    document.querySelector('.popup-container[data-dungeon-exit]')?.remove();
+    console.info('[DungeonExits]', currentDungeon.geoKey, report);
+  }
+  const player = { x: playerPosX, y: playerPosY };
+  const near = window.DungeonExits.nearby(currentDungeon, player);
+  if (!near) {
+    if (!window.DungeonExits.nearby(currentDungeon, player, 2.2)) dungeonExitPromptKey = null;
+    document.querySelector('.popup-container[data-dungeon-proximity]')?.remove();
+    return;
+  }
+  const key = `${currentDungeon.geoKey}:${near.direction}`;
+  if (key === dungeonExitPromptKey || document.querySelector('.popup-container') ||
+      document.activeElement?.id === 'chatuserinput' || window._combatRoundActiveUntil > Date.now()) return;
+  const link = document.querySelector(`#phaser-container .clickable-exit[data-exit="${near.direction}"]`);
+  if (!link) return;
+  dungeonExitPromptKey = key;
+  link.click(); // Reuse the original Go / Unlock / Cancel command path, including locked exits.
+  const popup = document.querySelector('.popup-container[data-dungeon-exit]');
+  if (popup) popup.dataset.dungeonProximity = 'true';
+}
+
+function drawDungeonExitMapMarkers(scene, draw) {
+  const { pos, cs, centerX, centerY, combatAngle, viewRadius } = draw;
+  for (const marker of currentDungeon?.roomExits?.markers || []) {
+    let dx = marker.x + 0.5 - pos.x, dy = marker.y + 0.5 - pos.y;
+    const extent = Math.max(Math.abs(dx), Math.abs(dy)), distant = extent > viewRadius;
+    if (distant) { dx *= (viewRadius - 0.8) / extent; dy *= (viewRadius - 0.8) / extent; }
+    const size = Math.max(10, Math.round(cs * 0.8)), key = `journey-exit-${marker.label}-${size}-${distant}`;
+    if (!scene.textures.exists(key)) {
+      const canvas = document.createElement('canvas'); canvas.width = canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#173d31'; ctx.fillRect(0, 0, size, size);
+      ctx.strokeStyle = '#9ce3bc'; ctx.strokeRect(0.5, 0.5, size - 1, size - 1);
+      ctx.fillStyle = '#dcffe9'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = `bold ${Math.max(7, Math.floor(size * 0.45))}px Arial`;
+      ctx.fillText(marker.label, size / 2, size / 2 - (distant ? size * 0.12 : 0));
+      if (distant) { ctx.font = `${Math.max(6, Math.floor(size * 0.25))}px Arial`; ctx.fillText('...', size / 2, size * 0.8); }
+      scene.textures.addCanvas(key, canvas);
+    }
+    const x = centerX + (dx * Math.cos(combatAngle) - dy * Math.sin(combatAngle)) * cs;
+    const y = centerY + (dx * Math.sin(combatAngle) + dy * Math.cos(combatAngle)) * cs;
+    scene.renderRT.draw(key, Math.round(x - size / 2), Math.round(y - size / 2));
+  }
+}
+
 class MainScene extends Phaser.Scene {
     constructor() {
         super({ key: 'MainScene' });
@@ -1880,6 +1966,8 @@ class MainScene extends Phaser.Scene {
         const monstersState = data?.monstersState || "None";
         const puzzle = data?.puzzle || { inRoom: "No puzzle", solution: "No solution" };
         const currentQuest = data?.currentQuest || "None";
+        const questProgress = data?.questProgress ?? window.questProgressText ?? '';
+        const escapedText = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
         const nextArtifact = data?.nextArtifact || "None";
         const nextBoss = data?.nextBoss || "None";
         const nextBossRoom = data?.nextBossRoom || "None";
@@ -1891,7 +1979,7 @@ class MainScene extends Phaser.Scene {
         
         let exitsHtml = exits;
         if (exits !== "None") {
-            const exitList = exits.split(", ");
+            const exitList = window.DungeonExits ? window.DungeonExits.normalize(exits) : exits.split(", ");
             exitsHtml = exitList.map(exit => `<span class="clickable-exit" data-exit="${exit}">${exit}</span>`).join(", ");
         }
         
@@ -2027,6 +2115,7 @@ Puzzle: ${puzzle.inRoom}
 Solution: ${puzzle.solution}
 
 Current Quest: ${currentQuest}
+${questProgress && questProgress !== 'None' ? `\nQuest Progress: ${escapedText(questProgress)}\n` : ''}
 
 Next Artifact: ${nextArtifact}
 
@@ -2046,6 +2135,12 @@ ${adjacentRooms}
     
         // Update the content inside the popup
         contentDiv.innerHTML = fullText;
+        window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs });
+        const consoleCoordNumbers = String(coordinates).match(/-?\d+/g);
+        window.dungeonConsoleExits = { geoKey: consoleCoordNumbers?.length === 3 ? consoleCoordNumbers.join(',') : null, exits };
+        window.dungeonItemConsole = consoleCoordNumbers?.length === 3
+          ? `Coordinates: X: ${consoleCoordNumbers[0]}, Y: ${consoleCoordNumbers[1]}, Z: ${consoleCoordNumbers[2]}\nObjects in Room: ${objects}\nObjects in Room Properties: ${objectsInRoomProperties}`
+          : null;
     
         // Add event listener to clickable objects inside contentDiv
         contentDiv.addEventListener('click', (event) => {
@@ -2073,6 +2168,7 @@ ${adjacentRooms}
         
                 // Append the popup to the body
                 document.body.appendChild(popup);
+                popup.dataset.dungeonItem = objectName;
         
                 // Add event listeners for buttons
                 document.getElementById('take-button').addEventListener('click', () => {
@@ -2281,51 +2377,39 @@ ${adjacentRooms}
             if (target.classList.contains("clickable-monster")) {
                 const monsterName = target.getAttribute("data-monster");
                 console.log(`Clicked on monster: ${monsterName}`);
-       
-                // Remove any existing popup
+
                 const existingPopup = document.querySelector(".popup-container");
-                if (existingPopup) {
-                    existingPopup.remove();
-                }
-       
-                // Create the confirmation popup
+                if (existingPopup) existingPopup.remove();
+
                 const popup = document.createElement("div");
                 popup.classList.add("popup-container");
-       
-                // Add popup content with both "Add" and "Attack" options
                 popup.innerHTML = `
                     <p>What would you like to do with ${monsterName}?</p>
                     <button class="popup-button" id="add-button">Add to Party</button>
                     <button class="popup-button" id="attack-button">Attack</button>
                     <button class="popup-button" id="cancel-button">Cancel</button>
                 `;
-       
-                // Append the popup to the body
                 document.body.appendChild(popup);
-       
-                // Add event listeners for buttons
+
                 document.getElementById("add-button").addEventListener("click", () => {
                     const chatInput = document.getElementById("chatuserinput");
                     chatInput.value = `add ${monsterName} to party`; // Command to add monster
                     chatbotprocessinput(); // Process the command
-                    popup.remove(); // Remove the popup
+                    popup.remove();
                 });
-       
                 document.getElementById("attack-button").addEventListener("click", () => {
                     const chatInput = document.getElementById("chatuserinput");
                     chatInput.value = `attack ${monsterName}`; // Command to attack monster
                     chatbotprocessinput(); // Process the command
-                    popup.remove(); // Remove the popup
+                    popup.remove();
                 });
-       
-                document.getElementById("cancel-button").addEventListener("click", () => {
-                    popup.remove(); // Remove the popup
-                });
+                document.getElementById("cancel-button").addEventListener("click", () => popup.remove());
             }
         });
         
         // ---- Exit click handler (equip-style flow; Unlock only when locked) ----
-        contentDiv.addEventListener("click", (event) => {
+        if (contentDiv._exitClickHandler) contentDiv.removeEventListener('click', contentDiv._exitClickHandler);
+        contentDiv._exitClickHandler = (event) => {
           const target = event.target;
           if (!target.classList.contains("clickable-exit")) return;
         
@@ -2344,7 +2428,7 @@ ${adjacentRooms}
           // Consider anything not "open" as locked (e.g., "sealed", "locked", etc.)
           const isLocked = !!(exitData && String(exitData.status || "").toLowerCase() !== "open");
           const requiredKeyHint = isLocked && exitData && exitData.key
-            ? `<div style="margin:4px 0 8px 0;opacity:.85;">Requires: ${exitData.key}</div>`
+            ? `<div style="margin:4px 0 8px 0;opacity:.85;">Requires: ${escapedText(exitData.key)}</div>`
             : "";
         
           // Create the popup container
@@ -2354,11 +2438,13 @@ ${adjacentRooms}
           // Base popup (Go / [Unlock] / Cancel). Unlock appears only when isLocked = true
           popup.innerHTML = `
             <p>Go ${exitDirection}?</p>
+            ${requiredKeyHint}
             <button class="popup-button" id="go-button">Go</button>
             ${isLocked ? `<button class="popup-button" id="unlock-button">Unlock</button>` : ""}
             <button class="popup-button" id="cancel-button">Cancel</button>
           `;
           document.body.appendChild(popup);
+          popup.dataset.dungeonExit = exitDirection;
         
           // Go -> move
           document.getElementById("go-button").addEventListener("click", () => {
@@ -2417,7 +2503,8 @@ ${adjacentRooms}
         
           // Cancel -> close
           document.getElementById("cancel-button").addEventListener("click", () => popup.remove());
-        });
+        };
+        contentDiv.addEventListener('click', contentDiv._exitClickHandler);
         // ---- End exit click handler ----
 
         let characters = [];
@@ -2426,7 +2513,7 @@ ${adjacentRooms}
             characters.push({ name: pcName, type: 'pc' });
         }*/
         if (pc && pc !== 'No PC data') {
-            const pcName = pc.split('\n')[0];
+            const pcName = pc.split('\n')[0].trim().replace(/^Name:\s*/i, '');
             let pcEntry = { name: pcName, type: 'pc' };
             // Ensure the PC in combat mode uses the exact selected/generated sprite from the character review.
             // This build path (from console text parse on room/coordinate change) was stripping sprite data,
@@ -2445,7 +2532,7 @@ ${adjacentRooms}
         if (npcs && npcs !== 'None') {
             let npcNames = npcs.split('\n').filter(line => line.trim() !== '');
             for (let i = 0; i < npcNames.length; i += 14) {
-                let name = npcNames[i];
+                let name = npcNames[i].trim().replace(/^Name:\s*/i, '');
                 const npcEntry = { name, type: 'npc' };
                 const npcSprite = resolveKnownCharacterSprite(name, 'npc');
                 if (npcSprite) npcEntry.sprite = npcSprite;
@@ -2455,7 +2542,7 @@ ${adjacentRooms}
         if (monsters && monsters !== 'None') {
             let monsterNames = monsters.split('\n').filter(line => line.trim() !== '');
             for (let i = 0; i < monsterNames.length; i += 14) {
-                let name = monsterNames[i];
+                let name = monsterNames[i].trim().replace(/^Name:\s*/i, '');
                 characters.push({ name, type: 'monster' });
             }
         }
@@ -3144,6 +3231,7 @@ class CombatScene extends Phaser.Scene {
         gridGfx.setRotation(+combatAngle);
         this.renderRT.draw(gridGfx);
         gridGfx.destroy();
+        drawDungeonExitMapMarkers(this, this._lastDungeonDraw);
 
         // NPCs + room monsters: draw into the rotating RT at maze-relative cells (same path as items).
         // Root cause: redrawCombatRT only stamped the PC token, so Mode 1/2/3 showed actors in 3D
@@ -3897,7 +3985,7 @@ function getFirstResponseForRoom(coordinates) {
   const roomHistory = roomConversationHistories[coordinatesString];
 
   if (roomHistory && roomHistory.length > 0) {
-    return roomHistory[0];
+    return roomHistory.find(entry => entry.roomName && entry.roomHistory) || null;
   }
 
   return null;
@@ -3934,26 +4022,9 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
         console.log(roomName);
         console.log(objectMetadata);
 
-        // Define excluded keywords for cleanup
-        const excludedKeywords = [
-            "Current Game Information:", "Updated Game Information", "Seed:",
-            "Room Description:", "Coordinates:", "Objects in Room:", "Objects in Room Properties:", "Exits:",
-            "XP:", "Score:", "Artifacts Found:", "Quests Achieved:", "HP:",
-            "Inventory:", "PC:", "NPCs:", "Rooms Visited:", "Turns:",
-            "north", "south", "east", "west", "northeast", "southeast",
-            "northwest", "southwest"
-        ];
-
-        // Remove excluded keywords from roomHistory if it's defined
-        if (roomHistory) {
-            excludedKeywords.forEach(keyword => {
-                const regex = new RegExp(`${keyword}.*`, 'gi'); // Match the keyword and everything after it
-                roomHistory = roomHistory.replace(regex, '').trim(); // Replace with empty and trim
-            });
-
-            // Remove line breaks and clean up spaces
-            roomHistory = roomHistory.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-        }
+        // This is already the Room Description field, not narrative to filter. Words such as
+        // "north" or "east" belong in it; truncating them changes the scene's source identity.
+        if (!roomName || !roomHistory || /^(undefined|null)$/i.test(roomName) || /^(undefined|null)$/i.test(roomHistory)) return;
 
         // Create a new conversation history entry with server game console details
         const newConversationEntry = {
@@ -3984,6 +4055,8 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
 
 // add a prompt, assistant prompt, system prompt, response, and personal narrative to the database
 function addPromptAndResponse(prompt, assistantPrompt, systemPrompt, response, personalNarrative, conversationId, gameConsole) {
+  // Seed authoritative room fields before appending narrative-only history, including at startup.
+  updateRoomConversationFirstResponse(currentCoordinates, gameConsole);
   const transaction = db.transaction(['conversation'], 'readwrite');
   const store = transaction.objectStore('conversation');
 
@@ -4731,7 +4804,7 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
         let monstersState = "";
 
         // Update regex to ensure it captures the entire monsters section properly
-        const monsterDataMatch = serverGameConsole.match(/Monsters in Room:([\s\S]+?)(?=Monsters Equipped Properites:|$)/);
+        const monsterDataMatch = serverGameConsole.match(/Monsters in Room:([\s\S]*?)(?=Monsters Equipped Properties:|Monsters State:|Rooms Visited:|$)/);
         if (monsterDataMatch) {
             // Correctly split monster entries by looking for two consecutive newlines or start of a new monster entry
             const monstersStateMatch = serverGameConsole.match(/Monsters State:([\s\S]+?)(?=Rooms Visited:|$)/);
@@ -4741,7 +4814,7 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
             const monsterEntries = monsterDataMatch[1].trim().split(/\n(?=\w)/);
             monsters = monsterEntries.map(monsterBlock => {
                 const lines = monsterBlock.split('\n').map(line => line.trim());
-                if (lines.length < 13) {
+                if (lines.length < 14) {
                     console.error("Unexpected format in monsterBlock:", lines);
                     return null; // Skip improperly formatted blocks
                 }
@@ -5459,6 +5532,7 @@ npcs.forEach(npc => {
 
         let currentQuestMatch = serverGameConsole.match(/Current Quest: (.+)/);
         if (currentQuestMatch) currentQuest = currentQuestMatch[1];
+        window.questProgressText = serverGameConsole.match(/^Quest Progress:[ \t]*([^\r\n]*)/m)?.[1] || '';
 
         let nextArtifactMatch = serverGameConsole.match(/Next Artifact: (.+)/);
         if (nextArtifactMatch) nextArtifact = nextArtifactMatch[1];
@@ -5717,7 +5791,7 @@ if (Math.random() < 1.0) {
     console.log('Room History:', roomConversationHistories);
   } else if (!matchingConsole) {
     const roomEntry = roomNameDatabase.get(coordinatesString);
-    roomName = roomEntry ? roomEntry.name : `Room ${coordinatesString}`;
+    roomName = (typeof roomEntry === 'string' ? roomEntry : roomEntry?.name) || roomName || `Room ${coordinatesString}`;
     exits = generateUniqueExits(currentCoordinates, conversationHistory);
     // Example usage: update unvisited rooms set whenever roomNameDatabase or visitedRooms changes
 updateUnvisitedRoomsSet(currentCoordinates);
@@ -5770,7 +5844,7 @@ if (Math.random() < 1.0) {
   const roomHistoryObj = getFirstResponseForRoom(currentCoordinates); // Get the room's first response based on coordinates
 if (roomHistoryObj) {
     // Ensure that roomName and roomHistory are updated based on the first response in the room's conversation history
-    roomName = roomHistoryObj.roomName; // Provide a default if undefined
+    roomName = roomHistoryObj.roomName;
     roomHistory = roomHistoryObj.roomHistory;
     puzzleInRoom = roomHistoryObj.puzzleInRoom;
     puzzleSolution = roomHistoryObj.puzzleSolution;
@@ -6363,6 +6437,22 @@ if (removeMonsterFromPartyPattern.test(userInput)) {
 
   // Format the inventory as a string
   const inventoryString = inventory.length > 0 ? inventory.join(", ") : "Empty";
+  // Supplement the existing generator only when it lacks a fresh outward outdoor route.
+  if (window.OutdoorRoutes) {
+    const visitedKeys = new Set(Array.from(visitedRooms, value => typeof value === 'string' ? value : coordinatesToString(value)));
+    const fromKey = recentCoordinates && (typeof recentCoordinates === 'string' ? recentCoordinates : coordinatesToString(recentCoordinates));
+    const bossNumbers = String(bossCoordinates || '').match(/-?\d+/g);
+    const continuation = window.OutdoorRoutes.ensureContinuation(roomNameDatabase, currentCoordinates, exits,
+      { fromKey, visitedKeys, seed: window.dungeonRunId, protectedKeys: bossNumbers?.length === 3 ? [bossNumbers.join(',')] : [] });
+    exits = continuation.exits;
+    if (continuation.added) {
+      updateRoomConnections(currentCoordinates, exits);
+      const neighbors = populateAdjacentRoomsFromDatabase(currentCoordinates, exits);
+      adjacentRooms = Object.entries(neighbors).map(([direction, name]) => `${direction}: ${name}`).join(', ');
+      roomNameDatabaseString = JSON.stringify(mapToPlainObject(roomNameDatabase));
+      console.info('[OutdoorContinuation]', { geoKey: coordinatesString, ...continuation });
+    }
+  }
   // Format the exits as a string
   const exitsString = exits.join(", ");
   // Format the equipment items as a string
@@ -6434,6 +6524,7 @@ Next Boss: ${nextBoss}
 Next Boss Room: ${nextBossRoom}
 Boss Room Coordinates: ${bossCoordinates}
 Current Quest: ${currentQuest}
+Quest Progress: ${window.questProgressText || 'None'}
 Inventory: ${inventoryString}
 Inventory Properties: ${inventoryPropertiesString}
 Turns: ${turns}
@@ -7920,6 +8011,10 @@ function ensureKnownSpritesInCombatList(list) {
   if (!Array.isArray(list)) return list;
   list.forEach(entry => {
     if (!entry) return;
+    entry.name = String(entry.name || '').trim().replace(/^Name:\s*/i, '');
+    if (isPresetSpriteCharacter(entry.name) && (entry.sprite?.procedural || entry.sprite?.placeholder)) {
+      delete entry.sprite;
+    }
     if (applyProceduralSpriteToEntry(entry)) return;
     if (entry.sprite && entry.sprite.dataUrl) return;
     const known = resolveKnownCharacterSprite(entry.name, entry.type);
@@ -8134,9 +8229,36 @@ function markCombatRoundActive(ms = 90000) {
   window._combatRoundActiveUntil = Date.now() + ms;
 }
 function isCombatRoundActive() {
-  return !!window.actionDiceState?.active || Date.now() < (window._combatRoundActiveUntil || 0);
+  return !!window._combatCommandPending || !!window.actionDiceState?.active || Date.now() < (window._combatRoundActiveUntil || 0);
 }
 if (typeof window !== 'undefined') window.markCombatRoundActive = markCombatRoundActive;
+
+function applyCombatMazeStep(data) {
+  const active = window.actionDiceState?.active;
+  if (!currentDungeon || active?.kind !== 'combat' || active.id !== data.actionId || currentDungeon.geoKey !== data.geoKey) return;
+  const entry = (window.combatCharacters || []).find(c => c.name === data.character);
+  if (!entry || !Number.isInteger(data.x) || !Number.isInteger(data.y)) return;
+  entry._renderFromMazeX = Number.isFinite(entry.renderMazeX) ? entry.renderMazeX : entry.mazeX;
+  entry._renderFromMazeY = Number.isFinite(entry.renderMazeY) ? entry.renderMazeY : entry.mazeY;
+  entry.facing = deriveFacingFromDelta(data.x - entry.mazeX, data.y - entry.mazeY, entry.facing);
+  entry.mazeX = data.x;
+  entry.mazeY = data.y;
+  entry.mazeRoomKey = getCurrentCombatRoomKey();
+  entry._renderTweenToX = data.x;
+  entry._renderTweenToY = data.y;
+  entry._renderTweenStartedAt = performance.now();
+  entry.moveTweenMs = data.duration || 200;
+  advanceWalkFrame(entry, Date.now(), NPC_WALK_FRAME_MS);
+  if (entry.type === 'pc') {
+    playerDungeonX = data.x;
+    playerDungeonY = data.y;
+    playerPosX = data.x + 0.5;
+    playerPosY = data.y + 0.5;
+    updatePlayerHeightFromCell();
+  }
+  refreshPartyCombatProjection(true);
+  renderDungeonView();
+}
 
 function shouldUsePartyMazeAnchors() {
   if (!currentDungeon || !Array.isArray(window.combatCharacters)) return false;
@@ -8562,7 +8684,7 @@ function ensurePartyMazeAnchors(forceReset = false) {
 
 function syncPartyMazeToCombatPositions(forceReset = false) {
   if (!shouldUsePartyMazeAnchors()) return;
-  ensurePartyMazeAnchors(forceReset);
+  if (forceReset || !isCombatRoundActive()) ensurePartyMazeAnchors(forceReset);
   const roomKey = getCurrentCombatRoomKey();
 
   window.combatCharacters.forEach(entry => {
@@ -8874,7 +8996,7 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
 window.updateMonsterWandering = updateMonsterWandering;
 
 function updatePartyMazeLocomotion(force = false) {
-  if (window.actionDiceState?.active) return false;
+  if (isCombatRoundActive()) return false;
   if (!shouldUsePartyMazeAnchors()) return false;
   const now = Date.now();
   if (!force && now - _partyMazeStepAt < NPC_MOVE_THINK_MS) return false;
@@ -9121,7 +9243,8 @@ function equipItem(itemName, targetCharacterName = null) {
     let character;
     if (targetCharacterName) {
         // Try to find the character by matching the full name or just the first name
-        const matchingNpcs = npcs.filter(npc => npc.Name.toLowerCase().startsWith(targetCharacterName.toLowerCase()));
+        const exactNpc = npcs.find(npc => npc.Name.toLowerCase() === targetCharacterName.toLowerCase());
+        const matchingNpcs = exactNpc ? [exactNpc] : npcs.filter(npc => npc.Name.toLowerCase().startsWith(targetCharacterName.toLowerCase()));
 
         if (matchingNpcs.length === 0) {
             return `${targetCharacterName} is not in the room.`;
@@ -9139,6 +9262,7 @@ function equipItem(itemName, targetCharacterName = null) {
     }
 
     // Ensure the character has the Equipped object initialized
+    if (!character) return 'There is no character available to equip this item.';
     if (!character.Equipped) {
         character.Equipped = {
             Weapon: "None",
@@ -9148,10 +9272,18 @@ function equipItem(itemName, targetCharacterName = null) {
         };
     }
 
+    const previous = character.Equipped[slot];
+    if (previous && previous !== 'None') {
+        // The original Unequip command must finish before a replacement can apply modifiers.
+        window.InventoryUi?.requestEquip(itemName, character.Name);
+        return `Unequip ${previous.name || previous} from ${character.Name} before equipping ${itemName}.`;
+    }
+
     // Initialize Attack, Damage, and Armor if not already defined
     if (character.Attack === undefined) character.Attack = 0;
     if (character.Damage === undefined) character.Damage = 0;
     if (character.Armor === undefined) character.Armor = 0;
+    if (character.Magic === undefined) character.Magic = 0;
 
     // Equip the item to the character
     character.Equipped[slot] = itemProperties;
@@ -9176,7 +9308,8 @@ function unequipItem(itemName, targetCharacterName = null) {
     let character;
     if (targetCharacterName) {
         // Try to find the character by matching the full name or just the first name
-        const matchingNpcs = npcs.filter(npc => npc.Name.toLowerCase().startsWith(targetCharacterName.toLowerCase()));
+        const exactNpc = npcs.find(npc => npc.Name.toLowerCase() === targetCharacterName.toLowerCase());
+        const matchingNpcs = exactNpc ? [exactNpc] : npcs.filter(npc => npc.Name.toLowerCase().startsWith(targetCharacterName.toLowerCase()));
 
         if (matchingNpcs.length === 0) {
             return `NPC named ${targetCharacterName} not found.`;
@@ -9194,6 +9327,7 @@ function unequipItem(itemName, targetCharacterName = null) {
     }
 
     // Ensure the character has the Equipped object initialized
+    if (!character) return 'There is no character available to unequip this item.';
     if (!character.Equipped) {
         return `${character.Name} has no items equipped.`;
     }
@@ -9202,7 +9336,7 @@ function unequipItem(itemName, targetCharacterName = null) {
     let item = null;
     let slot = null;
     for (const [key, value] of Object.entries(character.Equipped)) {
-        if (value && value.name.toLowerCase() === itemName.toLowerCase()) {
+        if (value && typeof value.name === 'string' && value.name.toLowerCase() === itemName.toLowerCase()) {
             item = value;
             slot = key;
             break;
@@ -9491,14 +9625,69 @@ function startKeepAliveInterval(chatLog) {
   }, 30000);
 }
 
+const roomDatabaseSyncClient = window.RoomDatabaseSync.createClient();
+
+window.startReviewedGame = async function(payload) {
+  if (window._characterStartupPending) return;
+  window._characterStartupPending = true;
+  try {
+    currentCoordinates = { x: 0, y: 0, z: 0 };
+    const initialConsole = updateGameConsole('', currentCoordinates, '');
+    const initialState = { updatedGameConsole: initialConsole, roomNameDatabaseString: JSON.stringify(mapToPlainObject(roomNameDatabase)) };
+    updateChatLog('<br>Building the first room...<br>');
+    return await window.CharacterStartup.start({ ...payload, initialState }, {
+      onResult: async result => {
+        window._statsRolled = true;
+        window._skipStartMenu = true;
+        await chatbotprocessinput({ completedStartResult: result });
+      }
+    });
+  } finally {
+    window._characterStartupPending = false;
+  }
+};
+
+async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAttempt = false) {
+  const wirePayload = { ...payload, ...roomDatabaseSyncClient.prepare(payload.roomNameDatabaseString) };
+  if (wirePayload.roomDatabaseSync.mode === 'patch') delete wirePayload.roomNameDatabaseString;
+  const response = await transport('/updateState7', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(wirePayload)
+  });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => null);
+    if (!resyncAttempt && detail?.code === 'ROOM_DATABASE_SYNC_REQUIRED') {
+      roomDatabaseSyncClient.reset();
+      return syncGameStateBeforeCommand(payload, transport, true);
+    }
+    throw new Error(detail?.error || `Game state update failed (HTTP ${response.status}).`);
+  }
+  const acknowledgement = await response.json();
+  const coords = String(payload.updatedGameConsole || '').match(/Coordinates:\s*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
+  const geoKey = coords ? `${coords[1]},${coords[2]},${coords[3]}` : null;
+  if (acknowledgement.geoKey !== undefined && acknowledgement.geoKey !== geoKey) {
+    throw new Error('The server acknowledged a different room. The command was not sent.');
+  }
+  console.info('[StateSyncAccepted]', { geoKey });
+  roomDatabaseSyncClient.acknowledge(payload.roomNameDatabaseString, acknowledgement.roomDatabaseSyncToken);
+  return acknowledgement;
+}
+
 async function chatbotprocessinput(textin) {
-  if (window.actionDiceState?.active) {
+  const completedStartResult = textin?.completedStartResult;
+  if (window._characterStartupPending && !completedStartResult) {
+    updateChatLog('<br>The first room is still being built. Please wait.<br>');
+    return;
+  }
+  const coordinatesBeforeCommand = { ...currentCoordinates };
+  if (window.actionDiceState?.active || window._combatCommandPending) {
     updateChatLog('<br>Finish the current action and any pending d20 roll first.<br>');
     return;
   }
   
-    let userInput = document.getElementById("chatuserinput").value;
-  document.getElementById("chatuserinput").value = "";
+    let userInput = completedStartResult ? '' : document.getElementById("chatuserinput").value;
+  if (!completedStartResult) document.getElementById("chatuserinput").value = "";
   
   if (!userInput) {
     if (window._skipStartMenu) {
@@ -9508,6 +9697,10 @@ async function chatbotprocessinput(textin) {
       return;
     }
     // when stats rolled, allow blank reply (empty input) to proceed to roll dungeon automatically
+  }
+
+  if (!completedStartResult && /\battack\b/i.test(userInput)) {
+    markCombatRoundActive();
   }
 
   const movementCommands = ["n", "s", "e", "w", "north", "south", "east", "west", "ne", "nw", "se", "sw", "u", "d", "up", "down"];
@@ -12072,7 +12265,7 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
 }
 
   // Update the game console based on user inputs and get the updated game console
- let updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
+ let updatedGameConsole = completedStartResult?.updatedGameConsole || updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString);
   console.log('updatedGameConsole:', updatedGameConsole);
   
   conversationHistory = conversationHistory + "\n" + updatedGameConsole;
@@ -12081,7 +12274,7 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
   const combinedHistory = conversationHistory + "\n" + userInput;
 
   // Perform dynamic search using the Sentence Transformer model
-  let personalNarrative = await performDynamicSearch(combinedHistory);
+  let personalNarrative = completedStartResult ? '' : await performDynamicSearch(combinedHistory);
 
     const messages = [
     { role: "assistant", content: "" },
@@ -12129,20 +12322,28 @@ function fetchWithTimeout2(resource, options = {}, timeout = TIMEOUT_DURATION2) 
 
 const combatMode = window.combatMode;
 
-await fetchWithTimeout('/updateState7', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString: JSON.stringify(window.combatCharacters || []), combatMode }),
-})
-    .then(response => response.json())
-    .then(data => console.log(data))
-    .catch(error => console.error('Error:', error));
+try {
+  if (!completedStartResult) await syncGameStateBeforeCommand({ personalNarrative, updatedGameConsole, roomNameDatabaseString,
+    combatCharactersString: JSON.stringify(window.combatCharacters || []), combatMode }, fetchWithTimeout);
+} catch (error) {
+  currentCoordinates = coordinatesBeforeCommand;
+  clearInterval(window.keepAliveInterval);
+  console.error('[StateSyncFailed] Command withheld:', error);
+  window._combatCommandPending = false;
+  window._combatRoundActiveUntil = 0;
+  updateChatLog('<br><b>Error:</b> Could not synchronize the room with the server. Your command was not sent; please try again.<br>');
+  document.getElementById('chatuserinput').value = userInput;
+  return;
+}
 
 // An attack starts a server-driven combat round: keep the maze anchors off the combat grid.
-if (/\battack\b/i.test(String(userInput || ''))) markCombatRoundActive();
+if (!completedStartResult && /\battack\b/i.test(String(userInput || ''))) {
+  window._combatCommandPending = true;
+  markCombatRoundActive();
+}
 
 // Extend $.ajax with a timeout setting
-$.ajax({
+const taskRequest = {
   url: '/processInput7',
   type: 'POST',
   contentType: 'application/json',
@@ -12153,13 +12354,8 @@ $.ajax({
     const taskId = initialResponse.taskId; // Get taskId from immediate 202 response
 
     // Start polling /poll-task/:taskId every 5 seconds
-    const pollInterval = setInterval(function() {
-      $.ajax({
-        url: `/poll-task2/${taskId}`,
-        type: 'GET',
-        timeout: 30000, // Short timeout for polls
-        // In game.js, within the $.ajax success callback in chatbotprocessinput:
-        success: function(pollResponse) {
+    let pollInterval = null;
+    const handlePollResponse = function(pollResponse) {
           console.log('Poll response:', pollResponse); // Debug the raw response
           if (pollResponse.status === 'processing') {
             console.log('Task still processing...');
@@ -12167,6 +12363,8 @@ $.ajax({
             clearInterval(pollInterval); // Stop polling on complete/error
         
             if (pollResponse.status === 'error') {
+              window._combatCommandPending = false;
+              window._combatRoundActiveUntil = 0;
               console.error('Task error:', pollResponse.result);
               updateChatLog("<br><b>Error:</b> " + pollResponse.result + "<br>");
               return;
@@ -12336,23 +12534,8 @@ $.ajax({
                 playRoomMusic();
               }
         
-              // Update the game console with new room details and exits
-              updatedGameConsole = updatedGameConsole.replace(/Room Name: .*/, `Room Name: ${newRoomName}`);
-              updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${newRoomHistory}`);
-              updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${newObjectsInRoomString}`);
-              updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${newObjectsInRoomPropertiesString}`);
-              updatedGameConsole = updatedGameConsole.replace(/Exits: .*/, `Exits: ${newExitsString}`);
-              updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${newMonstersInRoomString}`);
-              updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${newMonstersEquippedPropertiesString}`);
-              updatedGameConsole = updatedGameConsole.replace(/Monsters State: .*/, `Monsters State: ${newMonstersState}`);
-              updatedGameConsole = updatedGameConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
-              updatedGameConsole = updatedGameConsole.replace(/Next Boss: .*/, `Next Boss: ${nextBoss}`);
-              updatedGameConsole = updatedGameConsole.replace(/Next Boss Room: .*/, `Next Boss Room: ${nextBossRoom}`);
-              updatedGameConsole = updatedGameConsole.replace(/Boss Room Coordinates: .*/, `Boss Room Coordinates: ${bossCoordinates}`);
-              updatedGameConsole = updatedGameConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
-              updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRooms}`);
-              updatedGameConsole = updatedGameConsole.replace(/Puzzle in Room: .*/, `Puzzle in Room: ${puzzleInRoom}`);
-              updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, `Puzzle Solution: ${puzzleSolution}`);
+              // Consume the complete generated result, including multiline sheets, exactly once.
+              updatedGameConsole = serverGameConsole;
                     // Construct updated data object
             const updatedData = {
                 roomName: newRoomName,
@@ -12481,11 +12664,27 @@ $.ajax({
             } catch (error) {
               console.error('Error processing poll response:', error);
               updateChatLog("<br><b>Error:</b> Failed to process server response. Check console for details.<br>");
+              if (completedStartResult) throw error;
+            } finally {
+              window._combatCommandPending = false;
+              window._combatRoundActiveUntil = 0;
             }
           }
-        },
+        };
+    if (initialResponse.completedStartResult) {
+      handlePollResponse({ status: 'complete', result: initialResponse.completedStartResult });
+      return;
+    }
+    pollInterval = setInterval(function() {
+      $.ajax({
+        url: `/poll-task2/${taskId}`,
+        type: 'GET',
+        timeout: 30000,
+        success: handlePollResponse,
         error: function(error) {
           clearInterval(pollInterval);
+          window._combatCommandPending = false;
+          window._combatRoundActiveUntil = 0;
           console.log('Polling error:', error);
           updateChatLog("<br><b>Error:</b> Unable to get a response from the server.<br>");
         }
@@ -12494,10 +12693,14 @@ $.ajax({
   },
   error: function(error) {
     clearInterval(window.keepAliveInterval);
+    window._combatCommandPending = false;
+    window._combatRoundActiveUntil = 0;
     console.log('Initial request error:', error);
     updateChatLog("<br><b>Error:</b> Unable to start the task.<br>");
   }
-});
+};
+if (completedStartResult) taskRequest.success({ completedStartResult });
+else $.ajax(taskRequest);
   } 
 
 //const sharedState = require('./sharedState');
@@ -12592,17 +12795,16 @@ function preloadDungeonTextures() {
 
 function updatePlayerHeightFromCell() {
   if (!currentDungeon || !currentDungeon.cells) return;
-  // Feet tile from continuous pos (holodek-2) + soft lerp only (holodek-1) — no mid-step Z snap.
-  const tx = Number.isFinite(playerPosX) ? Math.floor(playerPosX) : playerDungeonX;
-  const ty = Number.isFinite(playerPosY) ? Math.floor(playerPosY) : playerDungeonY;
-  const cell = currentDungeon.cells[`${tx},${ty}`]
-    || currentDungeon.cells[`${playerDungeonX},${playerDungeonY}`];
-  const floorHeight =
-    cell && typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
+  // Include local plinth footing without turning the entire prop tile into raised terrain.
+  const x = Number.isFinite(playerPosX) ? playerPosX : playerDungeonX + 0.5;
+  const y = Number.isFinite(playerPosY) ? playerPosY : playerDungeonY + 0.5;
+  const floorHeight = getDungeonSurfaceAt(x, y).height;
   playerZTarget = floorHeight + PLAYER_EYE_HEIGHT;
   if (!playerZInitialized || !Number.isFinite(playerZ)) {
     playerZ = playerZTarget;
     playerZInitialized = true;
+    window.TerrainCamera?.reset();
+    window.dungeonViewShift = 0;
   } else if (playerZ < floorHeight + 0.12) {
     playerZ = floorHeight + 0.12;
   }
@@ -13475,7 +13677,8 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const layoutH = currentDungeon?.layout?.height || 32;
   const maxDim = Math.max(layoutW, layoutH);
   const isOutdoor = currentDungeon && currentDungeon.classification && currentDungeon.classification.indoor === false;
-  const HORIZON = Math.floor(H / 2);
+  const viewShift = Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
+  const HORIZON = Math.floor(H * (.5 + viewShift));
   if (currentDungeon && !Number.isFinite(currentDungeon._minFloor)) {
     let minFloor = Infinity;
     for (const cell of Object.values(currentDungeon.cells || {})) {
@@ -14730,6 +14933,13 @@ if (!hit) continue;
 }
 
 function renderDungeonView() {
+  syncDungeonExitNavigation();
+  const navigationPosition = { x: playerPosX, y: playerPosY };
+  window.ItemInteractionUi?.update(currentDungeon, getVisibleSceneObjects(), navigationPosition);
+  window.DungeonCompass?.setNavigation(currentDungeon, navigationPosition);
+  window.DungeonCompass?.update(playerAngle);
+  window.DungeonExplorationMap?.update(currentDungeon, navigationPosition, playerAngle, window.dungeonRunId);
+  window.GameMenuUi?.onDungeonReady(currentDungeon);
   window.currentDungeon = currentDungeon;
   window.dungeonTextures = dungeonTextures;
   window.dungeonTexturesMeta = dungeonTexturesMeta;

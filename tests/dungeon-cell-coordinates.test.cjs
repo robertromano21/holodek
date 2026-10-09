@@ -11,13 +11,17 @@ function createRenderer() {
   vm.runInNewContext(source, context);
   const renderer = context.window.webglDungeonRenderer;
   const unpack = { flipY: false, premultiplyAlpha: false };
+  renderer.cellTex = {};
+  renderer.roofCellsTex = {};
+  let boundTexture;
   renderer.gl = {
     UNPACK_FLIP_Y_WEBGL: 'flipY', UNPACK_PREMULTIPLY_ALPHA_WEBGL: 'premultiplyAlpha',
     getParameter(parameter) { return unpack[parameter] || false; },
-    bindTexture() {},
+    bindTexture(target, texture) { boundTexture = texture; },
+    activeTexture() {},
     pixelStorei(parameter, value) { unpack[parameter] = value; },
     texImage2D(...args) {
-      if (args.length === 9 && args[3] > 1 && args[4] > 1) {
+      if (args.length === 9 && args[3] > 1 && args[4] > 1 && boundTexture === renderer.cellTex) {
         const width = args[3], height = args[4], data = args[8];
         renderer.uploadedCells = new Uint8Array(data.length);
         for (let row = 0; row < height; row++) {

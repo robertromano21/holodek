@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Isolated Biome WebGL Visual Probe</title>
+<style>
+  body { margin: 12px; background: #181c1c; color: #e7ddbd; font: 14px monospace; }
+  #dungeon-container canvas { width: 640px; height: 480px; image-rendering: pixelated; }
+</style>
+<div id="dungeon-popup" style="display:block"><div id="dungeon-container"><canvas id="gpu" width="160" height="120"></canvas></div></div>
+<pre id="results">Running...</pre>
+<script src="/fixtures.js"></script>
+<script src="/assets/masonryPatterns.js"></script>
+<script src="/assets/voxelMaterials.js"></script>
+<script src="/assets/scenePropVoxels.js"></script>
+<script src="/assets/voxelCollision.js"></script>
+<script src="/assets/terrainCamera.js"></script>
+<script src="/assets/rendererWebGL.js"></script>
+<script>
+(async function() {
+  'use strict';
+  const report = { pass: false, originalShadersCompiled: false, originalPrograms: {}, exhibits: [],
+    jsErrors: [], contextLost: false, specialization: null, initializationMs: 0 };
+  const stage = (name, data = {}) => console.info('[BiomeProbe]', JSON.stringify({ stage: name, ...data }));
+  window.addEventListener('error', e => report.jsErrors.push(e.message));
+  window.addEventListener('unhandledrejection', e => report.jsErrors.push(String(e.reason)));
+  const check = (condition, message) => { if (!condition) throw new Error(message); };
+  const errors = gl => {
+    const values = [];
+    for (let i = 0; i < 16; i++) { const value = gl.getError(); if (value === gl.NO_ERROR) break; values.push(value); }
+    return values;
+  };
+  try {
+    const { exhibits, limits } = window.BIOME_FIXTURES;
+    window.WEBGPU_VOXEL_PREWARM = false;
+    window.WEBGPU_GPU_VOXEL_MESHING = false;
+    window.WEBGL_EYE_BACK = 0; window.dungeonViewShift = 0; window.combatCharacters = [];
+    const renderer = window.webglDungeonRenderer;
+    renderer.canvas = document.getElementById('gpu');
+    renderer.canvas.addEventListener('webglcontextlost', event => { report.contextLost = true; event.preventDefault(); });
+    const context = renderer.canvas.getContext('webgl2', { alpha: false, depth: true });
+    check(context, 'WebGL2 context unavailable');
+    const debug = context.getExtension('WEBGL_debug_renderer_info');
+    report.adapter = debug ? context.getParameter(debug.UNMASKED_RENDERER_WEBGL) : context.getParameter(context.RENDERER);
+    stage('adapter', { adapter: report.adapter });
+    const initializationStarted = performance.now();
+    check(renderer.init(document.getElementById('dungeon-container')), 'Production renderer initialization failed');
+    const gl = renderer.gl;
+    for (const [name, program] of [['world', renderer.program], ['voxel', renderer.voxelProgram], ['sprite', renderer.spriteProgram]]) {
+      report.originalPrograms[name] = !!program && gl.getProgramParameter(program, gl.LINK_STATUS);
+      check(report.originalPrograms[name], `Unmodified production ${name} shaders did not link`);
+    }
+    report.originalShadersCompiled = true;
+    report.originalInitializationMs = Math.round(performance.now() - initializationStarted);
+    check(!errors(gl).length, 'GL error after unmodified shader initialization');
+    stage('original-shaders-ready', { initializationMs: report.originalInitializationMs });
+    if (new URLSearchParams(location.search).get('zero-light') === '1') {
+      check(/SwiftShader/i.test(report.adapter), 'Zero-light specialization is allowed only for SwiftShader');
+      check(exhibits.every(e => Object.values(e.dungeon.cells).every(c => c.tile !== 'torch')), 'Fixture contains live torch lighting');
+      let changed = 0;
+      const original = gl.shaderSource.bind(gl);
+      gl.shaderSource = (shader, source) => {
+        const start = source.indexOf('float accumulateTorchLit(');
+        if (start >= 0 && source.includes('float floorHeightFromCell')) {
+          const opening = source.indexOf('{', start);
+          let depth = 1, end = opening + 1;
+          while (depth && end < source.length) { if (source[end] === '{') depth++; if (source[end] === '}') depth--; end++; }
+          check(!depth, 'Could not bound production light accumulator');
+          source = source.slice(0, opening + 1) +
+            '\nshadowBlend = 0.0; primaryDir2D = vec2(0.0); primaryStrengthOut = 0.0; return 0.0;\n}' + source.slice(end);
+          changed++;
+        }
+        original(shader, source);
+      };
+      try { check(renderer.init(document.getElementById('dungeon-container')), 'Zero-light fixture initialization failed'); }
+      finally { gl.shaderSource = original; }
+      check(changed === 1, `Specialization changed ${changed} shaders rather than one world accumulator`);
+      report.specialization = { function: 'world.accumulateTorchLit', changedShaders: changed, zeroLightsOnly: true,
+        worldTraversalUnchanged: true, voxelShaderUnchanged: true, spriteShaderUnchanged: true };
+      check(!errors(gl).length, 'GL error after zero-light fixture initialization');
+      stage('zero-light-shaders-ready');
+    }
+    report.initializationMs = Math.round(performance.now() - initializationStarted);
+    check(report.initializationMs <= limits.initializationMs, 'Shader initialization exceeded its bound');
+    let currentFrame, program;
+    const useProgram = gl.useProgram.bind(gl), drawArrays = gl.drawArrays.bind(gl), drawElements = gl.drawElements.bind(gl);
+    gl.useProgram = value => { program = value; useProgram(value); };
+    gl.drawArrays = (...args) => { if (currentFrame) currentFrame.drawCalls++; drawArrays(...args); };
+    gl.drawElements = (...args) => {
+      if (currentFrame) { currentFrame.drawCalls++; if (program === renderer.voxelProgram) currentFrame.voxelDrawCalls++; }
+      drawElements(...args);
+    };
+    for (const entry of exhibits) {
+      const d = entry.dungeon;
+      stage('exhibit-start', { kind: entry.kind, seed: d.generation.seed });
+      window.currentDungeon = d;
+      const textures = {}, meta = {};
+      await Promise.all(Object.entries(d.tiles).map(async ([name, tile]) => {
+        meta[name] = tile.spriteSpec || {};
+        if (!tile.url) return;
+        check(tile.url.startsWith('data:image/png;base64,'), 'Fixture attempted a non-inline texture load');
+        const image = new Image();
+        await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = () => reject(new Error(`PNG decode failed: ${name}`)); image.src = tile.url; });
+        textures[name] = image;
+      }));
+      window.dungeonTextures = textures; window.dungeonTexturesMeta = meta;
+      renderer.rebuildDungeonTextures(d, textures);
+      const used = new Set([...Object.values(d.cells).map(c => c.tile), ...(d.sceneStructures || []).map(p => p.tile)]);
+      const meshes = [];
+      for (const name of used) {
+        const spec = d.tiles[name]?.spriteSpec;
+        if (!spec?.voxelShape) continue;
+        const grid = window.ScenePropVoxels.build(spec.voxelShape, 16, spec.voxelSeed || 0);
+        check(grid?.length === 4096 && grid.some(Boolean), `Empty actual shape grid: ${name}`);
+        const mesh = renderer.getVoxelMesh(name, d), passes = mesh?.passes || (mesh ? [mesh] : []);
+        check(passes.length > 0 && passes.every(p => p.count > 0 && gl.isBuffer(p.vbo) && gl.isBuffer(p.ibo)), `No GPU mesh uploaded: ${name}`);
+        meshes.push({ tile: name, shape: spec.voxelShape, occupiedVoxels: grid.reduce((sum, value) => sum + value, 0),
+          passes: passes.length, indices: passes.reduce((sum, p) => sum + p.count, 0) });
+      }
+      check(meshes.length > 0 && !errors(gl).length, 'Actual shape-grid meshing/upload failed');
+      const exhibit = { kind: entry.kind, seed: d.generation.seed, layout: d.layout, meshes, frames: [] };
+      report.exhibits.push(exhibit);
+      for (const view of entry.views) {
+        window.playerPosX = view.x + .5; window.playerPosY = view.y + .5;
+        window.playerDungeonX = view.x; window.playerDungeonY = view.y; window.playerAngle = view.angle;
+        window.playerZ = window.VoxelCollision.surfaceAt(d, window.playerPosX, window.playerPosY).height + .65;
+        window.TerrainCamera.reset(); window.dungeonViewShift = 0;
+        check(d.cells[`${view.x},${view.y}`]?.tile === 'floor', 'Inspection camera is not on usable floor');
+        currentFrame = { view: view.view, label: view.label, camera: { x: window.playerPosX, y: window.playerPosY, angle: view.angle, z: window.playerZ },
+          drawCalls: 0, voxelDrawCalls: 0 };
+        stage('frame-start', { kind: entry.kind, view: view.view });
+        const frameStarted = performance.now();
+        renderer.renderScene();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        const pixels = new Uint8Array(limits.width * limits.height * 4);
+        gl.readPixels(0, 0, limits.width, limits.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        currentFrame.frameMs = Math.round(performance.now() - frameStarted);
+        currentFrame.glErrors = errors(gl);
+        currentFrame.nonblackPixels = 0;
+        const colors = new Set(); let fingerprint = 2166136261;
+        for (let i = 0; i < pixels.length; i += 4) {
+          if (pixels[i] + pixels[i + 1] + pixels[i + 2] > 12) currentFrame.nonblackPixels++;
+          colors.add((pixels[i] >> 3) * 1024 + (pixels[i + 1] >> 3) * 32 + (pixels[i + 2] >> 3));
+          fingerprint = Math.imul(fingerprint ^ (pixels[i] + pixels[i + 1] * 256 + pixels[i + 2] * 65536), 16777619) >>> 0;
+        }
+        currentFrame.fingerprint = fingerprint.toString(16);
+        currentFrame.colorBuckets = colors.size;
+        currentFrame.rendererStats = renderer.lastFrameStats;
+        check(!report.contextLost && !gl.isContextLost() && !currentFrame.glErrors.length, 'GL error or context lost during actual renderScene');
+        check(currentFrame.nonblackPixels > limits.width * limits.height * .5 && colors.size >= 8, 'Black or uniform/empty frame');
+        check(currentFrame.drawCalls > 1 && currentFrame.drawCalls <= limits.drawCalls && currentFrame.voxelDrawCalls > 0, 'No actual voxel draws or draw count exceeded bound');
+        check(renderer.lastFrameStats?.nearbyTorches === 0, 'Zero-light fixture unexpectedly has live torch lights');
+        check(currentFrame.voxelDrawCalls === renderer.lastFrameStats.voxelDrawCalls, 'Instrumented draws disagree with production counters');
+        check(currentFrame.frameMs <= limits.frameMs, 'Frame/readback exceeded bounded smoke-test time');
+        const png = document.createElement('canvas'); png.width = limits.width; png.height = limits.height;
+        const ctx = png.getContext('2d'), data = ctx.createImageData(limits.width, limits.height);
+        for (let y = 0; y < limits.height; y++) data.data.set(pixels.subarray(y * limits.width * 4, (y + 1) * limits.width * 4), (limits.height - y - 1) * limits.width * 4);
+        ctx.putImageData(data, 0, 0); currentFrame.png = png.toDataURL('image/png');
+        exhibit.frames.push(currentFrame);
+        stage('frame-ready', { kind: entry.kind, view: view.view, frameMs: currentFrame.frameMs, drawCalls: currentFrame.drawCalls });
+        currentFrame = null;
+      }
+    }
+    check(report.exhibits.length === 6 && new Set(report.exhibits.map(e => e.frames[1].fingerprint)).size === 6, 'Six visibly different overview frames were not produced');
+    check(!report.jsErrors.length, 'Browser JavaScript errors occurred');
+    report.pass = true;
+    stage('complete', { pass: true });
+  } catch (error) { report.error = error.stack || error.message; stage('failed', { error: error.message }); }
+  document.getElementById('results').textContent = JSON.stringify(report);
+})();
+</script>
+</html>

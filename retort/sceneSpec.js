@@ -131,6 +131,27 @@ const BRIGHT_WORDS = ['bright', 'brilliant', 'blazing', 'radiant', 'sunlit', 'da
 // Landmarks are big room features the view must contain (they become custom_ prop tiles).
 // type -> trigger words. Matching is on the singular/plural stem.
 const LANDMARKS = {
+  fallen_arch: ['fallen arch', 'collapsed arch'],
+  broken_masonry: ['broken masonry', 'masonry rubble', 'brick rubble'],
+  scree: ['scree', 'rockfall', 'loose stones'],
+  portcullis: ['portcullis', 'iron gate', 'barred gate'],
+  timber_gate: ['timber gate', 'wooden gate'],
+  buttress: ['buttress'],
+  battlement: ['battlement', 'crenellat', 'parapet'],
+  arrow_slit: ['arrow slit', 'arrow loop', 'loophole'],
+  fluted_column: ['fluted column', 'classical column', 'roman column'],
+  doric_column: ['doric column', 'doric pillar'],
+  ionic_column: ['ionic column', 'ionic pillar'],
+  corinthian_column: ['corinthian column', 'corinthian pillar'],
+  pointed_arch: ['pointed arch', 'gothic arch'],
+  oak: ['oak'], pine: ['pine'], willow: ['willow'], cypress: ['cypress'],
+  bone_tree: ['bone tree'], charred_tree: ['charred tree'], mushroom_tree: ['mushroom tree', 'giant mushroom'],
+  pale_hollow_tree: ['pale hollow tree', 'white dead tree', 'hollow dead tree'],
+  split_snag: ['split snag', 'lightning-split tree'], wind_bent_tree: ['wind-bent tree', 'windswept dead tree'],
+  dead_willow: ['dead willow'], skeletal_pine: ['skeletal pine', 'dead conifer'],
+  twisted_yew: ['twisted yew', 'dead yew'], rootbound_tree: ['rootbound tree', 'root-tangled tree'],
+  thorn_bush: ['thorn bush', 'thorn scrub'], bramble_patch: ['bramble', 'thorn thicket'], ash_reeds: ['ash reed'],
+  roots: ['calcified root', 'exposed root', 'tangled root'], stump: ['stump'],
   altar: ['altar'],
   statue: ['statue', 'idol', 'effigy', 'figure carved', 'stone figure', 'colossus'],
   broken_columns: ['broken column', 'broken pillar', 'shattered column', 'toppled column', 'fallen column', 'cracked column', 'cracked pillar', 'collapsed column'],
@@ -172,6 +193,7 @@ const LANDMARKS = {
   campfire: ['campfire', 'fire pit', 'firepit'],
   mushroom: ['mushroom', 'toadstool', 'fungi', 'fungus'],
   boulder: ['boulder', 'rock formation'],
+  rock_face: ['rock face', 'cliff face', 'rocky escarpment'],
   stalagmite: ['stalagmite', 'stalactite']
 };
 // Mass nouns / one-per-room features: plural wording doesn't mean two of them.
@@ -571,14 +593,14 @@ function applySceneSpecToClassification(spec, classification) {
   }
   c.features = Array.from(feats);
   if (spec.palette) {
-    c.floorColor = spec.palette.floorPrimary || c.floorColor;
-    c.wallColor = spec.palette.primary || c.wallColor;
+    if (!/^#[0-9a-f]{6}$/i.test(c.floorColor || '')) c.floorColor = spec.palette.floorPrimary || c.floorColor;
+    if (!/^#[0-9a-f]{6}$/i.test(c.wallColor || '')) c.wallColor = spec.palette.primary || c.wallColor;
   }
   c.sceneSpecHash = spec.textHash;
   return c;
 }
 
-/** Force textures, light and palette to follow the written description. */
+/** Preserve the description's generated palette; semantic material colors are fallbacks. */
 function applySceneSpecToVisualStyle(spec, style) {
   if (!spec) return style;
   const s = style ? JSON.parse(JSON.stringify(style)) : {};
@@ -590,18 +612,15 @@ function applySceneSpecToVisualStyle(spec, style) {
   s.door = { material: 'wood', bands: 'iron', handle: 'ring', ...(s.door || {}) };
   s.motifs = s.motifs || [];
   const p = spec.palette || {};
-  if (spec.wallMaterial || !style) {
-    s.palette.primary = p.primary;
-    s.palette.secondary = p.secondary;
-    s.palette.highlight = p.highlight;
-    s.palette.shadow = p.shadow;
+  for (const key of ['primary', 'secondary', 'highlight', 'shadow']) {
+    if (!/^#[0-9a-f]{6}$/i.test(s.palette[key] || '')) s.palette[key] = p[key];
   }
   if (spec.wallStyleMaterial) s.wall.material = spec.wallStyleMaterial;
   if (spec.floorStyleMaterial) s.floor.material = spec.floorStyleMaterial;
   // Floor palette is carried separately so floor and wall can differ.
   s.floorPalette = {
-    primary: p.floorPrimary || s.palette.primary,
-    secondary: p.floorSecondary || s.palette.secondary,
+    primary: s.floorPalette?.primary || (spec.floorStyleMaterial && spec.floorStyleMaterial !== spec.wallStyleMaterial ? p.floorPrimary : null) || s.palette.primary,
+    secondary: s.floorPalette?.secondary || (spec.floorStyleMaterial && spec.floorStyleMaterial !== spec.wallStyleMaterial ? p.floorSecondary : null) || s.palette.secondary,
     highlight: s.palette.highlight,
     shadow: s.palette.shadow
   };
@@ -639,7 +658,7 @@ function checkSceneAgainstDungeon(spec, dungeon) {
     const t = String(cell && cell.tile || '');
     if (!t) continue;
     const m = t.match(/^custom_(.+)_\d+$/);
-    const key = m ? m[1] : t;
+    const key = cell.architectureRole === 'roof-support' && cell.feature === 'pillar' ? 'pillar' : m ? m[1] : t;
     counts[key] = (counts[key] || 0) + 1;
   }
   // Tiles may carry the model's own names ("broken_column"); compare by the sprite
@@ -650,6 +669,7 @@ function checkSceneAgainstDungeon(spec, dungeon) {
   const canonCounts = {};
   for (const [k, n] of Object.entries(counts)) canonCounts[canon(k)] = (canonCounts[canon(k)] || 0) + n;
   for (const l of spec.landmarks || []) {
+    if (l.fromVegetation) continue; // Ambient grove counts are reported separately, not promised by the prose.
     const have = Math.max(counts[l.type] || 0, canonCounts[canon(l.type)] || 0);
     const entry = { kind: 'landmark', type: l.type, want: l.count, have };
     if (have >= l.count) result.present.push(entry); else result.missing.push(entry);

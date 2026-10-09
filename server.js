@@ -1,7 +1,7 @@
 require('./serverLogger').installServerLogger();
 
 const express = require('express');
-const bodyParser = require('body-parser');
+const { createGameJsonParser, gameJsonErrorHandler, createRoomDatabaseReceiver } = require('./gameStateTransport');
 const cors = require('cors');
 const { retortWithUserInput, runNpcAutonomyTick } = require('./retort/retortWithUserInput.js');
 const sharedState = require('./sharedState');
@@ -11,13 +11,17 @@ const { renderArrangementToWav } = require('./retort/renderAudio');
 const characterTraits = require('./retort/characterTraitSpec');
 const { summarizeDungeon } = require('./dungeonDiagnostics');
 const { actionDice } = require('./retort/actionDice');
+const LivingEnvironments = require('./assets/livingEnvironments');
+const { finalizeRoomDungeon } = require('./retort/retortWithUserInput');
+const { buildEnvironmentLab, descriptions: environmentLabKinds } = require('./retort/environmentLab');
+const { buildInitialWorldConsole, buildInitialGameConsole } = require('./retort/initialGameState');
 const app = express();
 const port = 3000;
+const roomDatabaseReceiver = createRoomDatabaseReceiver();
 
 // Middleware
-app.use(bodyParser.json());
+app.use(createGameJsonParser());
 app.use(cors());
-app.use(express.json()); // Ensure JSON parsing is enabled
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 app.use('/node_modules', express.static(path.join(__dirname, 'node_modules')));
 app.use('/sid', express.static(path.join(__dirname, 'sid'), {
@@ -55,6 +59,7 @@ app.get('/combat-updates2', (req, res) => {
         }
     };
     clients.push(client);
+    client.send({ type: 'dungeonRun', runId: sharedState.getDungeonRunId() });
     client.send(actionDice.snapshot());
 
     req.on('close', () => {
@@ -162,14 +167,57 @@ app.post('/set-dungeon-testing-mode', (req, res) => {
 });
 
 app.post('/submit-target2', (req, res) => {
-    const { combatant, target } = req.body;
+    const { combatant, target, cancelled, actionId } = req.body;
+    if (!actionDice.active || actionDice.active.kind !== 'combat' || actionDice.active.id !== actionId) {
+      return res.status(409).json({ error: 'That combat turn is no longer active.' });
+    }
     console.log(`Received target selection: ${combatant} targets ${target}`);
-    sharedState.emitter.emit(`target_response_${combatant}`, { target });
+    sharedState.emitter.emit(`target_response_${combatant}`, { target, cancelled: cancelled === true, actionId });
     res.json({ status: 'success' });
 });
 
 const tasks = new Map();  // { taskId: { status: 'processing', result: null } }
 let inputTaskInFlight = false;
+
+// Isolated exhibits use the production builder/renderer but never touch campaign state.
+const environmentLabCache = new Map();
+app.get('/environment-lab/:kind', (req, res) => {
+  const kind = req.params.kind;
+  if (!Object.hasOwn(environmentLabKinds, kind)) return res.status(404).json({ error: 'Unknown exhibit' });
+  const seed = req.query?.seed;
+  if (seed !== undefined && (typeof seed !== 'string' || !seed.length || seed.length > 160)) return res.status(400).json({ error: 'Lab seed must contain 1-160 characters.' });
+  try {
+    const cacheKey = JSON.stringify([kind, seed ?? null]);
+    if (!environmentLabCache.has(cacheKey)) environmentLabCache.set(cacheKey, buildEnvironmentLab(kind, { seed }));
+    const dungeon = environmentLabCache.get(cacheKey);
+    environmentLabCache.delete(cacheKey); environmentLabCache.set(cacheKey, dungeon);
+    while (environmentLabCache.size > 12) environmentLabCache.delete(environmentLabCache.keys().next().value);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ dungeon });
+  } catch (error) {
+    console.error('[EnvironmentLab]', error);
+    res.status(500).json({ error: 'Exhibit construction failed; see server log.' });
+  }
+});
+
+app.post('/living-environment/interact', (req, res) => {
+  if (inputTaskInFlight || actionDice.active) return res.status(409).json({ error: 'Finish the current action first.' });
+  const coords = sharedState.getLastCoords();
+  if (!coords || !req.body || typeof req.body !== 'object') return res.status(400).json({ error: 'No active room or action.' });
+  const geoKey = `${coords.x},${coords.y},${coords.z}`;
+  if (req.body.geoKey !== geoKey) return res.status(409).json({ error: 'That room is no longer active.' });
+  const dungeon = sharedState.getRoomDungeon(coords);
+  if (!dungeon?.livingEncounter) return res.status(404).json({ error: 'No seal encounter in this room.' });
+  const result = LivingEnvironments.interact(dungeon, req.body);
+  if (!result.ok) return res.status(409).json({ error: result.message });
+  const next = finalizeRoomDungeon(geoKey, { ...dungeon, cells: { ...dungeon.cells, ...result.cells }, livingEncounter: result.encounter }, dungeon.customTiles);
+  sharedState.setRoomDungeon(coords, next, next.customTiles);
+  const delta = { type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp,
+    geometryStamp: next._geometryStamp, cells: result.cells, livingEncounter: result.encounter };
+  broadcast(delta);
+  console.info('[LivingEnvironmentAction]', JSON.stringify({ geoKey, fixture: req.body.fixtureId, revision: result.encounter.revision, status: result.encounter.status }));
+  res.json({ message: result.message, delta });
+});
 
 app.post('/action-dice/roll', (req, res) => {
   try {
@@ -257,8 +305,10 @@ app.post('/processInput7', async (req, res) => {
 // This tells the Retort session "the player has finalized their starting character (with sprite) — now proceed with dungeon generation".
 app.post('/startGameWithCharacter', async (req, res) => {
   if (inputTaskInFlight) return res.status(409).json({ error: 'Finish the pending action before starting another game.' });
+  if (!req.body?.character || typeof req.body.character !== 'object') return res.status(400).json({ error: 'Missing starting character.' });
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
+  inputTaskInFlight = true;
 
   (async () => {
     try {
@@ -268,6 +318,9 @@ app.post('/startGameWithCharacter', async (req, res) => {
       const incomingCombatCharacters = Array.isArray(req.body.combatCharacters) ? req.body.combatCharacters : null;
 
       console.log(`[Server] Starting game with finalized character:`, characterData?.Name || characterData?.name);
+      const runId = sharedState.beginDungeonRun();
+      roomDatabaseReceiver.reset();
+      broadcast({ type: 'dungeonRun', runId });
 
       // Store the finalized character (with sprite) so the Retort flow and client can access it
       sharedState.setCurrentPC(characterData);
@@ -303,52 +356,12 @@ app.post('/startGameWithCharacter', async (req, res) => {
 
       // Format the PC stats exactly like the original client-side createMortacia / createSuzerain flow
       // so they appear in the "game console" (above the prompt) using the original methodology.
-      const eq = characterData.Equipped || { Weapon: null, Armor: null, Shield: null, Other: null };
-      const equippedStr = `Weapon: ${eq.Weapon || 'None'}, Armor: ${eq.Armor || 'None'}, Shield: ${eq.Shield || 'None'}, Other: ${eq.Other || 'None'}`;
-      const pcBlock = `PC:
-Name: ${characterData.Name || characterData.name}
-Sex: ${characterData.Sex || characterData.sex}
-Race: ${characterData.Race || characterData.race}
-Class: ${characterData.Class || characterData.class}
-Level: ${characterData.Level || characterData.level}
-AC: ${characterData.AC || characterData.ac || 10}
-XP: ${characterData.XP || characterData.xp || 0}
-HP: ${characterData.HP || characterData.hp}
-MaxHP: ${characterData.MaxHP || characterData.maxHP || characterData.HP || characterData.hp}
-Equipped: ${equippedStr}
-Attack: ${characterData.Attack || characterData.attack || 0}
-Damage: ${characterData.Damage || characterData.damage || 0}
-Armor: ${characterData.Armor || characterData.armor || 0}
-Magic: ${characterData.Magic || characterData.magic || 0}
-`;
-
-      const npcBlock = partyNpcData.length
-        ? `NPCs in Party:
-${partyNpcData.map(npc => {
-  const npcEq = npc.Equipped || { Weapon: null, Armor: null, Shield: null, Other: null };
-  const npcEquippedStr = `Weapon: ${npcEq.Weapon || 'None'}, Armor: ${npcEq.Armor || 'None'}, Shield: ${npcEq.Shield || 'None'}, Other: ${npcEq.Other || 'None'}`;
-  return `Name: ${npc.Name || npc.name}
-Sex: ${npc.Sex || npc.sex}
-Race: ${npc.Race || npc.race}
-Class: ${npc.Class || npc.class}
-Level: ${npc.Level || npc.level || 1}
-AC: ${npc.AC || npc.ac || 10}
-XP: ${npc.XP || npc.xp || 0}
-HP: ${npc.HP || npc.hp || 0}
-MaxHP: ${npc.MaxHP || npc.maxHP || npc.HP || npc.hp || 0}
-Equipped: ${npcEquippedStr}
-Attack: ${npc.Attack || npc.attack || 0}
-Damage: ${npc.Damage || npc.damage || 0}
-Armor: ${npc.Armor || npc.armor || 0}
-Magic: ${npc.Magic || npc.magic || 0}`;
-}).join('\n\n')}
-`
-        : `NPCs in Party: None
-`;
-
       // Seed the updatedGameConsole with the PC stats so the main console display (and the LLM prompt)
       // includes them above the prompt, exactly as the last-known-good 1/2 path in chatbotprocessinput did.
-      sharedState.setUpdatedGameConsole(`${pcBlock}${npcBlock}`);
+      const initialWorld = buildInitialWorldConsole(req.body.initialState);
+      sharedState.setRoomNameDatabase(initialWorld.roomNameDatabaseString);
+      sharedState.setPersonalNarrative('');
+      sharedState.setUpdatedGameConsole(buildInitialGameConsole(initialWorld.console, characterData, partyNpcData));
 
       // We send a special internal command to retortWithUserInput so it knows to skip the normal start menu
       // and use the provided character directly, then begin dungeon generation.
@@ -381,6 +394,9 @@ Magic: ${npc.Magic || npc.magic || 0}`;
     } catch (err) {
       console.error('startGameWithCharacter error:', err);
       tasks.set(taskId, { status: 'error', result: err.message });
+    } finally {
+      actionDice.end();
+      inputTaskInFlight = false;
     }
   })();
 
@@ -565,10 +581,18 @@ app.get('/poll-task2/:taskId', (req, res) => {
 app.post('/updateState7', async (req, res) => {
     if (inputTaskInFlight) return res.status(409).json({ error: 'Cannot replace state during an action.' });
     const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest, liveWorldState } = req.body; // New: currentQuest
+    let roomSync;
+    try {
+      roomSync = roomDatabaseReceiver.apply(req.body, sharedState.getRoomNameDatabase());
+    } catch (error) {
+      const status = error.code === 'ROOM_DATABASE_SYNC_REQUIRED' ? 409 : 400;
+      console.warn('[StateSyncRejected]', JSON.stringify({ status, reason: error.code || 'invalid-room-database' }));
+      return res.status(status).json({ error: error.message, code: error.code });
+    }
 
     if (personalNarrative !== undefined) sharedState.setPersonalNarrative(personalNarrative);
     if (updatedGameConsole !== undefined) sharedState.setUpdatedGameConsole(updatedGameConsole);
-    if (roomNameDatabaseString !== undefined) sharedState.setRoomNameDatabase(roomNameDatabaseString);
+    if (roomSync) sharedState.setRoomNameDatabase(roomSync.json);
     if (combatCharactersString !== undefined) {
         sharedState.setCombatCharactersString(combatCharactersString);
         console.log("Updated combatCharactersString:", combatCharactersString);
@@ -589,7 +613,11 @@ app.post('/updateState7', async (req, res) => {
         sharedState.setLiveWorldState(liveWorldState);
     }
 
-    res.json({ message: 'State updated successfully' });
+    const coordinates = String(updatedGameConsole || '').match(/Coordinates:\s*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
+    const geoKey = coordinates ? `${coordinates[1]},${coordinates[2]},${coordinates[3]}` : null;
+    console.info('[StateSyncAccepted]', JSON.stringify({ geoKey, bytes: Number(req.get('Content-Length')) || null,
+      roomDatabaseMode: roomSync?.mode || 'unchanged', changedRooms: roomSync?.changedRooms || 0 }));
+    res.json({ message: 'State updated successfully', geoKey, roomDatabaseSyncToken: roomSync?.token });
 });
 
 // NEW: Endpoint to get room music JSON by coordinates
@@ -690,6 +718,8 @@ app.get('/get-room-dungeon', (req, res) => {
 //     npcAutonomyTickInFlight = false;
 //   }
 // }, NPC_AUTONOMY_TICK_MS);
+
+app.use(gameJsonErrorHandler);
 
 app.listen(port, () => {
     console.log(`Server running on port ${port}`);

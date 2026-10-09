@@ -1,6 +1,6 @@
 {
   "bpm": 120,
-  "key": "D",
+  "key": "C#",
   "scale": "phrygian",
   "voices": [
     {
@@ -21,9 +21,9 @@
       "patternSections": {
         "intro": [
           {
-            "note": "D",
-            "octave": 3,
-            "duration": 8
+            "note": "E",
+            "octave": 4,
+            "duration": 16
           },
           {
             "note": "REST",
@@ -31,29 +31,14 @@
             "duration": 8
           },
           {
-            "note": "F",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "C",
-            "octave": 3,
-            "duration": 4
-          },
-          {
             "note": "D",
-            "octave": 3,
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "E",
+            "octave": 4,
             "duration": 4
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 8
-          },
-          {
-            "note": "D",
-            "octave": 3,
-            "duration": 8
           },
           {
             "note": "REST",
@@ -61,33 +46,8 @@
             "duration": 8
           },
           {
-            "note": "F",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 8
-          },
-          {
-            "note": "D",
-            "octave": 3,
-            "duration": 4
-          },
-          {
-            "note": "C",
-            "octave": 3,
-            "duration": 4
-          },
-          {
-            "note": "F",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "D",
-            "octave": 3,
+            "note": "C#",
+            "octave": 4,
             "duration": 8
           },
           {
@@ -97,14 +57,94 @@
           },
           {
             "note": "D",
-            "octave": 3,
+            "octave": 4,
             "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "E",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "D",
+            "octave": 4,
+            "duration": 4
+          },
+          {
+            "note": "C#",
+            "octave": 4,
+            "duration": 4
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "E",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "D",
+            "octave": 4,
+            "duration": 16
           }
         ],
         "development": [
           {
-            "note": "A",
-            "octave": 2,
+            "note": "E",
+            "octave": 4,
+            "duration": 16
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "D",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "F#",
+            "octave": 4,
+            "duration": 4
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "C#",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "E",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
             "duration": 8
           },
           {
@@ -114,63 +154,18 @@
           },
           {
             "note": "D",
-            "octave": 3,
+            "octave": 4,
             "duration": 8
           },
           {
-            "note": "A",
-            "octave": 2,
+            "note": "C#",
+            "octave": 4,
             "duration": 4
           },
           {
-            "note": "F",
-            "octave": 3,
+            "note": "E",
+            "octave": 4,
             "duration": 4
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 8
-          },
-          {
-            "note": "G",
-            "octave": 2,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 8
-          },
-          {
-            "note": "D",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 4
-          },
-          {
-            "note": "F",
-            "octave": 3,
-            "duration": 4
-          },
-          {
-            "note": "D",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 8
           },
           {
             "note": "REST",
@@ -179,30 +174,85 @@
           },
           {
             "note": "D",
-            "octave": 3,
+            "octave": 4,
             "duration": 8
+          },
+          {
+            "note": "F#",
+            "octave": 4,
+            "duration": 16
           }
         ],
         "cadence": [
           {
-            "note": "F",
-            "octave": 3,
+            "note": "C#",
+            "octave": 4,
             "duration": 4
           },
           {
-            "note": "A",
-            "octave": 2,
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "F#",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "E",
+            "octave": 4,
+            "duration": 4
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "D",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "C#",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "REST",
+            "octave": 0,
+            "duration": 8
+          },
+          {
+            "note": "F#",
+            "octave": 4,
+            "duration": 8
+          },
+          {
+            "note": "E",
+            "octave": 4,
             "duration": 4
           },
           {
             "note": "D",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "A",
-            "octave": 2,
-            "duration": 8
+            "octave": 4,
+            "duration": 4
           },
           {
             "note": "REST",
@@ -210,59 +260,9 @@
             "duration": 8
           },
           {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
-          },
-          {
-            "note": "REST",
-            "octave": 0,
-            "duration": 8
+            "note": "C#",
+            "octave": 4,
+            "duration": 16
           }
         ]
       }
@@ -285,246 +285,246 @@
       "patternSections": {
         "intro": [
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           }
         ],
         "development": [
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 4
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "A#",
+            "note": "B",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           }
         ],
         "cadence": [
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 2,
             "duration": 8
           }
@@ -549,37 +549,32 @@
       "patternSections": {
         "intro": [
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
+            "note": "D",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "A",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "D#",
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
@@ -589,69 +584,84 @@
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
+            "note": "C#",
+            "octave": 3,
+            "duration": 8
+          },
+          {
+            "note": "D",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "D#",
+            "note": "D",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           }
         ],
         "development": [
           {
-            "note": "D#",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "A",
-            "octave": 3,
-            "duration": 16
-          },
-          {
             "note": "D",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
+            "note": "G#",
+            "octave": 3,
+            "duration": 16
+          },
+          {
+            "note": "C#",
+            "octave": 3,
+            "duration": 8
+          },
+          {
+            "note": "D",
             "octave": 3,
             "duration": 4
           },
           {
-            "note": "D#",
+            "note": "D",
+            "octave": 3,
+            "duration": 8
+          },
+          {
+            "note": "C#",
+            "octave": 3,
+            "duration": 8
+          },
+          {
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
@@ -661,89 +671,74 @@
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "D",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "D#",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
+            "note": "D",
             "octave": 3,
             "duration": 4
           },
           {
-            "note": "D#",
+            "note": "D",
+            "octave": 3,
+            "duration": 8
+          },
+          {
+            "note": "C#",
+            "octave": 3,
+            "duration": 16
+          },
+          {
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
           {
             "note": "D",
-            "octave": 3,
-            "duration": 16
-          },
-          {
-            "note": "A",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "D#",
             "octave": 3,
             "duration": 8
           }
         ],
         "cadence": [
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
+            "note": "D",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "A",
-            "octave": 3,
-            "duration": 8
-          },
-          {
-            "note": "D#",
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
@@ -753,42 +748,47 @@
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D#",
+            "note": "C#",
+            "octave": 3,
+            "duration": 8
+          },
+          {
+            "note": "D",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 4
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "A",
+            "note": "G#",
             "octave": 3,
             "duration": 16
           },
           {
-            "note": "D#",
+            "note": "D",
             "octave": 3,
             "duration": 8
           },
           {
-            "note": "D",
+            "note": "C#",
             "octave": 3,
             "duration": 8
           }

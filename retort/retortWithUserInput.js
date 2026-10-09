@@ -34,11 +34,27 @@ const {
 // prose checks and later visits read the same structured scene.
 const { applySceneGraphics, placeSceneLandmarks, placeSceneObjects } = require('./sceneRoomBuilder.js');
 const { applySceneArchitecture } = require('./sceneArchitecture.js');
+const { applySceneRoofs } = require('./sceneRoofs.js');
+const { prepareSceneGeography, applySceneGeography } = require('./sceneGeography.js');
+const { prepareSceneVegetation, applySceneVegetation } = require('./sceneVegetation.js');
+const { prepareSceneBiomeProps, applySceneBiomeProps } = require('./sceneBiomeProps.js');
+const BlueprintPillars = require('./blueprintPillars.js');
+const DungeonGeneration = require('./dungeonGeneration.js');
+const IndoorBlueprint = require('./indoorBlueprint.js');
+const OutdoorTerrain = require('./outdoorTerrain.js');
+const BlueprintDesign = require('./blueprintDesign.js');
+const { prepareSceneExteriors, applySceneExteriors } = require('./sceneExterior.js');
+const { buildRoomWorldContext, snapshotQuestContext, propagateComplexIdentity, supplementOutdoorRoutes, attachSceneWorldContext } = require('./worldContext.js');
+const { chooseEnvironmentIntents, describeEnvironmentIntent } = require('./environmentIntents.js');
+const { evaluateTaskRequirements, mergeTaskProgress, taskBinding } = require('./questProgress.js');
+const { ensureBossGate, seedBossKey, makeBossKeyTask, isReservedBossKeyName } = require('./bossGate.js');
+const DungeonExits = require('../assets/dungeonExits');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
 const { logDungeonConstruction, saveDungeonDiagnostic } = require('../dungeonDiagnostics');
 const { actionDice } = require('./actionDice');
 const { createCombatSpace } = require('./dungeonReach');
 const { parseSheets } = require('../assets/partyRoster');
+const { applyAdditionalOutcomes, selectCommandedNpcs } = require('./adjudicationState');
 const { doorIntent, prepareDoorAction, applyDoorAction } = require('./dungeonActions');
 const { buildEnvironment } = require('../assets/dungeonEnvironment');
 const LivingEnvironments = require('../assets/livingEnvironments');
@@ -78,13 +94,20 @@ function computeDungeonGeometryStamp(dungeon, geoKey) {
     mix(cell.tile || 'floor');
     mix(Number.isFinite(cell.floorHeight) ? Math.round(cell.floorHeight * 1000) : 0);
     mix(Number.isFinite(cell.ceilHeight) ? Math.round(cell.ceilHeight * 1000) : 0);
+    if (cell.roof) mix(`roof:${cell.roof.style}:${cell.roof.height}:${cell.roof.slopeX}:${cell.roof.slopeY}`);
+    if (cell.structureHeight) mix(`support:${cell.structureHeight}`);
     if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
   }
+  mix(JSON.stringify(dungeon.sceneStructures || []));
   return `${keys.length}:${(hash >>> 0).toString(16)}`;
 }
 
 function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   if (!dungeon) return dungeon;
+  // Action deltas must not upgrade cached geometry behind the client's back.
+  const cachedGeometry = !!(dungeon._geometryStamp || dungeon._meta?.geometryStamp || dungeon._meta?.finalizedAt);
+  if (!cachedGeometry && !dungeon.sceneRoof) applySceneRoofs(dungeon, dungeon.sceneSpec);
+  if (!cachedGeometry && !dungeon.roomExits) DungeonExits.install(dungeon);
   if (!dungeon.environment) dungeon.environment = buildEnvironment(dungeon);
   dungeon.geoKey = geoKey;
   dungeon.customTiles = Array.isArray(customTiles) ? customTiles : (dungeon.customTiles || []);
@@ -93,6 +116,7 @@ function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   dungeon._meta = {
     ...(dungeon._meta || {}),
     geometryStamp,
+    runId: sharedState.getDungeonRunId(),
     finalizedAt: Date.now()
   };
   const finalized = JSON.parse(JSON.stringify(dungeon, (key, value) => {
@@ -1081,8 +1105,15 @@ async function generateKey($, coordinates, direction) {
   });
   console.log(`Key result (raw): ${JSON.stringify(keyResult)}`);
   const keyData = keyResult.result || {};
+  let keyName = (keyData.name || `Key for ${direction} at ${coordinatesToString(coordinates)}`).toLowerCase();
+  let keyDatabase = {};
+  try { keyDatabase = JSON.parse(sharedState.getRoomNameDatabase() || '{}'); } catch {}
+  if (isReservedBossKeyName(keyDatabase, keyName)) {
+    console.warn('[BossKeyReserved] Ordinary key generation cannot seed the quest seal.');
+    keyName = `Key for ${direction} at ${coordinatesToString(coordinates)}`.toLowerCase();
+  }
   return {
-    name: (keyData.name || `Key for ${direction} at ${coordinatesToString(coordinates)}`).toLowerCase(),
+    name: keyName,
     type: keyData.type || "key",
     properties: {
       attack: keyData.attack_modifier || 0,
@@ -2560,6 +2591,8 @@ async function generateRoomObjects($, roomName, roomDescription) {
     
     const itemTypes = ['weapon', 'armor', 'shield', 'other'];
     const objects = [];
+    let itemDatabase = {};
+    try { itemDatabase = JSON.parse(sharedState.getRoomNameDatabase() || '{}'); } catch {}
     
     for (let i = 0; i < numberOfItems; i++) {
         const objectType = itemTypes[Math.floor(Math.random() * itemTypes.length)];
@@ -2568,6 +2601,10 @@ async function generateRoomObjects($, roomName, roomDescription) {
         await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure for the ${roomName}, with the object all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType} Room Description: ${roomDescription} If the object type is other, it might be a type of treasure that is wearable, a jewel, an orb, a relic or something readable like a scroll or tome. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
         const objectResult = await $.assistant.generation({ maxTokens: 30 });
         const objectName = objectResult.content.trim().toLowerCase();
+        if (isReservedBossKeyName(itemDatabase, objectName)) {
+            console.warn('[BossKeyReserved] Ordinary object generation cannot seed the quest seal.');
+            continue;
+        }
         objects.push({ name: objectName, type: objectType });
     }
 
@@ -3282,54 +3319,152 @@ ${roomDescription}
     }
 }
 
-async function generateDungeonBlueprint($, roomDescription, puzzleDesc, classification, size, customTiles) {
+async function generateDungeonBlueprint($, roomDescription, puzzleDesc, classification, size, customTiles, generation = null, sceneSpec = null) {
   const customList = Array.isArray(customTiles)
     ? customTiles.map(t => t && (t.name || t.type)).filter(Boolean)
     : [];
   $.model = "gpt-4.1-mini";
   $.temperature = 0.5;
   await $.user`
-You are designing a dungeon blueprint for a grid-based raycast renderer.
+You are the Grave Master's architect and master mason, designing a playable dungeon blueprint for a grid-based raycast renderer.
 Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
   Grid size: ${size}x${size}. Indoor: ${classification && classification.indoor === true}.
+  This campaign's room seed: ${generation?.seed || 'unspecified'}.
+  Room description (the layout must realize this): ${roomDescription || 'unspecified'}.
+  Architectural family: ${sceneSpec?.architecture || 'choose from the description'}.
+  Planned physical features: ${sceneSpec?.level?.layoutFeatures?.join('; ') || 'invent a fitting arrangement'}.
+  Planned scenery: ${(sceneSpec?.landmarks || []).map(l => `${l.count || 1}x ${l.type} (${l.placement || 'scattered'})`).join('; ') || 'choose fitting physical scenery'}.
+  Declared exits: ${(sceneSpec?.exits || []).map(e => typeof e === 'string' ? e : e.direction).join(', ') || 'not specified'}.
   Biome: ${classification && classification.biome ? classification.biome : "unknown"}.
   Features: ${Array.isArray(classification?.features) && classification.features.length ? classification.features.join(", ") : "none"}.
   Available custom tile ids: ${customList.length ? customList.join(", ") : "none"}.
   Puzzle description: ${puzzleDesc || "none"}.
 
-  Schema:
-  {
-  "seed": "string",
-  "base": { "floor": 0.0, "ceil": 2.5 },
-  "heightfield": { "amplitude": 1.2, "roughness": 0.9, "scale": 0.18, "radial": 0.6, "terrace": 0.0 },
-  "rooms": [{ "x":0.2, "y":0.2, "w":0.3, "h":0.2, "floor":0.0, "ceil":2.5 }],
-  "paths": [{ "from":[0.1,0.8], "to":[0.9,0.8], "width":0.08, "flatten": true, "ramp": true }],
-  "volumes": [{ "x":0.6, "y":0.4, "w":0.12, "h":0.12, "floor":0.0, "ceil":2.5, "tile":"wall|pillar|torch|door|floor" }],
-  "prefabs": [
-    { "type":"pillar_cluster|arch|platform|ramp|spire|ruin_wall|mountain", "x":0.5, "y":0.5, "w":0.12, "h":0.12, "height":2.5, "count":3 }
-  ],
-  "props": [
-      { "type":"custom_id_or_type", "x":0.55, "y":0.45, "scale":1.0 }
-  ],
-  "indoorPlan": {
-    "roomCount": 6,
-    "rooms": [{ "x":0.2, "y":0.2, "w":0.2, "h":0.2 }],
-    "heightLevels": [0.0, 0.5, -0.5],
-    "corridors": [{ "from":[0.25,0.25], "to":[0.55,0.35], "style":"L" }]
-  }
-  }
-
+  Schema for THIS room only (all coordinate/radius fields are numbers, not these field descriptions):
+  ${JSON.stringify(classification?.indoor === true ? {
+    seed: 'campaign seed', base: { floor: 0, ceil: 5 },
+    indoorPlan: { roomCount: '6-12', rooms: [{ x: '0..1', y: '0..1', w: '0..1', h: '0..1',
+      role: 'entrance|hall|chapel|sanctum|shrine|rotunda|courtyard|chamber|gallery|crypt|keep', clearance: '3..9',
+      roofStyle: 'barrel|groin|ribbed|fan|coffered|timber|hammerbeam|boarded|gold-coffered|pendentive|squinch|domed', columnOrder: 'doric|ionic|corinthian' }],
+      heightLevels: [0, .5, -.5], corridors: [{ fromRoom: 'room index', toRoom: 'room index', style: 'L|H|V', width: '2..4 tiles' }],
+      modules: [{ type: 'template or section type from toolbox', room: 'room index', x: '0..1 within room', y: '0..1 within room', width: 'grid tiles', height: 'grid tiles' }] },
+    props: [{ type: 'available custom tile id', x: '0..1', y: '0..1' }]
+  } : {
+    seed: 'campaign seed', base: { floor: 0, ceil: 2.5 },
+    landforms: [{ kind: 'hill|ridge|mountain|mesa|butte|hoodoo|terraces|basin|cliff|canyon|thermal_basin|caldera', x: '0..1', y: '0..1', radiusX: '0..1', radiusY: '0..1', rise: 'world units', angle: 'degrees' }],
+    buildings: [{ type: 'temple|castle|rotunda|bathhouse|catacomb|ruins|basilica|forum|villa|domus|warehouse|insula', variant: 'castle only: gatehouse|stone-keep|shell-keep|motte-bailey|concentric|watchtower', x: '0..1', y: '0..1', w: '0..1', h: '0..1', ruined: true }],
+    paths: [{ from: ['0..1', '0..1'], to: ['0..1', '0..1'], widthTiles: '3..8', ramp: true }],
+    props: [{ type: 'available custom tile id', x: '0..1', y: '0..1', scale: '0.5..1.4' }],
+    volumes: [{ x: '0..1', y: '0..1', w: '0..1', h: '0..1', tile: 'wall|pillar|floor', ceil: 'world units' }]
+  }, null, 2)}
 Rules:
+  - Apply only the rules for this room's Indoor value. OUTDOORS: do NOT return indoorPlan, a maze of rooms, or room-count quotas.
+  - The spawn is at normalized (0.5, 0.75). Put a recognizable point of interest within 12-24 tiles of spawn and 3-5
+    distinct scenery clusters along paths and exit approaches, about 25-45 tiles apart. Do not put all content north of spawn.
+  - Schema coordinates are field descriptions, not preset placements. Invent new coordinates and compositions for this campaign.
   - Indoor: include "indoorPlan" and use it to decide room sizes/positions/heights/corridors.
+  - Use the campaign room seed to invent a fresh arrangement, not a stock layout associated with the room name.
+  - You own the indoor layout. Design 6-12 connected spaces with distinct sizes, offset wings, bends, branching corridors and optional loops, drawn from the description.
+  - Include an entrance room. Do not reduce every building to one rectangular great hall or repeated symmetrical template.
+  - Large indoor grids are complexes: mix a few spacious halls with smaller side chambers, galleries and optional open courtyards.
+  - Compose architecture like a master mason, not a prop scatterer. Establish an arrival sequence, a focal space and secondary
+    routes: for example portico -> vestibule -> bent corridor -> sky court -> vaulted gallery -> raised sanctuary.
+    Invent a different sequence for this room; this example is not a mandatory layout. Use monumental axes where justified,
+    but break symmetry with ruined wings, crypt passages and side chapels. Avoid another identical great hall.
+  - Choose 1-3 fitting architectural set pieces and build the level around them with smaller connecting spaces and loops.
+    A pedimented portico can lead to a domed bay; a stair landing can overlook a court; a vaulted corridor can link a keep
+    to a shrine. These are modular compositions INSIDE your blueprint, not a reason to erase its chambers or corridors.
+  - Give every covered bay a coherent load path: columns/piers at its span edges, capitals below entablatures, pediments
+    over paired supports, and grounded walls or piers below vaults. Use one column order per connected classical grouping.
+    Align adjacent bays and thresholds; keep clear aisles, reachable doorways and usable landing space. Courtyards stay sky.
+    Select materials and roof styles from the prose's architecture, and let the separately generated room palette color them.
+  - Think in elevations as well as plan: lower crypts, stepped sanctuaries, terraces and raised galleries can surround a
+    taller central hall. Connect height changes with stair/ramp sections. Honor up/down exits with an actual multi-flight
+    approach when space permits. Do not invent walkable floors stacked over the same XY cell; balconies are offset galleries.
+  - Choose room roles to utilize the architecture: shrine/sanctum gets a supported columned portico and pediment;
+    rotunda gets a supported dome; courtyard remains open to the sky. Fit these features into your layout, not a second overlaid map.
+  - At the Ruined Temple Entrance, ALWAYS include a reachable pillared pediment/portico. Choose a fresh position for this campaign,
+    not the same central axis every game. Reserve a clear 5x6 patch for it near the entrance or in a connected court.
+  - Reserve enough space: a shrine needs at least 5x6 tiles, a rotunda 9x9, and a grand hall a broad clear walking aisle.
+  - Roof styles: stone, coffered, barrel, groin, ribbed, fan, timber, hammerbeam, boarded, gold-coffered, pendentive, squinch, domed.
+    Match the description's Roman, Gothic, Byzantine or medieval idiom. Columns (doric/ionic/corinthian) and walls support the ceilings.
+  - Give grand halls 5-9 tiles of clearance and side chambers 3-5. Keep rooms distinct; avoid overlaps that erase dividing walls.
+  - Include at least one fitting architectural section/module or a shrine/sanctum/rotunda room role; do not omit the toolbox.
+    Template modules are local buildings INSIDE your chosen rooms, not replacements for the complex:
+    temple (colonnade, pedimented sanctum, quarter-tile steps, raised sanctuary, courtyard),
+    basilica (columned nave), rotunda (columned dome), bathhouse (vaulted bays and court),
+    castle (variant gatehouse|stone-keep|shell-keep|motte-bailey|concentric|watchtower), catacomb (burial chambers),
+    ruins, amphitheater, theater, circus, forum, domus, villa, warehouse, insula, infrastructure (arcade).
+    Give a full template module a clear chamber of at least 21x25 grid tiles; compact shrine/rotunda room roles need less.
+    Usually use 0-2 full modules, with maze-like passages and side rooms around them. Not every level needs the same modules.
+  - Prefer composing template SECTIONS when a whole building would overwhelm the plan. Section module types:
+    portico/shrine (paired columns, entablature and pediment), colonnade (supported aisle), vaulted_bay,
+    rotunda_section (dome and paired portico), sanctuary (supported raised sanctum), courtyard (open sky),
+    terrace/raised_gallery (quarter-tile approach steps), staircase (two flights and a landing, default 3x16 tiles),
+    cloister (default 11x13, open court with supported surrounding galleries), apsidal_chapel (11x13, curved apse and nave),
+    switchback_stair (9x11, two returning flights and landings), split_raised_gallery (13x13, paired stair runs and upper wings).
+    Module x/y are 0..1 positions INSIDE the selected room, width/height are grid tiles, not fractions;
+    roofStyle and columnOrder select the architectural idiom. Stairs/terraces allow rise (-4.2..4.2) and cardinal direction.
+    Full building modules may specify width 19-63 and height 23-79 when the chamber fits, leaving a one-cell margin.
+    Sections remain bounded at 19x23. Cloisters need at least 9x9, apsidal chapels 9x11 and switchbacks 9x11
+    (east/west switches those dimensions). Split raised galleries need width 13, rise -2..2 and at least
+    max(9, 2*ceil(abs(rise)/0.25)+1) tiles of height for their quarter-tile stair runs. Leave the approach clear.
+    Combine a portico, shrine and rotunda with your own corridors instead of using the entire temple shell.
+  - Raised galleries, upper wings and lower crypts use room floor values or heightLevels plus connecting corridors.
+    Keep one walkable surface per XY cell; no stacked overlapping floors. Paths and modules can provide steps and terraces.
+  - All rooms must be connected. Corridors refer to zero-based room indexes and have width 2-4 grid tiles, not normalized fractions.
   - Indoor: use 2-4 distinct heightLevels and connect rooms with corridors (style L/H/V).
   - Indoor: paths between rooms should use "ramp": true where heights differ.
-- Outdoor: use heightfield + mountains/spires/ruin walls; fewer rooms.
+  - Outdoor: use a landscape heightfield, not a collection of indoor room rectangles.
+  - Outdoors you are a master landscape crafter. Compose a journey, not a blank plane dotted with unrelated props:
+    create near-ground detail, middle-distance discoveries and distant silhouettes. A torchlit ridge might lead past a
+    broken keep to a gorge overlook, then descend by a winding trail into a lower basin. Invent your own arrangement.
+    Give landforms different footprints, orientations and heights. Broad rolling hills are the normal backing terrain;
+    only explicitly flat sites, wetlands, city foundations and quiet gardens should read as level ground.
+  - Place ruin clusters in geographic context: a watchtower on a ridge saddle, a fort beside a pass, a shrine beneath
+    a sheltered cliff, dead-tree groves along a valley. Reserve viewpoints and winding routes between discoveries.
+    Open stretches provide contrast, not hundreds of barren tiles between every point of interest. Do not distribute
+    everything uniformly or place all landmarks far from the starting area. The later scatter pass enriches YOUR design.
+  - Select at least one fitting building module in ruined wastelands (unless the prose explicitly excludes buildings),
+    plus geological and vegetation clusters. In forests, gardens or untouched wilderness, prioritize their natural suite
+    instead of adding a fort everywhere. Use seeded irregular spacing and varied scale; do not stamp identical grids.
+  - Outdoor toolbox: large rolling hills, ridges, mountains, flat-topped mesas, isolated buttes, hoodoo spires, stepped
+    terraces, sheer cliffs, winding deep canyons, volcanic calderas and mineral/thermal basins. These are real floor-height geometry.
+    Mix 2-3 broad walkable hills with more dramatic landforms when the prose allows; not every feature should be a cone.
+    Grand-Canyon-like gorges, Utah-like mesas/buttes and Yellowstone-like mineral terraces are possible, translated to Tartarus.
+    Keep their silhouettes and geography distinct. Natural arches use available arch props, not unsupported terrain overhangs.
+    Match the biome: gardens favor gentle terraces and garden paths; forests use leafless groves and rolling hills;
+    icy uplands use ridges and cliffs; volcanic regions use calderas and fitting lava props. Caves and sewers use indoor plans.
+  - Also include fitting ruined buildings, forts (castle/gatehouse), keeps (castle/stone-keep), watchtowers (castle/watchtower), obelisks, rubble,
+    dead-tree groves, thorn bushes, graves, altars, arches and rock faces. Use the available custom tile ids to place real objects.
+    Plan clusters and landmarks along routes, not uniformly scattered clutter. The biome decoration/terrain passes add bounded
+    supporting scenery afterward; do not flatten the entire heightfield or omit all planned scenery.
+    Natural prop choices include eroded hoodoos, mushroom rocks, wind-carved arches, layered outcrops, cairns and talus;
+    hollow logs, rootballs, buttress roots, shelf fungi and toadstool rings; fumaroles, mineral cones, basalt columns,
+    lava spatter and sulfur crust; ice spires/arches, pressure ridges, glacial erratics, driftwood and reed tussocks.
+    Use the available exact tile ids. Group species by local biome and shared transition zones, not a uniform global mix.
+  - Outdoors: design 2-6 landforms at intentional positions with different scales, plus walking paths linking scenery clusters.
+    When appropriate to the wastes, include a traversable dry gorge, ravine or basin with a trail; if water/lava is described,
+    place its available pool/basin props in the low ground. Keep waters dry when the description calls for a parched landscape.
+    Landform radii/positions are normalized; rise is world-height units (mountain/cliff 12-80, basin/canyon depth 7-48).
+    Canyon/basin/thermal_basin rises are interpreted as depths. Angle is degrees. Keep flat plains/wetlands flat when explicitly described.
+    Put ruins on usable plateaus and trails along or between landforms; concentrate rubble, trees and graves in fitting places.
+    The buildings array places local architectural templates on bounded foundations at your chosen coordinates, NOT across the map.
+    Allocate at least 21x25 tiles per building and link its foundation to a walking path. Keep everything else as landscape.
+    Water/lava surfaces and rock faces use available custom props; do not invent unsupported fluid physics or animated waterfalls.
+    Torches are welcome on ruin walls and cliff trails; do not remove their lighting as natural terrain is added.
+  - Outdoor paths use widthTiles, ramp=true, and follow existing elevations. Do not bulldoze broad rectangles to floor=0;
+    do not set flatten=true on trails. Only small, explicit building foundations may flatten the terrain.
+    Use several linked trail segments or switchbacks for climbs; keep each segment's rise under one unit per grid tile.
+    Outdoor wall/spire volumes without an explicit floor are grounded on existing terrain; ceil is their local height.
   - If Features include pillars/arches/statues/altars/broken_columns, express them via prefabs/volumes/props.
+  - Columns form small, spaced colonnades with walking aisles, never a solid rectangle of one pillar per floor tile.
+    Prefer pillar_cluster prefabs for small groups. A pillar volume denotes a bounded colonnade, not thousands of columns.
   - Keep values within 0..1. Avoid overlaps near the start (center-bottom).
   - If a puzzle is present, express it as volumes/prefabs/props.
 JSON only.`;
 
-  const result = await $.assistant.generation({ maxTokens: 350 });
+  const result = await $.assistant.generation({ maxTokens: classification?.indoor === true ? 6144 : 4096 });
   const raw = result.content || String(result.result || '');
   const firstBrace = raw.indexOf('{');
   const lastBrace = raw.lastIndexOf('}');
@@ -3340,7 +3475,11 @@ JSON only.`;
   const jsonString = raw.substring(firstBrace, lastBrace + 1);
   try {
     const parsed = JSON.parse(jsonString);
-    return parsed;
+    const blueprint = BlueprintDesign.enrich(DungeonGeneration.seedBlueprint(parsed, generation), {
+      classification, size, generation, sceneSpec, description: roomDescription
+    });
+    console.info('[BlueprintDesign]', JSON.stringify({ seed: generation?.seed || null, ...blueprint.designContract }));
+    return blueprint;
   } catch (e) {
     console.error("Failed to parse blueprint JSON:", e);
     return null;
@@ -3352,6 +3491,12 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   const h = dungeon.layout.height;
   const cells = dungeon.cells = {};
   const indoor = classification && classification.indoor === true;
+  const random = dungeon.generation?.seed ? DungeonGeneration.random(dungeon.generation.seed) : Math.random;
+  const chamberScale = Math.min(3, Math.max(1, Math.min(w, h) / 32));
+  const baseTerrain = !indoor && dungeon.generation?.seed ? dungeon.outdoorTerrain || OutdoorTerrain.plan({
+    indoor: false, biome: classification?.biome, generation: dungeon.generation }, w, h) : null;
+  const terrain = baseTerrain ? OutdoorTerrain.design(baseTerrain, blueprint, w, h) : null;
+  if (terrain) dungeon.outdoorTerrain = terrain;
 
   const baseFloor = Number.isFinite(blueprint?.base?.floor) ? blueprint.base.floor : 0;
   const baseCeil = Number.isFinite(blueprint?.base?.ceil) ? blueprint.base.ceil : 2.5;
@@ -3399,7 +3544,9 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let floorH = baseFloor;
-      if (!indoor || amp > 0.01) {
+      if (terrain) {
+        floorH += OutdoorTerrain.heightAt(terrain, x, y);
+      } else if (!indoor || amp > 0.01) {
         const nx = x * scale;
         const ny = y * scale;
         let n = (noise2(nx, ny) * 2 - 1) * rough;
@@ -3427,7 +3574,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   function toGridX(n) { return Math.max(0, Math.min(w - 1, Math.floor(clamp01(n) * w))); }
   function toGridY(n) { return Math.max(0, Math.min(h - 1, Math.floor(clamp01(n) * h))); }
 
-  function carveRect(rect, tile, floor, ceil) {
+  function carveRect(rect, tile, floor, ceil, localHeight) {
     const x0 = toGridX(rect.x);
     const y0 = toGridY(rect.y);
     const x1 = Math.max(x0 + 1, toGridX(rect.x + rect.w));
@@ -3437,9 +3584,11 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
         const key = `${x},${y}`;
         const cell = cells[key];
         if (!cell) continue;
+        if (terrain && tile !== 'floor' && cell.navigationReserved) continue;
         cell.tile = tile;
         if (Number.isFinite(floor)) cell.floorHeight = floor;
         if (Number.isFinite(ceil)) cell.ceilHeight = ceil;
+        else if (Number.isFinite(localHeight)) cell.ceilHeight = cell.floorHeight + Math.max(.5, localHeight);
       }
     }
   }
@@ -3447,7 +3596,9 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   function carvePath(path) {
     const from = path.from || [0.5, 0.5];
     const to = path.to || [0.5, 0.5];
-    const width = Math.max(1, Math.floor(clamp01(path.width || 0.06) * w));
+    const width = Number.isFinite(path.widthTiles) ? Math.max(1, Math.min(6, Math.floor(path.widthTiles / 2))) :
+      terrain ? Math.max(1, Math.min(4, Math.floor(clamp01(path.width || 0.006) * w))) :
+      Math.max(1, Math.floor(clamp01(path.width || 0.06) * w));
     const x0 = toGridX(from[0]);
     const y0 = toGridY(from[1]);
     const x1 = toGridX(to[0]);
@@ -3460,8 +3611,18 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
     const startCell = cells[`${x0},${y0}`];
     const endCell = cells[`${x1},${y1}`];
     const startH = startCell ? startCell.floorHeight : baseFloor;
-    const endH = endCell ? endCell.floorHeight : baseFloor;
+    let endH = endCell ? endCell.floorHeight : baseFloor;
     const doRamp = !!path.ramp || (!path.flatten && indoor);
+    let gradeStart = 0, gradeEnd = steps;
+    if (terrain) {
+      let leaving = !!startCell?.outdoorFoundation;
+      for (let i = 0; i <= steps; i++) {
+        const c = cells[`${Math.round(lerp(x0, x1, i / steps))},${Math.round(lerp(y0, y1, i / steps))}`];
+        if (leaving && c?.outdoorFoundation) { gradeStart = i; continue; }
+        leaving = false;
+        if (c?.outdoorFoundation) { gradeEnd = i; endH = c.floorHeight; break; }
+      }
+    }
     let err = dx - dy;
     let x = x0;
     let y = y0;
@@ -3473,7 +3634,14 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
           const cell = cells[key];
           if (!cell) continue;
           cell.tile = 'floor';
-          if (path.flatten) {
+          if (terrain && (path.flatten || doRamp)) {
+            // Grade a narrow trail at local elevation, not a broad trench at global zero.
+            const t = Math.max(0, Math.min(1, (step - gradeStart) / Math.max(1, gradeEnd - gradeStart)));
+            cell.floorHeight = cell.outdoorFoundation ? cell.floorHeight : lerp(startH, endH, t);
+            cell.ceilHeight = cell.floorHeight + baseCeil;
+            cell.navigationReserved = true;
+            cell.terrainRole = 'trail';
+          } else if (path.flatten) {
             cell.floorHeight = baseFloor;
             cell.ceilHeight = baseFloor + baseCeil;
           } else if (doRamp) {
@@ -3492,244 +3660,14 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   function buildIndoorFromPlan(plan) {
-    // 1) Init everything as solid wall
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const key = `${x},${y}`;
-        cells[key] = {
-          tile: 'wall',
-          floorHeight: baseFloor,
-          ceilHeight: baseFloor + baseCeil,
-          feature: null
-        };
-      }
-    }
-
-    const rooms = [];
-    const roomCount = Math.min(10, plan?.roomCount || (4 + Math.floor((w * h) / 256)));
-
-    // First room at spawn
-    const firstRoomSize = {
-      w: 4 + Math.floor(Math.random() * 4),
-      h: 4 + Math.floor(Math.random() * 4)
-    };
-    const firstRoom = {
-      x: Math.max(1, dungeon.start.x - Math.floor(firstRoomSize.w / 2)),
-      y: Math.max(1, dungeon.start.y - Math.floor(firstRoomSize.h / 2)),
-      w: firstRoomSize.w,
-      h: firstRoomSize.h
-    };
-    rooms.push(firstRoom);
-
-    // Additional rooms (use plan if provided)
-    if (Array.isArray(plan?.rooms) && plan.rooms.length) {
-      for (const r of plan.rooms) {
-        const rw = Math.max(3, Math.floor(clamp01(r.w || 0.15) * w));
-        const rh = Math.max(3, Math.floor(clamp01(r.h || 0.15) * h));
-        const rx = Math.max(1, Math.min(w - rw - 2, toGridX(r.x || 0.2)));
-        const ry = Math.max(1, Math.min(h - rh - 2, toGridY(r.y || 0.2)));
-        rooms.push({ x: rx, y: ry, w: rw, h: rh });
-        if (rooms.length >= roomCount) break;
-      }
-    } else {
-      let attempts = 0;
-      while (rooms.length < roomCount && attempts < roomCount * 10) {
-        attempts++;
-        const rw = 4 + Math.floor(Math.random() * 5);
-        const rh = 4 + Math.floor(Math.random() * 5);
-        const rx = 1 + Math.floor(Math.random() * (w - rw - 2));
-        const ry = 1 + Math.floor(Math.random() * (h - rh - 2));
-        const room = { x: rx, y: ry, w: rw, h: rh };
-
-        let overlaps = false;
-        for (const r of rooms) {
-          if (
-            rx < r.x + r.w + 1 &&
-            rx + rw + 1 > r.x &&
-            ry < r.y + r.h + 1 &&
-            ry + rh + 1 > r.y
-          ) {
-            overlaps = true;
-            break;
-          }
-        }
-        if (overlaps) continue;
-        rooms.push(room);
-      }
-    }
-
-    // Height levels
-    const heightLevels = [];
-    heightLevels[0] = 0;
-    if (Array.isArray(plan?.heightLevels) && plan.heightLevels.length) {
-      for (let i = 1; i < rooms.length; i++) {
-        const v = plan.heightLevels[i % plan.heightLevels.length];
-        heightLevels[i] = Number.isFinite(v) ? v : 0;
-      }
-    } else {
-      for (let i = 1; i < rooms.length; i++) {
-        const candidate = (Math.floor(Math.random() * 5) - 2) * 0.5;
-        const prev = heightLevels[i - 1];
-        let level = candidate;
-        if (level > prev + 1.0) level = prev + 1.0;
-        if (level < prev - 1.0) level = prev - 1.0;
-        heightLevels[i] = level;
-      }
-    }
-
-    // Carve rooms
-    rooms.forEach((room, idx) => {
-      const hLevel = heightLevels[idx] || 0;
-      for (let y = room.y; y < room.y + room.h; y++) {
-        for (let x = room.x; x < room.x + room.w; x++) {
-          const key = `${x},${y}`;
-          const cell = cells[key];
-          cell.tile = 'floor';
-          cell.floorHeight = baseFloor + hLevel;
-          cell.ceilHeight = baseFloor + hLevel + baseCeil;
-        }
-      }
-    });
-
-    function carveCorridor(ax, ay, bx, by, hA, hB, style) {
-      const steps = Math.max(Math.abs(ax - bx), Math.abs(ay - by)) || 1;
-      const stepHeight = (hB - hA) / steps;
-      let x = ax;
-      let y = ay;
-      let currentHeight = hA;
-      while (x !== bx || y !== by) {
-        const key = `${x},${y}`;
-        const cell = cells[key];
-        cell.tile = 'floor';
-        cell.floorHeight = baseFloor + currentHeight;
-        cell.ceilHeight = baseFloor + currentHeight + baseCeil;
-
-        if (style === 'H') {
-          if (x < bx) x++;
-          else if (x > bx) x--;
-          else if (y < by) y++;
-          else if (y > by) y--;
-        } else if (style === 'V') {
-          if (y < by) y++;
-          else if (y > by) y--;
-          else if (x < bx) x++;
-          else if (x > bx) x--;
-        } else {
-          // L-style randomized
-          if (Math.random() < 0.5) {
-            if (x < bx) x++;
-            else if (x > bx) x--;
-            else if (y < by) y++;
-            else if (y > by) y--;
-          } else {
-            if (y < by) y++;
-            else if (y > by) y--;
-            else if (x < bx) x++;
-            else if (x > bx) x--;
-          }
-        }
-        currentHeight += stepHeight;
-      }
-      const keyEnd = `${bx},${by}`;
-      const endCell = cells[keyEnd];
-      endCell.tile = 'floor';
-      endCell.floorHeight = baseFloor + hB;
-      endCell.ceilHeight = baseFloor + hB + baseCeil;
-    }
-
-    if (Array.isArray(plan?.corridors) && plan.corridors.length >= rooms.length - 1) {
-      plan.corridors.forEach((c, i) => {
-        const from = c.from || [0.5, 0.5];
-        const to = c.to || [0.5, 0.5];
-        const ax = toGridX(from[0]);
-        const ay = toGridY(from[1]);
-        const bx = toGridX(to[0]);
-        const by = toGridY(to[1]);
-        const hA = heightLevels[i % heightLevels.length] || 0;
-        const hB = heightLevels[(i + 1) % heightLevels.length] || 0;
-        carveCorridor(ax, ay, bx, by, hA, hB, String(c.style || 'L').toUpperCase());
-      });
-    } else {
-      for (let i = 1; i < rooms.length; i++) {
-        const prev = rooms[i - 1];
-        const curr = rooms[i];
-        const ax = Math.floor(prev.x + prev.w / 2);
-        const ay = Math.floor(prev.y + prev.h / 2);
-        const bx = Math.floor(curr.x + curr.w / 2);
-        const by = Math.floor(curr.y + curr.h / 2);
-        carveCorridor(ax, ay, bx, by, heightLevels[i - 1], heightLevels[i], 'L');
-      }
-    }
-
-    // Start cell safety
-    const startKey = `${dungeon.start.x},${dungeon.start.y}`;
-    if (cells[startKey]) {
-      const c = cells[startKey];
-      c.tile = 'floor';
-      c.floorHeight = baseFloor + (heightLevels[0] || 0);
-      c.ceilHeight = c.floorHeight + baseCeil;
-    } else {
-      const r0 = rooms[0];
-      dungeon.start.x = Math.floor(r0.x + r0.w / 2);
-      dungeon.start.y = Math.floor(r0.y + r0.h / 2);
-    }
-
-    // Outer border solid & tall
-    for (let x = 0; x < w; x++) {
-      const topKey = `${x},0`;
-      const botKey = `${x},${h - 1}`;
-      cells[topKey].tile = 'wall';
-      cells[topKey].floorHeight = baseFloor;
-      cells[topKey].ceilHeight = baseFloor + baseCeil;
-      cells[botKey].tile = 'wall';
-      cells[botKey].floorHeight = baseFloor;
-      cells[botKey].ceilHeight = baseFloor + baseCeil;
-    }
-    for (let y = 0; y < h; y++) {
-      const leftKey = `0,${y}`;
-      const rightKey = `${w - 1},${y}`;
-      cells[leftKey].tile = 'wall';
-      cells[leftKey].floorHeight = baseFloor;
-      cells[leftKey].ceilHeight = baseFloor + baseCeil;
-      cells[rightKey].tile = 'wall';
-      cells[rightKey].floorHeight = baseFloor;
-      cells[rightKey].ceilHeight = baseFloor + baseCeil;
-    }
-
-  // Raise walls adjacent to floors
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-        const key = `${x},${y}`;
-        const cell = cells[key];
-        if (cell.tile !== 'wall') continue;
-        let maxNeighborFloor = baseFloor;
-        let touchesFloor = false;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nKey = `${x + dx},${y + dy}`;
-            const nCell = cells[nKey];
-            if (!nCell) continue;
-            if (nCell.tile === 'floor') {
-              touchesFloor = true;
-              if (typeof nCell.floorHeight === 'number' && nCell.floorHeight > maxNeighborFloor) {
-                maxNeighborFloor = nCell.floorHeight;
-              }
-            }
-          }
-        }
-        if (touchesFloor) {
-          cell.floorHeight = maxNeighborFloor;
-          cell.ceilHeight = maxNeighborFloor + 3.0;
-        }
-      }
-    }
+    IndoorBlueprint.build(dungeon, plan, { floor: baseFloor, ceil: baseCeil });
+    console.info('[IndoorLayout]', JSON.stringify({ geoKey: dungeon.geoKey || null, ...dungeon.indoorLayout }));
   }
 
   function addPillar(x, y, height) {
     const key = `${x},${y}`;
     const cell = cells[key];
-    if (!cell) return;
+    if (!cell || cell.tile !== 'floor' || cell.navigationReserved || cell.exit || cell.door || cell.interactable) return;
     cell.tile = 'pillar';
     cell.ceilHeight = (Number.isFinite(cell.floorHeight) ? cell.floorHeight : baseFloor) + (Number.isFinite(height) ? height : baseCeil);
   }
@@ -3752,6 +3690,16 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   function applyRoomsAndPaths() {
+    if (!indoor && Array.isArray(blueprint?.buildings)) for (const building of blueprint.buildings.slice(0, 4)) {
+      if (!building || ![building.x, building.y, building.w, building.h].every(Number.isFinite) || building.w <= 0 || building.h <= 0) continue;
+      const bw = Math.max(3, Math.min(63, Math.floor(building.w * w))), bh = Math.max(3, Math.min(79, Math.floor(building.h * h)));
+      const bx = Math.max(1, Math.min(w - bw - 1, Math.floor(building.x * w)));
+      const by = Math.max(1, Math.min(h - bh - 1, Math.floor(building.y * h)));
+      const elevation = cells[`${bx + Math.floor(bw / 2)},${by + Math.floor(bh / 2)}`].floorHeight;
+      for (let y = by; y < by + bh; y++) for (let x = bx; x < bx + bw; x++) {
+        Object.assign(cells[`${x},${y}`], { tile: 'floor', floorHeight: elevation, ceilHeight: elevation + baseCeil, outdoorFoundation: true });
+      }
+    }
     if (Array.isArray(blueprint?.rooms)) {
       blueprint.rooms.forEach((r, idx) => {
         let roomFloor = Number.isFinite(r.floor) ? r.floor : baseFloor;
@@ -3760,7 +3708,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
           roomFloor = baseFloor + levels[(seed + idx) % levels.length];
         }
         const roomCeil = Number.isFinite(r.ceil) ? r.ceil : roomFloor + baseCeil;
-        carveRect(r, 'floor', roomFloor, roomCeil);
+        carveRect(r, 'floor', terrain && !r.flatten ? undefined : roomFloor, terrain && !r.flatten ? undefined : roomCeil);
       });
     }
 
@@ -3792,7 +3740,17 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
     if (Array.isArray(blueprint?.volumes)) {
       blueprint.volumes.forEach(v => {
         const tile = resolveTileName(typeof v.tile === 'string' ? v.tile : 'wall');
-        carveRect(v, tile, Number.isFinite(v.floor) ? v.floor : baseFloor, Number.isFinite(v.ceil) ? v.ceil : baseFloor + baseCeil);
+        if (tile === 'pillar') {
+          const report = BlueprintPillars.apply(dungeon, { ...v, tile,
+            floor: Number.isFinite(v.floor) ? v.floor : baseFloor,
+            ceil: Number.isFinite(v.ceil) ? v.ceil : baseFloor + baseCeil });
+          console.info('[BlueprintPillars]', JSON.stringify({ geoKey: dungeon.geoKey || null, ...report }));
+          return;
+        }
+        const grounded = terrain && !Number.isFinite(v.floor);
+        carveRect(v, tile, grounded ? undefined : Number.isFinite(v.floor) ? v.floor : baseFloor,
+          grounded ? undefined : Number.isFinite(v.ceil) ? v.ceil : baseFloor + baseCeil,
+          grounded ? Number.isFinite(v.ceil) ? v.ceil : baseCeil : undefined);
       });
     }
 
@@ -3807,8 +3765,8 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
           case 'pillar_cluster': {
             const count = Math.max(2, Math.min(6, Math.floor(p.count || 3)));
             for (let i = 0; i < count; i++) {
-              const ox = px + Math.floor((Math.random() - 0.5) * pw);
-              const oy = py + Math.floor((Math.random() - 0.5) * ph);
+              const ox = px + Math.floor((random() - 0.5) * pw);
+              const oy = py + Math.floor((random() - 0.5) * ph);
               addPillar(ox, oy, height);
             }
             break;
@@ -3832,11 +3790,13 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
             break;
           }
           case 'spire': {
-            carveRect({ x: p.x, y: p.y, w: p.w || 0.05, h: p.h || 0.05 }, 'wall', baseFloor, baseFloor + height * 1.6);
+            carveRect({ x: p.x, y: p.y, w: p.w || 0.05, h: p.h || 0.05 }, 'wall',
+              terrain ? undefined : baseFloor, terrain ? undefined : baseFloor + height * 1.6, terrain ? height * 1.6 : undefined);
             break;
           }
           case 'ruin_wall': {
-            carveRect({ x: p.x, y: p.y, w: p.w || 0.2, h: p.h || 0.05 }, 'wall', baseFloor, baseFloor + height);
+            carveRect({ x: p.x, y: p.y, w: p.w || 0.2, h: p.h || 0.05 }, 'wall',
+              terrain ? undefined : baseFloor, terrain ? undefined : baseFloor + height, terrain ? height : undefined);
             break;
           }
           case 'mountain': {
@@ -3857,7 +3817,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
         const y = toGridY(p.y || 0.5);
         const key = `${x},${y}`;
         const cell = cells[key];
-        if (!cell || cell.tile !== 'floor') return;
+        if (!cell || cell.tile !== 'floor' || cell.navigationReserved || cell.exit || cell.door || cell.interactable) return;
         cell.tile = tileName;
         cell.feature = tileName;
       });
@@ -3911,8 +3871,8 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
     }
   }
 
-  if (indoor && blueprint?.indoorPlan) {
-    buildIndoorFromPlan(blueprint.indoorPlan);
+  if (indoor) {
+    buildIndoorFromPlan(blueprint?.indoorPlan || { rooms: blueprint?.rooms, corridors: blueprint?.paths });
     applyBlueprintFeatures();
     applySafeSpawnZone();
     return;
@@ -3923,12 +3883,13 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
 
   // Convert steep slopes into walls for outdoor cliffs
   if (!indoor) {
-    const diffThreshold = 0.45;
+    const diffThreshold = terrain ? 1.35 : 0.45;
     for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
         const key = `${x},${y}`;
         const cell = cells[key];
         if (!cell) continue;
+        if (cell.tile !== 'floor' || cell.feature || cell.navigationReserved) continue;
         const neighbors = [
           cells[`${x+1},${y}`],
           cells[`${x-1},${y}`],
@@ -3942,6 +3903,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
         }
         if (maxDiff > diffThreshold) {
           cell.tile = 'wall';
+          cell.terrainRole = 'cliff';
           cell.ceilHeight = cell.floorHeight + baseCeil + 1.0;
         }
       }
@@ -3950,6 +3912,10 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
 
   // Guaranteed safe spawn zone (prevents starting inside walls)
   applySafeSpawnZone();
+  if (terrain && typeof OutdoorTerrain.decorate === 'function') {
+    console.info('[OutdoorDressing]', JSON.stringify({ geoKey: dungeon.geoKey || null,
+      ...OutdoorTerrain.decorate(dungeon, classification) }));
+  }
 }
 
 async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast) {
@@ -4118,27 +4084,25 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
   }));
   classification = applySceneSpecToClassification(sceneSpec, classification);
   if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
+  DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
   console.log('[SceneSpec]', geoKey, describeSceneSpec(sceneSpec));
+  attachSceneWorldContext(sceneSpec, roomNameDbString, sharedState, updatedGameConsole);
   try {
     const levelSpec = await getLevelSpec(sceneSpec.source || {});
     applyLevelSpecToScene(sceneSpec, levelSpec);
     console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
   } catch (e) { console.warn('[LevelSpec] failed', e.message); }
 
+  DungeonGeneration.varyPalette(sceneSpec);
+  sceneSpec.outdoorTerrain = OutdoorTerrain.plan(sceneSpec, sceneSpec.generation.gridSize);
+  prepareSceneGeography(sceneSpec, roomNameDbString);
+  prepareSceneExteriors(sceneSpec, roomNameDbString, { seed: sharedState.getDungeonRunId(), enabled: process.env.HOLODEK_SCENE_EXTERIORS !== '0' });
   LivingEnvironments.enrichSceneSpec(sceneSpec);
+  prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
+  prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
 
   const isOutdoor = classification && classification.indoor === false;
-    const requestedSize = (classification && typeof classification.size === 'number')
-      ? classification.size
-      : 32;
-    const minSize = isOutdoor ? 96 : 24;
-    const maxBaseSize = isOutdoor ? 192 : 64;
-    const baseSize = Math.max(minSize, Math.min(requestedSize, maxBaseSize));
-    const outdoorScale = 10;
-    const maxOutdoorSize = 512;
-    const size = isOutdoor
-      ? Math.min(baseSize * outdoorScale, maxOutdoorSize)
-      : baseSize;
+    const size = sceneSpec.generation.gridSize;
 
     const startX = Math.floor(size / 2);
     const startY = size - Math.floor(size / 4);
@@ -4164,7 +4128,9 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       puzzleInRoom,
       classification,
       size,
-      customTiles
+      customTiles,
+      sceneSpec.generation,
+      sceneSpec
     );
 
     let lighting = (visualStyle && visualStyle.lighting) ? visualStyle.lighting : {
@@ -4195,6 +4161,8 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
 
     dungeon = {
       layout: { width: size, height: size },
+      generation: sceneSpec.generation,
+      outdoorTerrain: sceneSpec.outdoorTerrain,
       start: { x: startX, y: startY },
       tiles: {},
       cells: {},
@@ -4312,6 +4280,8 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
 
     logDungeonConstruction('layout', dungeon);
     applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+    applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
+    logDungeonConstruction('geography', dungeon);
     dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
     console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
     logDungeonConstruction('architecture', dungeon);
@@ -4389,9 +4359,15 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     logDungeonConstruction('torch-walls', dungeon);
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
     try {
+      applySceneRoofs(dungeon, sceneSpec);
+      logDungeonConstruction('roof-structure', dungeon);
       const placement = placeSceneLandmarks(dungeon, sceneSpec);
       console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
       console.log('[SceneGfx] objects placed', geoKey, JSON.stringify(placeSceneObjects(dungeon, sceneSpec)));
+      DungeonExits.install(dungeon, sceneSpec.exits);
+      console.info('[SceneExteriors]', geoKey, JSON.stringify(applySceneExteriors(dungeon, sceneSpec)));
+      console.info('[SceneVegetation]', geoKey, JSON.stringify(applySceneVegetation(dungeon, sceneSpec)));
+      console.info('[SceneBiomeProps]', geoKey, JSON.stringify(applySceneBiomeProps(dungeon, sceneSpec)));
     } catch (e) {
       console.error('[SceneGfx] landmark placement failed:', e);
     }
@@ -4424,6 +4400,8 @@ function buildIndoorLayout(dungeon, classification) {
   const w = dungeon.layout.width;
   const h = dungeon.layout.height;
   const cells = dungeon.cells;
+  const random = dungeon.generation?.seed ? DungeonGeneration.random(dungeon.generation.seed) : Math.random;
+  const chamberScale = Math.min(3, Math.max(1, Math.min(w, h) / 32));
 
   // ------------------------------
   // 1. Init everything as solid wall
@@ -4451,8 +4429,8 @@ function buildIndoorLayout(dungeon, classification) {
   //    → force this to height level 0
   // ------------------------------
   const firstRoomSize = {
-    w: 4 + Math.floor(Math.random() * 4),
-    h: 4 + Math.floor(Math.random() * 4)
+    w: Math.floor((4 + random() * 4) * chamberScale),
+    h: Math.floor((4 + random() * 4) * chamberScale)
   };
   const firstRoom = {
     x: Math.max(1, dungeon.start.x - Math.floor(firstRoomSize.w / 2)),
@@ -4468,10 +4446,10 @@ function buildIndoorLayout(dungeon, classification) {
   let attempts = 0;
   while (rooms.length < roomCount && attempts < roomCount * 10) {
     attempts++;
-    const rw = 4 + Math.floor(Math.random() * 5);
-    const rh = 4 + Math.floor(Math.random() * 5);
-    const rx = 1 + Math.floor(Math.random() * (w - rw - 2));
-    const ry = 1 + Math.floor(Math.random() * (h - rh - 2));
+    const rw = Math.floor((4 + random() * 5) * chamberScale);
+    const rh = Math.floor((4 + random() * 5) * chamberScale);
+    const rx = 1 + Math.floor(random() * (w - rw - 2));
+    const ry = 1 + Math.floor(random() * (h - rh - 2));
     const room = { x: rx, y: ry, w: rw, h: rh };
 
     let overlaps = false;
@@ -4500,7 +4478,7 @@ function buildIndoorLayout(dungeon, classification) {
   heightLevels[0] = 0;
 
   for (let i = 1; i < rooms.length; i++) {
-    const candidate = (Math.floor(Math.random() * 5) - 2) * 0.5; // −1, −0.5, 0, 0.5, 1
+    const candidate = (Math.floor(random() * 5) - 2) * 0.5; // -1, -0.5, 0, 0.5, 1
     const prev      = heightLevels[i - 1];
 
     let level = candidate;
@@ -4547,7 +4525,7 @@ function buildIndoorLayout(dungeon, classification) {
       cell.ceilHeight  = currentHeight + 2.5;
 
       // Randomized L-shaped path
-      if (Math.random() < 0.5) {
+      if (random() < 0.5) {
         if (x < bx) x++;
         else if (x > bx) x--;
         else if (y < by) y++;
@@ -4682,7 +4660,7 @@ function buildIndoorLayout(dungeon, classification) {
         candidates.push({ x, y });
       }
     }
-    candidates.sort(() => Math.random() - 0.5);
+    candidates.sort(() => random() - 0.5);
     const targetCount = Math.max(2, Math.min(6, Math.floor((w * h) / 200)));
     for (let i = 0; i < Math.min(targetCount, candidates.length); i++) {
       const c = candidates[i];
@@ -4706,6 +4684,10 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
   const w = dungeon.layout.width;
   const h = dungeon.layout.height;
   const cells = dungeon.cells = {}; // Ensure fresh cells
+  const terrain = dungeon.generation?.seed ? dungeon.outdoorTerrain || OutdoorTerrain.plan({
+    indoor: false, biome: classification?.biome, generation: dungeon.generation }, w, h) : null;
+  const random = dungeon.generation?.seed ? DungeonGeneration.random(`${dungeon.generation.seed}:scatter`) : Math.random;
+  if (terrain) dungeon.outdoorTerrain = terrain;
   const maxHeight = 5.5;
   const roughness = 1.1;
   const cx = w / 2;
@@ -4724,7 +4706,7 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
       const noise =
         (Math.sin(nx) + Math.sin(ny) + Math.sin(nx + ny * 1.3)) / 3; // [-1,1]
       let height = (noise * roughness + radial) * maxHeight * 0.7;
-      height = Math.max(-1.2, Math.min(4.8, height));
+      height = terrain ? OutdoorTerrain.heightAt(terrain, x, y) : Math.max(-1.2, Math.min(4.8, height));
       cells[key] = {
         tile: 'floor',
         floorHeight: height,
@@ -4735,7 +4717,7 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
   }
 
   // Turn steep edges into walls / cliffs
-  const diffThreshold = 0.45;
+  const diffThreshold = terrain ? 1.35 : 0.45;
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const key = `${x},${y}`;
@@ -4776,8 +4758,8 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
     20000
   ); // Cap attempts for massive outdoor grids
   for (let i = 0; i < attempts; i++) {
-    const x = 3 + Math.floor(Math.random() * (w - 6)); // Buffer from borders
-    const y = 3 + Math.floor(Math.random() * (h - 6));
+    const x = 3 + Math.floor(random() * (w - 6)); // Buffer from borders
+    const y = 3 + Math.floor(random() * (h - 6));
     const key = `${x},${y}`;
     const cell = cells[key];
     if (!cell || cell.tile !== 'floor') continue;
@@ -4787,7 +4769,7 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
     if (Math.sqrt(dx*dx + dy*dy) < 3.5) continue;
 
     // Place feature
-    const featureTile = allFeatures[Math.floor(Math.random() * allFeatures.length)];
+    const featureTile = allFeatures[Math.floor(random() * allFeatures.length)];
     cell.tile = featureTile;
     cell.feature = featureTile; // For minimap/debug
 
@@ -5177,6 +5159,7 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
 }
 
 async function generateMissingRoomDetails($, object) {
+  const diversitySeed = ['vitality_contrast', 'auditory_twist', 'dialogue_inversion'][Math.floor(Math.random() * 3)];
   let roomDescriptionGenerated = false;
   let environmentDescription = '';
   let puzzleInRoom = 'None';
@@ -5364,11 +5347,13 @@ async function generateMissingRoomDetails($, object) {
   console.log("Parsed adjacentRooms:", adjacentRooms);
 
   const roomExitsArray = roomExits && roomExits.toLowerCase() !== 'none'
-    ? roomExits.split(',').map(e => e.trim()).filter(Boolean)
+    ? roomExits.split(',').map(e => e.trim().toLowerCase()).filter(Boolean)
     : [];
-  let existingAdjacentRooms = adjacentRooms
-    ? adjacentRooms.split(',').map(adj => adj.split(':')[0].trim()).filter(Boolean)
-    : [];
+  // "None" is a placeholder, not a populated neighbor that can satisfy an exit.
+  const existingAdjacentRooms = adjacentRooms.split(',')
+    .map(adj => adj.trim().match(/^(north|south|east|west|northeast|southeast|northwest|southwest|up|down):\s*(.+)$/i))
+    .filter(match => match && !/^(none|null|undefined|empty)$/i.test(match[2].trim()))
+    .map(match => match[1].toLowerCase());
 
   console.log("Existing Adjacent Rooms:", existingAdjacentRooms);
   console.log("Room Exits Array:", roomExitsArray);
@@ -5528,12 +5513,81 @@ async function generateMissingRoomDetails($, object) {
     // Store in returnObj for client (optional, for status updates)
     returnObj.musicArrangement = currentRoomMusic;*/
 
-    // Generate new adjacent rooms only if needed
-    if (roomExitsArray.length > existingAdjacentRooms.length || !roomDescription) {
+    // The initial boilerplate still needs the original full population pipeline.
+    const missingAdjacentRooms = roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction));
+    const missingDescription = !roomDescription || /^(none|null|undefined)$/i.test(roomDescription);
+    const startupBoilerplate = coordKey === startKey && roomName === 'Ruined Temple Entrance' &&
+      /^You find yourself standing in the first room of the afterlife at the Ruined Temple\b/.test(roomDescription);
+    const savedDescription = [currentRoomData.description, currentRoomData.roomDescription, currentRoomData.sceneSpec?.source?.description]
+      .some(value => typeof value === 'string' && value.trim() && !/^(none|null|undefined)$/i.test(value.trim()));
+    const alreadyPopulated = currentRoomData.populationComplete === true || !missingDescription &&
+      (!startupBoilerplate || savedDescription || currentRoomData.visited === true ||
+        roomExitsArray.length > 0 && missingAdjacentRooms.length === 0);
+    const shouldPopulateRoom = !alreadyPopulated && (missingAdjacentRooms.length > 0 || missingDescription);
+    console.info('[RoomPopulation]', JSON.stringify({ phase: 'decision', geoKey: coordKey,
+      exits: roomExitsArray, existingAdjacentRooms, missingAdjacentRooms, missingDescription,
+      alreadyPopulated, repairNeighbors: alreadyPopulated && missingAdjacentRooms.length > 0, generate: shouldPopulateRoom }));
+    if (alreadyPopulated) {
+      currentRoomData.populationComplete = true;
+      const offsets = { north: [0, 1, 0], south: [0, -1, 0], east: [1, 0, 0], west: [-1, 0, 0],
+        northeast: [1, 1, 0], southeast: [1, -1, 0], northwest: [-1, 1, 0], southwest: [-1, -1, 0],
+        up: [0, 0, 1], down: [0, 0, -1] };
+      const repaired = [];
+      for (const direction of new Set(missingAdjacentRooms)) {
+        if (!Object.hasOwn(offsets, direction)) continue;
+        const [dx, dy, dz] = offsets[direction];
+        const exit = currentRoomData.exits?.[direction];
+        const targetKey = exit?.targetCoordinates ? normalizeCoordKeyLocal(exit.targetCoordinates) :
+          coordinatesToString({ x: currentCoordinates.x + dx, y: currentCoordinates.y + dy, z: currentCoordinates.z + dz });
+        if (targetKey === coordKey) continue;
+        let neighbor = getRoomSafeLocal(roomNameDatabasePlain, targetKey);
+        let name = neighbor?.name;
+        if (!name || /^(none|null|undefined|empty)$/i.test(String(name).trim())) {
+          $.model = 'gpt-4.1-mini';
+          $.temperature = 1.0;
+          await $.assistant`Generate only a room name for the existing ${direction} exit from ${roomName}. Do not redescribe or repopulate the current room. Current room description: ${roomDescription}`;
+          const response = await $.assistant.generation({ maxTokens: 40 });
+          name = response.content?.trim();
+          if (!name || /^(none|null|undefined|empty)$/i.test(name)) continue;
+        }
+        if (!neighbor) {
+          let shape;
+          try { shape = await classifyDungeon(name, false); }
+          catch { shape = { indoor: true, size: 32, biome: 'temple', features: [] }; }
+          const outdoorEntrance = coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0];
+          const indoor = outdoorEntrance ? false : shape.indoor;
+          neighbor = { name, exhaustionLimit: null, attemptedSearches: 0, trapTriggered: false,
+            exits: {}, objects: [], monsters: { inRoom: 'None', equippedProperties: 'None', state: 'None' },
+            indoor, isIndoor: indoor, isOutdoor: !indoor,
+            classification: { ...shape, indoor, ...(outdoorEntrance ? { biome: 'wasteland' } : {}) } };
+        } else if (neighbor.name !== name) neighbor.name = name;
+        setRoomSafeLocal(roomNameDatabasePlain, targetKey, neighbor);
+        currentRoomData.exits ||= {};
+        // Keep existing targets, locks, keys and any other exit metadata intact.
+        currentRoomData.exits[direction] = { status: 'open', ...exit, targetCoordinates: exit?.targetCoordinates || targetKey };
+        repaired.push(direction);
+      }
+      if (repaired.length) {
+        const namedEntries = new Map(adjacentRooms.split(',').map(entry => {
+          const match = entry.trim().match(/^(\w+):\s*(.+)$/);
+          return match ? [match[1].toLowerCase(), entry.trim()] : [null, null];
+        }));
+        const entries = roomExitsArray.map(direction => {
+          if (!repaired.includes(direction)) return namedEntries.get(direction) || `${direction}: None`;
+          const exit = currentRoomData.exits[direction];
+          const name = getRoomSafeLocal(roomNameDatabasePlain, exit.targetCoordinates)?.name;
+          return `${direction}: ${name}${exit.status !== 'open' ? ` (${exit.status})` : ''}`;
+        }).join(', ');
+        updatedGameConsole = updatedGameConsole.replace(/^(Adjacent Rooms:)[^\r\n]*/m, (_, label) => `${label} ${entries}`);
+        needsUpdate = true;
+        console.info('[RoomPopulation]', JSON.stringify({ phase: 'neighbor-repair', geoKey: coordKey, repaired }));
+      }
+      persistRoomDb(roomNameDatabasePlain);
+    }
+    if (shouldPopulateRoom) {
         console.log("Generating new room details due to missing description or incomplete exits.");
             $.model = "gpt-4.1-mini";
             $.temperature = 1.2;
-            const diversitySeed = ['vitality_contrast', 'auditory_twist', 'dialogue_inversion'][Math.floor(Math.random() * 3)];
             $.user`FYI: Variability seed for this turn—infuse subtle contrast: ${diversitySeed}. Await next.`;
             $.user`Instructions for the Grave Master:
             
@@ -5612,6 +5666,14 @@ Backend Integration: Programmatic vs. Narrative Handling`;
 // Generate room description
 // Generate room description
     // Generate room description (only when missing)
+    const existingIntent = describeEnvironmentIntent(currentRoomData.environmentIntent);
+    if (existingIntent) await $.assistant`${existingIntent}`;
+    const worldContext = buildRoomWorldContext(roomNameDatabasePlain, currentCoordinates,
+      { exits: roomExitsArray, quest: snapshotQuestContext(sharedState, updatedGameConsole) });
+    console.info('[WorldContext]', JSON.stringify(worldContext));
+    await $.assistant`Conditional world context for this newly described room: ${JSON.stringify(worldContext)}
+Use only known facts here, not an invented list of exits. If outdoors, describe real terrain, walkable approaches and suitable dead vegetation, not only abstract metaphors. If a known route leads to an indoor building, describe that destination's exterior, forecourt and physical entrance; its other walls enclose the building, while the surrounding perimeter can be explored. If a route leads outdoors, it is a continuation through the region rather than an arbitrary indoor hall. If indoors and linked to the same complex, distinguish deeper interior passages from gateways to exterior courts or wasteland. The Ruined Temple is a large complex, not a single shed, and can have multiple entrance rooms connected by its interior. Keep each known complex's architectural identity coherent. The journey ultimately heads toward Hades and Arithus, but do not rush, teleport, complete quests, invent visible exits, or change encounter mechanics. Plan a few plausible developments ahead using existing neighbor names and quest context, leaving branches, surprises, settlements, ruins and environmental challenges imaginative and responsive to player choices. Choose what lies along the road; this is not a fixed sequence of scenes. Hints of Hades can motivate the journey without prematurely revealing the finale. These distinctions supplement the existing system prompt and never replace startup, monster, item, puzzle or quest generation.`;
+    await $.assistant`Physical architecture guidance for newly described locations: describe concrete, navigable buildings, not only metaphors. Match the existing room name and biome; never replace an already described room. Use one dominant plan, with a few coherent nested structures: Roman temples, basilicas, forums, amphitheaters, theaters, chariot circuses, bathhouses, granaries/horrea, atrium houses/domus, villas, insula courtyards, aqueduct arcades or monumental arches; or motte-and-bailey, shell-keep, stone-keep or concentric castles. Indoor halls and corridors are normally roofed, with explicitly located open courtyards or ruined sections. Mention an appropriate roof where relevant: barrel/groin/ribbed/fan vault, timber or hammerbeam roof, boarded or gold-coffered ceiling, pendentive or squinch dome. Pillars support grouped buildings, not random farms. A pedimented portico may lead into a rotunda inside a larger complex. These are visual construction cues, not new inventory items, exits, characters or rules. Do not list every style; choose what serves this location's lore and physical use.`;
     await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
     const generationResultDescription = await $.assistant.generation({ maxTokens: 220 });
     roomDescription = generationResultDescription.content.trim();
@@ -5649,13 +5711,14 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     const pcDetails = updatedGameConsole.match(/PC:([\s\S]*?)(?=(NPCs in Party|Rooms Visited))/)?.[1]?.trim();
     const npcsInPartyDetails = updatedGameConsole.match(/NPCs in Party:([\s\S]*?)(?=(Monsters in Room|Rooms Visited))/)?.[1]?.trim();
     const extractDetails = (details) => {
-      const lines = details.split('\n').map(line => line.trim());
+      // Blank separators are not fields in the existing 14-line character format.
+      const lines = details.split('\n').map(line => line.trim()).filter(Boolean);
       const characters = [];
       for (let i = 0; i < lines.length; i += 14) {
         const name = lines[i] || 'Unknown';
         const className = lines[i + 3] ? lines[i + 3].trim() : 'Unknown';
-        const xp = lines[i + 6] ? parseInt(lines[i + 6].split(':')[1].trim()) : 0;
-        const hp = lines[i + 7] ? parseInt(lines[i + 7].split(':')[1].trim()) : 0;
+        const xp = lines[i + 6] ? parseInt(lines[i + 6].split(':')[1], 10) : 0;
+        const hp = lines[i + 7] ? parseInt(lines[i + 7].split(':')[1], 10) : 0;
         if (name && className && !isNaN(xp) && !isNaN(hp)) {
           characters.push({ name, className, xp, hp });
         }
@@ -5690,15 +5753,28 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     await $.assistant`Current Game Console: ${updatedGameConsole}`;
 
     // Generate new adjacent rooms (names)
+    const questIntentContext = snapshotQuestContext(sharedState, updatedGameConsole);
+    const bossIntentNumbers = questIntentContext.bossCoordinates.match(/-?\d+/g);
+    const frontierIntent = await chooseEnvironmentIntents($, { coords: currentCoordinates,
+      directions: roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction)), database: roomNameDatabasePlain,
+      currentQuest: questIntentContext.currentQuest, tasks: questIntentContext.tasks, taskIndex: questIntentContext.taskIndex,
+      nextBoss: questIntentContext.nextBoss, nextBossRoom: questIntentContext.nextBossRoom,
+      bossCoordinates: bossIntentNumbers?.length === 3 ? { x: +bossIntentNumbers[0], y: +bossIntentNumbers[1], z: +bossIntentNumbers[2] } : null,
+      sourceIndoor: currentRoomData.indoor, seed: sharedState.getDungeonRunId?.() || '' });
+    console.info('[EnvironmentIntent]', coordKey, JSON.stringify(frontierIntent));
     let newAdjacentRooms = {};
-    if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length > 1) {
+    if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length > 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
       console.log("Generating a room name for the first exit leading to the Wastelands of Tartarus.");
+      const guidance = describeEnvironmentIntent(frontierIntent.intents[roomExitsArray[0]]);
+      if (guidance) await $.assistant`${guidance}`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
       await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} leading to the wastelands of Tartarus. This room is an outdoor area away from the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
       const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
-    } else if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length < 2) {
+    } else if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length === 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
+      const guidance = describeEnvironmentIntent(frontierIntent.intents[roomExitsArray[0]]);
+      if (guidance) await $.assistant`${guidance}`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
       await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
@@ -5707,6 +5783,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     }
     for (const exit of roomExitsArray.slice(1)) {
       if (!existingAdjacentRooms.includes(exit)) {
+        const guidance = describeEnvironmentIntent(frontierIntent.intents[exit]);
+        if (guidance) await $.assistant`${guidance}`;
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
         await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the ${roomName} to the ${exit} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
@@ -5739,7 +5817,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         z: currentCoordinates.z + offset.z
       };
       const outKey = coordinatesToString(outCoord);
-
+      if (!roomNameDatabasePlain[outKey]) {
       let wastelandShape;
       try {
         wastelandShape = await classifyDungeon(newAdjacentRooms[firstDir] || "Wastelands of Tartarus", false);
@@ -5773,6 +5851,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         isOutdoor: true
       };
       console.log(`Forced outdoor skeleton for ${outKey}:`, roomNameDatabasePlain[outKey].classification);
+      }
     }
 
     // Eagerly create ALL new adjacent rooms with SHAPE ONLY (palette deferred)
@@ -5794,6 +5873,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         console.error(`classifyDungeon failed for ${newKey}:`, err);
         roomShape = { indoor: true, size: 32, biome: 'temple', features: [] };
       }
+      const intendedEnvironment = frontierIntent.intents[dir];
+      if (intendedEnvironment) roomShape = { ...roomShape, indoor: intendedEnvironment.indoor, biome: intendedEnvironment.biome };
 
       roomNameDatabasePlain[newKey] = {
         name: newRoomName,
@@ -5821,6 +5902,11 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       console.log(`Created skeleton for ${newKey}:`, roomNameDatabasePlain[newKey].classification);
     }
 
+    // Persist only the new neighbor's compact intent, not repeated quest snapshots per room.
+    for (const [direction, intent] of Object.entries(frontierIntent.intents)) {
+      if (newAdjacentRooms[direction] && roomNameDatabasePlain[intent.targetKey] && !roomNameDatabasePlain[intent.targetKey].environmentIntent)
+        roomNameDatabasePlain[intent.targetKey].environmentIntent = intent;
+    }
     // Locked exit + key placement (unchanged)
     let lockedDirection = null;
     if (roomExitsArray.length >= 3) {
@@ -5896,6 +5982,14 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     }
 
     // Final scrub + repair + persist after all mutations
+    propagateComplexIdentity(roomNameDatabasePlain, currentCoordinates);
+    const bossGateReport = ensureBossGate(roomNameDatabasePlain, updatedGameConsole);
+    if (bossGateReport.changed) console.info('[BossGate]', JSON.stringify(bossGateReport));
+    const outdoorRoute = supplementOutdoorRoutes(roomNameDatabasePlain, currentCoordinates, roomExitsArray, updatedGameConsole,
+      { seed: sharedState.getDungeonRunId?.() || '' });
+    roomExitsArray.splice(0, roomExitsArray.length, ...outdoorRoute.exits);
+    updatedGameConsole = outdoorRoute.updatedConsole;
+    if (outdoorRoute.report.added) console.info('[OutdoorContinuation]', coordKey, JSON.stringify(outdoorRoute.report));
     scrubMalformedKeysInDb(roomNameDatabasePlain);
     for (const [k, r] of Object.entries(roomNameDatabasePlain)) {
       if (!r) continue;
@@ -5998,7 +6092,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       }
     }
 
-    const monstersInRoom = updatedGameConsole.match(/Monsters in Room:([\s\S]*?)(?=(Monsters Equipped Properties|Rooms Visited|$))/)?.[1]?.trim();
+    const monstersInRoom = updatedGameConsole.match(/Monsters in Room:([\s\S]*?)(?=(Monsters Equipped Properties|Monsters State|Rooms Visited|$))/)?.[1]?.trim() || 'None';
     let monstersStateMatch = updatedGameConsole.match(/Monsters State: ([^\n]+)/);
     let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "None";
 
@@ -6084,6 +6178,11 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, `Puzzle Solution: None`);
     }
 
+    console.info('[RoomPopulation]', JSON.stringify({ phase: 'complete', geoKey: coordKey,
+      generatedObjects: objects.length, hasMonsters: !!monstersInRoom && !/^(none|empty)$/i.test(monstersInRoom),
+      hasPuzzle: puzzleInRoom !== 'None' && !!puzzleSolution, adjacentDirections: roomExitsArray }));
+    currentRoomData.populationComplete = true;
+    persistRoomDb(roomNameDatabasePlain);
     needsUpdate = true;
   }
 
@@ -6488,6 +6587,11 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
     ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
     : { x: 0, y: 0, z: 0 };
   const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
+  const bossGateReport = ensureBossGate(roomNameDatabasePlain, updatedGameConsole);
+  if (bossGateReport.changed) {
+    sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+    console.info('[BossGate]', JSON.stringify(bossGateReport));
+  }
   if (!isAutoForSeed) {
     // Canonicalize once per turn to merge rogue keys
     roomNameDatabasePlain = canonicalizeRoomDb(roomNameDatabasePlain);
@@ -6511,7 +6615,7 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
   const coordsExceptCurrent = allCoords.filter(c => c !== currentRoomKey);
   // Get monsters in current room
   function readLine(consoleText, key) {
-    const re = new RegExp(`^${key}:\\s*(.*)$`, 'mi');
+    const re = new RegExp(`^${key}:[ \\t]*([^\\r\\n]*)`, 'mi');
     const m = re.exec(consoleText);
     return m ? m[1].trim() : null;
   }
@@ -6615,42 +6719,7 @@ function getMonsterHpFromDbOrConsole(monsterName, placementKey) {
     return !!ex && String(ex.status || '').toLowerCase() === 'open';
   }
   function gateWithRequirements(task, consoleText) {
-    const hardFails = [];
-    const actionFails = [];
-    const inv = parseInventoryFromConsole(consoleText);
-    const invSet = new Set(inv.map(s => s.toLowerCase()));
-    const hard = Array.isArray(task.hardRequirements) ? task.hardRequirements : [];
-    const act = Array.isArray(task.actionRequirements) ? task.actionRequirements : [];
-    for (const r of hard) {
-      if (!r || !r.check) continue;
-      const check = String(r.check).toLowerCase();
-      if (check === 'at_coords') {
-        const need = String(r.value || '').trim();
-        if (currentRoomKey !== need) hardFails.push(`Be at ${need}`);
-      } else if (check === 'inventory_contains') {
-        const item = (r.value || '').toString().toLowerCase();
-        if (!invSet.has(item)) hardFails.push(`Have "${r.value}" in Inventory`);
-      } else if (check === 'monster_hp_zero') {
-        const mon = (r.value || '').toString();
-        const placementHint = (task.requiredElements || []).find(e => e.type === 'monster' && e.name === mon)?.placement;
-        const hp = getMonsterHpFromDbOrConsole(mon, placementHint || currentRoomKey);
-        if (!(typeof hp === 'number' && hp <= 0)) hardFails.push(`${mon} HP must be 0`);
-      }
-    }
-    for (const r of act) {
-      if (!r || !r.check) continue;
-      const check = String(r.check).toLowerCase();
-      if (check === 'exit_open') {
-        const ok = isExitOpen(r.coords, r.direction);
-        if (!ok) actionFails.push(`Open the ${r.direction} exit at ${r.coords}`);
-      } else if (check === 'monster_hp_zero') {
-        const mon = (r.value || '').toString();
-        const placementHint = (task.requiredElements || []).find(e => e.type === 'monster' && e.name === mon)?.placement;
-        const hp = getMonsterHpFromDbOrConsole(mon, placementHint || currentRoomKey);
-        if (!(typeof hp === 'number' && hp <= 0)) actionFails.push(`${mon} HP must be 0`);
-      }
-    }
-    return { hardFails, actionFails };
+    return evaluateTaskRequirements(task, { roomKey: currentRoomKey, consoleText, database: roomNameDatabasePlain });
   }
   // Ensure DB.monsters has names-only inRoom and the full text in consoleBlock — with exclusion support
 function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
@@ -6706,13 +6775,54 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
   const seedNextTaskForCurrentIndex = async () => {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.0;
+    if (currentTaskIndex === 1 && !bossGateReport.gate) {
+      console.warn('[BossKeyTask] Waiting for the existing boss binding and room record.', bossGateReport.reason);
+      return null;
+    }
+    if (currentTaskIndex === 1 && bossGateReport.gate) {
+      const gate = bossGateReport.gate;
+      const placements = gate.keyPlacement ? [gate.keyPlacement] :
+        [...new Set([currentRoomKey, ...Object.keys(roomNameDatabasePlain).filter(key => key !== gate.targetKey).slice(0, 8)])];
+      let selected = placements[0];
+      if (!gate.keySeeded && placements.length > 1) {
+        await $.assistant`The current quest's final pre-boss step retrieves its existing bound key ${gate.keyName}.
+Quest: ${String(currentQuest).slice(0, 1200)}. Previous completed step: ${String(currentTasks[0]?.desc || '').slice(0, 300)}.
+Choose a meaningful, reachable location from these existing coordinates only: ${JSON.stringify(placements)}.
+Use the existing quest and characters for context. Do not place it inside the boss room, move the boss, create characters, or alter other quest tasks. Return only {"placement":"x,y,z"}.`;
+        const chosen = await $.assistant.generation({ maxTokens: 70, parameters: { placement: String } });
+        const candidate = parseOnlyJson(chosen.content, { placement: currentRoomKey }).placement;
+        if (placements.includes(candidate)) selected = candidate;
+      }
+      for (const placement of [...new Set([selected, ...placements])]) {
+        const keyReport = seedBossKey(roomNameDatabasePlain, gate, placement, { playerRoomKey: currentRoomKey });
+        if (!['seeded', 'already-seeded'].includes(keyReport.status)) continue;
+        const keyTask = makeBossKeyTask(keyReport.gate, keyReport.gate.keyPlacement || placement);
+        if (!keyTask) continue;
+        currentTasks[currentTaskIndex] = keyTask;
+        sharedState.setCurrentTasks(currentTasks);
+        sharedState.setQuestSeeded(true);
+        sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+        if (keyReport.gate.keyPlacement === currentRoomKey) {
+          updatedGameConsole = await syncObjectsOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
+          sharedState.setUpdatedGameConsole(updatedGameConsole);
+        }
+        console.info('[BossKeyTask]', JSON.stringify({ task: keyTask, seed: keyReport }));
+        return keyTask;
+      }
+      console.warn('[BossKeyTask] Waiting for a reachable approach to the bound boss room.', gate.targetKey);
+      return null;
+    }
     // Stage 3 (boss) — unchanged
     if (currentTaskIndex === 2) {
-      const bossName = readLine(updatedGameConsole, "Next Boss") || "The Boss";
-      const bossRoom = readLine(updatedGameConsole, "Next Boss Room") || "Boss Chamber";
+      const bossName = readLine(updatedGameConsole, "Next Boss") || '';
+      const bossRoom = readLine(updatedGameConsole, "Next Boss Room") || '';
       const bossCoordsLine = readLine(updatedGameConsole, "Boss Room Coordinates") || "";
-      const bossCoords = (bossCoordsLine && /X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/.test(bossCoordsLine))
-        ? `${RegExp.$1},${RegExp.$2},${RegExp.$3}` : currentRoomKey;
+      const bossCoordMatch = bossCoordsLine.match(/^(?:X:\s*)?(-?\d+),\s*(?:Y:\s*)?(-?\d+),\s*(?:Z:\s*)?(-?\d+)$/);
+      const bossCoords = bossGateReport.gate?.targetKey || (bossCoordMatch ? bossCoordMatch.slice(1).map(Number).join(',') : null);
+      if (!bossCoords || !bossName || !bossRoom || /^none$/i.test(bossName) || /^none$/i.test(bossRoom)) {
+        console.warn('[QuestProgress] Waiting for the existing boss binding; no substitute boss was created.');
+        return null;
+      }
       const nextArtifact = readLine(updatedGameConsole, "Next Artifact") || "the artifact";
       const newTask = {
         type: "Defeat",
@@ -6729,7 +6839,7 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
         ],
         status: "Pending",
       };
-      currentTasks.push(newTask);
+      currentTasks[2] = newTask;
       sharedState.setCurrentTasks(currentTasks);
       sharedState.setCurrentTaskIndex(2);
       sharedState.setQuestSeeded(true);
@@ -6744,8 +6854,9 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
     try { countParsed = Number(parseOnlyJson(reqCountResp.content, { count: 0 }).count || 0); } catch {}
     const reqCount = Math.max(0, Math.min(3, isNaN(countParsed) ? 0 : countParsed));
     // 2) Create/place those elements first (DB is source of truth)
-    const allCoords = Object.keys(roomNameDatabasePlain);
-    if (!allCoords.includes(currentRoomKey)) allCoords.push(currentRoomKey);
+    const allCoords = Object.keys(roomNameDatabasePlain).filter(key => key !== bossGateReport.gate?.targetKey);
+    if (!allCoords.includes(currentRoomKey) && currentRoomKey !== bossGateReport.gate?.targetKey) allCoords.push(currentRoomKey);
+    if (!allCoords.length) return null;
     const coordsExceptCurrent = allCoords.filter(c => c !== currentRoomKey);
     const preferElsewhere = Math.random() < 0.8;
     const usedPlacements = new Set();
@@ -6771,7 +6882,7 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
       usedPlacements.add(placement);
       const room = ensureRoom(roomNameDatabasePlain, placement);
       if (elType === 'object') {
-        let objDb = (room.objects && room.objects.length) ? room.objects[0] : null;
+        let objDb = (room.objects || []).find(object => !isReservedBossKeyName(roomNameDatabasePlain, object?.name)) || null;
         if (!objDb) {
           const objs = await generateRoomObjects($, room.name || 'Room', room.description || 'A room');
           if (objs && objs.length) {
@@ -6790,7 +6901,7 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
         }
         requiredElementsStrings.push(`object|${objDb.name}|${placement}`);
       } else if (elType === 'key') {
-        let keyDb = (room.objects || []).find(o => o.type === 'key');
+        let keyDb = (room.objects || []).find(o => o.type === 'key' && !isReservedBossKeyName(roomNameDatabasePlain, o.name));
         if (!keyDb) {
           const keyRaw = await generateKey($, currentCoords, "dir");
           keyDb = toDbObject({ ...keyRaw, type: 'key' }, 'key');
@@ -6918,32 +7029,36 @@ Respond ONLY {"metrics":"..."}.
   // ---------------- end seeding helper ----------------
   // ---------- seed if not seeded yet ----------
   let questJustSeeded = false;
-  let activeTask = null;
+  let questUpdate = '';
+  let completedTaskThisTurn = false;
+  let attemptedSeedIndex = null;
+  let activeTask = currentTasks[sharedState.getCurrentTaskIndex() || 0] || null;
   if (!sharedState.getQuestSeeded()) {
+    attemptedSeedIndex = currentTaskIndex;
     const seeded = await seedNextTaskForCurrentIndex();
-    questJustSeeded = true;
+    questJustSeeded = !!seeded;
     activeTask = seeded;
   }
   // Read last adjudication hint
   const adjud = (typeof sharedState.getLastAdjudication === 'function') ? sharedState.getLastAdjudication() : null;
-  if (adjud && activeTask) {
+  if (adjud && activeTask && adjud.taskBinding === taskBinding(activeTask)) {
     const sameRoom = adjud.roomKey === currentRoomKey;
     const isPuzzleTask = (activeTask.actionKind === 'solve_puzzle' || (activeTask.type || '').toLowerCase() === 'puzzle');
     if (sameRoom && adjud.questAttempted && adjud.prereqsMet) {
-      if (isPuzzleTask && adjud.questSucceeded) {
+      if (isPuzzleTask && adjud.questSucceeded && gateWithRequirements(activeTask, updatedGameConsole).progress.eligible) {
         activeTask.status = "Completed";
-        questUpdate = `You solve the puzzle tied to the quest. The chamber’s secrets fade. XP gained: 250. Task completed: ${activeTask.desc}`;
-        const oldIdx = idx;
+        questUpdate = `Quest puzzle completed: ${activeTask.desc}`;
+        const oldIdx = sharedState.getCurrentTaskIndex() || 0;
         sharedState.setCurrentTaskIndex(oldIdx + 1);
         sharedState.setQuestSeeded(false);
+        completedTaskThisTurn = true;
         activeTask = null;
         sharedState.setCurrentTasks(currentTasks);
       }
     }
   }
   // ---------- evaluate progress (two-pronged) ----------
-  let questUpdate = '';
-  if ((sharedState.getCurrentTaskIndex() || 0) < 3) {
+  if (!completedTaskThisTurn && (sharedState.getCurrentTaskIndex() || 0) < 3) {
     currentTasks = sharedState.getCurrentTasks() || [];
     const idx = sharedState.getCurrentTaskIndex() || 0;
     if (!activeTask && currentTasks.length > idx) activeTask = currentTasks[idx];
@@ -6951,6 +7066,7 @@ Respond ONLY {"metrics":"..."}.
       await $.assistant`Evaluate if input "${userInput}" advances task: ${JSON.stringify(activeTask)} based on game state: ${updatedGameConsole || ''}.
 Use metrics: ${activeTask.metrics}.
 IMPORTANT: Hard requirements are NECESSARY but NOT SUFFICIENT. Only mark Completed if the intended ACTION for this task clearly occurred (e.g., exit actually opened, item delivered, monster HP reached 0), not merely because the item exists in inventory or because you're in the right room.
+XP is committed by the existing action adjudication, not this progress evaluator. Do not invent an XP award; leave reward empty.
 Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote":".","narrative":".","reward":"XP gained: X"}.`;
       const updateResult = await $.assistant.generation({ maxTokens: 200,
         parameters: {
@@ -6966,11 +7082,13 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
         narrative: "",
         reward: ""
       });
-      const computedUpdate =
-        (updateJson.narrative || "") +
-        (updateJson.progressNote ? ` (${updateJson.progressNote})` : "") +
-        (updateJson.reward ? ` ${updateJson.reward}` : "");
-      const { hardFails, actionFails } = gateWithRequirements(activeTask, updatedGameConsole);
+      const assessment = gateWithRequirements(activeTask, updatedGameConsole);
+      const { hardFails, actionFails } = assessment;
+      activeTask.progress = mergeTaskProgress(activeTask.progress, assessment);
+      const keyRetrieved = activeTask.bossGateId === bossGateReport.gate?.id && bossGateReport.gate?.keySeeded && assessment.progress.eligible;
+      const mayComplete = !hardFails.length && !actionFails.length && (updateJson.updatedStatus === 'Completed' || keyRetrieved);
+      const computedUpdate = updateJson.updatedStatus === 'Completed' && !mayComplete ? '' :
+        (updateJson.narrative || '') + (updateJson.progressNote ? ` (${updateJson.progressNote})` : '');
       if (hardFails.length) {
         activeTask.status = "In Progress";
         const note = `Prereqs not met: ${hardFails.join('; ')}`;
@@ -6980,7 +7098,7 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
         const note = `Action pending: ${actionFails.join('; ')}`;
         questUpdate = (computedUpdate ? `${computedUpdate} ${note}` : note);
       } else {
-        activeTask.status = updateJson.updatedStatus || activeTask.status || "Pending";
+        activeTask.status = keyRetrieved ? 'Completed' : updateJson.updatedStatus || activeTask.status || "Pending";
         questUpdate = computedUpdate;
       }
       if (activeTask.status === 'Completed') {
@@ -7000,12 +7118,35 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
     updatedGameConsole = (updatedGameConsole || '').replace(/Current Quest: .*/, `Current Quest: None`);
     sharedState.setUpdatedGameConsole(updatedGameConsole);
     await generateQuest($);
+    updatedGameConsole = sharedState.getUpdatedGameConsole() || updatedGameConsole;
     questUpdate += (questUpdate ? "\n" : "") + "Quest completed! A new quest stirs...";
     if (typeof sharedState.appendQuestLog === 'function') {
       sharedState.appendQuestLog({ update: "Quest completed", currentTaskIndex: sharedState.getCurrentTaskIndex() });
     }
   }
+  else if (!sharedState.getQuestSeeded() && attemptedSeedIndex !== sharedState.getCurrentTaskIndex()) {
+    currentTaskIndex = sharedState.getCurrentTaskIndex() || 0;
+    const nextTask = await seedNextTaskForCurrentIndex();
+    if (nextTask) {
+      questJustSeeded = true;
+      activeTask = nextTask;
+    }
+  }
   // ---------- persist ----------
+  const visibleTaskIndex = sharedState.getCurrentTaskIndex() || 0;
+  const visibleTask = (sharedState.getCurrentTasks() || [])[visibleTaskIndex] || null;
+  if (visibleTask) {
+    visibleTask.progress = mergeTaskProgress(visibleTask.progress, gateWithRequirements(visibleTask, updatedGameConsole));
+    sharedState.setCurrentTasks(sharedState.getCurrentTasks());
+  }
+  const questProgress = visibleTask ? `Step ${visibleTaskIndex + 1}/3: ${visibleTask.status || 'Pending'}; ` +
+    `${visibleTask.progress?.satisfied || 0}/${visibleTask.progress?.total || 0} requirements verified. ${visibleTask.desc || ''}` :
+    `Step ${visibleTaskIndex + 1}/3: waiting for a reachable route to the bound quest destination.`;
+  if (/^Quest Progress:/m.test(updatedGameConsole)) updatedGameConsole = updatedGameConsole.replace(/^Quest Progress:[^\r\n]*/m, `Quest Progress: ${questProgress}`);
+  else updatedGameConsole = updatedGameConsole.replace(/^Current Quest:[^\r\n]*/m, match => `${match}\nQuest Progress: ${questProgress}`);
+  sharedState.setUpdatedGameConsole(updatedGameConsole);
+  console.info('[QuestProgress]', JSON.stringify({ taskIndex: visibleTaskIndex, task: visibleTask?.desc || null,
+    status: visibleTask?.status || null, progress: visibleTask?.progress || null }));
   if (typeof sharedState.setLastQuestUpdate === 'function') {
     sharedState.setLastQuestUpdate(questUpdate || "");
   }
@@ -7016,7 +7157,7 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
       activeTask: activeTask ? { type: activeTask.type, status: activeTask.status } : null
     });
   }
-  return { questJustSeeded, questUpdate, activeTask };
+  return { questJustSeeded, questUpdate, activeTask, questProgress };
 }
 
 async function generateQuest($) {
@@ -7406,6 +7547,22 @@ function dropMonsterItemsToRoom(targetMonster) {
 }
 
 async function tryDungeonDoorAction(userInput) {
+    const sealCommand = String(userInput).trim().match(/^(?:touch|press|activate)\s+(ash|bone|ember)\s+seal[.!]?$/i);
+    if (sealCommand) {
+        const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+        const dungeon = sharedState.getRoomDungeon(coords);
+        if (!dungeon?.livingEncounter) return { content: 'There is no seal encounter in this room.', actionOnly: true };
+        const pc = JSON.parse(sharedState.getCombatCharactersString() || '[]').find(c => c.type === 'pc' && c.mazeRoomKey === geoKey);
+        const result = LivingEnvironments.interact(dungeon, { fixtureId: sealCommand[1].toLowerCase(),
+            actor: pc ? { x: pc.mazeX + 0.5, y: pc.mazeY + 0.5 } : null, expectedRevision: dungeon.livingEncounter.revision });
+        if (result.ok) {
+            const next = finalizeRoomDungeon(geoKey, { ...dungeon, cells: { ...dungeon.cells, ...result.cells }, livingEncounter: result.encounter }, dungeon.customTiles);
+            sharedState.setRoomDungeon(coords, next, next.customTiles);
+            broadcast({ type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp,
+                geometryStamp: next._geometryStamp, cells: result.cells, livingEncounter: result.encounter });
+        }
+        return { content: result.message, actionOnly: true };
+    }
     if (!doorIntent(userInput)) return null;
     const coords = sharedState.getLastCoords();
     const geoKey = `${coords.x},${coords.y},${coords.z}`;
@@ -7453,14 +7610,33 @@ async function handleCombatRound($, userInput, combatMode) {
     try {
         return await resolveCombatRound($, userInput, combatMode);
     } finally {
-        combatSpace = null;
-        actionDice.end();
+        try {
+            if (combatSpace) {
+                const finalRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+                sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(finalRoster)));
+            }
+        } finally {
+            combatSpace = null;
+            actionDice.end();
+        }
     }
 }
 
 async function rollCombatAttack(combatant, target, pc, combatLog) {
     if (combatSpace && !combatSpace.canAttack(combatant, target)) {
-        combatLog.push(`${combatant.name} cannot reach ${target.name} with a clear attack. Reposition before attacking.`);
+        const path = combatSpace.pursuitPath(combatant, target);
+        for (const step of path) {
+            combatSpace.move(combatant, step);
+            const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+            sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(roster)));
+            broadcast({ type: 'combat_maze_step', geoKey: actionDice.active.geoKey,
+                actionId: actionDice.active.id, character: combatant.name, ...step, duration: 200 });
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        if (path.length) combatLog.push(`${combatant.name} advances ${path.length} tiles to engage ${target.name}.`);
+    }
+    if (combatSpace && !combatSpace.canAttack(combatant, target)) {
+        combatLog.push(`${combatant.name} cannot find a clear route into attack range of ${target.name}.`);
         return null;
     }
     const result = await actionDice.roll({
@@ -7470,6 +7646,19 @@ async function rollCombatAttack(combatant, target, pc, combatLog) {
     if (!result) combatLog.push(`${combatant.name} did not roll in time and holds the attack.`);
     else combatLog.push(`${combatant.name}: d20 ${result.natural} + ${combatant.attack} = ${result.total}.`);
     return result;
+}
+
+async function rollCombatDamage(combatant, target, pc, combatLog) {
+    const attackerClass = characterClasses.find(cls => cls.name === combatant.className);
+    const sides = attackerClass ? attackerClass.baseHP : 8;
+    const result = await actionDice.roll({ actor: combatant.name, player: combatant.name === pc?.name,
+        label: 'Damage', target: target.name, sides, modifier: combatant.damage });
+    if (!result) {
+        combatLog.push(`${combatant.name} did not roll damage in time; no damage was applied.`);
+        return null;
+    }
+    combatLog.push(`${combatant.name}: d${sides} ${result.natural} + ${combatant.damage} = ${result.total} damage.`);
+    return result.total;
 }
 
 async function resolveCombatRound($, userInput, combatMode) {
@@ -7586,13 +7775,13 @@ async function resolveCombatRound($, userInput, combatMode) {
         ...npcs.filter(npc => npc.hp > 0),
         ...aliveMonsters,
     ];
+    combatSpace?.setHealth(allCombatants);
 
     allCombatants.forEach(combatant => {
         const initiativeRoll = roll1d20();
-        initiativeOrder.push({
-            ...combatant,
-            initiative: initiativeRoll
-        });
+        // Initiative orders the live combatants; copying them forks HP during successive hits.
+        combatant.initiative = initiativeRoll;
+        initiativeOrder.push(combatant);
     });
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
@@ -7642,10 +7831,11 @@ async function resolveCombatRound($, userInput, combatMode) {
         combatLog.push(`${combatant.name} rolls ${attackRoll} to hit ${target.name} (AC ${target.ac}).`);
 
         if (attackSuccess) {
-            const attackerClass = characterClasses.find(cls => cls.name === combatant.className);
-            const damageRoll = attackerClass ? getRandomInt(1, attackerClass.baseHP) + combatant.damage : getRandomInt(1, 8) + combatant.damage;
+            const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
+            if (damageRoll === null) continue;
 
             target.hp -= damageRoll;
+            combatSpace?.setHealth([target]);
             combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
             // Live patch after every damage so the console text (and thus Game Console panel after round) has the intermediate HP.
@@ -7811,6 +8001,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     const monsterOpponents = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0)];
     const allCombatants = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0), ...aliveMonsters];
+    combatSpace?.setHealth(allCombatants);
 
     // Use client-provided combatCharacters if available, otherwise fall back to sharedState
     let combatCharacters = clientCombatCharacters ? clientCombatCharacters : (sharedState.getCombatCharactersString() ? JSON.parse(sharedState.getCombatCharactersString()) : []);
@@ -7893,7 +8084,8 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     allCombatants.forEach(combatant => {
         const initiativeRoll = roll1d20();
-        initiativeOrder.push({ ...combatant, initiative: initiativeRoll });
+        combatant.initiative = initiativeRoll;
+        initiativeOrder.push(combatant);
         // combatLog.push(`${combatant.name} starts at position (${combatant.x}, ${combatant.y}) with initiative ${initiativeRoll}.`);
     });
 
@@ -8000,7 +8192,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                     const monsterPosition = { x: monsterInOrder.x, y: monsterInOrder.y };
                     const path = findPath(combatant.x, combatant.y, monsterPosition.x, monsterPosition.y, currentOccupiedPositions);
                     if (path.length > 1 && !currentOccupiedPositions.has(`${path[path.length - 1].x},${path[path.length - 1].y}`)) {
-                        target = { ...specifiedMonster, x: monsterPosition.x, y: monsterPosition.y };
+                        target = specifiedMonster;
                     } else {
                         combatLog.push(`The specified target ${specifiedTargetName} is unreachable on the map. Choosing a different target.`);
                     }
@@ -8080,9 +8272,10 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             const attackSuccess = attackRoll >= target.ac;
 
             if (attackSuccess) {
-                const attackerClass = characterClasses.find(cls => cls.name === combatant.className);
-                const damageRoll = attackerClass ? getRandomInt(1, attackerClass.baseHP) + combatant.damage : getRandomInt(1, 8) + combatant.damage;
+                const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
+                if (damageRoll === null) continue;
                 target.hp -= damageRoll;
+                combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
                 const updateHPInConsole = (entity, sectionHeader) => {
@@ -8159,6 +8352,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
         return combatant && combatant.hp > 0;
     });
 
+    combatSpace?.syncRoster(combatCharacters);
     if (needsUpdate) {
         sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
         sharedState.setUpdatedGameConsole(updatedGameConsole);
@@ -8301,6 +8495,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
 
     const monsterOpponents = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0)];
     let allCombatants = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0), ...aliveMonsters];
+    combatSpace?.setHealth(allCombatants);
 
     // Use client-provided combatCharacters or fall back to sharedState
     let combatCharacters = clientCombatCharacters ? clientCombatCharacters : (sharedState.getCombatCharactersString() ? JSON.parse(sharedState.getCombatCharactersString()) : []);
@@ -8375,7 +8570,8 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     // Roll initiative
     allCombatants.forEach(combatant => {
         const initiativeRoll = roll1d20();
-        initiativeOrder.push({ ...combatant, initiative: initiativeRoll });
+        combatant.initiative = initiativeRoll;
+        initiativeOrder.push(combatant);
     });
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
@@ -8458,6 +8654,8 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                 resolve(target);
             };
             const handleTargetResponse = response => {
+                if (response.actionId !== actionDice.active?.id) return;
+                if (response.cancelled) { finish(null); return; }
                 const selectedTarget = validTargets.find(t => t.name.toLowerCase() === String(response.target).toLowerCase());
                 if (selectedTarget) finish(selectedTarget);
             };
@@ -8465,9 +8663,11 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             timer = setTimeout(() => finish(null), 180000);
             broadcast({
                 type: 'target_prompt',
+                actionId: actionDice.active.id,
                 combatant: combatant.name,
                 targets: targetNames,
-                positions: validTargets.map(t => ({ name: t.name, x: t.x, y: t.y }))
+                positions: validTargets.map(t => ({ name: t.name, x: t.x, y: t.y,
+                    distance: combatSpace ? combatSpace.distance(combatant, t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) }))
             });
 
         });
@@ -8560,9 +8760,10 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             const attackSuccess = attackRoll >= target.ac;
 
             if (attackSuccess) {
-                const attackerClass = characterClasses.find(cls => cls.name === combatant.className);
-                const damageRoll = attackerClass ? getRandomInt(1, attackerClass.baseHP) + combatant.damage : getRandomInt(1, 8) + combatant.damage;
+                const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
+                if (damageRoll === null) continue;
                 target.hp -= damageRoll;
+                combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
                 const updateHPInConsole = (entity, sectionHeader) => {
@@ -8642,6 +8843,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
         return combatant && combatant.hp > 0;
     });
 
+    combatSpace?.syncRoster(combatCharacters);
     if (needsUpdate) {
         sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
         sharedState.setUpdatedGameConsole(updatedGameConsole);
@@ -8830,7 +9032,7 @@ function executePython(pythonCode, maxRetries = 10, delayMs = 1000, regenerateCa
 }
 
 function generateNarrative(initialOutcomes, additionalOutcomes, userInput) {
-    //let narrative = ``;
+    let narrative = '';
     // Process initial outcomes
     if (initialOutcomes.Outcomes && Array.isArray(initialOutcomes.Outcomes)) {
         narrative += `The following actions and results occurred:\n`;
@@ -8936,7 +9138,7 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
   // Only the acting party members roll, not every observer and creature in the room.
   pcs = parseSheets(pcDetails?.[1], 'pc').map(c => c.name);
   npcs = parseSheets(npcsDetails?.[1], 'npc').map(c => c.name);
-  const commandedNpcs = npcs.filter(name => userInput.toLowerCase().includes(name.toLowerCase()));
+  const commandedNpcs = selectCommandedNpcs(userInput, npcs);
   const selectedCharacters = commandedNpcs.length ? commandedNpcs : pcs;
   if (selectedCharacters.length === 0) {
     console.error("No characters were selected for dice rolls.");
@@ -9124,19 +9326,6 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
   }
   const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-  // Grab just the first comma-separated token per line as "name"
-  function extractNamesFromBlock(blockText) {
-    if (!blockText) return [];
-    const names = [];
-    const re = /^([^,\n]+)\s*,/gm;
-    let m;
-    while ((m = re.exec(blockText)) !== null) {
-      const name = (m[1] || '').trim();
-      if (name && !/^none$/i.test(name)) names.push(name);
-    }
-    return [...new Set(names)];
-  }
-
   function parseInventoryLine(text) {
     const m = text.match(/^Inventory:\s*(.*)$/mi);
     if (!m) return [];
@@ -9160,46 +9349,10 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
     return m ? parseInt(m[1], 10) : null;
   }
 
-  function getHpAfterName(text, name) {
-    const idx = text.search(new RegExp(escapeRe(name), 'i'));
-    if (idx === -1) return null;
-    const win = text.slice(idx, idx + 800);
-    const m = /HP:\s*(-?\d+)/i.exec(win);
-    return m ? parseInt(m[1], 10) : null;
-  }
-
-  function replaceHpAfterName(text, name, newHp) {
-    const idx = text.search(new RegExp(escapeRe(name), 'i'));
-    if (idx === -1) return text;
-    const before = text.slice(0, idx);
-    const win    = text.slice(idx, idx + 800);
-    const after  = text.slice(idx + 800);
-    const replacedWin = win.replace(/HP:\s*\d+/i, `HP: ${newHp}`);
-    return before + replacedWin + after;
-  }
-
   // Hard prereq check (no side effects)
   function checkTaskPrereqs(activeTask, roomDb, consoleText, currentRoomKey) {
-    const inv = new Set(parseInventoryLine(consoleText).map(s => s.toLowerCase()));
-    const hard = Array.isArray(activeTask?.hardRequirements) ? activeTask.hardRequirements : [];
-    const reqFails = [];
-
-    for (const r of hard) {
-      const c = String(r?.check || '').toLowerCase();
-      if (c === 'at_coords') {
-        const need = String(r.value || '').trim();
-        if (currentRoomKey !== need) reqFails.push(`Be at ${need}`);
-      } else if (c === 'inventory_contains') {
-        const item = (r.value || '').toString().toLowerCase();
-        if (!inv.has(item)) reqFails.push(`Have "${r.value}" in Inventory`);
-      } else if (c === 'monster_hp_zero') {
-        const mon = (r.value || '').toString();
-        const placement = (activeTask?.requiredElements || []).find(e => e.type === 'monster' && e.name === mon)?.placement || currentRoomKey;
-        const hp = getHpFromDbOrConsole(mon, roomDb, consoleText, placement);
-        if (!(typeof hp === 'number' && hp <= 0)) reqFails.push(`${mon} HP must be 0`);
-      }
-    }
-    return { prereqsMet: reqFails.length === 0, prereqFailures: reqFails };
+    const { hardFails } = evaluateTaskRequirements(activeTask, { roomKey: currentRoomKey, consoleText, database: roomDb });
+    return { prereqsMet: hardFails.length === 0, prereqFailures: hardFails };
   }
 
   // ---------- parse console ----------
@@ -9211,9 +9364,9 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
   const objectsInRoomMatch = updatedGameConsole.match(/Objects in Room: ([^\n]+)/);
   const roomExitsMatch     = updatedGameConsole.match(/Exits: ([^\n]+)/);
 
-  const pcs       = pcDetails       ? extractNamesFromBlock(pcDetails)       : [];
-  const npcs      = npcsDetails     ? extractNamesFromBlock(npcsDetails)     : [];
-  const monsters  = monstersDetails ? extractNamesFromBlock(monstersDetails) : [];
+  const pcs       = parseSheets(pcDetails, 'pc').map(c => c.name);
+  const npcs      = parseSheets(npcsDetails, 'npc').map(c => c.name);
+  const monsters  = parseSheets(monstersDetails, 'monster').map(c => c.name);
   const currentObjects = objectsInRoomMatch ? objectsInRoomMatch[1].split(", ").map((o) => o.trim()) : [];
   const currentExits   = roomExitsMatch ? roomExitsMatch[1].split(", ").map((e) => e.trim()) : [];
 
@@ -9321,14 +9474,15 @@ Respond ONLY a JSON object with these exact keys.`;
     if (fb !== -1 && lb !== -1 && lb > fb) {
       try {
         const parsed = JSON.parse(respStr.slice(fb, lb + 1));
-        engagedInDialogue  = !!parsed.engagedInDialogue;
-        justLooking        = !!parsed.justLooking;
-        searchAttempted    = !!parsed.searchAttempted;
-        searchSuccessful   = !!parsed.searchSuccessful;
-        objectDiscovered   = !!parsed.objectDiscovered;
-        exitDiscovered     = !!parsed.exitDiscovered;
-        puzzleRequiresExit = !!parsed.puzzleRequiresExit;
-        puzzleRequiresObject = !!parsed.puzzleRequiresObject;
+        const yes = value => value === true || String(value).toLowerCase() === 'true';
+        engagedInDialogue  = yes(parsed.engagedInDialogue);
+        justLooking        = yes(parsed.justLooking);
+        searchAttempted    = yes(parsed.searchAttempted);
+        searchSuccessful   = yes(parsed.searchSuccessful);
+        objectDiscovered   = yes(parsed.objectDiscovered);
+        exitDiscovered     = yes(parsed.exitDiscovered);
+        puzzleRequiresExit = yes(parsed.puzzleRequiresExit);
+        puzzleRequiresObject = yes(parsed.puzzleRequiresObject);
       } catch (e) {
         console.warn("Failed to parse intent JSON:", e);
       }
@@ -9430,6 +9584,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   if (activeTask && questAttempted && !prereqsMet) {
     searchAttempted = true;
     searchSuccessful = false;
+    objectDiscovered = false;
+    exitDiscovered = false;
   }
 
   let exhausted = currentRoomData.attemptedSearches >= currentRoomData.exhaustionLimit;
@@ -9531,6 +9687,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
         numberOfObjects = Number.isNaN(n) ? 1 : n;
       }
     }
+    numberOfObjects = Math.max(0, Math.min(5, numberOfObjects));
     for (let i = 0; i < numberOfObjects; i++) {
       await $.user`Generate a name for a portable object suitable for a fantasy roleplaying game, as described in the outcomes of actions. Respond with ONLY the JSON object in the format: {"name": "X"} where X is the lowercased object name (single-line text without punctuation, fitting the game's narrative). No explanations, comments, or text before or after the JSON.`;
       const nameResponse = await $.assistant.generation({ maxTokens: 30 });
@@ -9622,11 +9779,9 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
     console.log(`Characters to damage: ${JSON.stringify(charactersToDamage)}`);
     for (const name of charactersToDamage) {
       const dmg    = Math.floor(Math.random() * 7) + 1; // 1..7
-      const currHp = getHpAfterName(updatedGameConsole, name);
-      const newHp  = Math.max(0, (typeof currHp === 'number' ? currHp : 0) - dmg);
-      updatedGameConsole = replaceHpAfterName(updatedGameConsole, name, newHp);
+      // Return damage as an effect; processGameUpdate is the only HP commit point.
       trap_damage[name] = (trap_damage[name] || 0) + dmg;
-      console.log(`Applied ${dmg} trap damage to ${name}; HP ${currHp ?? '??'} -> ${newHp}`);
+      console.log(`Planned ${dmg} trap damage to ${name}.`);
     }
   }
 
@@ -9971,6 +10126,8 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
   }
     let attempt = 0;
     let initialOutcomes = null;
+    let additionalOutcomes = null;
+    let gameUpdateResult = null;
 
     while (attempt < maxRetries) {
         try {
@@ -10002,13 +10159,13 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
 
             // Step 2: Generate additional outcomes using `generateAdditionalOutcomes`
             console.log("Generating additional outcomes...");
-            const additionalOutcomes = await generateAdditionalOutcomes($, outcomesResult, updatedGameConsole, userInput, activeTask);
+            additionalOutcomes = additionalOutcomes || await generateAdditionalOutcomes($, outcomesResult, updatedGameConsole, userInput, activeTask);
 
             console.log("Generated Additional Outcomes:", additionalOutcomes);
 
             // Step 3: Update the game console using `processGameUpdate`
             console.log("Updating Game Console...");
-            const gameUpdateResult = processGameUpdate(additionalOutcomes, updatedGameConsole);
+            gameUpdateResult = gameUpdateResult || processGameUpdate(additionalOutcomes, updatedGameConsole);
             console.log("Updated Game Console:", gameUpdateResult);
 
             // Step 4: Generate the narrative
@@ -10018,6 +10175,7 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
             
             if (typeof sharedState.setLastAdjudication === 'function') {
                 sharedState.setLastAdjudication({
+                  taskBinding: taskBinding(activeTask),
                   roomKey: (updatedGameConsole.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/) || []).slice(1,4).join(','),
                   questAttempted: !!additionalOutcomes.questAttempted,
                   questSucceeded: !!additionalOutcomes.questSucceeded,
@@ -10138,173 +10296,26 @@ async function adjudicateActionWithPythonSimulation($, userInput, updatedGameCon
 }
 
 function processGameUpdate(additionalOutcomes, updatedGameConsole) {
-    if (!updatedGameConsole || typeof updatedGameConsole !== "string") {
-        throw new Error("Invalid or missing updatedGameConsole input.");
-    }
-
-    if (!additionalOutcomes || typeof additionalOutcomes !== "object") {
-        console.error("Invalid additionalOutcomes:", additionalOutcomes);
-        throw new Error("Invalid additionalOutcomes object.");
-    }
-
-    console.log("processGameUpdate - Starting with additionalOutcomes:", additionalOutcomes);
-    console.log("processGameUpdate - Current Game Console State:", updatedGameConsole);
-
-    const {
-        new_objects = [],
-        object_modifiers = {},
-        new_exit = "",
-        new_adjacent_room = {},
-        coordinates_of_connected_rooms = {},
-        xp_awarded = {},
-        trap_damage = {},
-    } = additionalOutcomes;
-
-    let needsUpdate = false; // Flag to track if updates are made
-
-    // Extract existing objects and properties
-    const objectsInRoomMatch = updatedGameConsole.match(/Objects in Room: ([^\n]+)/);
-    let currentObjects = objectsInRoomMatch?.[1]?.split(", ").map(o => o.trim()) || [];
-    
-    // Handle "None" in current objects
-    if (currentObjects.length === 1 && currentObjects[0] === "None") {
-        currentObjects = [];
-    }
-
-    const objectPropertiesMatch = updatedGameConsole.match(/Objects in Room Properties: ([^\n]+)/);
-
-    let currentProperties = [];
-    if (objectPropertiesMatch && objectPropertiesMatch[1] !== "None") {
-        currentProperties = objectPropertiesMatch[1]
-            .split("}, {")
-            .map(str => `{${str.replace(/[{}]/g, "").trim()}}`)
-            .map(entry => {
-                const pairs = entry.replace(/[{}]/g, "").split(", ").map(pair => pair.split(": ").map(p => p.trim()));
-                return Object.fromEntries(
-                    pairs.map(([key, value]) => [
-                        key.replace(/"/g, ""),
-                        isNaN(value) ? value.replace(/"/g, "") : Number(value),
-                    ])
-                );
-            });
-    }
-
-    // Add new objects and update properties
-    new_objects.forEach(object => {
-        const lowerCaseObject = object.toLowerCase(); // Convert the object name to lowercase
-        if (!currentObjects.includes(lowerCaseObject)) {
-            currentObjects.push(lowerCaseObject);
-
-            const modifiers = object_modifiers[object] || {
-                type: "other",
-                attack_modifier: 0,
-                damage_modifier: 0,
-                ac: 0,
-                magic: 0,
-            };
-
-            currentProperties.push({
-                name: lowerCaseObject,
-                type: modifiers.type,
-                attack_modifier: modifiers.attack_modifier,
-                damage_modifier: modifiers.damage_modifier,
-                ac: modifiers.ac,
-                magic: modifiers.magic,
-            });
-
-            needsUpdate = true; // Mark that an update was made
-        }
-    });
-
-    // Determine if properties should be updated
-    const formattedProperties =
-        currentProperties.length > 0
-            ? currentProperties
-                  .map(
-                      prop =>
-                          `{name: "${prop.name}", type: "${prop.type}", attack_modifier: ${prop.attack_modifier}, damage_modifier: ${prop.damage_modifier}, ac: ${prop.ac}, magic: ${prop.magic}}`
-                  )
-                  .join(", ")
-            : "None";
-
-    // Update the game console with new objects and properties
-    updatedGameConsole = updatedGameConsole.replace(
-        /Objects in Room: [^\n]*/,
-        `Objects in Room: ${currentObjects.length > 0 ? currentObjects.join(", ") : "None"}`
-    );
-
-    updatedGameConsole = updatedGameConsole.replace(
-        /Objects in Room Properties: [^\n]*/,
-        `Objects in Room Properties: ${formattedProperties}`
-    );
-
-    // Update room exits
-    const roomExitsMatch = updatedGameConsole.match(/Exits: ([^\n]+)/);
-    const currentExits = roomExitsMatch ? roomExitsMatch[1].split(", ").map(e => e.trim()) : [];
-    if (new_exit) {
-        if (!currentExits.includes(new_exit)) {
-            currentExits.push(new_exit);
-            updatedGameConsole = updatedGameConsole.replace(/Exits: [^\n]*/, `Exits: ${currentExits.join(", ")}`);
-            needsUpdate = true;
-        }
-
-        const adjacentRoomsMatch = updatedGameConsole.match(/Adjacent Rooms: ([^\n]+)/);
-        const currentAdjacentRooms = adjacentRoomsMatch
-            ? adjacentRoomsMatch[1].split(", ").map(a => a.trim())
-            : [];
-        const newAdjacentRoomEntry = `${new_exit}: ${new_adjacent_room.name}`;
-
-        if (!currentAdjacentRooms.includes(newAdjacentRoomEntry)) {
-            currentAdjacentRooms.push(newAdjacentRoomEntry);
-            updatedGameConsole = updatedGameConsole.replace(
-                /Adjacent Rooms: [^\n]*/,
-                `Adjacent Rooms: ${currentAdjacentRooms.join(", ")}`
-            );
-        }
-
-        const coordinatesMatch = updatedGameConsole.match(/Coordinates of Connected Rooms: ([^\n]+)/);
-        const currentCoordinates = coordinatesMatch
-            ? coordinatesMatch[1].split(";").map(coord => coord.trim())
-            : [];
-
-        const newCoordinates = `${coordinates_of_connected_rooms.x},${coordinates_of_connected_rooms.y},${coordinates_of_connected_rooms.z}`;
-
-        if (!currentCoordinates.includes(newCoordinates)) {
-            currentCoordinates.push(newCoordinates);
-            updatedGameConsole = updatedGameConsole.replace(
-                /Coordinates of Connected Rooms: [^\n]*/,
-                `Coordinates of Connected Rooms: ${currentCoordinates.join("; ")}`
-            );
-        }
-    }
-
-    // Apply XP awards
-    Object.entries(xp_awarded).forEach(([character, xp]) => {
-        const xpRegex = new RegExp(`(${character}.*?XP:\\s*)(\\d+)`, "s");
-        updatedGameConsole = updatedGameConsole.replace(xpRegex, (match, prefix, currentXp) => {
-            const newXp = parseInt(currentXp, 10) + xp;
-            return `${prefix}${newXp}`;
+    const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+    const result = applyAdditionalOutcomes(additionalOutcomes, updatedGameConsole, db);
+    Object.assign(additionalOutcomes, { new_objects: result.discoveries, new_exit: result.exit,
+        xp_awarded: result.xp, trap_damage: result.damage });
+    sharedState.setRoomNameDatabase(JSON.stringify(result.database));
+    sharedState.setUpdatedGameConsole(result.console);
+    // Keep live actor HP/XP consistent with the same sheets displayed in the console.
+    if (sharedState.getCombatCharactersString && sharedState.setCombatCharactersString) {
+        const sheets = [...parseSheets(result.console.match(/PC:([\s\S]*?)(?=NPCs in Party:|$)/)?.[1], 'pc'),
+            ...parseSheets(result.console.match(/NPCs in Party:([\s\S]*?)(?=Monsters in Room:|$)/)?.[1], 'npc')];
+        const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+        roster.forEach(actor => {
+            const sheet = sheets.find(s => s.name.toLowerCase() === String(actor.name).toLowerCase());
+            if (sheet) { actor.hp = sheet.hp; actor.xp = sheet.xp; }
         });
-        needsUpdate = true; // Mark that an update was made
-    });
-
-    // Apply trap damage
-    Object.entries(trap_damage).forEach(([character, damage]) => {
-        const hpRegex = new RegExp(`(${character}.*?HP:\\s*)(\\d+)`, "s");
-        updatedGameConsole = updatedGameConsole.replace(hpRegex, (match, prefix, currentHp) => {
-            const newHp = Math.max(parseInt(currentHp, 10) - damage, 0); // Ensure HP doesn't go below 0
-            return `${prefix}${newHp}`;
-        });
-        needsUpdate = true; // Mark that an update was made
-    });
-
-    // Save the updated console state if there are changes
-    if (needsUpdate) {
-        sharedState.setUpdatedGameConsole(updatedGameConsole);
+        sharedState.setCombatCharactersString(JSON.stringify(roster.filter(actor => actor.hp === undefined || actor.hp > 0)));
     }
-
-    console.log("Updated Game Console:", updatedGameConsole);
-    return updatedGameConsole;
+    console.info('[AdjudicationApplied]', JSON.stringify({ roomKey: result.roomKey, objects: result.discoveries,
+        exit: result.exit, xp: result.xp, damage: result.damage }));
+    return result.console;
 }
 
 async function adjudicateActionWithCodeInterpreter(userInput, updatedGameConsole) {
@@ -11152,6 +11163,9 @@ if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") &&
 
   if (runSimulation) {
     currentSituation = await adjudicateActionWithSimulation($, userInput, updatedGameConsole);
+    if (currentSituation?.updatedGameConsole) updatedGameConsole = currentSituation.updatedGameConsole;
+    roomNameDatabaseString = sharedState.getRoomNameDatabase() || roomNameDatabaseString;
+    narrative = currentSituation?.narrative || '';
     formattedCurrentSituation = currentSituation?.narrative || '';
 
     if (currentSituation == null) {
@@ -11458,12 +11472,26 @@ const lastGeoKey =
 // lastCoords is already updated earlier this turn (music + coords bookkeeping), so a plain
 // coordinate comparison misses real moves. Also treat "no dungeon built for this room yet" as new.
 let hasRoomDungeon = false;
-try { hasRoomDungeon = !!(sharedState.getRoomDungeon && sharedState.getRoomDungeon(geoCoords)); } catch (_) {}
+let cachedRoomDungeon = null;
+let staleRoomDungeon = false;
+try {
+  cachedRoomDungeon = sharedState.getRoomDungeon && sharedState.getRoomDungeon(geoCoords);
+  const input = sceneInputFromConsole(updatedGameConsole, { coords: geoCoords });
+  const source = cachedRoomDungeon?.sceneSpec?.source;
+  const normalize = text => String(text || '').trim().replace(/\s+/g, ' ');
+  staleRoomDungeon = !!cachedRoomDungeon && (!source || normalize(source.roomName) !== normalize(input.roomName) ||
+    normalize(source.description) !== normalize(input.description));
+  hasRoomDungeon = !!cachedRoomDungeon?.layout && !!cachedRoomDungeon?.cells && !staleRoomDungeon;
+} catch (error) { console.warn('[DungeonEntry] Cached room validation failed:', error.message); }
 const isNewGeoRoom =
   isFirstTurn ||
   !lastGeoKey ||
   geoKey !== lastGeoKey ||
   !hasRoomDungeon;
+
+console.info('[DungeonEntry]', JSON.stringify({ geoKey, lastGeoKey, isFirstTurn,
+  hasRoomDungeon, staleRoomDungeon, isAutoSimAdvance, build: !!(isNewGeoRoom && roomDescription && !isAutoSimAdvance),
+  reason: isAutoSimAdvance ? 'automatic-turn' : staleRoomDungeon ? 'description-changed' : !hasRoomDungeon ? 'missing-dungeon' : isNewGeoRoom ? 'room-entry' : 'cached-room' }));
 
 if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
   console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
@@ -11543,27 +11571,25 @@ try {
   }));
   classification = applySceneSpecToClassification(sceneSpec, classification);
   if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
+  DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
   console.log('[SceneSpec]', geoKey, describeSceneSpec(sceneSpec));
+  attachSceneWorldContext(sceneSpec, roomNameDatabaseString, sharedState, updatedGameConsole);
   try {
     const levelSpec = await getLevelSpec(sceneSpec.source || {});
     applyLevelSpecToScene(sceneSpec, levelSpec);
     console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
   } catch (e) { console.warn('[LevelSpec] failed', e.message); }
 
+  DungeonGeneration.varyPalette(sceneSpec);
+  sceneSpec.outdoorTerrain = OutdoorTerrain.plan(sceneSpec, sceneSpec.generation.gridSize);
+  prepareSceneGeography(sceneSpec, roomNameDatabaseString);
+  prepareSceneExteriors(sceneSpec, roomNameDatabaseString, { seed: sharedState.getDungeonRunId(), enabled: process.env.HOLODEK_SCENE_EXTERIORS !== '0' });
   LivingEnvironments.enrichSceneSpec(sceneSpec);
+  prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
+  prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
 
   const isOutdoor = classification && classification.indoor === false;
-  const requestedSize = (classification && typeof classification.size === 'number')
-    ? classification.size
-    : 32;
-  const minSize = isOutdoor ? 96 : 24;
-  const maxBaseSize = isOutdoor ? 192 : 64;
-  const baseSize = Math.max(minSize, Math.min(requestedSize, maxBaseSize));
-  const outdoorScale = 10;
-  const maxOutdoorSize = 512;
-  const size = isOutdoor
-    ? Math.min(baseSize * outdoorScale, maxOutdoorSize)
-    : baseSize;
+  const size = sceneSpec.generation.gridSize;
 
   const startX = Math.floor(size / 2);
   const startY = size - Math.floor(size / 4);
@@ -11589,7 +11615,9 @@ try {
         puzzleInRoom,
         classification,
         size,
-        customTiles
+        customTiles,
+        sceneSpec.generation,
+        sceneSpec
       );
     let lighting = (visualStyle && visualStyle.lighting) ? visualStyle.lighting : {
       dir: "NW",
@@ -11618,6 +11646,8 @@ try {
     }
     const dungeon = {
       layout: { width: size, height: size },
+      generation: sceneSpec.generation,
+      outdoorTerrain: sceneSpec.outdoorTerrain,
       start: { x: startX, y: startY },
       tiles: {},
       cells: {},
@@ -11738,6 +11768,8 @@ try {
     }
   logDungeonConstruction('layout', dungeon);
   applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+  applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
+  logDungeonConstruction('geography', dungeon);
   dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
   console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
   logDungeonConstruction('architecture', dungeon);
@@ -11788,9 +11820,15 @@ try {
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
   // 🔴 STEP 6 — put the landmarks the text names into the room
   try {
+    applySceneRoofs(dungeon, sceneSpec);
+    logDungeonConstruction('roof-structure', dungeon);
     const placement = placeSceneLandmarks(dungeon, sceneSpec);
     console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
     console.log('[SceneGfx] objects placed', geoKey, JSON.stringify(placeSceneObjects(dungeon, sceneSpec)));
+    DungeonExits.install(dungeon, sceneSpec.exits);
+    console.info('[SceneExteriors]', geoKey, JSON.stringify(applySceneExteriors(dungeon, sceneSpec)));
+    console.info('[SceneVegetation]', geoKey, JSON.stringify(applySceneVegetation(dungeon, sceneSpec)));
+    console.info('[SceneBiomeProps]', geoKey, JSON.stringify(applySceneBiomeProps(dungeon, sceneSpec)));
   } catch (e) {
     console.error('[SceneGfx] landmark placement failed:', e);
   }
@@ -11886,6 +11924,10 @@ if (isAutoSimAdvance) {
   returnObj.roomNameDatabaseString = roomNameDatabaseString || '';
 }
 
+returnObj.updatedGameConsole = updatedGameConsole;
+returnObj.questUpdate = sharedState.getLastQuestUpdate?.() || '';
+returnObj.activeTask = sharedState.getActiveTask?.() || null;
+returnObj.questProgress = updatedGameConsole.match(/^Quest Progress:[ \t]*([^\r\n]*)/m)?.[1] || '';
 try {
   const tasks = sharedState.getCurrentTasks() || [];
   const idx = Number(sharedState.getCurrentTaskIndex() || 0);

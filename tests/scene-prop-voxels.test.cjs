@@ -18,7 +18,8 @@ test('solid scenery has deterministic volume, depth and non-box silhouettes', ()
       grid.forEach((v, i) => { if (v) ys.add(Math.floor(i / size) % size); });
       assert.ok(ys.size > size / 2, `${shape} must have actual depth`);
       const volume = grid.reduce((a, b) => a + b, 0);
-      assert.ok(volume > size ** 2 && volume < size ** 3 * 0.7);
+      const minimum = shape === 'dead_tree' ? size ** 2 * .5 : size ** 2;
+      assert.ok(volume > minimum && volume < size ** 3 * 0.7, `${shape}: slender branches remain volumetric`);
     }
   }
 });

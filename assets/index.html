@@ -11,6 +11,7 @@
 <audio id="room-music" src="/sid/current_room.wav" loop autoplay></audio>
  <script src="/assets/renderCharacterProcedural.js"></script>
  <script src="/assets/renderSceneItems.js"></script>
+ <script src="/assets/sceneObjectSync.js"></script>
  <script src="/assets/dungeonEnvironment.js"></script>
  <script src="/assets/livingEnvironments.js"></script>
  <script defer src="/assets/livingEnvironmentUi.js"></script>
@@ -18,8 +19,23 @@
  <script src="/assets/renderCharacterSprite.js"></script>
  <script src="/assets/partyRoster.js"></script>
  <script src="/assets/actionDiceUi.js"></script>
-<script src="/assets/game.js"></script>
+ <script src="/assets/roomDatabaseSync.js"></script>
+ <script src="/assets/characterStartup.js"></script>
  <script src="/assets/scenePropVoxels.js"></script>
+<script src="/assets/voxelCollision.js"></script>
+<script src="/assets/terrainCamera.js"></script>
+<script src="/assets/dungeonExits.js"></script>
+<script src="/assets/outdoorRoutes.js"></script>
+<script src="/assets/dungeonCartography.js"></script>
+<script src="/assets/compassUi.js"></script>
+<script src="/assets/explorationMapUi.js"></script>
+<script src="/assets/inventoryUi.js"></script>
+<script src="/assets/itemInteractionUi.js"></script>
+<script src="/assets/mapShortcutUi.js"></script>
+<script src="/assets/gameMenuUi.js"></script>
+<script src="/assets/game.js"></script>
+ <script src="/assets/masonryPatterns.js"></script>
+ <script src="/assets/voxelMaterials.js"></script>
  <script src="/assets/rendererWebGL.js"></script>
  <script src="/assets/rendererWebGPU.js"></script>
    <script>
@@ -321,7 +337,7 @@ function toggleCombatMode() {
         const combatPopup = document.getElementById('combat-popup');
         combatPopup.style.display = combatPopup.style.display === 'block' ? 'none' : 'block';
         if (combatPopup.style.display === 'block') {
-            combatPopup.style.top = '105px';
+            combatPopup.style.top = '42px';
             combatPopup.style.left = '5px';
 
             // Refresh combat roster/art. Initial open may center once; manual scrolling remains respected after that.
@@ -398,8 +414,10 @@ function toggleCombatMode() {
       if (!popup) return;
       popup.style.display = popup.style.display === 'block' ? 'none' : 'block';
       if (popup.style.display === 'block') {
-        popup.style.top = '5px';
-        popup.style.left = '220px';
+        popup.style.top = 'auto';
+        popup.style.left = 'auto';
+        popup.style.right = '5px';
+        popup.style.bottom = '5px';
         syncGameLogTranscript();
       }
     }
@@ -721,20 +739,17 @@ function toggleCombatMode() {
       const nameEl = document.getElementById('party-popup-name');
       const spriteCanvas = document.getElementById('party-popup-preview-canvas');
       const sheetEl = document.getElementById('party-popup-sheet');
-      const emptyEl = document.getElementById('party-popup-empty');
-      if (!nameEl || !spriteCanvas || !sheetEl || !emptyEl) return;
+      if (!nameEl || !spriteCanvas || !sheetEl) return;
 
       const entries = getPartyInfoEntries();
       renderPartyIconDock();
       if (!entries.length) {
-        nameEl.textContent = 'No party data';
+        nameEl.textContent = '';
         sheetEl.innerHTML = '';
-        emptyEl.style.display = 'block';
         drawPartySpriteCanvas(spriteCanvas, null);
         return;
       }
 
-      emptyEl.style.display = 'none';
       const activeIndex = Math.max(0, Math.min(entries.length - 1, window._partyPanelIndex || 0));
       window._partyPanelIndex = activeIndex;
       const activeEntry = entries[activeIndex];
@@ -765,15 +780,8 @@ function toggleCombatMode() {
     }
 
     function initDungeonTestingMode() {
-      const stored = localStorage.getItem('dungeonTestingMode');
-      const enabled = stored === 'true';
-      window.dungeonTestingMode = enabled;
-      updateDungeonTestingButton(enabled);
-      fetch('/set-dungeon-testing-mode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled })
-      }).catch(err => console.error('Failed to sync dungeon testing mode:', err));
+      // Test-only generation must be explicitly enabled for this page session.
+      setDungeonTestingMode(false);
     }
 
 
@@ -898,6 +906,7 @@ function toggleCombatMode() {
       width: 95%;
       margin: 0 auto;
       color: #ffffff;
+      text-align: left;
       word-wrap: break-word;
     }
 
@@ -1027,9 +1036,11 @@ function toggleCombatMode() {
 
     #game-log-popup {
         display: none;
-        position: absolute;
-        top: 5px;
-        left: 220px;
+        position: fixed;
+        top: auto;
+        left: auto;
+        right: 5px;
+        bottom: 5px;
         width: 260px;
         height: 300px;
         background-color: black;
@@ -1090,6 +1101,24 @@ function toggleCombatMode() {
         pointer-events: auto;
     }
 
+    #game-menu-toggle { position: fixed; top: 10px; left: 10px; z-index: 3101; display: flex; gap: 7px; align-items: center; }
+    .game-menu-bars { display: grid; gap: 3px; width: 14px; }
+    .game-menu-bars i { display: block; height: 2px; background: #eee; }
+    #game-menu { position: fixed; top: 38px; left: 10px; z-index: 3100; display: flex;
+      flex-direction: column; gap: 3px; width: 210px; padding: 5px; box-sizing: border-box;
+      border: 1px solid #8f8f8f; border-radius: 6px; background: rgba(0,0,0,.94); overflow-y: auto; }
+    #game-menu[hidden] { display: none; }
+    #game-menu > button { text-align: left; }
+    #game-menu #combat-mode-toggle { padding: 5px; }
+    #game-menu #combat-mode-select { width: 100%; }
+    .game-menu-button { background: #444; color: white; padding: 5px 10px; border: none; cursor: pointer; }
+    .combat-target-controls { width: 100%; padding: 6px; box-sizing: border-box; background: rgba(0, 0, 0, 0.9); color: white; border: 1px solid white; border-radius: 8px; font: 14px Arial, sans-serif; text-align: center; }
+    .combat-target-controls select { width: 100%; margin: 4px 0; }
+    @media (max-width: 480px) {
+      #combat-mode-toggle { top: 74px !important; }
+      #open-combat-button { top: 108px !important; }
+    }
+
     .party-icon-button {
         width: 56px;
         min-height: 54px;
@@ -1108,15 +1137,26 @@ function toggleCombatMode() {
     }
 
     .party-icon-slot { display: flex; align-items: center; }
+    .party-icon-slot.current-turn { outline: 1px solid white; background: #333333b0; }
     .party-d20 {
-        width: 32px; height: 34px; padding: 0; border: 1px solid #ae9968;
-        background: #242018; color: #e4d4ac; font: bold 10px monospace;
+        width: 32px; height: 34px; padding: 0; border: 1px solid white;
+        background: #444; color: white; font: bold 9px monospace; white-space: pre-line;
         clip-path: polygon(50% 0, 100% 25%, 92% 78%, 50% 100%, 8% 78%, 0 25%);
     }
     .party-d20:disabled { opacity: .7; }
-    .party-d20.awaiting-roll { background: #f0cc71; color: #201a0d; cursor: pointer; }
+    .party-d20.awaiting-roll { background: #ededed; color: #111; cursor: pointer; }
     .party-d20:focus-visible { outline: 3px solid white; outline-offset: -5px; }
-    .party-roll-status { width: 100%; color: #f0dda4; background: #17130ee8; font: 11px monospace; }
+    .party-dice-wrap { display: flex; flex-direction: column; align-items: center; perspective: 160px; }
+    .party-d20.rolling { animation: dice-tumble 1s ease-out both; background: linear-gradient(135deg, #ededed, #888 55%, white); color: #111; }
+    @keyframes dice-tumble {
+      0% { transform: translateY(0) rotateX(0) rotateY(0) rotateZ(0) scale(.8); }
+      30% { transform: translateY(-12px) rotateX(270deg) rotateY(360deg) rotateZ(130deg) scale(1.2); }
+      70% { transform: translateY(-5px) rotateX(570deg) rotateY(850deg) rotateZ(300deg) scale(1.1); }
+      100% { transform: translateY(0) rotateX(720deg) rotateY(1080deg) rotateZ(360deg) scale(1); }
+    }
+    @media (prefers-reduced-motion: reduce) { .party-d20.rolling { animation: none; } }
+    .party-roll-history { white-space: pre-line; color: #ededed; font: 9px monospace; }
+    .party-roll-status { width: 100%; color: white; background: rgba(0, 0, 0, 0.9); font: 11px monospace; }
     .party-roll-status:empty { display: none; }
 
     .party-icon-button.active {
@@ -1242,14 +1282,6 @@ function toggleCombatMode() {
         padding: 0;
     }
 
-    #party-popup-empty {
-        font-size: 11pt;
-        color: #d0d0d0;
-        padding: 0;
-        text-align: left;
-        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
-    }
-
     #party-popup-sheet .npc-data,
     #party-popup-sheet .party-sheet-content {
         margin: 0;
@@ -1368,6 +1400,66 @@ function toggleCombatMode() {
         text-align: center;
     }
 
+    #dungeon-compass {
+      position: fixed; left: 8px; right: auto; bottom: 8px; width: 96px; padding: 4px;
+      background: rgba(0,0,0,.86); border: 1px solid #8f8f8f; border-radius: 6px;
+      color: #eee; text-align: center; font: 11px Arial,sans-serif; z-index: 1210; pointer-events: none;
+    }
+    .compass-dial { position: relative; height: 90px; margin: 2px; border: 1px solid #777; border-radius: 50%; }
+    .compass-rose { position: absolute; inset: 13px; }
+    .compass-rose span { position: absolute; line-height: 12px; }
+    .compass-n { left: calc(50% - 4px); top: 2px; color: #e6bd75; }
+    .compass-s { left: calc(50% - 4px); bottom: 2px; }
+    .compass-e { right: 4px; top: calc(50% - 6px); }
+    .compass-w { left: 4px; top: calc(50% - 6px); }
+    .compass-pointer { position: absolute; top: 33px; left: calc(50% - 5px); width: 0; height: 0;
+      border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 22px solid #ccc; }
+    .compass-readout { display: block; padding-top: 2px; }
+    .compass-exit-pins { position: absolute; inset: 0; }
+    .compass-exit-pin { position: absolute; transform: translate(-50%, -50%); border: 1px solid #777;
+      background: #333; color: #a8dbb5; padding: 1px 2px; font: 8px Arial, sans-serif; cursor: pointer; pointer-events: auto; }
+    .compass-exit-active { color: #ffdf93; border-color: #e6bd75; z-index: 1; }
+    .compass-exit-readout { display: block; color: #e6bd75; padding: 3px 0; }
+    .compass-exit-select { width: 100%; background: #333; color: #eee; border: 1px solid #777;
+      font: 10px Arial, sans-serif; pointer-events: auto; }
+    #dungeon-map-shortcut, #dungeon-inventory-shortcut { position: fixed; left: 8px; bottom: 8px; width: 38px; height: 40px; padding: 2px;
+      background: rgba(0,0,0,.75); border: 1px solid #8f8f8f; border-radius: 6px; z-index: 1210; cursor: pointer; }
+    #dungeon-map-shortcut img, #dungeon-inventory-shortcut img { display: block; width: 100%; height: 100%; }
+    #dungeon-map-shortcut:hover, #dungeon-inventory-shortcut:hover { border-color: #e6bd75; background: rgba(38,28,13,.9); }
+    #dungeon-map-shortcut:hover img { transform: rotate(-4deg); }
+    #dungeon-map-shortcut:focus-visible, #dungeon-inventory-shortcut:focus-visible { outline: 2px solid #e6bd75; outline-offset: 2px; }
+    #inventory-popup { position: fixed; width: 390px; max-height: 70vh; overflow-y: auto; box-sizing: border-box;
+      background: #111; color: #eee; border: 1px solid #8f8f8f; border-radius: 8px; z-index: 1600; font: 12px Arial,sans-serif; }
+    #inventory-popup[hidden] { display: none; }
+    .inventory-header { display: flex; justify-content: space-between; align-items: center; padding: 10px;
+      background: linear-gradient(#555, #333); font-weight: bold; border-bottom: 1px solid #888; }
+    #inventory-close { color: white; background: none; border: none; cursor: pointer; font-size: 16px; }
+    #inventory-groups { padding: 4px 10px; }
+    .inventory-category h3 { margin: 7px 0 4px; color: #e6bd75; font-size: 11px; }
+    .inventory-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); gap: 5px; }
+    .inventory-item { position: relative; display: flex; flex-direction: column; align-items: center; min-width: 0; padding: 3px;
+      border: 1px solid #777; border-radius: 3px; background: linear-gradient(135deg, #34302b, #191817); color: #eee; cursor: grab; }
+    .inventory-item canvas { width: 32px; height: 32px; image-rendering: pixelated; pointer-events: none; }
+    .inventory-item-name { width: 100%; font: 9px Arial,sans-serif; line-height: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+    .inventory-item:hover, .inventory-item:focus-visible, .inventory-selected { border-color: #e6bd75; outline: 1px solid #e6bd75; }
+    .inventory-quantity { position: absolute; right: 3px; top: 2px; color: #ffe8b5; font: bold 10px monospace; pointer-events: none; }
+    .inventory-category-empty { color: #888; padding: 3px 0; font-size: 10px; }
+    #inventory-detail { min-height: 28px; margin: 7px 10px 2px; line-height: 15px; }
+    .inventory-footer { padding: 0 5px 5px; text-align: right; }
+    .inventory-targeting .party-icon-button { outline: 1px dashed #e6bd75; outline-offset: 1px; }
+    .inventory-targeting .party-icon-button:hover, .party-icon-button.inventory-drop-hover { outline: 2px solid #e6bd75; background: #423828; }
+    #exploration-map-popup { display: none; position: fixed; top: 42px; left: 50%; width: 390px; box-sizing: border-box;
+      background: #000; color: #eee; border: 1px solid #8f8f8f; border-radius: 8px; overflow: hidden;
+      z-index: 1600; font: 12px Arial, sans-serif; }
+    .exploration-map-header { display: flex; justify-content: space-between; align-items: center;
+      padding: 10px; background: linear-gradient(#555, #333); font-weight: bold; border-bottom: 1px solid #888; }
+    #exploration-map-close { color: white; background: none; border: none; cursor: pointer; font-size: 16px; }
+    .exploration-map-tools { display: flex; gap: 3px; padding: 6px; }
+    .exploration-map-tools button { background: #444; color: white; border: none; padding: 4px 8px; cursor: pointer; }
+    #exploration-map-canvas { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; image-rendering: pixelated; touch-action: none; }
+    #exploration-map-caption, .exploration-map-hint { margin: 6px 8px; }
+    .exploration-map-hint { color: #bcbcbc; font-size: 10px; }
+
     /* Popup buttons */
     .popup-button {
         background-color: #444;
@@ -1383,7 +1475,8 @@ function toggleCombatMode() {
         background-color: #666; /* Slightly lighter background on hover */
     }
     
-    .popup-container select {
+    .popup-container select,
+    .combat-target-controls select {
         background-color: #222;
         color: white;
         border: 1px solid white;
@@ -1393,7 +1486,8 @@ function toggleCombatMode() {
         margin: 10px 0;
     }
     
-    .popup-container select:focus {
+    .popup-container select:focus,
+    .combat-target-controls select:focus {
         outline: none;
         box-shadow: 0 0 5px #444;
     }
@@ -1447,7 +1541,7 @@ function toggleCombatMode() {
   #combat-popup {
     display: none;
     position: absolute;
-    top: 105px;
+    top: 42px;
     left: 5px;
     width: 170px;
     height: 250px;
@@ -1642,9 +1736,8 @@ function toggleCombatMode() {
     </div>
     <div id="party-popup-body">
       <div id="party-popup-preview-frame"><canvas id="party-popup-preview-canvas" width="56" height="56"></canvas></div>
-      <div id="party-popup-name">No party data</div>
+      <div id="party-popup-name"></div>
       <div id="party-popup-sheet"></div>
-      <div id="party-popup-empty">Party members will appear here as soon as the roster is available.</div>
     </div>
   </div>
 <div id="combat-popup">
@@ -1712,11 +1805,36 @@ function toggleCombatMode() {
     </div>
   </div>
   <div id="party-icon-dock"></div>
+  <button id="dungeon-map-shortcut" title="Exploration map" aria-label="Open exploration map" aria-expanded="false" aria-controls="exploration-map-popup"><img src="/assets/adventurers-map.svg" alt=""></button>
+  <button id="dungeon-inventory-shortcut" title="Inventory" aria-label="Open inventory" aria-expanded="false" aria-controls="inventory-popup"><img src="/assets/adventurers-pack.svg" alt=""></button>
+  <section id="inventory-popup" aria-label="Inventory" hidden>
+    <div class="inventory-header"><span>Inventory</span><button id="inventory-close" aria-label="Close inventory">X</button></div>
+    <div id="inventory-groups"></div>
+    <p id="inventory-detail" role="status">Drag an item onto a party icon, or select it and click a character.</p>
+    <div class="inventory-footer"><button id="inventory-equip" class="popup-button" disabled>Equip...</button></div>
+  </section>
   
-    <button id="open-popup-button" onclick="togglePopup()" style="position: fixed; top: 10px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Game Console</button>
-    <button id="open-game-log-button" onclick="toggleGameLogPopup()" style="position: fixed; top: 10px; left: 105px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Game Log</button>
-    <button id="open-party-button" onclick="togglePartyPopup()" style="position: fixed; top: 10px; left: 187px; z-index: 1100; background-color: #444; color: white; padding: 5px 10px; border: none; cursor: pointer;">Party</button>
+    <button id="game-menu-toggle" class="game-menu-button" aria-expanded="false" aria-controls="game-menu" aria-label="Open game menu"><span class="game-menu-bars" aria-hidden="true"><i></i><i></i><i></i></span>Menu</button>
+    <div id="game-menu" hidden aria-label="Game controls">
+      <button id="open-popup-button" class="game-menu-button" onclick="togglePopup()">Game Console</button>
+      <button id="open-game-log-button" class="game-menu-button" onclick="toggleGameLogPopup()">Game Log</button>
+      <button id="open-party-button" class="game-menu-button" onclick="togglePartyPopup()">Party</button>
+      <button id="open-exploration-map-button" class="game-menu-button" aria-expanded="false" aria-controls="exploration-map-popup" onclick="window.DungeonExplorationMap.toggle()">Map</button>
+      <button id="environment-lab-button" class="game-menu-button" onclick="window.open('/assets/environment-lab.html', '_blank', 'noopener')">Environment Lab</button>
+    </div>
     <!-- Physically placed combat mode toggle -->
+    <div id="exploration-map-popup" role="dialog" aria-label="Exploration map">
+      <div class="exploration-map-header"><span>Exploration Map</span><button id="exploration-map-close" aria-label="Close map">X</button></div>
+      <div class="exploration-map-tools">
+        <button id="exploration-map-zoom-in" aria-label="Zoom in">+</button>
+        <button id="exploration-map-zoom-out" aria-label="Zoom out">-</button>
+        <button id="exploration-map-follow">Follow</button>
+        <button id="exploration-map-whole">Whole Level</button>
+      </div>
+      <canvas id="exploration-map-canvas" width="640" height="640" aria-label="North-up map of explored terrain"></canvas>
+      <p id="exploration-map-caption">Explore a dungeon to begin mapping.</p>
+      <p class="exploration-map-hint">Drag to pan. Dark ground is unexplored; known exits are marked. Roofed halls are blue; higher ground is lighter.</p>
+    </div>
     
     <div id="combat-mode-toggle" style="position: fixed; top: 40px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 4.75px 6px; border: none; cursor: pointer;">
       <select id="combat-mode-select" onchange="toggleCombatMode()">
@@ -2111,27 +2229,16 @@ function toggleCombatMode() {
         }
         window.combatCharactersString = JSON.stringify(window.combatCharacters || cloneCombatRosterFromParty(roster));
         window._awaitingSpriteSave = false;
-        window._pendingPartyReview = null;
 
         if (panel) panel.style.display = 'none';
         if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
 
         window._skipStartMenu = true;
-        fetch('/startGameWithCharacter', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+        window.startReviewedGame({
             character: pcCharacter,
             npcs: partyMembers,
             combatCharacters: window.combatCharacters || cloneCombatRosterFromParty(roster)
-          })
-        }).then(r => r.json()).then(() => {
-          if (typeof window.forceProceedAfterCharacterSave === 'function') {
-            window.forceProceedAfterCharacterSave(pcCharacter);
-          } else if (typeof chatbotprocessinput === 'function') {
-            setTimeout(() => chatbotprocessinput(), 80);
-          }
-        }).catch(e => console.warn('[Save] party startGameWithCharacter post failed:', e));
+        }).then(() => { window._pendingPartyReview = null; }).catch(showStartupError);
         return;
       }
 
@@ -2167,9 +2274,7 @@ function toggleCombatMode() {
       window.combatCharactersString = JSON.stringify(window.combatCharacters);
       console.log('%c[CharacterGen] SAVE seeded client combatCharacters + combatCharactersString for immediate combat readiness.', 'color:#aaffaa');
 
-      // Unblock using original paths: no new server methods for data transport.
-      // The character (stats from createMortacia etc + sprite) is in the data system.
-      // Re-enter chatbotprocessinput (with skip) so it builds console via updateGameConsole etc as before.
+      // The completed startup task supplies the console and room to the regular response handler.
       window._skipStartMenu = true;
 
       // Post to the dedicated /startGameWithCharacter so server:
@@ -2177,20 +2282,17 @@ function toggleCombatMode() {
       // - seeds combatCharactersString from the char (per-room/party slots)
       // - clears characterGenerationInProgress (unblocks processInput7 and normal flow)
       // - calls retortWith __START_WITH_CHARACTER__ special to begin dungeon without re-showing menu.
-      fetch('/startGameWithCharacter', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ character: character })
-      }).then(r => r.json()).then(resp => {
-        console.log('%c[CharacterGen] /startGameWithCharacter response task:', 'color:#aaffaa', resp && resp.taskId);
-        // Only proceed after the server has seeded the selected PC; otherwise the client can race back
-        // into the local start menu before the special start-with-character state exists.
-        if (typeof window.forceProceedAfterCharacterSave === 'function') {
-          window.forceProceedAfterCharacterSave(character);
-        } else if (typeof chatbotprocessinput === 'function') {
-          setTimeout(() => chatbotprocessinput(), 80);
-        }
-      }).catch(e => console.warn('[Save] startGameWithCharacter post failed (may still proceed via chatbot reentry):', e));
+      window.startReviewedGame({ character }).catch(showStartupError);
+    }
+
+    function showStartupError(error) {
+      console.error('[CharacterStartup]', error);
+      const message = document.createElement('div');
+      message.textContent = `Could not start the game: ${error.message}. Save the character again to retry.`;
+      document.getElementById('chatlog')?.append(message);
+      const panel = document.getElementById('character-sprite-review');
+      if (panel) panel.style.display = 'block';
+      window._awaitingSpriteSave = true;
     }
 
     // Expose globally so the onclick= handlers in the HTML and calls from game.js / SSE always work
@@ -2201,20 +2303,9 @@ function toggleCombatMode() {
     window.rerollCharacterSpriteFromMenu = rerollCharacterSpriteFromMenu;
     window.saveCharacterAndProceed = saveCharacterAndProceed;
 
-    // Provide the forceProceed so the save path can explicitly mimic space+enter after stats load
-    // to correctly launch without manual input.
+    // Compatibility entry point for callers outside the review menu.
     window.forceProceedAfterCharacterSave = function(character) {
-      // Trigger the process (like old path) so the seeded PC stats / updatedGameConsole from /startGameWithCharacter
-      // get pulled into the UI (character stats load). The response handler will set _statsRolled and
-      // auto-submit blank (which is now allowed) to proceed to roll dungeon automatically.
-      setTimeout(() => {
-        const inputEl = document.getElementById('chatuserinput');
-        if (inputEl) {
-          window._skipStartMenu = true;
-          inputEl.value = ''; // post-save continue should bypass the local start menu, not re-open it
-          chatbotprocessinput();
-        }
-      }, 80);
+      return window.startReviewedGame({ character });
     };
 
     console.log('%c[SpriteReview] Review menu functions installed (Save/Reroll will now appear reliably)', 'color:#aaffaa');

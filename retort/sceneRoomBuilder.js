@@ -12,8 +12,10 @@ const fs = require('fs');
 const path = require('path');
 const { createCanvas } = require('canvas');
 const { drawLandmarkSprite, resolveLandmarkDrawer, landmarkSpriteSpec } = require('../assets/renderSceneProps.js');
-const { drawSceneSurface, hasMaterial } = require('../assets/renderSceneTextures.js');
-const { select: selectVoxelShape } = require('../assets/scenePropVoxels.js');
+const { drawSceneSurface, drawRoofSurface, hasMaterial } = require('../assets/renderSceneTextures.js');
+const { select: selectVoxelShape, architecture, vegetation, biomeProps } = require('../assets/scenePropVoxels.js');
+const Masonry = require('../assets/masonryPatterns');
+const { roofStyle } = require('./sceneRoofs');
 
 const SPRITE_DIR = process.env.HOLODEK_SPRITE_DIR || path.join(__dirname, '../sid/sprites');
 const LIBRARY_FILE = path.join(SPRITE_DIR, '_library.json');
@@ -102,24 +104,37 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   if (!dungeon || !spec) return { textures: [], landmarks: [] };
   const report = { textures: [], landmarks: [] };
   const cover = coverList(spec);
-  const pal = spec.palette || {};
+  const pal = { ...(spec.palette || {}), ...(dungeon.visualStyle?.palette || {}) };
+  const surfaceSeed = dungeon.generation?.seed || spec.generation?.seed || spec.textHash || geoKey;
   const floorMat = spec.floorStyleMaterial || spec.floorMaterial || (spec.biome === 'cave' ? 'earth' : null);
-  const wallMat = spec.wallStyleMaterial || spec.wallMaterial || (spec.biome === 'cave' ? 'earth' : null);
+  const wallText = String(spec.source?.description || '').split(/[.;!?]/)
+    .filter(s => /wall|masonry|brickwork|facade/i.test(s)).join(' ');
+  const wallMat = Masonry.fromDescription(wallText) || spec.wallStyleMaterial || spec.wallMaterial || (spec.biome === 'cave' ? 'earth' : null);
+  const roof = roofStyle(spec);
+  if (roof) {
+    const material = roof === 'timber' ? 'wood' : (wallMat || 'stone');
+    const r = librarySprite({ kind: 'ceiling', undersideVersion: 3, material, style: roof, palette: pal, seed: surfaceSeed }, `scene_ceiling_${material}`,
+      ctx => drawRoofSurface(ctx, createCanvas, { material, palette: pal, style: roof, seed: surfaceSeed }));
+    dungeon.tiles.ceiling = { url: r.url };
+    report.textures.push({ tile: 'ceiling', material, style: roof, reused: r.reused });
+  }
 
   if (floorMat && hasMaterial('floor', floorMat) || cover.length || (spec.scatter || []).length) {
     const material = floorMat && hasMaterial('floor', floorMat) ? floorMat : 'stone';
-    const floorPalette = { primary: pal.floorPrimary || pal.primary, secondary: pal.floorSecondary || pal.secondary, highlight: pal.highlight, shadow: pal.shadow };
+    const floorPalette = dungeon.visualStyle?.floorPalette || { primary: pal.floorPrimary || pal.primary, secondary: pal.floorSecondary || pal.secondary, highlight: pal.highlight, shadow: pal.shadow };
+    const style = dungeon.visualStyle?.floor || {};
     const scatter = spec.scatter || [];
-    const r = librarySprite({ kind: 'floor', material, cover, palette: floorPalette, scatter, ps: spec.paletteStrength || 0 }, `scene_floor_${material}`,
-      ctx => drawSceneSurface(ctx, createCanvas, 'floor', { material, palette: floorPalette, groundCover: cover, scatter, seed: material, paletteStrength: spec.paletteStrength }));
+    const r = librarySprite({ kind: 'floor', appearanceVersion: 2, material, cover, palette: floorPalette, scatter, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_floor_${material}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'floor', { material, palette: floorPalette, groundCover: cover, scatter, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
     dungeon.tiles.floor = { ...(dungeon.tiles.floor || {}), url: r.url };
-    report.textures.push({ tile: 'floor', material, cover, reused: r.reused });
+    report.textures.push({ tile: 'floor', material, pattern: style.pattern || null, seed: surfaceSeed, cover, reused: r.reused });
   }
   if (wallMat && hasMaterial('wall', wallMat)) {
     const wallCover = cover.filter(c => ['water', 'moss', 'ash', 'blood', 'cobweb', 'snow', 'ice'].includes(c));
     const decals = spec.decals || [];
-    const r = librarySprite({ kind: 'wall', material: wallMat, cover: wallCover, palette: pal, decals, ps: spec.paletteStrength || 0 }, `scene_wall_${wallMat}`,
-      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { material: wallMat, palette: pal, groundCover: wallCover, decals, seed: wallMat, paletteStrength: spec.paletteStrength }));
+    const style = dungeon.visualStyle?.wall || {};
+    const r = librarySprite({ kind: 'wall', appearanceVersion: 2, material: wallMat, cover: wallCover, palette: pal, decals, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_wall_${wallMat}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { material: wallMat, palette: pal, groundCover: wallCover, decals, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
     dungeon.tiles.wall = { ...(dungeon.tiles.wall || {}), url: r.url };
     report.textures.push({ tile: 'wall', material: wallMat, cover: wallCover, reused: r.reused });
   }
@@ -131,7 +146,8 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   for (const lm of spec.landmarks || []) {
     if (lm.type === 'pillar') continue; // uses the built-in cylinder pillar tile
     const drawer = resolveLandmarkDrawer(lm.type);
-    let idx = tiles.findIndex(t => t && t.type && (t.type === lm.type || (!lm.prim && drawer && resolveLandmarkDrawer(t.type) === drawer)));
+    const shape = selectVoxelShape(lm.type, lm.assembly, lm.prim);
+    let idx = tiles.findIndex(t => t && t.type && (t.type === lm.type || (!shape && !lm.prim && drawer && resolveLandmarkDrawer(t.type) === drawer)));
     if (idx < 0) {
       tiles.push({ type: lm.type, procedure: {}, spriteSpec: null, fromSceneSpec: true });
       idx = tiles.length - 1;
@@ -143,11 +159,13 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   tiles.forEach((tile, idx) => {
     if (!tile || !tile.type) return;
     const prim = tile.sceneLandmark && tile.sceneLandmark.prim;
-    const drawer = resolveLandmarkDrawer(tile.type) || (prim ? '_primitive' : null);
+    const shape = selectVoxelShape(tile.type, tile.sceneLandmark?.assembly, prim);
+    const piece = architecture[shape] || vegetation[shape] || biomeProps[shape];
+    const drawer = vegetation[shape] ? shape : piece?.drawer || resolveLandmarkDrawer(tile.type) || (prim ? '_primitive' : null);
     if (!drawer) return; // keep the LLM-procedure sprite for unknown types
     const lm = tile.sceneLandmark || (spec.landmarks || []).find(l => resolveLandmarkDrawer(l.type) === drawer) || { type: tile.type, condition: [] };
     const condition = Array.from(new Set([...(lm.condition || []), ...(glowFromLight && ['obelisk', 'crystal_cluster', 'portal', 'statue'].includes(drawer) ? ['glowing'] : [])]));
-    const material = landmarkMaterial(spec, lm);
+    const material = piece?.material === 'stone' && Masonry.names.includes(wallMat) ? wallMat : piece?.material || landmarkMaterial(spec, lm);
     const name = `custom_${tile.type}_${idx}`;
     tile.name = name;
     const assembly = (tile.sceneLandmark && tile.sceneLandmark.assembly) || (prim && prim.assembly) || null;
@@ -160,9 +178,12 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
       url: r.url,
       // Retain sprites for the map/Canvas fallback; solid props use the GPU voxel pass.
       spriteSpec: { ...landmarkSpriteSpec(drawer, prim),
-        ...(selectVoxelShape(tile.type, assembly, prim) ? {
-          voxelShape: selectVoxelShape(tile.type, assembly, prim), material: material || (['dead_tree', 'roots'].includes(selectVoxelShape(tile.type, assembly, prim)) ? 'wood' : 'stone')
+        ...(piece ? { heightRatio: piece.heightRatio, baseWidth: piece.baseWidth, gridWidth: piece.baseWidth } : {}),
+        ...(prim?.color ? { palette: { primary: prim.color, ...(prim.color2 ? { secondary: prim.color2 } : {}) } } : {}),
+        ...(shape ? {
+          voxelShape: shape, material: material || (/tree|oak|pine|willow|cypress|roots|stump/.test(shape) ? 'wood' : 'stone')
         } : {}),
+        ...(typeof prim?.blocking === 'boolean' ? { collisionBlocking: prim.blocking } : {}),
         ...(prevSpec && prevSpec.collisionRadius ? { collisionRadius: prevSpec.collisionRadius } : {}) },
       landmark: { type: lm.type, drawer, material, condition, shape: prim ? prim.shape : null, label: lm.label || null }
     };
@@ -229,7 +250,7 @@ function placeSceneLandmarks(dungeon, spec) {
   const tiles = dungeon.customTiles || [];
   const missing = [];
   // stable pseudo-random from the room text so placement is reproducible
-  let seed = parseInt(hash(`${spec.textHash}|place`), 16) >>> 0;
+  let seed = parseInt(hash(`${spec.generation?.seed || spec.textHash}|place`), 16) >>> 0;
   const rnd = () => { seed = (Math.imul(seed ^ (seed >>> 15), 2246822507) + 0x9E3779B9) >>> 0; return seed / 4294967296; };
 
   const base = bfsCount(cells, w, h, sx, sy);
@@ -241,7 +262,12 @@ function placeSceneLandmarks(dungeon, spec) {
   const tileFor = (lm) => {
     if (lm.type === 'pillar') return 'pillar';
     const drawer = resolveLandmarkDrawer(lm.type);
-    const idx = tiles.findIndex(t => t && t.type && (t.type === lm.type || (!lm.prim && drawer && resolveLandmarkDrawer(t.type) === drawer)));
+    let idx = tiles.findIndex(t => t?.type === lm.type);
+    if (idx < 0 && !lm.prim && drawer) {
+      const shape = selectVoxelShape(lm.type, lm.assembly, lm.prim);
+      idx = tiles.findIndex(t => t?.type && resolveLandmarkDrawer(t.type) === drawer &&
+        (!shape || selectVoxelShape(t.type, t.sceneLandmark?.assembly, t.sceneLandmark?.prim) === shape));
+    }
     return idx >= 0 ? `custom_${tiles[idx].type}_${idx}` : null;
   };
   // count what the blueprint already put down
@@ -310,9 +336,17 @@ function placeSceneLandmarks(dungeon, spec) {
   }
 
   for (const lm of order) {
+    if (lm.fromVegetation) continue; // The bounded grove compiler places ambient vegetation as a batch.
     const tileName = tileFor(lm);
     if (!tileName) { missing.push(lm.type); continue; }
     const want = Math.max(1, lm.count || 1);
+    const plannedColumn = dungeon.sceneRoof?.status === 'built' &&
+      ['pillar', 'fluted_column', 'doric_column', 'ionic_column', 'corinthian_column'].includes(lm.type);
+    if (plannedColumn) {
+      const count = Object.values(cells).filter(c => c.tile === 'pillar' || c.architectureRole === 'roof-support' && c.feature === 'pillar').length;
+      if (count < want) missing.push(`${lm.type} (${count}/${want}, architectural bays retained)`);
+      continue;
+    }
     let have = lm.type === 'pillar' ? Math.min(existing.pillar || 0, want) : (existing[tileName] || 0);
     const drawer = resolveLandmarkDrawer(lm.type) || lm.type;
     let guard = 0;
@@ -408,7 +442,7 @@ function placeSceneObjects(dungeon, spec) {
   const cells = dungeon.cells;
   const sx = dungeon.start ? dungeon.start.x : 1, sy = dungeon.start ? dungeon.start.y : 1;
   const reach = bfsCount(cells, w, h, sx, sy);
-  let seed = parseInt(hash(`${spec.textHash}|objects`), 16) >>> 0;
+  let seed = parseInt(hash(`${spec.generation?.seed || spec.textHash}|objects`), 16) >>> 0;
   const rnd = () => { seed = (Math.imul(seed ^ (seed >>> 15), 2246822507) + 0x9E3779B9) >>> 0; return seed / 4294967296; };
   const viewR = spec.indoor === false ? 12 : Math.max(w, h);
   let pool = [];

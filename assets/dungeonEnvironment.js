@@ -18,11 +18,15 @@
     for (const [key, cell] of Object.entries(dungeon.cells || {})) {
       const landmark = dungeon.tiles?.[cell.tile]?.landmark;
       if (!landmark) continue;
-      const type = Object.keys(FEATURES).find(t => String(landmark.drawer || landmark.type).includes(t));
+      const vegetation = cell.vegetationRole || dungeon.tiles?.[cell.tile]?.spriteSpec?.voxelShape;
+      const plant = /pale_hollow_tree|split_snag|wind_bent_tree|dead_willow|skeletal_pine|twisted_yew|rootbound_tree/.test(vegetation) ?
+        { kind: 'dust', text: 'The bare branches creak overhead; pale bark flakes drift into the clearing.' } :
+        /thorn_bush|bramble_patch/.test(vegetation) ? { kind: 'dust', text: 'Dry thorns scrape together in the breeze beside the trail.' } : null;
+      const type = plant ? vegetation : Object.keys(FEATURES).find(t => String(landmark.drawer || landmark.type).includes(t));
       if (!type) continue;
       const [x, y] = key.split(',').map(Number);
       candidates.push({ id: `environment:${type}:${key}`, sourceKey: key, sourceTile: cell.tile,
-        x: x + 0.5, y: y + 0.5, z: (cell.floorHeight || 0) + (type === 'pool' ? 0.05 : 0.7), ...FEATURES[type] });
+        x: x + 0.5, y: y + 0.5, z: (cell.floorHeight || 0) + (type === 'pool' ? 0.05 : 0.7), ...(plant || FEATURES[type]) });
     }
     candidates.sort((a, b) => Math.hypot(a.x - sx, a.y - sy) - Math.hypot(b.x - sx, b.y - sy));
     cues.push(...candidates.slice(0, 24));

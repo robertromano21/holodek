@@ -7,6 +7,7 @@
 'use strict';
 
 const BASE = 32;
+const PlantVoxels = require('./scenePropVoxels');
 
 // ---------- deterministic RNG ----------
 function seedFrom(str) {
@@ -424,6 +425,18 @@ DRAW.ash_flora = (P, pal, o, rng) => {
   }
   P.ellipse(16, 29, 5, 2, a.dark);
 };
+for (const shape of [...PlantVoxels.deadTrees, ...PlantVoxels.scrubShapes]) {
+  DRAW[shape] = (P) => {
+    const grid = PlantVoxels.build(shape);
+    P.groundShadow(16, 20);
+    for (let y = 15; y >= 0; y--) for (let z = 0; z < 16; z++) for (let x = 0; x < 16; x++) {
+      if (!grid[x + y * 16 + z * 256]) continue;
+      const rgb = PlantVoxels.color(shape, x / 16, y / 16, z / 16, [0, -1, 0], [0.5, 0.5, 0.5], 'wood');
+      const hex = '#' + rgb.map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+      P.rect(x * 2, 30 - z * 2, 2, 2, hex);
+    }
+  };
+}
 DRAW.mushroom = (P, pal, o) => {
   const caps = [[10, 20, 5, '#8a3a6a'], [20, 16, 6, '#6a3a8a'], [15, 24, 3, '#8a5a3a']];
   P.groundShadow(16, 22);
@@ -538,6 +551,15 @@ const LANDMARK_ALIASES = {
 
 function resolveLandmarkDrawer(type) {
   const t = String(type || '').toLowerCase().replace(/^custom_/, '').replace(/_\d+$/, '');
+  if (PlantVoxels.vegetation[t]) return t;
+  if (/fallen_arch|collapsed_arch|broken_masonry|masonry_rubble|brick_rubble|scree|rockfall|battlement/.test(t)) return 'rubble';
+  if (/portcullis|timber_gate|arrow_slit/.test(t)) return 'gate';
+  if (/buttress|stalagmite/.test(t)) return 'obelisk';
+  if (/fluted_column/.test(t)) return 'pillar';
+  if (/pointed_arch/.test(t)) return 'archway';
+  if (/^(oak|pine|willow|cypress|bone_tree|charred_tree|mushroom_tree)$/.test(t)) return 'tree';
+  if (t === 'roots') return 'vines';
+  if (t === 'stump') return 'dead_tree';
   if (DRAW[t]) return t;
   if (LANDMARK_ALIASES[t]) return LANDMARK_ALIASES[t];
   // substring match ("ancient_altar" -> altar, "statues_of_kings" -> statue)

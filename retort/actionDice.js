@@ -2,9 +2,10 @@ const { randomInt, randomUUID } = require('node:crypto');
 
 // One live game is hosted by sharedState today. Keep requests scoped to its current action.
 class ActionDice {
-  constructor({ random = () => randomInt(1, 21), timeoutMs = 180000 } = {}) {
+  constructor({ random = sides => randomInt(1, sides + 1), timeoutMs = 180000, animationMs = 1000 } = {}) {
     this.random = random;
     this.timeoutMs = timeoutMs;
+    this.animationMs = animationMs;
     this.active = null;
     this.pending = null;
     this.results = new Map();
@@ -42,18 +43,19 @@ class ActionDice {
     broadcast(this.snapshot());
   }
 
-  async roll({ actor, player = false, label, target = '', modifier = 0, difficulty = null }) {
+  async roll({ actor, player = false, label, target = '', modifier = 0, difficulty = null, sides = 20 }) {
     if (!this.active || this.pending) throw new Error('Invalid dice action state.');
-    if (!Number.isFinite(modifier) || (difficulty !== null && !Number.isFinite(difficulty))) {
+    if (!Number.isInteger(sides) || sides < 2 || sides > 1000 || !Number.isFinite(modifier) || (difficulty !== null && !Number.isFinite(difficulty))) {
       throw new Error('Invalid dice modifiers.');
     }
     const request = {
-      id: randomUUID(), actionId: this.active.id, actor, label, target, modifier, difficulty,
+      id: randomUUID(), actionId: this.active.id, actor, label, target, modifier, difficulty, sides,
       geoKey: this.active.geoKey, expiresAt: Date.now() + this.timeoutMs
     };
     if (!player) {
       const result = this.makeResult(request);
       this.publish();
+      if (this.animationMs > 0) await new Promise(resolve => setTimeout(resolve, this.animationMs));
       return result;
     }
     return new Promise(resolve => {
@@ -65,8 +67,8 @@ class ActionDice {
   }
 
   makeResult(request) {
-    const natural = this.random();
-    if (!Number.isInteger(natural) || natural < 1 || natural > 20) throw new Error('Invalid d20 result.');
+    const natural = this.random(request.sides);
+    if (!Number.isInteger(natural) || natural < 1 || natural > request.sides) throw new Error(`Invalid d${request.sides} result.`);
     const result = { ...request, natural, total: natural + request.modifier };
     result.success = request.difficulty === null ? null : result.total >= request.difficulty;
     this.results.set(request.id, result);

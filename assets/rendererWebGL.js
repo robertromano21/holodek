@@ -7,27 +7,33 @@
       .join('\n');
   }
 
-  function createShader(gl, type, source) {
+  function createShader(gl, type, source, progress) {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
+    const kind = type === gl.VERTEX_SHADER ? 'vertex' : 'fragment';
+    progress?.(`${kind}-compile-start`);
     gl.compileShader(shader);
+    progress?.(`${kind}-compile-submitted`);
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
       console.error('WebGL shader compile error:', gl.getShaderInfoLog(shader));
       console.error('Shader source:\n' + formatShaderSource(source));
       gl.deleteShader(shader);
       return null;
     }
+    progress?.(`${kind}-compile-ready`);
     return shader;
   }
 
-  function createProgram(gl, vsSource, fsSource) {
-    const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
-    const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+  function createProgram(gl, vsSource, fsSource, progress) {
+    const vs = createShader(gl, gl.VERTEX_SHADER, vsSource, progress);
+    const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource, progress);
     if (!vs || !fs) return null;
     const program = gl.createProgram();
     gl.attachShader(program, vs);
     gl.attachShader(program, fs);
+    progress?.('link-start');
     gl.linkProgram(program);
+    progress?.('link-submitted');
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       console.error('WebGL program link error:', gl.getProgramInfoLog(program));
       console.error('Vertex shader source:\n' + formatShaderSource(vsSource));
@@ -35,6 +41,7 @@
       gl.deleteProgram(program);
       return null;
     }
+    progress?.('link-ready');
     return program;
   }
 
@@ -252,6 +259,51 @@
     _voxelPrewarmToken: 0,
     _voxelPrewarmKey: null,
 
+    reportStartupStage(stage) {
+      const dungeon = window.currentDungeon;
+      const report = { reason: 'renderer-startup', stage,
+        elapsedMs: Date.now() - (this.startupStartedAt || Date.now()),
+        geoKey: dungeon?.geoKey, geometryStamp: dungeon?._geometryStamp,
+        runId: dungeon?._meta?.runId, shaderBaseline: 'legacy-284bd86', voxelProjection: 'homogeneous-near-clip',
+        samples: [], backend: 'webgl', roofCells: dungeon?.sceneRoof?.coveredCells || 0,
+        structuralParts: dungeon?.sceneStructures?.length || 0 };
+      this.startupEvents ||= [];
+      this.startupEvents.push(report);
+      if (this.startupEvents.length > 24) this.startupEvents.shift();
+      console.info('[RendererStartup]', JSON.stringify(report));
+      // CPU-only progress records can reach the server before a driver/compiler stalls.
+      if (!/^-?\d+,-?\d+,-?\d+$/.test(report.geoKey || '') ||
+          !/^https?:$/.test(window.location?.protocol || '')) return;
+      try {
+        const body = JSON.stringify(report);
+        if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+          navigator.sendBeacon('/debug/dungeon-rendering', new Blob([body], { type: 'application/json' }));
+        } else if (typeof fetch === 'function') {
+          fetch('/debug/dungeon-rendering', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+        }
+      } catch (_) { /* Diagnostics must never interrupt rendering. */ }
+    },
+
+    reportFramePerformance(report, now = performance.now()) {
+      if (!report || now - (this._lastPerformanceReportAt ?? -Infinity) < 5000) return;
+      if (window.DEBUG_DUNGEON_PERF !== true && report.cpuMs < 40 && report.voxelDrawCalls < 900) return;
+      this._lastPerformanceReportAt = now;
+      const diagnostic = { reason: 'renderer-performance', geoKey: report.geoKey,
+        geometryStamp: report.geometryStamp, runId: window.currentDungeon?._meta?.runId,
+        backend: 'webgl', samples: [], performance: report };
+      console.info('[RendererPerformance]', JSON.stringify(diagnostic));
+      if (!/^-?\d+,-?\d+,-?\d+$/.test(report.geoKey || '') || !/^https?:$/.test(window.location?.protocol || '')) return;
+      // Submission counters only: no synchronous GPU queries or pixel readback.
+      try {
+        const body = JSON.stringify(diagnostic);
+        if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+          navigator.sendBeacon('/debug/dungeon-rendering', new Blob([body], { type: 'application/json' }));
+        } else if (typeof fetch === 'function') {
+          fetch('/debug/dungeon-rendering', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+        }
+      } catch (_) { /* Performance reporting cannot interrupt a frame. */ }
+    },
+
     getCustomTypeFromName(name) {
       const match = /^custom_(.+)_\d+$/.exec(String(name || ''));
       return match ? match[1] : null;
@@ -282,10 +334,10 @@
       };
     },
 
-    getRenderingDiagnostics(dungeon = window.currentDungeon) {
+    getRenderingDiagnostics(dungeon = window.currentDungeon, { gpuReadback = true } = {}) {
       const gl = this.gl;
       if (!gl || !this.sceneCellData || !dungeon) return { error: 'No uploaded dungeon texture' };
-      const flipY = this.program ? gl.getUniform(this.program, this.uniformLocations.flipY) : null;
+      const flipY = gpuReadback && this.program ? gl.getUniform(this.program, this.uniformLocations.flipY) : null;
       const report = {
         geoKey: dungeon.geoKey,
         geometryStamp: dungeon._geometryStamp,
@@ -296,10 +348,11 @@
         layout: dungeon.layout,
         grid: { width: this.gridW, height: this.gridH },
         flipY,
-        voxelFlipY: this.voxelProgram ? gl.getUniform(this.voxelProgram, this.voxelUniforms.flipY) : null,
+        voxelFlipY: gpuReadback && this.voxelProgram ? gl.getUniform(this.voxelProgram, this.voxelUniforms.flipY) : null,
         heightMin: this.heightMin,
         heightRange: this.heightRange,
-        unpackFlipY: gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL),
+        unpackFlipY: gpuReadback ? gl.getParameter(gl.UNPACK_FLIP_Y_WEBGL) : this.cellUploadState?.unpackFlipY,
+        gpuReadback,
         uploadState: this.cellUploadState,
         cpuToPackedMismatches: 0,
         gpuUploadByteMismatches: null,
@@ -307,25 +360,27 @@
         samples: []
       };
       // Read the actual GPU texture on demand, preserving the render framebuffer.
-      const previous = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
-      const framebuffer = gl.createFramebuffer();
       let gpuCells = null;
-      try {
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
-        gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.cellTex, 0);
-        if (gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
-          const errorsBeforeRead = [];
-          for (let i = 0, error; i < 8 && (error = gl.getError()) !== gl.NO_ERROR; i++) errorsBeforeRead.push(error);
-          report.errorsBeforeRead = errorsBeforeRead;
-          const pixels = new Uint8Array(this.sceneCellData.length);
-          gl.readPixels(0, 0, this.gridW, this.gridH, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-          const error = gl.getError();
-          if (error === gl.NO_ERROR) gpuCells = pixels;
-          else report.readbackError = error;
-        } else report.readbackError = 'Incomplete cell-texture framebuffer';
-      } finally {
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previous);
-        gl.deleteFramebuffer(framebuffer);
+      if (gpuReadback) {
+        const previous = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING);
+        const framebuffer = gl.createFramebuffer();
+        try {
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, framebuffer);
+          gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.cellTex, 0);
+          if (gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+            const errorsBeforeRead = [];
+            for (let i = 0, error; i < 8 && (error = gl.getError()) !== gl.NO_ERROR; i++) errorsBeforeRead.push(error);
+            report.errorsBeforeRead = errorsBeforeRead;
+            const pixels = new Uint8Array(this.sceneCellData.length);
+            gl.readPixels(0, 0, this.gridW, this.gridH, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            const error = gl.getError();
+            if (error === gl.NO_ERROR) gpuCells = pixels;
+            else report.readbackError = error;
+          } else report.readbackError = 'Incomplete cell-texture framebuffer';
+        } finally {
+          gl.bindFramebuffer(gl.READ_FRAMEBUFFER, previous);
+          gl.deleteFramebuffer(framebuffer);
+        }
       }
       if (gpuCells) {
         let same = 0, mirrored = 0;
@@ -795,6 +850,10 @@
           return { primary: '#d8d2c8', secondary: '#a5a09a', highlight: '#f1ece4', shadow: '#7a756f' };
         case 'metal':
           return { primary: '#8a8f96', secondary: '#4e5257', highlight: '#c6cbd2', shadow: '#2c2f33' };
+        case 'gold':
+          return { primary: '#d6a83e', secondary: '#997027', highlight: '#ffe59a', shadow: '#654821' };
+        case 'ice':
+          return { primary: '#a5dae6', secondary: '#579aaa', highlight: '#effcff', shadow: '#36596b' };
         case 'wood':
           return { primary: '#8a5b36', secondary: '#5a3a22', highlight: '#b07a4a', shadow: '#3a2416' };
         default:
@@ -804,7 +863,7 @@
 
     buildVoxelGrid(tileName, dungeon, size = 16) {
       const shape = dungeon.tiles?.[tileName]?.spriteSpec?.voxelShape;
-      const shaped = shape && window.ScenePropVoxels?.build(shape, size);
+      const shaped = shape && window.ScenePropVoxels?.build(shape, size, dungeon.tiles?.[tileName]?.spriteSpec?.voxelSeed || 0);
       if (shaped) return shaped;
       const voxels = new Uint8Array(size * size * size);
       const setVoxel = (x, y, z) => {
@@ -1317,7 +1376,8 @@
       // IMPORTANT: voxel meshes are cached; rebuild when debug flags / revisions change.
       const debugSolid = (tileName === 'pillar' && !!window.DEBUG_SOLID_PILLAR);
       const meshRev = Number.isFinite(window.VOXEL_MESH_REV) ? window.VOXEL_MESH_REV : 0;
-      const debugKey = `${meshRev}|solid:${debugSolid ? 1 : 0}`;
+      const voxelTextures = window.VOXEL_MATERIAL_TEXTURES !== false;
+      const debugKey = `${meshRev}|appearance:2|solid:${debugSolid ? 1 : 0}|textures:${voxelTextures ? 1 : 0}`;
 
       const cached = this.voxelMeshes[tileName];
       if (cached && cached._debugKey === debugKey) return cached;
@@ -1330,7 +1390,10 @@
       const tileMeta = this.getCustomTileMeta(tileName, dungeon);
       const material = (spec.voxelShape && spec.material) || tileMeta?.procedure?.material || spec.material || null;
       const palette = dungeon.visualStyle?.palette || {};
-      const matPalette = this.getMaterialPalette(material, palette);
+      const materialPalette = this.getMaterialPalette(material, palette);
+      const matPalette = window.ScenePropVoxels?.usesRoomPalette?.(spec.voxelShape) && window.VoxelMaterials?.tintPalette ?
+        window.VoxelMaterials.tintPalette(materialPalette, palette, material, spec.palette) :
+        { ...materialPalette, ...(spec.palette || {}) };
 
       const hexToRgb = (hex) => {
         const m = String(hex || '').match(/^#?([0-9a-fA-F]{6})$/);
@@ -1356,6 +1419,7 @@
       const secondary = hexToRgb(matPalette.secondary || '#555555');
       const highlight = hexToRgb(matPalette.highlight || '#aaaaaa');
       const shadow = hexToRgb(matPalette.shadow || '#222222');
+      const shapePalette = { primary, secondary, highlight, shadow };
       const accentColor = detail.accentColor ? hexToRgb(detail.accentColor) : highlight;
       const accentStrength = clampRange(detail.accentStrength, 0, 1, detail.accentColor ? 0.3 : 0);
       const bandCount = Math.max(0, Math.round(clampRange(detail.bandCount, 0, 8, 0)));
@@ -1404,6 +1468,10 @@
       const colorFn = (x, y, z, normal) => {
         // Debug: prove the "slits" are lighting, not holes (shader will optionally bypass lighting too)
         if (debugSolid) return [1.0, 0.0, 1.0];
+        if (spec.voxelShape && window.ScenePropVoxels?.color) {
+          return window.ScenePropVoxels.color(spec.voxelShape, x / 16, y / 16, z / 16, normal, primary, material,
+            { textures: voxelTextures, palette: shapePalette });
+        }
 
       const n = isColumn
         ? hash(0.0, 0.0, Math.floor(z / 2))     // vertical-only variation (no checkerboard)
@@ -1586,9 +1654,10 @@
           vbo,
           ibo,
           count: mesh.indices.length,
-          toneShadow: shadow,
-          toneMid: primary,
-          toneHighlight: highlight,
+          // Vertex colors already contain the material. Tinting again muddies every prop.
+          toneShadow: [0.3, 0.3, 0.32],
+          toneMid: [1, 1, 1],
+          toneHighlight: [1.12, 1.12, 1.12],
           unlit: hints && Number.isFinite(hints.unlit) ? hints.unlit : 0,
           toonSteps: hints && Number.isFinite(hints.toonSteps) ? hints.toonSteps : 3,
           depthOnly: !!(hints && hints.depthOnly),
@@ -1733,6 +1802,9 @@
 
     init(container) {
       if (!container) return false;
+      this.startupStartedAt = Date.now();
+      this.startupEvents = [];
+      this.reportStartupStage('context-request');
       const displayW = 640;
       const displayH = 480;
       const pixelScale = 4;
@@ -1756,6 +1828,7 @@
         return false;
       }
       this.gl = gl;
+      this.reportStartupStage('context-ready');
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
 
@@ -1782,6 +1855,7 @@ uniform vec2 u_camDir;
 uniform vec2 u_plane;
 uniform float u_focalLength;
 uniform float u_eyeZ;
+uniform float u_viewShift;
 uniform float u_playerFloor;
 uniform sampler2D u_cells;
 uniform sampler2D u_wallAtlas;
@@ -2467,7 +2541,7 @@ void main() {
     return;
   }
 
-  float horizon = u_resolution.y * 0.5;
+  float horizon = u_resolution.y * (0.5 + u_viewShift);
 
   // Ray setup
   int mapX = int(floor(u_camPos.x));
@@ -2704,7 +2778,8 @@ void main() {
         wallDist = perpDist;
         wallHit = true;
       }
-      break;
+      // A wall outside this pixel's vertical span cannot hide a taller surface behind it.
+      if (wallHit) break;
     }
   }
 
@@ -2758,7 +2833,7 @@ void main() {
         fMapY += stepY;
       }
 
-      if (!inBounds(fMapX, fMapY) || fetchCell(fMapX, fMapY).a >= 0.5) break;
+      if (!inBounds(fMapX, fMapY) || fCurrDist >= wallDist || (sideHit && fCurrDist >= sideDistClosest)) break;
     }
   }
 
@@ -2836,8 +2911,10 @@ void main() {
   gl_FragDepth = 1.0;
 }`;
 
-      this.program = createProgram(gl, vsSource, fsSource);
+      this.reportStartupStage('world-program-start');
+      this.program = createProgram(gl, vsSource, fsSource, stage => this.reportStartupStage(`world-${stage}`));
       if (!this.program) return false;
+      this.reportStartupStage('world-program-ready');
 
       this.uniformLocations = {
         resolution: gl.getUniformLocation(this.program, 'u_resolution'),
@@ -2846,6 +2923,7 @@ void main() {
         plane: gl.getUniformLocation(this.program, 'u_plane'),
         focalLength: gl.getUniformLocation(this.program, 'u_focalLength'),
         eyeZ: gl.getUniformLocation(this.program, 'u_eyeZ'),
+        viewShift: gl.getUniformLocation(this.program, 'u_viewShift'),
         playerFloor: gl.getUniformLocation(this.program, 'u_playerFloor'),
         cells: gl.getUniformLocation(this.program, 'u_cells'),
         wallAtlas: gl.getUniformLocation(this.program, 'u_wallAtlas'),
@@ -3032,6 +3110,7 @@ void main() {
         'uniform vec2 u_plane;',
         'uniform float u_focalLength;',
         'uniform float u_eyeZ;',
+        'uniform float u_viewShift;',
         'uniform float u_depthFarDepth;',
         'uniform float u_depthShadeScale;',
         'uniform float u_depthBias;',
@@ -3050,17 +3129,11 @@ void main() {
         '  float invDet = 1.0 / (u_plane.x * u_camDir.y - u_camDir.x * u_plane.y);',
         '  float transformX = invDet * (u_camDir.y * rel.x - u_camDir.x * rel.y);',
         '  float transformY = invDet * (-u_plane.y * rel.x + u_plane.x * rel.y);',
-        '  if (transformY <= 0.02) {',
-        '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
-        '    v_depth = 1.0;',
-        '    return;',
-        '  }',
-        '  float screenX = (u_resolution.x * 0.5) * (1.0 + transformX / transformY);',
-        '  float screenY = (u_resolution.y * 0.5) + (u_eyeZ - worldPos.z) * u_focalLength / transformY;',
-        '  float ndcX = (screenX / u_resolution.x) * 2.0 - 1.0;',
-        '  float ndcY = 1.0 - (screenY / u_resolution.y) * 2.0;',
-        '  float w = transformY;',
-        '  gl_Position = vec4(ndcX * w, ndcY * w, 0.0, w);',
+        '  // Preserve homogeneous coordinates: GL clips triangles crossing the camera plane.',
+        '  // Moving individual behind-camera vertices to a corner creates giant phantom wedges.',
+        '  float clipY = (worldPos.z - u_eyeZ) * (2.0 * u_focalLength / u_resolution.y) - 2.0 * u_viewShift * transformY;',
+        '  const float nearPlane = 0.02;',
+        '  gl_Position = vec4(transformX, clipY, transformY - 2.0 * nearPlane, transformY);',
         '  v_depth = clamp(transformY / u_depthFarDepth - u_depthBias, 0.0, 1.0);',
         '}'
       ].join('\n');
@@ -3334,8 +3407,10 @@ void main() {
   outColor = vec4(col, 1.0);
 }`;
 
+this.reportStartupStage('sprite-program-start');
 this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (!this.spriteProgram) return false;
+      this.reportStartupStage('sprite-program-ready');
       this.spriteAttribs = {
         pos: gl.getAttribLocation(this.spriteProgram, 'a_pos'),
         uv: gl.getAttribLocation(this.spriteProgram, 'a_uv'),
@@ -3367,7 +3442,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       };
       this.spriteBuffer = gl.createBuffer();
 
+      this.reportStartupStage('voxel-program-start');
       this.voxelProgram = createProgram(gl, voxelVs, voxelFs);
+      this.reportStartupStage(this.voxelProgram ? 'voxel-program-ready' : 'voxel-program-failed');
       if (this.voxelProgram) {
         this.voxelAttribs = {
           pos: gl.getAttribLocation(this.voxelProgram, 'a_pos'),
@@ -3381,6 +3458,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           plane: gl.getUniformLocation(this.voxelProgram, 'u_plane'),
           focalLength: gl.getUniformLocation(this.voxelProgram, 'u_focalLength'),
           eyeZ: gl.getUniformLocation(this.voxelProgram, 'u_eyeZ'),
+          viewShift: gl.getUniformLocation(this.voxelProgram, 'u_viewShift'),
           depthFarDepth: gl.getUniformLocation(this.voxelProgram, 'u_depthFarDepth'),
           depthShadeScale: gl.getUniformLocation(this.voxelProgram, 'u_depthShadeScale'),
           depthBias: gl.getUniformLocation(this.voxelProgram, 'u_depthBias'),
@@ -3420,6 +3498,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         this.miniCtx = this.miniCanvas.getContext('2d');
       }
 
+      this.reportStartupStage('initialization-ready');
       return true;
     },
 
@@ -3427,7 +3506,19 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (!dungeon || !textures || !this.gl) return;
       const key = dungeon.geoKey || dungeon._meta?.id || 'default';
       const floorReady = isTextureReady(textures.floor);
-      const atlasCandidate = buildAtlas(textures);
+      const textureState = Object.keys(textures).filter(name => name === 'floor' ||
+        (name !== 'torch' && name !== 'pillar' && !name.startsWith('custom_'))).sort().map(name => {
+          const image = textures[name];
+          return [name, image, isTextureReady(image), image?.currentSrc || image?.src || '',
+            image?.naturalWidth || 0, image?.naturalHeight || 0, image?._revision || 0];
+        });
+      const previousTextures = this._atlasTextureState;
+      const textureChanged = !previousTextures || previousTextures.length !== textureState.length ||
+        textureState.some((entry, index) => entry.some((value, field) => value !== previousTextures[index]?.[field]));
+      const atlasCandidate = textureChanged ? buildAtlas(textures) : this._atlasCandidate;
+      this._atlasTextureState = textureState;
+      this._atlasCandidate = atlasCandidate;
+      if (textureChanged) this.sceneTextureRevision = (this.sceneTextureRevision || 0) + 1;
       const atlasReady = !!(atlasCandidate && atlasCandidate.canvas);
       const atlasKey = atlasReady
         ? Object.keys(atlasCandidate.map || {}).sort().join('|')
@@ -3452,7 +3543,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         this.dungeonGeometryStamp === geometryStamp &&
         this.atlasReady === atlasReady &&
         this.atlasKey === atlasKey &&
-        this.floorTexReady === floorReady
+        this.floorTexReady === floorReady &&
+        !textureChanged
       ) {
         return;
       }
@@ -3460,18 +3552,21 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const cells = dungeon.cells || {};
       let minH = Infinity;
       let maxH = -Infinity;
+      let minFloor = Infinity;
       for (const cell of Object.values(cells)) {
         if (!cell) continue;
         const fh = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
         const ch = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : fh + 2;
         minH = Math.min(minH, fh, ch);
         maxH = Math.max(maxH, fh, ch);
+        minFloor = Math.min(minFloor, fh);
       }
       if (!Number.isFinite(minH)) minH = 0;
       if (!Number.isFinite(maxH)) maxH = minH + 2;
       const range = Math.max(0.001, maxH - minH);
       this.heightMin = minH;
       this.heightRange = range;
+      this.minFloor = Number.isFinite(minFloor) ? minFloor : 0;
 
       let layoutW = dungeon.layout?.width || 0;
       let layoutH = dungeon.layout?.height || 0;
@@ -3514,6 +3609,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
       const wallDefault = this.atlasInfo.map.wall ?? 0;
       const data = new Uint8Array(layoutW * layoutH * 4);
+      this.hasRoofs = Object.values(cells).some(cell => !!cell.roof);
+      this.hasStructures = !!dungeon.sceneStructures?.length;
       const wallFallback = new Uint8Array([60, 45, 30, 255]);
       const floorFallback = new Uint8Array([34, 0, 0, 255]);
 
@@ -3564,6 +3661,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       const gl = this.gl;
       this.uploadDungeonCells(data, layoutW, layoutH, 'room');
+      gl.activeTexture(gl.TEXTURE0);
 
       if (this.atlasInfo.canvas) {
         gl.bindTexture(gl.TEXTURE_2D, this.wallAtlasTex);
@@ -3597,6 +3695,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         key,
         geometryStamp,
         `rev:${this.sceneObjectRevision || 0}`,
+        `textures:${this.sceneTextureRevision || 0}`,
         atlasKey,
         floorReady ? 'floor:ready' : 'floor:fallback',
         `${layoutW}x${layoutH}`,
@@ -3960,7 +4059,75 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       ctx.fillText(`c:${camTileX},${camTileY}`, originX, originY + (radius * 2 + 2) * tileSize + 28);
     },
 
+    getCachedTorchLights(frame, targetX, targetY, radiusScale, hasLineOfSight, stats) {
+      if (this._torchCacheDungeon !== frame.dungeon || this._torchCacheStamp !== frame.stamp) {
+        this._torchCacheDungeon = frame.dungeon;
+        this._torchCacheStamp = frame.stamp;
+        this._torchVisibilityCache = new Map();
+      }
+      const cache = this._torchVisibilityCache;
+      const key = `${targetX},${targetY},${radiusScale}`;
+      let entry = cache.get(key);
+      if (!entry) {
+        if (cache.size >= 4096) cache.delete(cache.keys().next().value);
+        entry = { visibility: new Map(), membership: null, candidates: [] };
+      } else {
+        cache.delete(key);
+        if (stats) stats.hits++;
+      }
+      cache.set(key, entry);
+      if (entry.membership !== frame.membership) {
+        entry.candidates = [];
+        for (const light of frame.lights) {
+          const dx = light.x - targetX, dy = light.y - targetY, distance = dx * dx + dy * dy;
+          const radius = light.radius * radiusScale;
+          if (distance > radius * radius) continue;
+          const id = `${light.x},${light.y},${light.radius}`;
+          let visible = entry.visibility.get(id);
+          if (visible === undefined) {
+            if (stats) stats.losTests++;
+            visible = hasLineOfSight(light.x, light.y, targetX, targetY);
+            entry.visibility.set(id, visible);
+          }
+          if (visible) entry.candidates.push({ id, dist2: distance });
+        }
+        // Membership can change as the player moves; retain only current light identities.
+        for (const id of entry.visibility.keys()) if (!frame.byId.has(id)) entry.visibility.delete(id);
+        entry.membership = frame.membership;
+      }
+      // Fresh light records carry this frame's flicker and camera tie-breaking order.
+      return entry.candidates.map(candidate => ({ t: frame.byId.get(candidate.id), dist2: candidate.dist2 }))
+        .sort((a, b) => a.dist2 - b.dist2 || a.t.order - b.t.order);
+    },
+
+    isVoxelBoxVisible(position, scale, camera) {
+      if (!position || !scale || !camera) return true;
+      const { x, y, z } = position;
+      if (![x, y, z, scale.x, scale.y, scale.z, camera.x, camera.y, camera.eyeZ,
+        camera.dirX, camera.dirY, camera.planeScale, camera.verticalScale].every(Number.isFinite)) return true;
+      // Include padded voxel faces; test the whole volume, never just its center.
+      const pad = Math.max(0.1, Math.abs(seamPad) / 16);
+      const ex = Math.abs(scale.x) * (0.5 + pad), ey = Math.abs(scale.y) * (0.5 + pad);
+      const ez = Math.abs(scale.z) * (0.5 + pad);
+      const dx = x + scale.x * 0.5 - camera.x, dy = y + scale.y * 0.5 - camera.y;
+      const dz = z + scale.z * 0.5 - camera.eyeZ;
+      const forward = dx * camera.dirX + dy * camera.dirY;
+      const forwardExtent = Math.abs(camera.dirX) * ex + Math.abs(camera.dirY) * ey;
+      if (forward + forwardExtent < 0.02) return false;
+      for (const side of [-1, 1]) {
+        const nx = camera.planeScale * camera.dirX - side * camera.dirY;
+        const ny = camera.planeScale * camera.dirY + side * camera.dirX;
+        if (nx * dx + ny * dy + Math.abs(nx) * ex + Math.abs(ny) * ey < 0) return false;
+      }
+      const shift = Number.isFinite(camera.viewShift) ? camera.viewShift : 0;
+      const vertical = dz * camera.verticalScale - 2 * shift * forward;
+      return forward + forwardExtent + camera.verticalScale * ez + Math.abs(2 * shift) * forwardExtent >= Math.abs(vertical);
+    },
+
     renderScene() {
+      const frameStartedAt = performance.now();
+      let voxelDrawCalls = 0, voxelIndices = 0, culledVoxels = 0, torchQueries = 0;
+      const torchCacheStats = { hits: 0, losTests: 0 };
       const popup = document.getElementById('dungeon-popup');
       const container = document.getElementById('dungeon-container');
       if (!popup || !container) return;
@@ -3988,6 +4155,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const textures = window.dungeonTextures;
       if (!dungeon || !textures) return;
       this.rebuildDungeonTextures(dungeon, textures);
+      const resourcesReadyAt = performance.now();
+      const startupFrame = this._startupFrameVersion !== this.sceneResourceVersion;
+      if (startupFrame) {
+        this._startupFrameVersion = this.sceneResourceVersion;
+        this.reportStartupStage('textures-ready');
+      }
       const isOutdoor = dungeon.classification && dungeon.classification.indoor === false;
 
       const playerX = window.playerDungeonX ?? 0;
@@ -4026,19 +4199,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       else if (eyeZ < playerFloor + 0.12) eyeZ = playerFloor + 0.12;
       window.playerZ = eyeZ;
 
-      let minFloor = Infinity;
-      for (const cell of Object.values(dungeon.cells || {})) {
-        if (cell && typeof cell.floorHeight === 'number') {
-          minFloor = Math.min(minFloor, cell.floorHeight);
-        }
-      }
-      if (!Number.isFinite(minFloor)) minFloor = 0;
+      // Rebuild already scanned these heights for this geometry revision.
+      const minFloor = Number.isFinite(this.minFloor) ? this.minFloor : 0;
 
       const FOV = Math.PI / 3;
       const planeScale = Math.tan(FOV / 2);
       const planeX = -dirY * planeScale;
       const planeY = dirX * planeScale;
       const focalLength = height / (2 * Math.tan(FOV / 2));
+      const viewShift = Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
+      const horizon = height * (.5 + viewShift);
+      const voxelCamera = { x: camX, y: camY, eyeZ, dirX, dirY, planeScale, viewShift, verticalScale: 2 * focalLength / height };
 
       if (window.DEBUG_WEBGL_POS) {
         const now = performance.now();
@@ -4175,7 +4346,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const layoutH = dungeon.layout?.height || 32;
       const maxDim = Math.max(layoutW, layoutH);
       const VIS_RADIUS = Math.max(10, Math.min(18, Math.floor(maxDim / 10)));
-      const TORCH_VIS_RADIUS = Math.max(VIS_RADIUS, 64);
+      const VOXEL_VIS_RADIUS = Math.max(VIS_RADIUS, 64);
+      const TORCH_VIS_RADIUS = VOXEL_VIS_RADIUS;
       const TORCH_MOUNT_HEIGHT = 0.45;
       const TORCH_MOUNT_RATIO = 0.55;
       const TORCH_LIGHT_OFFSET = 0.515;
@@ -4307,21 +4479,13 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       };
       const torchUniformData = makeTorchUniformData();
       const occludedTorchUniformData = makeTorchUniformData();
-      const visibleTorchScratch = [];
+      let torchFrame;
       const getTorchUniformData = (targetX, targetY, radiusScale) => {
+        torchQueries++;
         if (!torchOcclusion) return torchUniformData;
         if (!torchUniformData.count) return torchUniformData;
-        visibleTorchScratch.length = 0;
-        for (const t of torchLights) {
-          const dx = t.x - targetX;
-          const dy = t.y - targetY;
-          const rad = t.radius * radiusScale;
-          if (dx * dx + dy * dy > rad * rad) continue;
-          if (!hasLineOfSight(t.x, t.y, targetX, targetY)) continue;
-          visibleTorchScratch.push({ t, dist2: dx * dx + dy * dy });
-        }
-        visibleTorchScratch.sort((a, b) => a.dist2 - b.dist2);
-        return packTorchUniforms(visibleTorchScratch, occludedTorchUniformData, true);
+        const selected = this.getCachedTorchLights(torchFrame, targetX, targetY, radiusScale, hasLineOfSight, torchCacheStats);
+        return packTorchUniforms(selected, occludedTorchUniformData, true);
       };
       for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
         for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
@@ -4354,6 +4518,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
       }
       torchLights.sort((a, b) => a.dist2 - b.dist2);
+      const torchById = new Map();
+      torchLights.forEach((light, order) => { light.order = order; torchById.set(`${light.x},${light.y},${light.radius}`, light); });
+      torchFrame = { dungeon, stamp: this.dungeonGeometryStamp, lights: torchLights, byId: torchById,
+        membership: Array.from(torchById.keys()).sort().join('|') };
       packTorchUniforms(torchLights, torchUniformData);
 
       // Dynamic character shadow casters (party/NPC/monster footprints) — must be in cellTex
@@ -4378,6 +4546,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform2f(this.uniformLocations.plane, planeX, planeY);
       gl.uniform1f(this.uniformLocations.focalLength, focalLength);
       gl.uniform1f(this.uniformLocations.eyeZ, eyeZ);
+      gl.uniform1f(this.uniformLocations.viewShift, viewShift);
       gl.uniform1f(this.uniformLocations.playerFloor, playerFloor);
       gl.uniform2i(this.uniformLocations.gridSize, this.gridW, this.gridH);
       gl.uniform2i(this.uniformLocations.playerTile, playerX, playerY);
@@ -4458,7 +4627,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.activeTexture(gl.TEXTURE2);
       gl.bindTexture(gl.TEXTURE_2D, this.floorTex);
       gl.uniform1i(this.uniformLocations.floorTex, 2);
-
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
       // Sprites/torches pass (billboards in screen space, depth-tested)
@@ -4533,7 +4701,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (ty <= 0.02) return null;
         return {
           x: (width * 0.5) * (1.0 + tx / ty),
-          y: (height * 0.5) + (eyeZ - wz) * focalLength / ty,
+          y: horizon + (eyeZ - wz) * focalLength / ty,
           depth: Math.min(1.0, Math.max(0.0, ty / depthFarDepth)),
           viewDist: ty
         };
@@ -4552,8 +4720,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const TORCH_WIDTH_RATIO = 0.6;
       const TORCH_FLAME_RATIO = 0.4;
       const TORCH_ANCHOR_RATIO = 0.78;
-      for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
-        for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
+      for (let dx = -VOXEL_VIS_RADIUS; dx <= VOXEL_VIS_RADIUS; dx++) {
+        for (let dy = -VOXEL_VIS_RADIUS; dy <= VOXEL_VIS_RADIUS; dy++) {
           const wx = playerX + dx;
           const wy = playerY + dy;
           const cell = dungeon.cells?.[`${wx},${wy}`];
@@ -4594,12 +4762,19 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           }
 
           if (!isTorch && isCustom && this.voxelProgram) {
+            let voxelHeight = SPRITE_WORLD_HEIGHT;
+            if (Number.isFinite(cell.structureHeight)) voxelHeight = cell.structureHeight;
+            else if (ceilH > floorH) voxelHeight = Math.max(0.5, (ceilH - floorH) * heightRatio);
+            const modelPos = { x: renderX - baseWidth * 0.5, y: renderY - baseWidth * 0.5, z: floorH };
+            const modelScale = { x: baseWidth, y: baseWidth, z: voxelHeight };
+            // Known voxel meshes can be rejected before mesh lookup, overlay projection and instance allocation.
+            // Unknown shapes retain their existing billboard fallback until a mesh is available.
+            if (this.voxelMeshes[tileName] && !this.isVoxelBoxVisible(modelPos, modelScale, voxelCamera)) {
+              culledVoxels++;
+              continue;
+            }
             const voxelMesh = this.getVoxelMesh(tileName, dungeon);
             if (voxelMesh) {
-              let voxelHeight = SPRITE_WORLD_HEIGHT;
-              if (ceilH > floorH) {
-                voxelHeight = Math.max(0.5, (ceilH - floorH) * heightRatio);
-              }
               const relX = renderX - camX;
               const relY = renderY - camY;
               const invDet = 1.0 / (planeX * dirY - dirX * planeY);
@@ -4607,7 +4782,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               const ty = invDet * (-planeY * relX + planeX * relY);
               if (ty > 0.02) {
                 const centerX = (width * 0.5) * (1.0 + tx / ty);
-                const centerY = (height * 0.5) + (eyeZ - (floorH + voxelHeight * 0.5)) * focalLength / ty;
+                const centerY = horizon + (eyeZ - (floorH + voxelHeight * 0.5)) * focalLength / ty;
                 const spriteScreenHeight = Math.abs(voxelHeight * focalLength / ty);
                 const spriteScreenWidth = Math.max(
                   2,
@@ -4627,16 +4802,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               voxelInstances.push({
                 tileName,
                 mesh: voxelMesh,
-                modelPos: {
-                  x: renderX - baseWidth * 0.5,
-                  y: renderY - baseWidth * 0.5,
-                  z: floorH
-                },
-                modelScale: {
-                  x: baseWidth,
-                  y: baseWidth,
-                  z: voxelHeight
-                }
+                modelPos,
+                modelScale
               });
               continue;
             }
@@ -4675,8 +4842,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const spriteDistance = Math.max(0.1, safeTransformY);
 
           // Screen-space Y for the mount point Z.
-          // (height/2 is our horizon in the shader path.)
-          const mountScreenY = Math.floor(height / 2 + (eyeZ - spriteBaseZ) * focalLength / spriteDistance);
+          const mountScreenY = Math.floor(horizon + (eyeZ - spriteBaseZ) * focalLength / spriteDistance);
 
           let spriteScreenHeight = Math.max(2, Math.floor(spriteWorldHeight * focalLength / spriteDistance));
           const spriteScreenWidth = Math.max(isTorch ? 2 : 1, Math.floor(spriteScreenHeight * spriteWidthRatio));
@@ -4860,7 +5026,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const baseZ = feetZ - inset * worldH;
         const screenH = worldH * focalLength / transformY;
         const screenW = screenH;
-        const bottomY = height / 2 + (eyeZ - baseZ) * focalLength / transformY;
+        const bottomY = horizon + (eyeZ - baseZ) * focalLength / transformY;
         const topY = bottomY - screenH;
         const left = screenX - screenW / 2;
         const right = screenX + screenW / 2;
@@ -4870,7 +5036,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const shadowWorldR = Math.max(0.18, Math.min(0.42, worldH * 0.22));
         const shadowScreenW = shadowWorldR * 2.2 * focalLength / transformY;
         const shadowScreenH = shadowWorldR * 0.85 * focalLength / transformY;
-        const footScreenY = height / 2 + (eyeZ - feetZ) * focalLength / transformY;
+        const footScreenY = horizon + (eyeZ - feetZ) * focalLength / transformY;
         // Shadow closer than floor so soft blob is visible (was losing the depth test)
         const shadowDepth = Math.min(1.0, Math.max(0.0, (transformY - 0.5) / depthFarDepth));
         sprites.push({
@@ -4930,7 +5096,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const baseZ = floorH + 0.005 + bob - it.footInset * it.worldHeight;
         const screenX = (width / 2) * (1 + transformX / transformY);
         const screenH = it.worldHeight * focalLength / transformY;
-        const bottomY = height / 2 + (eyeZ - baseZ) * focalLength / transformY;
+        const bottomY = horizon + (eyeZ - baseZ) * focalLength / transformY;
         const left = screenX - screenH / 2;
         if (left + screenH < 0 || left >= width || bottomY < 0 || bottomY - screenH >= height) continue;
         sprites.push({
@@ -4940,11 +5106,34 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           depth: Math.min(1.0, Math.max(0.0, transformY / depthFarDepth)), viewDist: transformY, baseZ, worldHeight: it.worldHeight
         });
       }
+      // Match the column scan range, using whole footprints so large roofs do not pop early.
+      // These parts reuse the voxel pass but never become floor collision obstacles.
+      for (const part of dungeon.sceneStructures || []) {
+        const p = part.position, s = part.size;
+        if (!p || !s || ![p.x, p.y, p.z, s.x, s.y, s.z].every(Number.isFinite) ||
+            s.x <= 0 || s.y <= 0 || s.z <= 0) continue;
+        const partRange = part.skyline === true ? 192 : VOXEL_VIS_RADIUS;
+        if (p.x + s.x < playerX - partRange || p.x > playerX + partRange + 1 ||
+            p.y + s.y < playerY - partRange || p.y > playerY + partRange + 1) continue;
+        const mesh = this.getVoxelMesh(part.tile, dungeon);
+        if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: p, modelScale: s });
+      }
       voxelInstances.push(...actorVoxelInstances);
+      let visibleVoxelCount = 0;
+      for (const instance of voxelInstances) {
+        if (!this.isVoxelBoxVisible(instance.modelPos, instance.modelScale, voxelCamera)) {
+          culledVoxels++;
+        } else {
+          voxelInstances[visibleVoxelCount++] = instance;
+        }
+      }
+      voxelInstances.length = visibleVoxelCount;
+      if (startupFrame) this.reportStartupStage('voxel-instances-ready');
       webgpuOverlaySprites.sort((a, b) => b.depth - a.depth);
       webgpuTorchFlameSprites.sort((a, b) => b.depth - a.depth);
 
       // Voxel pass for pillars/custom tiles (depth-tested against raycast walls)
+      const voxelStartedAt = performance.now();
       if (this.voxelProgram && voxelInstances.length > 0) {
         gl.useProgram(this.voxelProgram);
         gl.disable(gl.BLEND);
@@ -4958,6 +5147,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform2f(this.voxelUniforms.plane, planeX, planeY);
         gl.uniform1f(this.voxelUniforms.focalLength, focalLength);
         gl.uniform1f(this.voxelUniforms.eyeZ, eyeZ);
+        gl.uniform1f(this.voxelUniforms.viewShift, viewShift);
         gl.uniform1f(this.voxelUniforms.depthFarDepth, depthFarDepth);
         if (this.voxelUniforms.depthShadeScale) {
           gl.uniform1f(this.voxelUniforms.depthShadeScale, voxelShadeScale);
@@ -5055,6 +5245,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             gl.uniform3f(this.voxelUniforms.modelPos, inst.modelPos.x, inst.modelPos.y, inst.modelPos.z);
             gl.uniform3f(this.voxelUniforms.modelScale, inst.modelScale.x, inst.modelScale.y, inst.modelScale.z);
             gl.drawElements(gl.TRIANGLES, pass.count, gl.UNSIGNED_SHORT, 0);
+            voxelDrawCalls++;
+            voxelIndices += pass.count;
             if (pass.depthOnly || pass.depthTestOnly) {
               gl.colorMask(true, true, true, true);
               gl.depthMask(true);
@@ -5065,6 +5257,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (wasCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
       }
 
+      const voxelsSubmittedAt = performance.now();
       // Sort by distance (farthest first for correct blending)
       sprites.sort((a, b) => b.depth - a.depth);
 
@@ -5097,7 +5290,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (ty <= 0.02) return null;
         return {
           x: (width * 0.5) * (1.0 + tx / ty),
-          y: (height * 0.5) + (eyeZ - wz) * focalLength / ty,
+          y: horizon + (eyeZ - wz) * focalLength / ty,
           depth: Math.min(1.0, Math.max(0.0, ty / depthFarDepth)),
           viewDist: ty
         };
@@ -5884,6 +6077,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           planeX,
           planeY,
           eyeZ,
+          viewShift,
           depthFar: depthFarDepth,
           minFloor,
           wallUScale: 0.25,
@@ -5967,10 +6161,20 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       } else if (this.debugCanvas) {
         this.debugCanvas.style.display = 'none';
       }
+      if (startupFrame) this.reportStartupStage('first-frame-submitted');
+      this.lastFrameStats = { geoKey: dungeon.geoKey, geometryStamp: this.dungeonGeometryStamp,
+        player: { x: playerWorldX, y: playerWorldY }, cpuMs: Number((performance.now() - frameStartedAt).toFixed(2)),
+        resourcesMs: Number((resourcesReadyAt - frameStartedAt).toFixed(2)),
+        collectionMs: Number((voxelStartedAt - resourcesReadyAt).toFixed(2)),
+        voxelSubmitMs: Number((voxelsSubmittedAt - voxelStartedAt).toFixed(2)),
+        voxelInstances: voxelInstances.length, culledVoxels, voxelDrawCalls, voxelTriangles: voxelIndices / 3,
+        nearbyTorches: torchLights.length, torchQueries, torchLosTests: torchCacheStats.losTests, torchCacheHits: torchCacheStats.hits };
+      this.reportFramePerformance(this.lastFrameStats);
     }
   };
 
   window.webglDungeonRenderer = renderer;
+  window.debugDungeonPerformance = () => renderer.lastFrameStats || null;
   window.useWebGLRenderer = true;
   if (typeof window.renderDungeonView === 'function') {
     window.renderDungeonView();

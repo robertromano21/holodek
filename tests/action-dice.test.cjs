@@ -47,3 +47,37 @@ test('expired player roll does not auto-succeed or consume RNG', async () => {
   assert.equal(dice.snapshot().pending, null);
   dice.end();
 });
+
+test('a hit prompts separately for the original damage die; duplicate clicks cannot reroll it', async () => {
+  const sidesRolled = [];
+  const dice = new ActionDice({ random: sides => { sidesRolled.push(sides); return sides; } });
+  dice.begin('combat', '0,0,0');
+  const attack = dice.roll({ actor: 'Mortacia', player: true, label: 'Attack', modifier: 2, difficulty: 15 });
+  let pending = dice.snapshot().pending;
+  assert.equal(pending.sides, 20);
+  const attackResult = dice.submit(pending.id, pending.actionId, pending.geoKey);
+  assert.equal((await attack).total, 22);
+  const damage = dice.roll({ actor: 'Mortacia', player: true, label: 'Damage', sides: 8, modifier: 3 });
+  pending = dice.snapshot().pending;
+  assert.equal(pending.sides, 8);
+  assert.notEqual(pending.id, attackResult.id);
+  assert.equal(dice.submit(attackResult.id, attackResult.actionId, attackResult.geoKey), attackResult);
+  assert.equal(dice.snapshot().pending.id, pending.id);
+  const damageResult = dice.submit(pending.id, pending.actionId, pending.geoKey);
+  assert.equal((await damage).total, 11);
+  assert.equal(dice.submit(pending.id, pending.actionId, pending.geoKey), damageResult);
+  assert.deepEqual(sidesRolled, [20, 8]);
+  assert.deepEqual(dice.snapshot().results.map(r => r.label), ['Attack', 'Damage']);
+  dice.end();
+});
+
+test('non-d20 NPC damage is published, and invalid die sizes are rejected', async () => {
+  const dice = new ActionDice({ random: sides => sides });
+  dice.begin('combat', '0,0,0');
+  const damage = await dice.roll({ actor: 'Ally', label: 'Damage', sides: 6, modifier: 1 });
+  assert.equal(damage.natural, 6);
+  assert.equal(damage.total, 7);
+  assert.equal(dice.snapshot().results[0].sides, 6);
+  await assert.rejects(dice.roll({ actor: 'PC', sides: 0 }), /Invalid dice/);
+  dice.end();
+});

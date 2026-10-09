@@ -1,4 +1,5 @@
 const EventEmitter = require('events');
+const { randomUUID } = require('node:crypto');
 const sharedStateEmitter = new EventEmitter();
 
 let personalNarrative = "";
@@ -17,6 +18,7 @@ let lastQuestUpdate = "";
 let questLog = [];
 let roomMusicDatabase = {};
 let roomDungeonDatabase = {};   // ← NEW: 3D dungeon per geo-room
+let dungeonRunId = randomUUID();
 
 let lastCoords = { x: 0, y: 0, z: 0 };
 
@@ -37,6 +39,15 @@ let pendingCharacterForReview = null;
 
 module.exports = {
   // --- existing getters/setters ---
+  getDungeonRunId: () => dungeonRunId,
+  beginDungeonRun: () => {
+    dungeonRunId = randomUUID();
+    roomDungeonDatabase = {};
+    roomMusicDatabase = {};
+    lastCoords = { x: 0, y: 0, z: 0 };
+    console.info('[DungeonRunStarted]', JSON.stringify({ runId: dungeonRunId }));
+    return dungeonRunId;
+  },
   getPersonalNarrative: () => personalNarrative,
   setPersonalNarrative: (narrative) => { personalNarrative = narrative; },
   getUpdatedGameConsole: () => updatedGameConsole,

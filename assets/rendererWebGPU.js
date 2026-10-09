@@ -136,7 +136,7 @@ struct TorchParams {
   torchCount : u32,
   spriteVoxelBlend : f32,
   rectCount : u32,
-  _pad0 : u32,
+  viewShift : f32,
   _pad1 : u32,
 };
 
@@ -204,7 +204,7 @@ fn projectTorch(torchPos : vec3<f32>) -> vec3<f32> {
     return vec3<f32>(-10.0, -10.0, transformY);
   }
   let screenX = 0.5 * (1.0 + transformX / transformY);
-  let screenY = 0.5 - ((torchPos.z - params.eyeZ) * params.focalLength / transformY) / params.resolution.y;
+  let screenY = 0.5 + params.viewShift - ((torchPos.z - params.eyeZ) * params.focalLength / transformY) / params.resolution.y;
   return vec3<f32>(screenX, screenY, transformY);
 }
 
@@ -314,7 +314,7 @@ struct WorldParams {
   skyTop : vec4<f32>,
   skyBot : vec4<f32>,
   heightShadowTorch : vec4<f32>,     // heightMin, heightRange, shadowStrength, torchRadiusScale
-  depthFar : vec4<f32>,              // depthFar, padding
+  depthFar : vec4<f32>,              // depthFar, viewShift, padding
   playerGrid : vec4<u32>,            // playerX, playerY, gridW, gridH
   atlasCounts : vec4<u32>,           // atlasCols, atlasRows, maxSteps, torchCount
 };
@@ -995,7 +995,7 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
     return makeWorldOut(vec4<f32>(0.0, 0.0, 0.0, 1.0), params.depthFar.x);
   }
 
-  let horizon = resolution.y * 0.5;
+  let horizon = resolution.y * (0.5 + params.depthFar.y);
   var mapX = i32(floor(params.camPos.x));
   var mapY = i32(floor(params.camPos.y));
   let deltaDistX = abs(1.0 / rayDir.x);
@@ -1170,7 +1170,7 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
         wallDist = perpDist;
         wallHit = true;
       }
-      break;
+      if (wallHit) { break; }
     }
   }
 
@@ -1217,7 +1217,7 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
         fSideDistY = fSideDistY + deltaDistY;
         fMapY = fMapY + stepY;
       }
-      if (!inBounds(fMapX, fMapY) || fetchCell(fMapX, fMapY).w >= 0.5) {
+      if (!inBounds(fMapX, fMapY) || fCurrDist >= wallDist || (sideHit && fCurrDist >= sideDistClosest)) {
         break;
       }
     }
@@ -1423,7 +1423,7 @@ struct TorchParams {
   torchCount : u32,
   spriteVoxelBlend : f32,
   rectCount : u32,
-  _pad0 : u32,
+  viewShift : f32,
   _pad1 : u32,
 };
 
@@ -1450,7 +1450,7 @@ fn projectTorch(torchPos : vec3<f32>) -> vec3<f32> {
     return vec3<f32>(-10.0, -10.0, transformY);
   }
   let screenX = 0.5 * (1.0 + transformX / transformY);
-  let screenY = 0.5 - ((torchPos.z - params.eyeZ) * params.focalLength / transformY) / params.resolution.y;
+  let screenY = 0.5 + params.viewShift - ((torchPos.z - params.eyeZ) * params.focalLength / transformY) / params.resolution.y;
   return vec3<f32>(screenX, screenY, transformY);
 }
 
@@ -2064,7 +2064,10 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         && typeof this.legacyRenderer.hasDynamicCharacterVoxels === 'function'
         && this.legacyRenderer.hasDynamicCharacterVoxels()
       );
-      return this.mode === 'webgpu' && isNativeWorldEnabled() && !legacyHasDynamicActors;
+      // Until the native world pass supports per-cell roofs, present the complete
+      // legacy GPU scene rather than overwriting its ceilings with the sky pass.
+      return this.mode === 'webgpu' && isNativeWorldEnabled() && !legacyHasDynamicActors &&
+        !this.legacyRenderer?.hasRoofs && !this.legacyRenderer?.hasStructures;
     },
 
     _ensureTorchBuffers() {
@@ -2942,7 +2945,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
       dv.setFloat32(104, shadowStrength, true);
       dv.setFloat32(108, torchRadiusScale, true);
       dv.setFloat32(112, depthFar, true);
-      dv.setFloat32(116, 0.0, true);
+      dv.setFloat32(116, Number.isFinite(frame.viewShift) ? Math.max(-.1, Math.min(0, frame.viewShift)) : 0, true);
       dv.setFloat32(120, 0.0, true);
       dv.setFloat32(124, 0.0, true);
       dv.setUint32(128, playerTileX >>> 0, true);
@@ -3071,7 +3074,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         dv.setUint32(44, this._torchCount >>> 0, true);
         dv.setFloat32(48, spriteVoxelBlend, true);
         dv.setUint32(52, this._rectCount >>> 0, true);
-        dv.setUint32(56, 0, true);
+        dv.setFloat32(56, Number.isFinite(frame.viewShift) ? Math.max(-.1, Math.min(0, frame.viewShift)) : 0, true);
         dv.setUint32(60, 0, true);
         this._device.queue.writeBuffer(this._torchParamsBuffer, 0, this._torchParamArrayBuffer);
         this._torchParamsDirty = false;
@@ -3984,6 +3987,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         planeX: frame?.planeX,
         planeY: frame?.planeY,
         eyeZ: frame?.eyeZ,
+        viewShift: frame?.viewShift,
         depthFar: frame?.depthFar,
         minFloor: frame?.minFloor,
         wallUScale: frame?.wallUScale,

@@ -1,5 +1,10 @@
+function roomKey(value) {
+  const numbers = String(value || '').match(/-?\d+/g);
+  return numbers?.length === 3 ? numbers.map(Number).join(',') : null;
+}
+
 function position(actor, geoKey) {
-  if (!actor || actor.mazeRoomKey !== geoKey || !Number.isFinite(actor.mazeX) || !Number.isFinite(actor.mazeY)) return null;
+  if (!actor || !roomKey(geoKey) || roomKey(actor.mazeRoomKey) !== roomKey(geoKey) || !Number.isFinite(actor.mazeX) || !Number.isFinite(actor.mazeY)) return null;
   return { x: actor.mazeX + 0.5, y: actor.mazeY + 0.5 };
 }
 
@@ -41,17 +46,66 @@ function lineClear(dungeon, a, b) {
 
 function createCombatSpace(dungeon, roster, geoKey) {
   const actors = new Map(roster.map(c => [String(c.name || c.Name).toLowerCase(), c]));
-  const point = actor => position(actors.get(String(actor.name || actor.Name).toLowerCase()), geoKey);
+  const entry = actor => actors.get(String(actor.name || actor.Name).toLowerCase());
+  const point = actor => position(entry(actor), geoKey);
   function distance(a, b) {
     const p = point(a), q = point(b);
     return p && q ? Math.hypot(p.x - q.x, p.y - q.y) : Infinity;
   }
-  function canAttack(a, b) {
+  function reachOf(a) {
     const weapon = String(a.equipped?.Weapon || a.equipped?.weapon || '');
-    const reach = /\b(bow|longbow|shortbow|crossbow|sling)\b/i.test(weapon) ? 8 : /\b(spear|pike|halberd)\b/i.test(weapon) ? 2 : 1.5;
-    return distance(a, b) <= reach && lineClear(dungeon, point(a), point(b));
+    return /\b(bow|longbow|shortbow|crossbow|sling)\b/i.test(weapon) ? 8 : /\b(spear|pike|halberd)\b/i.test(weapon) ? 2 : 1.5;
   }
-  return { distance, canAttack };
+  function canAttackFrom(a, p, b) {
+    const q = point(b);
+    return p && q && Math.hypot(p.x - q.x, p.y - q.y) <= reachOf(a) && lineClear(dungeon, p, q);
+  }
+  const canAttack = (a, b) => !!canAttackFrom(a, point(a), b);
+  function setHealth(combatants) {
+    combatants.forEach(actor => { const c = entry(actor); if (c) c.hp = actor.hp; });
+  }
+  function syncRoster(list) {
+    list.forEach(actor => {
+      const c = entry(actor);
+      if (!position(c, geoKey)) return;
+      Object.assign(actor, { mazeX: c.mazeX, mazeY: c.mazeY, mazeRoomKey: c.mazeRoomKey, hp: c.hp });
+    });
+    return list;
+  }
+  // Find an attack position in maze space, never in the rotated screen-space combat grid.
+  function pursuitPath(a, b, maxSteps = Infinity) {
+    const p = point(a), q = point(b);
+    if (!p || !q || canAttack(a, b)) return [];
+    const blocked = new Set([...actors.values()].filter(c => c !== entry(a) && (c.hp ?? 1) > 0 && position(c, geoKey))
+      .map(c => `${c.mazeX},${c.mazeY}`));
+    const start = { x: Math.floor(p.x), y: Math.floor(p.y), parent: null };
+    const queue = [start], seen = new Set([`${start.x},${start.y}`]);
+    for (let i = 0; i < queue.length && i < 4096; i++) {
+      const current = queue[i];
+      if (canAttackFrom(a, { x: current.x + 0.5, y: current.y + 0.5 }, b)) {
+        const path = [];
+        for (let node = current; node.parent; node = node.parent) path.unshift({ x: node.x, y: node.y });
+        return path.slice(0, maxSteps);
+      }
+      for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
+        const x = current.x + dx, y = current.y + dy, key = `${x},${y}`;
+        if (seen.has(key) || blocked.has(key)) continue;
+        const from = dungeon.cells[`${current.x},${current.y}`], to = dungeon.cells[key];
+        if (solid(to) || Math.abs((to.floorHeight || 0) - (from?.floorHeight || 0)) > 1.5 ||
+            (to.ceilHeight ?? Infinity) - (to.floorHeight || 0) <= 0.65) continue;
+        seen.add(key);
+        queue.push({ x, y, parent: current });
+      }
+    }
+    return [];
+  }
+  function move(a, step) {
+    const c = entry(a);
+    if (!c || !position(c, geoKey)) return false;
+    c.mazeX = step.x; c.mazeY = step.y;
+    return true;
+  }
+  return { distance, canAttack, point, pursuitPath, move, syncRoster, setHealth };
 }
 
-module.exports = { position, solid, lineClear, createCombatSpace };
+module.exports = { roomKey, position, solid, lineClear, createCombatSpace };

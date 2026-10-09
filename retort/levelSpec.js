@@ -221,8 +221,11 @@ function buildMessages(input, problems) {
     '— the renderer assembles a figure from those options, so choose combinations that match the words (e.g. cracked sandstone arch -> kit:arch,',
     'state:cracked, material:sandstone, ornament:cracks). Also pick room-wide wallStyle and floorTreat. Strong hex colours from the words.',
     'Non-physical text (lore, quotes, abstract mood) must be ignored. Named characters are NOT props.',
+    'An environmentIntent is an earlier planning cue, not permission to replace the room description or an existing building. Use its architecture and physical features where consistent with the text.',
+    'Quest constructionTasks are read-only, bound to this exact location. Give their existing actions appropriate reachable space, such as a ritual court, inscribed monument, gate or engagement area. Never duplicate quest inventory objects or actors as scenery, move targets, invent prerequisites, complete tasks, unlock doors or award rewards. Existing engine adjudication owns success.',
     'Respond with ONE JSON object with exactly these keys:', JSON.stringify(SCHEMA)].join(' ');
-  const msgs = [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ roomName: input.roomName, description: input.description, puzzle: input.puzzle }) }];
+  const msgs = [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ roomName: input.roomName, description: input.description, puzzle: input.puzzle,
+    environmentIntent: input.environmentIntent || null, questContext: input.questContext || null }) }];
   if (problems && problems.length) msgs.push({ role: 'user', content: 'Your previous answer failed validation: ' + problems.join('; ') + '. Return a corrected JSON object.' });
   return msgs;
 }
@@ -255,7 +258,7 @@ function scheduleBackgroundRetry(key, input, delay = 30000) {
 
 /** Level spec for the room text: cached LLM spec, else a fresh LLM call, else the deterministic parser. */
 async function getLevelSpec(input = {}) {
-  const key = hash(`${LEVEL_SPEC_VERSION}|${input.roomName || ''}|${input.description || ''}|${input.puzzle || ''}`);
+  const key = hash(`${LEVEL_SPEC_VERSION}|${input.roomName || ''}|${input.description || ''}|${input.puzzle || ''}|${JSON.stringify(input.environmentIntent || null)}|${JSON.stringify(input.questContext || null)}`);
   const c = loadCache();
   if (c[key] && c[key].source === 'llm') return { ...c[key].spec, source: 'llm', key };
   const spec = await callModel(input).catch(() => null);
