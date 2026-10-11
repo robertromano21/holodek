@@ -38,6 +38,26 @@ test('named flat plains, wetlands and urban rooms retain their geographic charac
   assert.equal(T.plan({ ...spec('x'), indoor: true }), null);
   assert.equal(T.plan({ indoor: false }), null);
 });
+
+test('metaphorical harbors and capacity do not misclassify wastelands as low-relief cities', () => {
+  for (const description of ['The ground beneath harbors silent, shifting fragments of smashed trust.',
+    'The dunes have a vast capacity to swallow lost travelers.']) {
+    const p = T.plan(spec('false-urban', description));
+    assert.equal(p.profile, 'wasteland');
+    assert.ok(p.features.length >= 5);
+  }
+  assert.equal(T.plan(spec('real-harbor', 'A harbor with quays and moored boats.')).profile, 'urban');
+});
+
+test('explicit flats keep their theme without a temple exterior changing the terrain plan', () => {
+  const s = spec('echoing-flats', 'This vast flatland is a memory palace. The ground beneath harbors silent fragments; to tread here is to dance on thin ice.');
+  s.source.roomName = 'The Echoing Flats';
+  const ordinary = T.plan(s), withTemple = T.plan({ ...s, exteriorPlan: { buildings: [{ targetName: 'Ruined Temple Entrance' }] },
+    worldContext: { neighbors: [{ name: 'Ruined Temple Entrance', indoor: true }] } });
+  assert.equal(ordinary.profile, 'flat');
+  assert.deepEqual(withTemple, ordinary);
+  assert.equal(T.plan({ ...s, source: { roomName: 'The Salt Flats', description: 'An expanse of ash.' } }).profile, 'flat');
+});
 test('real blueprint and fallback builders use the new heightfield, preserve safe spawn and do not mutate source plans', () => {
   const source = fs.readFileSync(require.resolve('../retort/retortWithUserInput'), 'utf8');
   const context = { Math, DungeonGeneration: G, OutdoorTerrain: T, BlueprintPillars: require('../retort/blueprintPillars'), console: { info() {}, log() {}, warn() {}, error() {} } };

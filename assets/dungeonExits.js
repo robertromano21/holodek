@@ -68,7 +68,7 @@
       landmark: { type: 'exit_marker', label: 'Journey threshold' } };
     dungeon.sceneStructures = (dungeon.sceneStructures || []).filter(p => p.role !== 'journey-exit-marker');
     for (const marker of markers) dungeon.sceneStructures.push({ role: 'journey-exit-marker', shape: 'exit_marker', tile: 'journey_exit_marker',
-      direction: marker.direction, position: { x: marker.x + 0.05, y: marker.y + 0.05, z: marker.floor + 0.01 }, size: { x: 0.9, y: 0.9, z: 0.06 } });
+      direction: marker.direction, position: { x: marker.x + 0.05, y: marker.y + 0.05, z: marker.floor + 0.05 }, size: { x: 0.9, y: 0.9, z: 0.4 } });
     dungeon.roomExits = { version: 1, signature, status: missing.length ? 'partial' : 'built', markers, missing, reachable: count };
     cache.set(dungeon, { signature, stamp });
     return dungeon.roomExits;

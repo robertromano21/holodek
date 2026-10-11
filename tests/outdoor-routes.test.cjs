@@ -3,7 +3,7 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { ensureContinuation } = require('../assets/outdoorRoutes');
+const { ensureContinuation, displayName } = require('../assets/outdoorRoutes');
 
 const OFFSETS = {
   north: [0, 1, 0], northeast: [1, 1, 0], east: [1, 0, 0], southeast: [1, -1, 0],
@@ -484,7 +484,7 @@ test('safe outdoor biomes inherit; indoor or unsupported biomes fall back to was
   }
 });
 
-test('seeded routes and names are deterministic and coordinate-unique', () => {
+test('seeded routes and readable names are deterministic and varied without exposing coordinate keys', () => {
   const left = { '0,0,0': outdoor() }, right = { '0,0,0': outdoor() };
   assert.deepEqual(ensureContinuation(left, origin, [], { seed: 'repeatable' }), ensureContinuation(right, origin, [], { seed: 'repeatable' }));
   assert.equal(snapshot(left), snapshot(right));
@@ -493,9 +493,27 @@ test('seeded routes and names are deterministic and coordinate-unique', () => {
     const db = { [`${x},0,0`]: outdoor() }, result = ensureContinuation(db, { x, y: 0, z: 0 }, [], { seed: 'repeatable' });
     const name = db[result.targetKey].name;
     assert.match(name, /Wasteland/);
+    assert.doesNotMatch(name, /[0-9]|[()]/);
     assert.equal(names.has(name), false);
     names.add(name);
   }
+});
+
+test('legacy reach names display without IDs while unrelated names and coordinate fields stay intact', () => {
+  const input = 'east: Sundered Wasteland Reach 31fe937a (1,-2,0) (blocked), southeast: Hollow Wasteland Reach a16fdb5d (1,-3,0)';
+  assert.equal(displayName(input), 'east: Sundered Wasteland Reach (blocked), southeast: Hollow Wasteland Reach');
+  assert.equal(displayName('Coordinates: X: 1, Y: -3, Z: 0'), 'Coordinates: X: 1, Y: -3, Z: 0');
+  assert.equal(displayName('Tower 7 (The Last Watch)'), 'Tower 7 (The Last Watch)');
+  const game = fs.readFileSync(path.join(__dirname, '../assets/game.js'), 'utf8');
+  const roomLine = game.match(/^\s*const roomName = window\.OutdoorRoutes[^\r\n]*/m)[0];
+  const adjacentLine = game.match(/^\s*const adjacentRooms = window\.OutdoorRoutes[^\r\n]*/m)[0];
+  const data = { roomName: 'Hollow Wasteland Reach a16fdb5d (1,-3,0)', adjacentRooms: input, coordinates: 'X: 1, Y: -3, Z: 0' };
+  const original = structuredClone(data);
+  const context = { data, window: { OutdoorRoutes: { displayName } } };
+  vm.runInNewContext(`${roomLine}\n${adjacentLine}\nwindow.rendered = { roomName, adjacentRooms };`, context);
+  assert.equal(context.window.rendered.roomName, 'Hollow Wasteland Reach');
+  assert.equal(context.window.rendered.adjacentRooms, displayName(input));
+  assert.deepEqual(data, original);
 });
 
 test('100-room linear exploration grows one minimal stub per step with no database scans or circuits', () => {

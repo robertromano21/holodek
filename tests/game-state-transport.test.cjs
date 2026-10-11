@@ -113,10 +113,11 @@ test('new games have separate dungeon caches while revisits retain the current g
   const second = shared.beginDungeonRun();
   assert.notEqual(first, second); assert.equal(shared.getRoomDungeon(coords), null);
   const storage = new Map(), accessed = [];
-  const context = { window: { dungeonRunId: first }, DUNGEON_STORE: 'rooms', openDungeonDB: async () => ({
+  const context = { window: { dungeonRunId: first }, DUNGEON_STORE: 'rooms', DUNGEON_INHABITANTS_STORE: 'inhabitants', openDungeonDB: async () => ({
     transaction() {
-      const transaction = { objectStore() { return {
-        get(key) { accessed.push(key); const req = { result: storage.get(key) }; queueMicrotask(() => req.onsuccess()); return req; },
+      const transaction = { objectStore(name) { return {
+        get(key) { if (name === 'rooms') accessed.push(key); const req = { result: storage.get(name === 'rooms' ? key : name + key) };
+          queueMicrotask(() => transaction.oncomplete?.()); return req; },
         put(value, key) { storage.set(key, value); queueMicrotask(() => transaction.oncomplete()); }
       }; } };
       return transaction;

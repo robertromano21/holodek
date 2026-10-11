@@ -11,11 +11,13 @@ class ActionDice {
     this.results = new Map();
     this.revision = 0;
     this.epoch = randomUUID();
+    this.paused = false;
+    this.resumeWaiters = [];
   }
 
   snapshot() {
     return {
-      type: 'dice_state', epoch: this.epoch, revision: this.revision,
+      type: 'dice_state', epoch: this.epoch, revision: this.revision, paused: this.paused,
       active: this.active && { id: this.active.id, kind: this.active.kind, geoKey: this.active.geoKey },
       pending: this.pending?.request || null,
       results: [...this.results.values()]
@@ -25,6 +27,28 @@ class ActionDice {
   publish() {
     this.revision++;
     this.active?.broadcast(this.snapshot());
+  }
+
+  setPaused(value) {
+    if (this.paused === value) return;
+    this.paused = value;
+    if (this.pending) {
+      if (value) {
+        this.pending.remaining = Math.max(1, this.pending.request.expiresAt - Date.now());
+        clearTimeout(this.pending.timer);
+        this.pending.request.expiresAt = null;
+      } else {
+        this.pending.request.expiresAt = Date.now() + this.pending.remaining;
+        this.pending.timer = setTimeout(() => this.finish(null), this.pending.remaining);
+        this.pending.timer.unref?.();
+      }
+    }
+    if (!value) this.resumeWaiters.splice(0).forEach(resolve => resolve());
+    this.publish();
+  }
+
+  waitUntilResumed() {
+    return this.paused ? new Promise(resolve => this.resumeWaiters.push(resolve)) : Promise.resolve();
   }
 
   begin(kind, geoKey, broadcast = () => {}) {
@@ -39,11 +63,16 @@ class ActionDice {
     if (this.pending) this.finish(null);
     const broadcast = this.active.broadcast;
     this.active = null;
+    this.resumeWaiters.splice(0).forEach(resolve=>resolve());
     this.revision++;
     broadcast(this.snapshot());
   }
 
   async roll({ actor, player = false, label, target = '', modifier = 0, difficulty = null, sides = 20 }) {
+    const action = this.active;
+    if (!action || this.pending) throw new Error('Invalid dice action state.');
+    if (this.paused) await this.waitUntilResumed();
+    if (this.active !== action) return null;
     if (!this.active || this.pending) throw new Error('Invalid dice action state.');
     if (!Number.isInteger(sides) || sides < 2 || sides > 1000 || !Number.isFinite(modifier) || (difficulty !== null && !Number.isFinite(difficulty))) {
       throw new Error('Invalid dice modifiers.');
@@ -56,7 +85,8 @@ class ActionDice {
       const result = this.makeResult(request);
       this.publish();
       if (this.animationMs > 0) await new Promise(resolve => setTimeout(resolve, this.animationMs));
-      return result;
+      await this.waitUntilResumed();
+      return this.active===action ? result : null;
     }
     return new Promise(resolve => {
       const timer = setTimeout(() => this.finish(null), this.timeoutMs);
@@ -76,6 +106,7 @@ class ActionDice {
   }
 
   submit(id, actionId, geoKey) {
+    if (this.paused) throw new Error('Resume the game before rolling.');
     const previous = this.results.get(id);
     if (previous && previous.actionId === actionId && previous.geoKey === geoKey) return previous;
     const request = this.pending?.request;

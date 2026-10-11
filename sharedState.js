@@ -19,6 +19,11 @@ let questLog = [];
 let roomMusicDatabase = {};
 let roomDungeonDatabase = {};   // ← NEW: 3D dungeon per geo-room
 let dungeonRunId = randomUUID();
+let roomPopulations = new Map();
+let gamePaused = false;
+let dialogueMemory = { characters: {}, recent: [] };
+let campaignMemory = { version: 1, runId: dungeonRunId, records: [], sequence: 0 };
+let lastAdjudication = null;
 
 let lastCoords = { x: 0, y: 0, z: 0 };
 
@@ -44,11 +49,26 @@ module.exports = {
     dungeonRunId = randomUUID();
     roomDungeonDatabase = {};
     roomMusicDatabase = {};
+    roomPopulations.clear();
+    gamePaused = false;
+    liveWorldState = null;
+    npcAutonomyFeed = [];
+    dialogueMemory = { characters: {}, recent: [] };
+    campaignMemory = { version: 1, runId: dungeonRunId, records: [], sequence: 0 };
+    lastAdjudication = null;
     lastCoords = { x: 0, y: 0, z: 0 };
     console.info('[DungeonRunStarted]', JSON.stringify({ runId: dungeonRunId }));
     return dungeonRunId;
   },
   getPersonalNarrative: () => personalNarrative,
+  getGamePaused: () => gamePaused,
+  getDialogueMemory: () => dialogueMemory,
+  getCampaignMemory: () => campaignMemory,
+  getLastAdjudication: () => lastAdjudication && structuredClone(lastAdjudication),
+  setLastAdjudication: value => { lastAdjudication = value && typeof value === 'object' ? structuredClone(value) : null; },
+  setGamePaused: value => { gamePaused = value === true; },
+  getRoomPopulation: key => roomPopulations.get(key) || null,
+  setRoomPopulation: (key, value) => { roomPopulations.set(key, value); },
   setPersonalNarrative: (narrative) => { personalNarrative = narrative; },
   getUpdatedGameConsole: () => updatedGameConsole,
   setUpdatedGameConsole: (consoleData) => { updatedGameConsole = consoleData; },
@@ -135,6 +155,7 @@ module.exports = {
   getQuestLog: () => questLog.slice(-50),
   clearQuestLog: () => { questLog = []; },
   resetQuestState: () => {
+    lastAdjudication = null;
     console.log('Resetting quest state.');
     currentTasks = [];
     currentTaskIndex = 0;
@@ -177,6 +198,7 @@ module.exports = {
     sharedStateEmitter.emit('music:roomUpdate', { coords: key, music: musicJson });
   },
   // UPDATED: DUNGEON DATABASE (with customTiles support)
+  getRoomDungeonForSimulation: (coords) => coords ? roomDungeonDatabase[`${coords.x},${coords.y},${coords.z}`] || null : null,
   getRoomDungeon: (coords) => {
     if (!coords || typeof coords !== 'object') return null;
     const key = `${coords.x},${coords.y},${coords.z}`;

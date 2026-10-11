@@ -29,7 +29,7 @@ function buildInitialWorldConsole(state = {}) {
   return { console: text.trim(), roomNameDatabaseString: JSON.stringify(database) };
 }
 
-function formatStartingCharacterSheet(character = {}, indentation = 6) {
+function formatStartingCharacterSheet(character = {}, indentation = 6, type = 'pc') {
   const value = (upper, lower, fallback) => character[upper] ?? character[lower] ?? fallback;
   const equipped = character.Equipped || character.equipped || {};
   const hp = value('HP', 'hp', 0);
@@ -40,13 +40,14 @@ function formatStartingCharacterSheet(character = {}, indentation = 6) {
     `Level: ${value('Level', 'level', 1)}`, `AC: ${value('AC', 'ac', 10)}`,
     `XP: ${value('XP', 'xp', 0)}`, `HP: ${hp}`, `MaxHP: ${value('MaxHP', 'maxHP', hp)}`,
     `Equipped: ${['Weapon', 'Armor', 'Shield', 'Other'].map(slot => `${slot}: ${equipped[slot] || 'None'}`).join(', ')}`,
-    ...['Attack', 'Damage', 'Armor', 'Magic'].map(stat => `${stat}: ${value(stat, stat.toLowerCase(), 0)}`)
+    ...['Attack', 'Damage', 'Armor', 'Magic'].map(stat => `${stat}: ${value(stat, stat.toLowerCase(), 0)}`),
+    `State: ${Number(hp) <= 0 ? 'Dead' : type === 'pc' ? 'Alive' : 'Friendly'}`
   ].map((line, index) => index ? ' '.repeat(indentation) + line : line).join('\n');
 }
 
 function buildInitialGameConsole(worldConsole, character, party = []) {
   const sheets = `PC:\n${formatStartingCharacterSheet(character)}\nNPCs in Party: ${party.length
-    ? party.map(member => formatStartingCharacterSheet(member, 8)).join('\n') : 'None'}\n`;
+    ? party.map(member => formatStartingCharacterSheet(member, 8, 'npc')).join('\n') : 'None'}\n`;
   // Keep PC -> NPCs -> monsters in the order used by the console's section parsers.
   return worldConsole.replace(/^Monsters in Room:/m, () => sheets + 'Monsters in Room:');
 }

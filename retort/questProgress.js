@@ -8,7 +8,7 @@ const PHASES = { hard: 'hardRequirements', action: 'actionRequirements' };
 const SUPPORTED = { hard: ['at_coords', 'inventory_contains', 'monster_hp_zero'],
   action: ['exit_open', 'monster_hp_zero'] };
 const SECTION = /^(?:PC|NPCs(?: in Party)?|Monsters in Room|Monsters Equipped Properties|Monsters State|Objects in Room(?: Properties)?|Rooms Visited|Inventory(?: Properties)?|Room Name|Room Description|Coordinates(?: of Connected Rooms)?|Exits|Adjacent Rooms|Score|Turns|Puzzle in Room|Puzzle Solution|Artifacts Found|Quests Achieved|Next Artifact|Next Boss(?: Room)?|Boss Room Coordinates|Current Quest|Party Status):/i;
-const STAT = /^(?:Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic):/i;
+const STAT = /^(?:Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic|State):/i;
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validName = value => typeof value === 'string' && value.trim().length > 0 &&
   !/[\r\n]/.test(value) && !/^(?:none|empty)$/i.test(value.trim());
@@ -131,8 +131,10 @@ function checkMonster(task, name, currentRoomKey, consoleText, database) {
   }
   // A malformed or ambiguous live sheet must not be overridden by a stale DB kill.
   if (!result || ['missing_monsters_section', 'monster_not_found'].includes(result.reason)) {
-    result = monsterHp(roomAt(database, placement)?.monsters?.consoleBlock, name, true);
-    source = 'database.monsters.consoleBlock';
+    const monsters = roomAt(database, placement)?.monsters;
+    const hasCurrentSheets = typeof monsters?.inRoom === 'string' && /(?:^|\n)\s*(?:Level|HP|Magic):/m.test(monsters.inRoom);
+    result = monsterHp(hasCurrentSheets ? monsters.inRoom : monsters?.consoleBlock, name, true);
+    source = hasCurrentSheets ? 'database.monsters.inRoom' : 'database.monsters.consoleBlock';
   }
   return { passed: result.hp === null ? null : result.hp <= 0,
     evidence: { source, roomKey: placement, monster: name, hp: result.hp, reason: result.reason } };
@@ -264,4 +266,54 @@ function taskBinding(task) {
   const identity = Object.fromEntries(Object.entries(task).filter(([key]) => key !== 'status' && key !== 'progress'));
   return JSON.stringify(snapshot(identity));
 }
-module.exports = { evaluateTaskRequirements, mergeTaskProgress, taskBinding };
+function normalizeDefeatTask(task) {
+  if (!isRecord(task) || task.status === 'Completed' || String(task.type).toLowerCase() !== 'defeat' ||
+      task.actionKind !== 'defeat_monster' || !Array.isArray(task.requiredElements) || !task.requiredElements.length ||
+      !task.requiredElements.every(e => e?.type === 'monster' && validName(e.name) && coordKey(e.placement))) return task;
+  if (task.hardRequirements !== undefined && !Array.isArray(task.hardRequirements) ||
+      task.actionRequirements !== undefined && !Array.isArray(task.actionRequirements)) return task;
+  const names = [...new Set(task.requiredElements.map(e => e.name.trim()))];
+  if (names.some(name => !monsterBinding(task, name))) return task;
+  const checks = [...(task.hardRequirements || []), ...(task.actionRequirements || [])];
+  if (checks.some(r => !['at_coords', 'monster_hp_zero'].includes(r?.check))) return task;
+  if (checks.some(r => r.check === 'monster_hp_zero' ? !validName(r.value) || !names.includes(r.value.trim()) :
+      !task.requiredElements.some(e => coordKey(e.placement) === coordKey(r.value)))) return task;
+  const hardRequirements = names.map(value => ({ check: 'monster_hp_zero', value }));
+  if (JSON.stringify(task.hardRequirements) === JSON.stringify(hardRequirements) && !task.actionRequirements?.length) return task;
+  const next = { ...task, hardRequirements, actionRequirements: [] };
+  // Legacy coordinate/duplicate check IDs cannot be reused for the new per-target counters.
+  delete next.progress;
+  return next;
+}
+
+function refreshCombatQuestProgress(state, consoleText) {
+  const storedTasks = state.getCurrentTasks?.(), index = state.getCurrentTaskIndex?.() ?? 0;
+  if (!Array.isArray(storedTasks) || !Number.isInteger(index) || index < 0 || index > 2 || !storedTasks[index] ||
+      typeof consoleText !== 'string') return consoleText;
+  const tasks = storedTasks.slice();
+  const task = { ...(index < 2 ? normalizeDefeatTask(tasks[index]) : tasks[index]) };
+  let database;
+  try { database = JSON.parse(state.getRoomNameDatabase?.() || '{}'); } catch { return consoleText; }
+  const roomKey = consoleText.match(/^Coordinates:[ \t]*([^\r\n]*)/m)?.[1];
+  const assessment = evaluateTaskRequirements(task, { roomKey, consoleText, database });
+  task.progress = mergeTaskProgress(task.progress, assessment);
+  const pureDefeat = index < 2 && String(task.type).toLowerCase() === 'defeat' && task.actionKind === 'defeat_monster' &&
+    task.progress.total > 0 && Array.isArray(task.requiredElements) &&
+    task.requiredElements.every(e => e?.type === 'monster' && validName(e.name) && monsterBinding(task, e.name.trim())) &&
+    assessment.checks.every(c => c.requirement?.check === 'monster_hp_zero');
+  if (pureDefeat && task.progress.eligible && task.status !== 'Completed') {
+    task.status = 'Completed';
+    state.setCurrentTaskIndex(index + 1);
+    state.setQuestSeeded(false);
+    state.setLastQuestUpdate?.(`Task completed: ${task.desc}`);
+    state.appendQuestLog?.({ update: `Task completed: ${task.desc}`, currentTaskIndex: index + 1 });
+  } else if (task.status !== 'Completed') task.status = 'In Progress';
+  tasks[index] = task;
+  state.setCurrentTasks(tasks);
+  const text = `Step ${index + 1}/3: ${task.status}; ${task.progress.satisfied}/${task.progress.total} requirements verified. ${task.desc || ''}`;
+  const next = /^Quest Progress:/m.test(consoleText) ? consoleText.replace(/^Quest Progress:[^\r\n]*/m, `Quest Progress: ${text}`) :
+    consoleText.replace(/^Current Quest:[^\r\n]*/m, line => `${line}\nQuest Progress: ${text}`);
+  state.setUpdatedGameConsole(next);
+  return next;
+}
+module.exports = { evaluateTaskRequirements, mergeTaskProgress, taskBinding, normalizeDefeatTask, refreshCombatQuestProgress };

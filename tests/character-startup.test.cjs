@@ -7,6 +7,8 @@ const { start } = require('../assets/characterStartup');
 const { buildInitialWorldConsole, buildInitialGameConsole, formatStartingCharacterSheet } = require('../retort/initialGameState');
 const { sceneInputFromConsole } = require('../retort/sceneSpec');
 const { parseSheets } = require('../assets/partyRoster');
+const Inhabitants = require('../assets/dungeonInhabitants');
+const characterState = (character, type = 'monster', fallback = 'Neutral') => Inhabitants.state({ ...character, type }, fallback);
 const { templateContent } = require('../node_modules/retort-js/dist/message.js');
 const root = path.join(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
@@ -52,6 +54,44 @@ test('Save waits for the accepted startup task and applies its result once', asy
   assert.ok(requests.every(r => r.url === '/startGameWithCharacter' || r.url === '/poll-task2/start-1'));
 });
 
+test('finalized character metadata cannot trigger the combat early return before dungeon construction', async () => {
+  const source = read('retort/retortWithUserInput.js');
+  const begin = source.indexOf('  const isAutoSimAdvance =', source.indexOf('async function retortWithUserInput('));
+  const end = source.indexOf('  const dungeonTestingMode =', begin);
+  const combatBegin = source.indexOf('if (userInput.toLowerCase().includes("attack") && monstersInRoom', end);
+  const combatEnd = source.indexOf('let outcomes =', combatBegin);
+  assert.ok(begin >= 0 && end > begin && combatBegin > end && combatEnd > combatBegin);
+  const character = { Name: 'Mortacia', HP: 131, Attack: 0, Equipped: { Weapon: null },
+    sprite: { dataUrl: 'data:selected-art', spec: { pose: 'attack_slash_female', notes: 'Ready to attack' } } };
+  const cases = [
+    { input: '__START_WITH_CHARACTER__' + JSON.stringify(character), combat: false, startup: true },
+    { input: 'attack the guardian', combat: true },
+    { input: 'look', combat: false }
+  ];
+  for (const scenario of cases) {
+    let selected, rounds = 0, constructed = 0;
+    const context = { console: quiet, $: {}, sharedState: {
+      setCurrentPC: value => { selected = value; }, getCombatCharactersString: () => '[]', getRoomNameDatabase: () => '{}'
+    }, handleCombatRound: async () => { rounds++; return { combatLog: 'A real attack.' }; } };
+    // Evaluate against the same isolated globals used by the real startup/attack blocks.
+    const sandbox = { ...context, recordConstruction: () => { constructed++; } };
+    vm.runInNewContext(`async function runStartup(userInput) {
+      ${source.slice(begin, end)}
+      const monstersInRoom = 'Nyxithra\\nHP: 22\\nState: Friendly', updatedGameConsole = 'Original console', roomNameDatabaseString = '{}';
+      const combatMode = 'Combat Map-Based'; let combatLog = '';
+      ${source.slice(combatBegin, combatEnd)}
+      recordConstruction(); return { isAutoSimAdvance, userInput };
+    }`, sandbox);
+    const result = await sandbox.runStartup(scenario.input);
+    assert.equal(rounds, scenario.combat ? 1 : 0);
+    assert.equal(constructed, scenario.combat ? 0 : 1);
+    if (scenario.startup) {
+      assert.deepEqual(JSON.parse(JSON.stringify(selected)), character);
+      assert.equal(result.userInput, ''); assert.equal(result.isAutoSimAdvance, false);
+    }
+  }
+});
+
 test('startup task and request failures surface without submitting another command', async () => {
   let applied = false;
   const responses = [{ ok: true, taskId: 'failed' }, { ok: true, status: 'error', result: 'Undefined passed to retort template' }];
@@ -79,11 +119,11 @@ test('startup sheets preserve preset names, zero stats, and legacy section bound
   const text = buildInitialGameConsole(buildInitialWorldConsole().console, character, [{ Name: 'Suzerain', HP: 24 }]);
   const pc = text.match(/PC:(.*?)(?=NPCs in Party:|$)/s)[1].trim().split('\n').map(line => line.trim());
   const npcs = text.match(/NPCs in Party:(.*?)(?=Monsters in Room:|$)/s)[1].trim().split('\n').map(line => line.trim());
-  assert.equal(pc.length, 14);
+  assert.equal(pc.length, 15);
   assert.deepEqual(pc.slice(0, 4), ['Mortacia', 'Female', 'Goddess', 'Assassin']);
   assert.equal(pc[7], 'HP: 0');
   assert.equal(pc[8], 'MaxHP: 120');
-  assert.equal(npcs.length, 14);
+  assert.equal(npcs.length, 15);
   assert.equal(npcs[0], 'Suzerain');
   assert.doesNotMatch(text, /undefined|\[object Object\]/);
 });
@@ -177,7 +217,7 @@ test('startup runs the complete console updater; dialogue retains monsters, equi
   const initial = buildInitialGameConsole(world, { ...startingCharacter, HP: 128, MaxHP: 128 }, [{ ...npc, Level: 3, HP: 10, MaxHP: 12 }]);
   const logs = [];
   const context = {
-    console: { ...quiet, info: (...args) => logs.push(args) }, window: {},
+    console: { ...quiet, info: (...args) => logs.push(args) }, window: { DungeonInhabitants: Inhabitants }, characterState,
     coordinatesToString: c => `${c.x},${c.y},${c.z}`, roomConversationHistories: {},
     visitedRooms: new Set(), unvisitedRooms: new Set(), roomConnections: {},
     monstersInVisitedRooms: new Map(), monstersEquippedPropertiesByRoom: new Map(), monstersStateByRoom: new Map(),
@@ -241,6 +281,7 @@ test('real room/puzzle helper accepts missing monsters using Retort template val
   const room = buildInitialWorldConsole().console.replace(/^Monsters in Room:.*\n?/m, '');
   const context = {
     console: quiet, updatedGameConsole: room, roomNameDatabaseString: '{}',
+    gameConsoleForPerception: () => Inhabitants.perceivedConsole(context.updatedGameConsole, []),
     ...require('../retort/worldContext'),
     ...require('../retort/environmentIntents'),
     ...require('../retort/bossGate'),
@@ -275,6 +316,7 @@ function roomPopulationHarness(room, database = {}, options = {}) {
   const agent = { user: tag, assistant, run: callback => callback(agent) };
   const context = {
     console: { ...quiet, info: (...args) => logs.push(args) }, updatedGameConsole: room, roomNameDatabaseString: JSON.stringify(database),
+    gameConsoleForPerception: () => Inhabitants.perceivedConsole(context.updatedGameConsole, []),
     parseSheets, Math: Object.assign(Object.create(Math), { random: options.random || Math.random }),
     ...require('../retort/worldContext'), ...require('../retort/environmentIntents'), ...require('../retort/bossGate'),
     coordinatesToString: c => `${c.x},${c.y},${c.z}`,
@@ -330,7 +372,7 @@ test('startup serializes PC and all six NPCs exactly like the original game.js s
   const npcTemplate = source.slice(source.indexOf('// Create a string representing NPCs and Mortacia'), source.indexOf('// Helper function to parse the Equipped string into an object'));
   const [pc, ...party] = sevenStartingCharacters();
   const original = vm.runInNewContext(`${pcTemplate}\n${npcTemplate}\n({ charactersString, npcsString });`, {
-    characters: [structuredClone(pc)], npcs: structuredClone(party)
+    characters: [structuredClone(pc)], npcs: structuredClone(party), characterState
   });
   const text = buildInitialGameConsole(buildInitialWorldConsole().console, pc, party);
   const sheets = text.match(/PC:[\s\S]*?(?=Monsters in Room:)/)[0];
@@ -588,7 +630,7 @@ test('server startup seeds a complete world and releases its lock after a task e
   const context = {
     app: { post: (url, handler) => routes.set(url, handler) }, inputTaskInFlight: false, tasks,
     console: quiet, broadcast() {}, roomDatabaseReceiver: { reset() {} }, buildInitialWorldConsole, buildInitialGameConsole,
-    actionDice: { end() { values.diceEnded = true; } },
+    actionDice: { end() { values.diceEnded = true; }, setPaused(value) { assert.equal(value, false); } },
     sharedState: {
       getCombatMode: () => 'Combat Map-Based', beginDungeonRun: () => 'new-run', setCurrentPC() {},
       setCharacterGenerationInProgress() {}, setPendingCharacterForReview() {}, setCombatCharactersString() {},

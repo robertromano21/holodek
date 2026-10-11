@@ -69,7 +69,7 @@ function chooseArchitecture(spec = {}) {
 }
 
 function walkable(cell) {
-  return !!cell && (cell.tile === 'floor' || (cell.tile === 'door' && !cell.door?.locked));
+  return !!cell && !cell.blocked && !cell.obstacle && (cell.tile === 'floor' || (cell.tile === 'door' && !cell.door?.locked));
 }
 
 function makeNavigation(dungeon) {

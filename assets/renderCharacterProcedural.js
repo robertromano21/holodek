@@ -176,6 +176,7 @@
     const freeFields = ['name', 'sex', 'race', 'class'];
     for (const line of lines) {
       if (!line) continue;
+      if (/^State:/i.test(line) && cur) { cur.state = line.split(':')[1].trim(); continue; }
       if (SHEET_STAT_KEYS.test(line)) {
         if (!cur) continue;
         cur._stats = true;
@@ -212,7 +213,7 @@
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i];
       const trimmed = raw.trim();
-      if (i > 0 && /^\S/.test(raw) && /^[A-Za-z][A-Za-z ]{1,40}:/.test(trimmed) && !SHEET_STAT_KEYS.test(trimmed)) break;
+      if (i > 0 && /^\S/.test(raw) && /^[A-Za-z][A-Za-z ]{1,40}:/.test(trimmed) && !SHEET_STAT_KEYS.test(trimmed) && !/^State:/i.test(trimmed)) break;
       out.push(raw);
     }
     return out.join('\n');
@@ -233,7 +234,7 @@
     const props = parseEquippedProperties(propLine ? propLine[1] : '');
     const stateLine = /Monsters State:\s*([^\n]*)/i.exec(text);
     const hostile = stateLine ? /hostile|aggress|attack|angry|enrag/i.test(stateLine[1]) : false;
-    monsters.forEach((m) => { m.itemTypes = props; m.hostile = hostile; });
+    monsters.forEach((m) => { m.itemTypes = props; m.hostile = m.state ? m.state === 'Hostile' && m.hp > 0 : hostile; });
     return { pc, npcs, monsters, all: pc.concat(npcs, monsters) };
   }
 

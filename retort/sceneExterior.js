@@ -2,6 +2,9 @@
 
 const { chooseArchitecture, makeNavigation, reachable } = require('./sceneArchitecture');
 const Voxels = require('../assets/scenePropVoxels');
+const Materials = require('../assets/voxelMaterials');
+const Exits = require('../assets/dungeonExits');
+const Details = require('../assets/sceneExteriorDetails');
 
 const EXTERIOR_VERSION = 1;
 const MAX_HEIGHT = 18;
@@ -124,9 +127,14 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     const roofFamily = roofless ? 'open' : roofs[Math.floor(random() * roofs.length)];
     const transverse = 13 + 2 * Math.floor(random() * 4), depth = 11 + 2 * Math.floor(random() * 3);
     const forecourtDepth = 2 + Math.floor(random() * 3), wallHeight = 5 + Math.floor(random() * 3);
+    const palette = Materials.tintPalette({ primary: room.classification?.wallColor || '#81988c',
+      secondary: room.classification?.floorColor || '#496656', highlight: '#eadfc6', shadow: '#30352f' }, scene.palette || {}, 'marble');
     plan.buildings.push({ direction: name, targetKey, targetName: roomName, targetIndoor: indoor.value, complexIdentity,
       family: selection.family, ruined: !!selection.ruined, roofFamily, transverse, depth, forecourtDepth,
       wallHeight, towerHeight: wallHeight + 2 + Math.floor(random() * 3),
+      entrance: 'closed-gate', palette,
+      ...(rootTemple ? { monumental: { transverse: 29 + 2 * Math.floor(random() * 4), depth: 19 + 2 * Math.floor(random() * 3),
+        wallHeight: 12 + Math.floor(random() * 4), towerHeight: 20 + Math.floor(random() * 5) } } : {}),
       evidence: { databaseKey: targetKey, roomName, description, indoorSource: indoor.source,
         architectureSource: selection.evidence, targetSource: target.declared ? 'exit-target-coordinates' : 'direction-offset',
         identitySource: room.complexId ? 'complexId' : room.siteId ? 'siteId' : rootTemple ? 'known-root-temple-name' : 'destination-coordinates' } });
@@ -137,7 +145,7 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     targetKey: building.targetKey, reason: 'building-limit' });
   plan.knownDestinations = plan.buildings.length;
   plan.buildings = plan.buildings.slice(0, maxBuildings);
-  if (plan.buildings.length) plan.requiredShapes = [...new Set(['entablature', 'pediment', 'pediment_side', 'battlement',
+  if (plan.buildings.length) plan.requiredShapes = [...new Set(['entablature', 'pediment', 'pediment_side', 'battlement', 'grand_gate', 'grand_gate_side',
     ...plan.buildings.map(b => ROOF_SHAPES[b.roofFamily]).filter(Boolean)])];
   plan.reason = plan.buildings.length ? 'known-adjacent-buildings' : 'no-known-adjacent-building';
   return (spec.exteriorPlan = plan);
@@ -212,37 +220,75 @@ function candidateSites(building, marker) {
   return result.slice(0, MAX_CANDIDATES);
 }
 
-function stageSite(dungeon, building, door, marker, nav, before, occupied) {
+function stageFoundation(dungeon, building, door, nav, options) {
+  const { footprint } = siteGeometry(building, door), apron = building.large ? 14 : 7, patch = new Map();
+  const floors = nav.floors.slice(), passable = nav.passable.slice();
+  const base = nav.floors[door.y * nav.width + door.x];
+  if (!Number.isFinite(base)) return { reason: 'foundation-invalid-floor' };
+  for (let y = footprint.y - apron; y < footprint.y + footprint.height + apron; y++) {
+    for (let x = footprint.x - apron; x < footprint.x + footprint.width + apron; x++) {
+      if (x < 1 || y < 1 || x >= nav.width - 1 || y >= nav.height - 1) continue;
+      const key = `${x},${y}`, c = dungeon.cells[key], index = y * nav.width + x;
+      const distance = Math.max(footprint.x - x, x - (footprint.x + footprint.width - 1),
+        footprint.y - y, y - (footprint.y + footprint.height - 1), 0);
+      const core = distance <= RING_WIDTH;
+      const bareWall = c?.tile === 'wall' && !c.feature && !c.structureHeight && (c.ceilHeight - c.floorHeight) <= 3;
+      const protectedCell = !c || c.tile !== 'floor' && !bareWall || c.feature || c.roof || c.door || c.exit || c.interactable ||
+        c.blocked || c.obstacle || c.architectureRole || c.exteriorRole || c.geographyRole || c.routeReserved || c.outdoorFoundation || c.object || c.prop ||
+        options.reservedRoutes?.has(key) || c.complexExit && c.complexExit !== building.direction ||
+        Math.hypot(x - dungeon.start.x, y - dungeon.start.y) < 4;
+      if (protectedCell) { if (core) return { reason: 'foundation-protected-cell', key }; continue; }
+      const oldFloor = nav.floors[index], delta = base - oldFloor;
+      if (Math.abs(delta) > (building.large ? 12 : 6)) { if (core) return { reason: 'foundation-excessive-grade', key }; continue; }
+      const blend = core ? 1 : Math.max(0, 1 - (distance - RING_WIDTH) / (apron - RING_WIDTH));
+      const floor = core ? base : oldFloor + delta * blend;
+      if (!core && (!blend || bareWall)) continue;
+      const clearance = bareWall ? 2.5 : Math.max(1, c.ceilHeight - oldFloor);
+      patch.set(key, { ...c, tile: 'floor', floorHeight: floor, ceilHeight: floor + clearance,
+        navigationReserved: true, exteriorFoundation: building.targetKey });
+      floors[index] = floor; passable[index] = 1;
+    }
+  }
+  return { patch, nav: { ...nav, floors, passable } };
+}
+
+function stageSite(dungeon, building, door, marker, nav, before, occupied, options = {}) {
   const { point, half, forward, footprint } = siteGeometry(building, door);
   const { width, height } = nav;
   const perimeter = { x: footprint.x - RING_WIDTH, y: footprint.y - RING_WIDTH,
     width: footprint.width + RING_WIDTH * 2, height: footprint.height + RING_WIDTH * 2 };
-  if (footprint.width > 21 || footprint.height > 21 || perimeter.width > 25 || perimeter.height > 25 || perimeter.x < 1 || perimeter.y < 1 ||
+  const limit = building.large ? 41 : 21;
+  if (footprint.width > limit || footprint.height > limit || perimeter.width > limit + 4 || perimeter.height > limit + 4 || perimeter.x < 1 || perimeter.y < 1 ||
     perimeter.x + perimeter.width >= width || perimeter.y + perimeter.height >= height ||
     occupied.some(box => box.markerDirection !== building.direction && overlaps(perimeter, box))) return { reason: 'protected-or-out-of-bounds-site' };
-  const site = [], patch = new Map(), walls = [], doorway = [], supports = [];
+  const foundation = options.early ? stageFoundation(dungeon, building, door, nav, options) : null;
+  if (options.early && !foundation?.patch) return { reason: foundation?.reason || 'no-safe-terraced-foundation' };
+  if (foundation) nav = foundation.nav;
+  const cellAt = key => foundation?.patch.get(key) || dungeon.cells[key];
+  const site = [], patch = new Map(foundation?.patch), walls = [], doorway = [], supports = [], gate = [];
   const start = dungeon.start;
   for (let v = -building.forecourtDepth; v < building.depth; v++) for (let u = -half; u <= half; u++) {
-    const p = point(u, v), key = `${p.x},${p.y}`, c = dungeon.cells[key];
+    const p = point(u, v), key = `${p.x},${p.y}`, c = cellAt(key);
     const index = p.y * width + p.x;
     const shell = v >= 0 && (Math.abs(u) === half || v === 0 || v === building.depth - 1);
     const tower = v >= 0 && v < 2 && Math.abs(u) >= half - 1;
     const throat = v === 0 && Math.abs(u) <= 1;
     const wall = (shell || tower) && !throat;
     const plannedExit = c?.complexExit && c.complexExit !== building.direction;
-    if (fixedContent(c) || plannedExit || !before.seen[index] || Math.hypot(p.x - start.x, p.y - start.y) < 4 ||
-      wall && (c.navigationReserved || c.complexExit || key === marker.key) ||
+    if (fixedContent(c) || plannedExit || !before.seen[index] && !foundation?.patch.has(key) || Math.hypot(p.x - start.x, p.y - start.y) < 4 ||
+      wall && (c.navigationReserved && !foundation?.patch.has(key) || c.complexExit || key === marker.key) ||
       throat && c.complexExit && c.complexExit !== building.direction) return { reason: 'protected-or-disconnected-site' };
     site.push({ ...p, key, u, v, wall, tower, throat, old: c, floor: nav.floors[index] });
   }
   const floors = site.map(p => p.floor), base = Math.max(...floors);
-  if (Math.min(...floors) < -MAX_HEIGHT || base - Math.min(...floors) > 0.5 ||
-    base + Math.max(building.towerHeight + 0.7, building.wallHeight + 2.5) > MAX_HEIGHT) return { reason: 'uneven-or-height-limited-site' };
+  const heightLimit = building.large ? 64 : MAX_HEIGHT;
+  if (Math.min(...floors) < -heightLimit || base - Math.min(...floors) > 0.5 ||
+    base + Math.max(building.towerHeight + 0.7, building.wallHeight + 2.5) > heightLimit) return { reason: 'uneven-or-height-limited-site' };
   const ring = [];
   for (let y = perimeter.y; y < perimeter.y + perimeter.height; y++) for (let x = perimeter.x; x < perimeter.x + perimeter.width; x++) {
     if (x >= footprint.x && x < footprint.x + footprint.width && y >= footprint.y && y < footprint.y + footprint.height) continue;
-    const key = `${x},${y}`, c = dungeon.cells[key], index = y * width + x;
-    if (fixedContent(c) || !before.seen[index] || Math.abs(nav.floors[index] - base) > 0.5 ||
+    const key = `${x},${y}`, c = cellAt(key), index = y * width + x;
+    if (fixedContent(c) || !before.seen[index] && !foundation?.patch.has(key) || Math.abs(nav.floors[index] - base) > 0.5 ||
       Math.hypot(x - start.x, y - start.y) < 4) return { reason: 'no-clear-level-walking-perimeter' };
     ring.push({ x, y, key });
     if (!c.navigationReserved && !c.complexExit) patch.set(key, { ...c, navigationReserved: true });
@@ -250,13 +296,22 @@ function stageSite(dungeon, building, door, marker, nav, before, occupied) {
   const next = { ...nav, passable: nav.passable.slice() };
   for (const p of site) {
     if (p.wall) {
-      const top = base + (p.tower ? building.towerHeight : building.wallHeight);
-      patch.set(p.key, { ...p.old, tile: 'wall', ceilHeight: top, structureHeight: top - p.floor,
-        exteriorRole: p.tower ? 'tower' : 'shell-wall', exteriorDestination: building.targetKey });
+      const top = base + (p.tower ? building.towerHeight : building.large && p.v === building.depth - 1 ? building.wallHeight + 6 : building.wallHeight);
+      const torch = Details.torchAt(p.u, p.v, half, building.depth);
+      patch.set(p.key, { ...p.old, tile: torch ? 'torch' : 'wall', ceilHeight: top, structureHeight: top - p.floor,
+        exteriorRole: p.tower ? 'tower' : 'shell-wall', exteriorDestination: building.targetKey,
+        ...(torch ? { feature: 'torch', torchMountHeight: Details.mountHeight(top - p.floor) } : {}) });
       next.passable[p.y * width + p.x] = 0;
       walls.push({ ...p, top });
       if (p.v === 0 && Math.abs(p.u) === 2) supports.push(p.key);
     } else {
+      if (building.entrance === 'closed-gate' && p.v > 0) {
+        patch.set(p.key, { ...p.old, blocked: true, obstacle: true, navigationReserved: true,
+          exteriorRole: p.v === 1 && Math.abs(p.u) <= 1 ? 'closed-gate' : 'sealed-interior', exteriorDestination: building.targetKey });
+        next.passable[p.y * width + p.x] = 0;
+        if (p.v === 1 && Math.abs(p.u) <= 1) gate.push(p);
+        continue;
+      }
       // Reserved approach/exit cells keep their original identity, except for the planned throat.
       if (!p.old.navigationReserved && !p.old.complexExit || p.throat) patch.set(p.key, { ...p.old,
         exteriorRole: p.v < 0 ? 'forecourt' : p.throat ? 'doorway' : 'building-floor',
@@ -273,30 +328,37 @@ function stageSite(dungeon, building, door, marker, nav, before, occupied) {
   if (!after.seen[approach.y * width + approach.x]) return { reason: 'unreachable-doorway-approach' };
   // Keep the actual path to the new doorway free of subsequent ambient placements.
   for (let i = approach.y * width + approach.x; i >= 0; i = after.parent[i]) {
-    const key = `${i % width},${Math.floor(i / width)}`, c = patch.get(key) || dungeon.cells[key];
+    const key = `${i % width},${Math.floor(i / width)}`, c = patch.get(key) || cellAt(key);
     if (c?.tile === 'floor' && !fixedContent(c) && !c.navigationReserved && !c.complexExit &&
       Math.hypot(i % width - start.x, Math.floor(i / width) - start.y) >= 4)
       patch.set(key, { ...c, navigationReserved: true });
   }
-  return { patch, site, walls, supports, doorway, approach, footprint, perimeter, ring, forward, base, before, after };
+  return { patch, site, walls, supports, doorway, gate, approach, footprint, perimeter, ring, forward, half, base, before, after,
+    foundationCells: foundation?.patch.size || 0, heightLimit };
 }
 
 function stageParts(dungeon, building, stage) {
   const parts = [], tiles = {}, unavailable = [];
-  const tileFor = shape => {
+  const tileFor = (shape, finish) => {
     if (!Voxels.architecture[shape]) return null;
-    const existing = Object.entries(dungeon.tiles || {}).find(([, meta]) => meta?.spriteSpec?.voxelShape === shape);
-    if (existing) return existing[0];
-    const tile = `custom_exterior_v${EXTERIOR_VERSION}_${shape}`;
+    const canonical = dungeon.tiles?.[`custom_exterior_v${EXTERIOR_VERSION}_${shape}`];
+    if (canonical && canonical.spriteSpec?.voxelShape !== shape) return null;
+    const identity = String(building.complexIdentity).replace(/[^a-z0-9_-]/gi, '_').slice(0, 40);
+    const colorKey = Object.values(building.palette || {}).join('').replace(/[^a-z0-9]/gi, '');
+    const tile = `custom_exterior_v${EXTERIOR_VERSION}_${identity}_${shape}_${finish}_${colorKey}`;
+    if (dungeon.tiles?.[tile]?.spriteSpec?.voxelShape === shape) return tile;
     if (Object.hasOwn(dungeon.tiles || {}, tile)) return null;
     // Structural instances use canonical meshes, not a texture pretending to be a wall or doorway.
+    const palette = finish === 'terrain' ? dungeon.visualStyle?.palette : finish === 'trim' ?
+      { ...building.palette, primary: building.palette?.secondary } : building.palette;
     tiles[tile] ||= { url: dungeon.tiles.wall.url, spriteSpec: { voxelShape: shape,
-      material: Voxels.architecture[shape].material || 'stone', profile: 'flat', heightRatio: 1, baseWidth: 1, gridWidth: 1 } };
+      material: finish === 'stone' ? 'marble' : Voxels.architecture[shape].material || 'stone',
+      ...(palette ? { palette } : {}), profile: 'flat', heightRatio: 1, baseWidth: 1, gridWidth: 1 } };
     return tile;
   };
-  const part = (shape, position, size, role) => {
-    const tile = tileFor(shape);
-    if (!tile || position.z + size.z > MAX_HEIGHT || size.z > MAX_HEIGHT) { unavailable.push({ shape, role }); return false; }
+  const part = (shape, position, size, role, finish = 'stone') => {
+    const tile = tileFor(shape, finish);
+    if (!tile || position.z + size.z > stage.heightLimit || size.z > stage.heightLimit) { unavailable.push({ shape, role }); return false; }
     parts.push({ tile, shape, position, size, role, skyline: true, exteriorDestination: building.targetKey });
     return true;
   };
@@ -308,9 +370,11 @@ function stageParts(dungeon, building, stage) {
     while (end < walls.length && walls[end].y === first.y && walls[end].x === walls[end - 1].x + 1 &&
       walls[end].floor === first.floor && walls[end].top === first.top && walls[end].tower === first.tower) end++;
     part('entablature', { x: first.x, y: first.y, z: first.floor },
-      { x: end - i, y: 1, z: first.top - first.floor }, first.tower ? 'exterior-tower-box' : 'exterior-wall-box');
+        { x: end - i, y: 1, z: first.top - first.floor }, first.tower ? 'exterior-tower-box' : 'exterior-wall-box');
+    if (first.v === 0) part('entablature', { x: first.x, y: first.y, z: first.floor + building.wallHeight * 0.7 },
+      { x: end - i, y: 1, z: 0.3 }, 'exterior-colored-frieze', 'trim');
     if (first.tower) part('battlement', { x: first.x, y: first.y, z: first.top },
-      { x: end - i, y: 1, z: 0.7 }, 'exterior-tower-crown');
+      { x: end - i, y: 1, z: 0.7 }, 'exterior-tower-crown', 'trim');
     i = end;
   }
   const spring = stage.base + building.wallHeight;
@@ -323,7 +387,32 @@ function stageParts(dungeon, building, stage) {
     if (part('entablature', { x, y, z: spring }, lintelSize, 'exterior-doorway-lintel') &&
       ['temple', 'basilica', 'rotunda', 'villa', 'domus'].includes(building.family)) {
       part(stage.forward.y ? 'pediment' : 'pediment_side', { x, y, z: spring + 0.35 },
-        { x: lintelSize.x, y: lintelSize.y, z: 1.2 }, 'exterior-pediment');
+        { x: lintelSize.x, y: lintelSize.y, z: 1.2 }, 'exterior-pediment', 'trim');
+    }
+    for (const p of stage.site.filter(p => supports.some(s => s.key === p.key))) {
+      part('fluted_column', { x: p.x, y: p.y, z: stage.base }, { x: 1, y: 1, z: building.wallHeight }, 'exterior-portico-column');
+    }
+  }
+  if (stage.gate.length) {
+    const x = Math.min(...stage.gate.map(p => p.x)), y = Math.min(...stage.gate.map(p => p.y));
+    part(stage.forward.y ? 'grand_gate' : 'grand_gate_side', { x, y, z: stage.base },
+      { x: stage.forward.y ? 3 : 1, y: stage.forward.x ? 3 : 1, z: building.wallHeight }, 'exterior-closed-gate', 'gate');
+  }
+  if (building.large) {
+    const rear = stage.site.filter(p => p.v >= building.depth - 6 && Math.abs(p.u) < stage.half);
+    // A handful of coarse masses implies buried wings and mountain masonry without thousands of voxel props.
+    for (const side of [-1, 1]) {
+      const flank = rear.filter(p => p.u * side > 2);
+      if (!flank.length) continue;
+      const x = Math.min(...flank.map(p => p.x)), y = Math.min(...flank.map(p => p.y));
+      const w = Math.max(...flank.map(p => p.x)) - x + 1, h = Math.max(...flank.map(p => p.y)) - y + 1;
+      part('rock_face', { x, y, z: stage.base }, { x: w, y: h, z: building.towerHeight + 8 }, 'exterior-mountain-backdrop', 'terrain');
+    }
+    for (const p of stage.walls.filter(p => p.v === building.depth - 1 && p.u === 0)) {
+      part('entablature', { x: p.x - (stage.forward.y ? 3 : 0), y: p.y - (stage.forward.x ? 3 : 0), z: stage.base },
+        { x: stage.forward.y ? 7 : 1, y: stage.forward.x ? 7 : 1, z: building.towerHeight + 5 }, 'exterior-distant-sanctum');
+      part('battlement', { x: p.x - (stage.forward.y ? 3 : 0), y: p.y - (stage.forward.x ? 3 : 0), z: stage.base + building.towerHeight + 5 },
+        { x: stage.forward.y ? 7 : 1, y: stage.forward.x ? 7 : 1, z: 0.7 }, 'exterior-sanctum-crown', 'trim');
     }
   }
   const shape = ROOF_SHAPES[building.roofFamily];
@@ -356,7 +445,7 @@ function relocateMarker(dungeon, marker, door, floor) {
   return old;
 }
 
-function applySceneExteriors(dungeon, spec = {}) {
+function applySceneExteriors(dungeon, spec = {}, options = {}) {
   // Saved reports of any version are authoritative: revisiting is never a compiler migration.
   if (dungeon?.sceneExteriors) return dungeon.sceneExteriors;
   const plan = spec.exteriorPlan;
@@ -376,7 +465,8 @@ function applySceneExteriors(dungeon, spec = {}) {
   report.sourceKey = plan.sourceKey;
   report.planningRejected = plan.rejected;
   const occupied = occupiedSites(dungeon);
-  for (const building of plan.buildings.slice(0, MAX_BUILDINGS)) {
+  for (const planned of plan.buildings.slice(0, MAX_BUILDINGS)) {
+    let building = planned.monumental && width >= 128 && height >= 128 ? { ...planned, ...planned.monumental, large: true } : planned;
     const marker = dungeon.roomExits.markers.find(m => direction(m.direction) === building.direction);
     const reject = (reason, attempts = 0, siteRejections) => report.rejected.push({ direction: building.direction,
       targetKey: building.targetKey, evidence: building.evidence, reason, attempts,
@@ -390,21 +480,36 @@ function applySceneExteriors(dungeon, spec = {}) {
     }
     let accepted, door, attempts = 0, reason = 'no-safe-site';
     const siteRejections = {};
-    for (const candidate of candidateSites(building, marker)) {
-      attempts++;
-      const stage = stageSite(dungeon, building, candidate, marker, nav, before, occupied);
-      if (!stage.patch) { reason = stage.reason; siteRejections[reason] = (siteRejections[reason] || 0) + 1; continue; }
-      accepted = stage; door = candidate; break;
+    // On steep mountains retain the tall skyline but fit a narrower gatehouse instead of omitting the temple.
+    const variants = options.early && building.large ? [building,
+      { ...building, transverse: planned.transverse, depth: planned.depth, siteVariant: 'hillside-gatehouse' },
+      { ...building, transverse: 9, depth: 7, forecourtDepth: 2, siteVariant: 'mountain-gate' }] : [building];
+    for (const variant of variants) {
+      const candidates = candidateSites(variant, marker);
+      if (options.early) {
+        const { forward: f, cross: c } = orientation(variant.direction);
+        for (const distance of [variant.depth + 12, variant.depth + 24, variant.depth + 36]) {
+          for (const lateral of [0, -12, 12, -24, 24, -36, 36]) candidates.push({ x: marker.x - f.x * distance + c.x * lateral,
+            y: marker.y - f.y * distance + c.y * lateral });
+        }
+      }
+      for (const candidate of candidates.slice(0, variants.length > 1 ? 32 : options.early ? 64 : MAX_CANDIDATES)) {
+        attempts++;
+        const stage = stageSite(dungeon, variant, candidate, marker, nav, before, occupied, options);
+        if (!stage.patch) { reason = stage.reason; siteRejections[reason] = (siteRejections[reason] || 0) + 1; continue; }
+        accepted = stage; door = candidate; building = variant; break;
+      }
+      if (accepted) break;
     }
     if (!accepted) { reject(reason, attempts, siteRejections); continue; }
     const structural = stageParts(dungeon, building, accepted);
     // Coarse wall/tower geometry is mandatory; no partially supported building can leak out of staging.
-    if (structural.unavailable.some(p => p.role === 'exterior-wall-box' || p.role === 'exterior-tower-box')) {
+    if (structural.unavailable.some(p => p.role === 'exterior-wall-box' || p.role === 'exterior-tower-box' || p.role === 'exterior-closed-gate')) {
       reject('missing-canonical-wall-mesh', attempts); continue;
     }
     for (const [key, cell] of accepted.patch) dungeon.cells[key] = cell;
     Object.assign(dungeon.tiles, structural.tiles);
-    const oldMarker = relocateMarker(dungeon, marker, door, nav.floors[door.y * width + door.x]);
+    const oldMarker = relocateMarker(dungeon, marker, door, accepted.base);
     dungeon.sceneStructures ||= [];
     dungeon.sceneStructures.push(...structural.parts);
     occupied.push(accepted.footprint);
@@ -419,15 +524,26 @@ function applySceneExteriors(dungeon, spec = {}) {
         height: accepted.forward.x ? building.transverse : building.forecourtDepth, outdoor: true },
       changedCells: accepted.patch.size, counts: { walls: accepted.walls.filter(p => !p.tower).length,
         towerCells: accepted.walls.filter(p => p.tower).length, towers: 2, doorwayCells: accepted.doorway.length,
+        gateCells: accepted.gate.length, foundationCells: accepted.foundationCells,
         roofParts: structural.roofParts, structuralParts: structural.parts.length },
       omittedParts: structural.unavailable, reachableBefore: before.count, reachableAfter: accepted.after.count,
       preservedReachability: true, roofBuilt: structural.roofParts > 0 });
     report.changedCells += accepted.patch.size;
     report.parts += structural.parts.length;
+    report.maxHeight = Math.max(report.maxHeight, accepted.heightLimit);
+    report.maxFootprint = Math.max(report.maxFootprint, building.large ? 41 : 21);
+    report.maxSite = Math.max(report.maxSite, building.large ? 45 : 25);
   }
   report.placed = report.buildings.length;
   report.status = report.placed ? 'built' : 'skipped';
   return finish(report.placed ? 'committed-safe-destination-facades' : 'no-safe-destination-facade');
 }
 
-module.exports = { prepareSceneExteriors, applySceneExteriors, EXTERIOR_VERSION };
+function buildSceneExteriorSites(dungeon, spec = {}) {
+  if (dungeon?.sceneExteriors || !spec.exteriorPlan?.enabled || !spec.exteriorPlan.buildings?.length) return dungeon?.sceneExteriors;
+  const reservedRoutes = new Set(Object.entries(dungeon.cells || {}).filter(([, c]) => c.navigationReserved).map(([key]) => key));
+  Exits.install(dungeon, spec.exits);
+  return applySceneExteriors(dungeon, spec, { early: true, reservedRoutes });
+}
+
+module.exports = { prepareSceneExteriors, buildSceneExteriorSites, applySceneExteriors, EXTERIOR_VERSION };

@@ -5,6 +5,33 @@ const { planIndoorRoofs, whollyRoofless, inside } = require('./indoorRoofPlan');
 const { random } = require('./dungeonGeneration');
 const VERSION = 6;
 
+function unsupportedWallRoofCorners(zone, supportKeys, cells) {
+  if (!supportKeys.some(key => cells[key]?.tile === 'wall')) return [];
+  const points = [...new Set(supportKeys)].map(key => {
+    const [x, y] = key.split(',').map(Number); return { x: x + .5, y: y + .5 };
+  }).sort((a, b) => a.x - b.x || a.y - b.y);
+  const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const half = values => {
+    const hull = [];
+    for (const p of values) {
+      while (hull.length > 1 && cross(hull.at(-2), hull.at(-1), p) <= 0) hull.pop();
+      hull.push(p);
+    }
+    return hull;
+  };
+  const hull = points.length < 3 ? points : [...half(points).slice(0, -1), ...half(points.slice().reverse()).slice(0, -1)];
+  const supported = p => {
+    if (hull.length > 2 && hull.every((a, i) => cross(a, hull[(i + 1) % hull.length], p) >= -1e-8)) return true;
+    return hull.some((a, i) => {
+      const b = hull[(i + 1) % hull.length], dx = b.x - a.x, dy = b.y - a.y;
+      const t = dx || dy ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy))) : 0;
+      return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) <= .75;
+    });
+  };
+  return [{ x: zone.x, y: zone.y }, { x: zone.x + zone.width, y: zone.y },
+    { x: zone.x, y: zone.y + zone.height }, { x: zone.x + zone.width, y: zone.y + zone.height }].filter(p => !supported(p));
+}
+
 // Small porticos decorate existing terrain; they never carve a second room grid.
 function domeSupports(zone) {
   const cx = zone.x + Math.floor(zone.width / 2), cy = zone.y + Math.floor(zone.height / 2);
@@ -191,6 +218,7 @@ function applySceneRoofs(dungeon, spec = {}) {
     requested: remainingShrines, candidates: sites.length });
   let coveragePlan;
   let porticoRetried = false;
+  let additionalWallSupports = 0;
   // Initial architectural bays get priority; infill is planned from the remaining real floors.
   for (let zoneIndex = 0; zoneIndex < zones.length || !coveragePlan; zoneIndex++) {
     if (zoneIndex === zones.length) {
@@ -223,9 +251,9 @@ function applySceneRoofs(dungeon, spec = {}) {
       return (cell?.floorHeight || 0) + (Number.isFinite(z.clearance) ? z.clearance : dimensions.clearance);
     }));
     const patch = new Map(), supportKeys = [], supportCaps = new Map();
-    const support = (x, y) => {
+    const support = (x, y, wallRepair = false) => {
       const key = `${x},${y}`, c = dungeon.cells[key];
-      if (!c) return false;
+      if (!c || c.exit || c.door || c.interactable) return false;
       if (c.architectureRole === 'roof-support' && c.structureHeight && c.ceilHeight >= spring) {
         // Adjacent shrine and nave bays can share an already-grounded column.
         patch.set(key, c);
@@ -237,8 +265,8 @@ function applySceneRoofs(dungeon, spec = {}) {
       } else if ((c.tile === 'wall' || c.architectureRole === 'castle-timber-wall') && !c.door && !c.exit) {
         const ceilHeight = Math.max(c.ceilHeight || 0, spring + 0.35);
         patch.set(key, { ...c, ceilHeight, ...(c.structureHeight ? { structureHeight: ceilHeight - (c.floorHeight || 0) } : {}) });
-      } else if (c.tile === 'pillar' || c.tile === 'floor' && (!z.infill || z.width >= 4 && z.height >= 4) && !c.navigationReserved &&
-          !c.exit && !c.door && !c.interactable && !c.feature &&
+      } else if ((c.tile === 'pillar' || c.tile === 'floor' && (wallRepair || !z.infill || z.width >= 4 && z.height >= 4)) && !c.navigationReserved &&
+          (!c.feature || c.tile === 'pillar' && c.feature === 'pillar') && !c.complexExit && !['stair-tread', 'stair-landing'].includes(c.architectureRole) &&
           Math.hypot(x - dungeon.start.x, y - dungeon.start.y) > 2) {
         patch.set(key, { ...c, tile: tileFor(supportShape, bayIdiom === 'medieval' ? 'wood' : material),
           feature: 'pillar', ceilHeight: spring, structureHeight: spring - (c.floorHeight || 0),
@@ -272,6 +300,35 @@ function applySceneRoofs(dungeon, spec = {}) {
         }
       }
     }
+    const wallBearingRepairs = [];
+    const overCourtyard = architecture?.zones?.some(o => o.role === 'courtyard' &&
+      z.x < o.x + o.width && z.x + z.width > o.x && z.y < o.y + o.height && z.y + z.height > o.y);
+    if (!dome && !z.openPortico && !overCourtyard && additionalWallSupports < 8) {
+      const corners = unsupportedWallRoofCorners(z, supportKeys, dungeon.cells);
+      // Only repair an exposed overhang resting on wall masonry. Ordinary
+      // halls keep their original columns; there is no room-wide support infill.
+      for (const corner of corners) {
+        if (wallBearingRepairs.length === 2 || additionalWallSupports + wallBearingRepairs.length === 8) break;
+        const right = corner.x > z.x, bottom = corner.y > z.y;
+        const x = right ? z.x + z.width - 1 : z.x, y = bottom ? z.y + z.height - 1 : z.y;
+        for (const [cx, cy] of [[right ? x + 1 : x - 1, y], [x, bottom ? y + 1 : y - 1], [x, y]]) {
+          const key = `${cx},${cy}`, cell = dungeon.cells[key];
+          if (!cell || cell.tile !== 'floor' || patch.has(key)) continue;
+          const count = supportKeys.length;
+          if (!support(cx, cy, true)) continue;
+          const candidate = { ...nav, passable: nav.passable.slice() };
+          for (const [k, c] of patch) {
+            const [px, py] = k.split(',').map(Number);
+            candidate.passable[py * nav.width + px] = c.tile === 'floor' ? 1 : 0;
+          }
+          const reached = reachable(candidate, dungeon.start);
+          if (before.seen.some((seen, i) => seen && candidate.passable[i] && !reached.seen[i])) {
+            patch.delete(key); supportKeys.length = count; continue;
+          }
+          wallBearingRepairs.push(key); break;
+        }
+      }
+    }
     const next = { ...nav, passable: nav.passable.slice(), floors: nav.floors.slice() };
     for (const [key, c] of patch) {
       const [x, y] = key.split(',').map(Number);
@@ -291,6 +348,7 @@ function applySceneRoofs(dungeon, spec = {}) {
         supports: uniqueSupports, x: z.x, y: z.y });
       continue;
     }
+    additionalWallSupports += wallBearingRepairs.length;
     for (const [key, c] of patch) dungeon.cells[key] = c;
     for (const cap of supportCaps.values()) part('entablature', { x: cap.x, y: cap.y, z: cap.z },
       { x: 1, y: 1, z: cap.height }, 'wall-roof-cap');
@@ -363,7 +421,8 @@ function applySceneRoofs(dungeon, spec = {}) {
       }
     }
     bays.push({ ...z, style: zoneStyle, idiom: bayIdiom, springHeight: spring, supports: uniqueSupports,
-      supportCaps: [...supportCaps.keys()], minimumSupports });
+      supportCaps: [...supportCaps.keys()], minimumSupports,
+      ...(wallBearingRepairs.length ? { wallBearingRepairs } : {}) });
   }
   if (idiom === 'gothic' && bays.length && architecture?.footprint) {
     const f = architecture.footprint, x = f.x + 2;
@@ -435,7 +494,8 @@ function applySceneRoofs(dungeon, spec = {}) {
       flush();
     }
   }
-  dungeon.sceneStructures = parts;
+  // Roof dressing is additive: retain earlier exterior gates, masonry and exit markers.
+  dungeon.sceneStructures = [...(dungeon.sceneStructures || []), ...parts];
   const count = Object.values(dungeon.cells).filter(c => c.roof).length;
   let covered = 0;
   if (coveragePlan?.indoor) for (const [key, c] of Object.entries(dungeon.cells)) {

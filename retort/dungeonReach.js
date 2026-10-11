@@ -1,3 +1,4 @@
+const Inhabitants = require('../assets/dungeonInhabitants');
 function roomKey(value) {
   const numbers = String(value || '').match(/-?\d+/g);
   return numbers?.length === 3 ? numbers.map(Number).join(',') : null;
@@ -5,6 +6,8 @@ function roomKey(value) {
 
 function position(actor, geoKey) {
   if (!actor || !roomKey(geoKey) || roomKey(actor.mazeRoomKey) !== roomKey(geoKey) || !Number.isFinite(actor.mazeX) || !Number.isFinite(actor.mazeY)) return null;
+  if(actor.type==='pc' && Number.isFinite(actor.mazePoint?.x) && Number.isFinite(actor.mazePoint?.y) &&
+      Math.floor(actor.mazePoint.x)===actor.mazeX && Math.floor(actor.mazePoint.y)===actor.mazeY) return {...actor.mazePoint};
   return { x: actor.mazeX + 0.5, y: actor.mazeY + 0.5 };
 }
 
@@ -21,7 +24,8 @@ function lineClear(dungeon, a, b) {
     const cell = dungeon.cells[`${x},${y}`];
     const z0 = floorA + (floorB - floorA) * t0 + 0.65;
     const z1 = floorA + (floorB - floorA) * t1 + 0.65;
-    return !solid(cell) && Math.min(z0, z1) >= (cell.floorHeight || 0) && Math.max(z0, z1) < (cell.ceilHeight ?? Infinity);
+    const clearBody=cell && (['floor','door'].includes(cell.tile) ? Inhabitants.walkable(dungeon,x,y) : Inhabitants.lineClear(dungeon,a,b));
+    return clearBody && Math.min(z0, z1) >= (cell.floorHeight || 0) && Math.max(z0, z1) < Inhabitants.ceilingHeight(dungeon, cell);
   };
   const dx = b.x - a.x, dy = b.y - a.y;
   const sx = Math.sign(dx), sy = Math.sign(dy);
@@ -69,6 +73,7 @@ function createCombatSpace(dungeon, roster, geoKey) {
       const c = entry(actor);
       if (!position(c, geoKey)) return;
       Object.assign(actor, { mazeX: c.mazeX, mazeY: c.mazeY, mazeRoomKey: c.mazeRoomKey, hp: c.hp });
+      if (c.mazePoint) actor.mazePoint=c.mazePoint;
     });
     return list;
   }
@@ -78,7 +83,7 @@ function createCombatSpace(dungeon, roster, geoKey) {
     if (!p || !q || canAttack(a, b)) return [];
     const blocked = new Set([...actors.values()].filter(c => c !== entry(a) && (c.hp ?? 1) > 0 && position(c, geoKey))
       .map(c => `${c.mazeX},${c.mazeY}`));
-    const start = { x: Math.floor(p.x), y: Math.floor(p.y), parent: null };
+    const start = { x: Math.floor(p.x), y: Math.floor(p.y), pointX:p.x,pointY:p.y,parent: null };
     const queue = [start], seen = new Set([`${start.x},${start.y}`]);
     for (let i = 0; i < queue.length && i < 4096; i++) {
       const current = queue[i];
@@ -91,8 +96,8 @@ function createCombatSpace(dungeon, roster, geoKey) {
         const x = current.x + dx, y = current.y + dy, key = `${x},${y}`;
         if (seen.has(key) || blocked.has(key)) continue;
         const from = dungeon.cells[`${current.x},${current.y}`], to = dungeon.cells[key];
-        if (solid(to) || Math.abs((to.floorHeight || 0) - (from?.floorHeight || 0)) > 1.5 ||
-            (to.ceilHeight ?? Infinity) - (to.floorHeight || 0) <= 0.65) continue;
+        if (!Inhabitants.canTraverse(dungeon, current, { x, y }) ||
+            Inhabitants.ceilingHeight(dungeon, to) - (to.floorHeight || 0) <= 0.65) continue;
         seen.add(key);
         queue.push({ x, y, parent: current });
       }
@@ -103,9 +108,10 @@ function createCombatSpace(dungeon, roster, geoKey) {
     const c = entry(a);
     if (!c || !position(c, geoKey)) return false;
     c.mazeX = step.x; c.mazeY = step.y;
+    if(c.type==='pc')c.mazePoint={x:step.x+0.5,y:step.y+0.5};
     return true;
   }
-  return { distance, canAttack, point, pursuitPath, move, syncRoster, setHealth };
+  return { dungeon, distance, canAttack, point, pursuitPath, move, syncRoster, setHealth };
 }
 
 module.exports = { roomKey, position, solid, lineClear, createCombatSpace };

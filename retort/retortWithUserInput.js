@@ -43,10 +43,10 @@ const DungeonGeneration = require('./dungeonGeneration.js');
 const IndoorBlueprint = require('./indoorBlueprint.js');
 const OutdoorTerrain = require('./outdoorTerrain.js');
 const BlueprintDesign = require('./blueprintDesign.js');
-const { prepareSceneExteriors, applySceneExteriors } = require('./sceneExterior.js');
+const { prepareSceneExteriors, buildSceneExteriorSites, applySceneExteriors } = require('./sceneExterior.js');
 const { buildRoomWorldContext, snapshotQuestContext, propagateComplexIdentity, supplementOutdoorRoutes, attachSceneWorldContext } = require('./worldContext.js');
 const { chooseEnvironmentIntents, describeEnvironmentIntent } = require('./environmentIntents.js');
-const { evaluateTaskRequirements, mergeTaskProgress, taskBinding } = require('./questProgress.js');
+const { evaluateTaskRequirements, mergeTaskProgress, taskBinding, normalizeDefeatTask, refreshCombatQuestProgress } = require('./questProgress.js');
 const { ensureBossGate, seedBossKey, makeBossKeyTask, isReservedBossKeyName } = require('./bossGate.js');
 const DungeonExits = require('../assets/dungeonExits');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
@@ -58,6 +58,16 @@ const { applyAdditionalOutcomes, selectCommandedNpcs } = require('./adjudication
 const { doorIntent, prepareDoorAction, applyDoorAction } = require('./dungeonActions');
 const { buildEnvironment } = require('../assets/dungeonEnvironment');
 const LivingEnvironments = require('../assets/livingEnvironments');
+const Inhabitants = require('../assets/dungeonInhabitants');
+const { createPopulationService, prepareEntryQuestContact } = require('./roomPopulation');
+const { generateInhabitants, needsQuestIntroduction } = require('./inhabitantGeneration');
+const DialogueMemory = require('./dialogueMemory');
+const { generateCharacterDialogue, describeCharacters } = require('./characterDialogue');
+const MonsterConsoleSync = require('./monsterConsoleSync');
+const JourneyMemory = require('./journeyMemory');
+const CampaignMemory = require('./campaignMemory');
+const AdjudicationMetadata = require('./adjudicationMetadata');
+const DialogueAudience = require('../assets/dialogueAudience');
 
 function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
   try {
@@ -182,6 +192,7 @@ const client = new OpenAI({
 
 // retortWithUserInput.js
 const sharedState = require('../sharedState');
+const populationService = createPopulationService(sharedState);
 
 let assistant; // Global variable to store the assistant
 let thread; // Global variable to store the thread
@@ -202,7 +213,7 @@ function sanitizeLiveWorldStateForPrompt(state) {
   if (!state || typeof state !== 'object') return null;
   const actors = Array.isArray(state.characters)
     ? state.characters
-        .slice(0, 16)
+        .slice(0, 32)
         .map(entry => ({
           name: entry && entry.name ? String(entry.name) : 'Unknown',
           type: entry && entry.type ? String(entry.type) : 'npc',
@@ -878,7 +889,7 @@ function mapToPlainObject(map) {
 
 
 // This function encapsulates your Retort-JS logic, now accepting dynamic input
-async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode()) {
+async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode(), options = {}) {
   console.log('Received combatMode in retortWithUserInput:', combatMode);
 
   const isAutoSimAdvance = !userInput || String(userInput).trim() === '';
@@ -901,6 +912,9 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
       // and combat sprite logic can use the exact chosen image for the PC token.
       sharedState.setCurrentPC(finalizedCharacter);
 
+      // Character stats and sprite poses are metadata, not player commands (e.g. Attack or attack_slash).
+      userInput = '';
+
       // NOTE: Do not return a tiny/separate retort here. We intentionally fall through so the main
       // game retort block below executes the full initialization (initial room/temple, combat setup,
       // returnObj with content, side effects to shared combatCharactersString etc).
@@ -914,11 +928,11 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
 
   const dungeonTestingMode = sharedState.getDungeonTestingMode && sharedState.getDungeonTestingMode();
   let personalNarrative = '';
-  if (!dungeonTestingMode) {
+  if (!dungeonTestingMode && !options.realtimeEncounter) {
     personalNarrative = await getDelayedPersonalNarrative();
   }
     // Use the function to delay fetching the updatedGameConsole
-  let updatedGameConsole = await getDelayedUpdatedGameConsole();
+  let updatedGameConsole = Inhabitants.withStates(MonsterConsoleSync.dedupeConsole(await getDelayedUpdatedGameConsole()));
   let roomNameDatabaseString = await getDelayedRoomNameDatabase();
   const liveWorldState = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
 
@@ -1303,7 +1317,7 @@ async function syncKeysOnRoomEntry($, coordinates, roomNameDatabasePlain, update
     // --- your existing UI sync for Objects / Properties ---
     let objectsInRoomMatch = updatedGameConsole.match(/Objects in Room: ([^\n]+)/);
     let objectsInRoom = objectsInRoomMatch && objectsInRoomMatch[1]
-      ? objectsInRoomMatch[1].split(', ').map(item => item.trim())
+      ? objectsInRoomMatch[1].split(',').map(item => item.trim()).filter(item => item && !/^none$/i.test(item))
       : [];
     let objectPropertiesMatch = updatedGameConsole.match(/Objects in Room Properties: ([^\n]+)/);
     let objectPropertiesArray = objectPropertiesMatch && objectPropertiesMatch[1].trim().toLowerCase() !== "none"
@@ -1328,39 +1342,16 @@ async function syncKeysOnRoomEntry($, coordinates, roomNameDatabasePlain, update
   return updatedGameConsole;
 }
 
-// Drop-in replacement for syncMonstersOnRoomEntry. Assumes helpers (getRoomSafe, setRoomSafe, ensureAllRoomsClassified) are added elsewhere.
 async function syncMonstersOnRoomEntry($, coordinates, roomNameDatabasePlain, updatedGameConsole) {
   const coordKey = coordinatesToString(coordinates);
-  let currentRoom = getRoomSafe(roomNameDatabasePlain, coordKey) || { monsters: { inRoom: "None", equippedProperties: "None", state: "None" } };
-  const dbMonsters = currentRoom.monsters || { inRoom: "None", equippedProperties: "None", state: "None" };
-  // Gather monsters from database
-  if (dbMonsters.inRoom !== "None") {
-    // Sync to console if missing or mismatched
-    let monstersInRoomMatch = updatedGameConsole.match(/Monsters in Room: ([^\n]+)/);
-    let monstersInRoom = monstersInRoomMatch ? monstersInRoomMatch[1].trim() : "None";
-   
-    let monstersEquippedMatch = updatedGameConsole.match(/Monsters Equipped Properties: ([^\n]+)/);
-    let monstersEquipped = monstersEquippedMatch ? monstersEquippedMatch[1].trim() : "None";
-   
-    let monstersStateMatch = updatedGameConsole.match(/Monsters State: ([^\n]+)/);
-    let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "None";
-    // Update if database has data not in console
-    if (monstersInRoom === "None" || monstersInRoom !== dbMonsters.inRoom) {
-      monstersInRoom = dbMonsters.inRoom;
-      monstersEquipped = dbMonsters.equippedProperties;
-      monstersState = dbMonsters.state;
-     
-      // Persist the updated room back to database (for consistency, though usually console follows db)
-      currentRoom.monsters = { inRoom: monstersInRoom, equippedProperties: monstersEquipped, state: monstersState };
-      setRoomSafe(roomNameDatabasePlain, coordKey, currentRoom);
-      ensureAllRoomsClassified(roomNameDatabasePlain, coordKey);
-    }
-    // Update console fields
-    updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: [^\n]+/, `Monsters in Room: ${monstersInRoom}`);
-    updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: [^\n]+/, `Monsters Equipped Properties: ${monstersEquipped}`);
-    updatedGameConsole = updatedGameConsole.replace(/Monsters State: [^\n]+/, `Monsters State: ${monstersState}`);
+  const currentRoom = getRoomSafe(roomNameDatabasePlain, coordKey);
+  const result = MonsterConsoleSync.syncConsole(updatedGameConsole, currentRoom?.monsters);
+  if (currentRoom?.monsters && result.monsters) {
+    currentRoom.monsters = result.monsters;
+    setRoomSafe(roomNameDatabasePlain, coordKey, currentRoom);
+    ensureAllRoomsClassified(roomNameDatabasePlain, coordKey);
   }
-  return updatedGameConsole;
+  return result.consoleText;
 }
 
 // Drop-in replacement for syncObjectsOnRoomEntry. Assumes helpers (getRoomSafe, ensureAllRoomsClassified) are added elsewhere.
@@ -1371,10 +1362,10 @@ async function syncObjectsOnRoomEntry($, coordinates, roomNameDatabasePlain, upd
   if (!room) return updatedGameConsole;
   const dbObjs = Array.isArray(room.objects) ? room.objects : [];
   // --- read existing console lines (if present) ---
-  const namesMatch = updatedGameConsole.match(/^\s*Objects in Room:\s*([^\n]+)/m);
-  const propsMatch = updatedGameConsole.match(/^\s*Objects in Room Properties:\s*([^\n]+)/m);
+  const namesMatch = updatedGameConsole.match(/^[ \t]*Objects in Room:[ \t]*([^\r\n]*)/m);
+  const propsMatch = updatedGameConsole.match(/^[ \t]*Objects in Room Properties:[ \t]*([^\r\n]*)/m);
   const existingNames = (namesMatch && namesMatch[1] && namesMatch[1].trim().toLowerCase() !== "none")
-    ? namesMatch[1].split(",").map(s => s.trim()).filter(Boolean)
+    ? namesMatch[1].split(",").map(s => s.trim()).filter(s => s && !/^none$/i.test(s))
     : [];
   // Parse props into a map keyed by name -> {type, attack, damage, ac, magic}
   const existingPropsByName = {};
@@ -1433,13 +1424,13 @@ async function syncObjectsOnRoomEntry($, coordinates, roomNameDatabasePlain, upd
   // --- write back (non-destructive: we rebuild the two lines only) ---
   const objectsLine = `Objects in Room: ${allNames.length ? allNames.join(', ') : 'None'}`;
   const propsLine = `Objects in Room Properties: ${propsList.length ? propsList.join(', ') : 'None'}`;
-  if (/^\s*Objects in Room:\s*[^\n]*/m.test(updatedGameConsole)) {
-    updatedGameConsole = updatedGameConsole.replace(/^\s*Objects in Room:\s*[^\n]*/m, objectsLine);
+  if (/^[ \t]*Objects in Room:[^\r\n]*/m.test(updatedGameConsole)) {
+    updatedGameConsole = updatedGameConsole.replace(/^[ \t]*Objects in Room:[^\r\n]*/m, () => objectsLine);
   } else {
     updatedGameConsole = (updatedGameConsole + '\n' + objectsLine).trim();
   }
-  if (/^\s*Objects in Room Properties:\s*[^\n]*/m.test(updatedGameConsole)) {
-    updatedGameConsole = updatedGameConsole.replace(/^\s*Objects in Room Properties:\s*[^\n]*/m, propsLine);
+  if (/^[ \t]*Objects in Room Properties:[^\r\n]*/m.test(updatedGameConsole)) {
+    updatedGameConsole = updatedGameConsole.replace(/^[ \t]*Objects in Room Properties:[^\r\n]*/m, () => propsLine);
   } else {
     updatedGameConsole = (updatedGameConsole + '\n' + propsLine).trim();
   }
@@ -2032,15 +2023,7 @@ console.log("personalNarrative:", personalNarrative);
     console.log("NPCs in Party:", npcsInParty);
     console.log("Monsters in Room:", monstersInRoom);
 
-    // Helper function to extract names by splitting the string into chunks of 14 lines
-    const extractNames = (details) => {
-        const lines = details.split('\n').map(line => line.trim());
-        const names = [];
-        for (let i = 0; i < lines.length; i += 14) {
-            names.push(lines[i]); // Take the first line of each 14-line chunk
-        }
-        return names;
-    };
+    const extractNames = details => Inhabitants.parseBlocks(details).map(actor => actor.name);
     
     if (monstersInRoom && monstersInRoom.toLowerCase() !== 'none') {
         console.log("Monsters in Room:", monstersInRoom);
@@ -2070,8 +2053,8 @@ console.log("personalNarrative:", personalNarrative);
     
     // Handle Monsters in Room
     if (monstersInRoom && monstersInRoom.trim().toLowerCase() !== 'none' && monstersInRoom.trim() !== '') {
-        const monsterNames = extractNames(monstersInRoom);
-
+        const nearbyHostiles = new Set(nearbyHostileNames());
+        const monsterNames = extractNames(monstersInRoom).filter(name=>nearbyHostiles.has(name)).slice(0,1);
         for (const monsterName of monsterNames) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
@@ -2080,12 +2063,12 @@ console.log("personalNarrative:", personalNarrative);
             const monstersState = updatedGameConsole.match(/Monsters State:([\s\S]*?)(?=(Rooms Visited|$))/)?.[1]?.trim();
             
                 // Check if the monsters are hostile and decide whether they attack
-        if (monstersState && monstersState.toLowerCase() === 'hostile') {
+        if (nearbyHostiles.has(monsterName)) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
 
             // Ask GPT if the monsters attack
-            await $.user`The monsters are ${monstersState}. Do they "Attack" or "Doesn't Attack Yet"? Respond with only one of these words.`;
+            await $.user`The nearby hostile encounter ${JSON.stringify([...nearbyHostiles])} can perceive the player. Given the player's command, does this local encounter attack? Decide once for this encounter, not for the entire level. Respond ONLY with JSON {"attack_decision":"Attack"} or {"attack_decision":"Doesn't Attack Yet"}.`;
 
             const attackDecisionResult = await $.assistant.generation({ maxTokens: 40,
                 parameters: {
@@ -2174,7 +2157,12 @@ function calculateCumulativeXp(xpThreshold, level) {
 // run it on a sandbox copy and hand back only the monsters section (current room left untouched).
 async function generateMonstersBlockIsolated($, roomName, roomDescription, roomCoordinates) {
   const saved = updatedGameConsole;
+  const key = typeof roomCoordinates === 'string' ? Inhabitants.roomKey(roomCoordinates) :
+    Inhabitants.roomKey(`${roomCoordinates?.x},${roomCoordinates?.y},${roomCoordinates?.z}`);
+  if (!key) throw new Error('Quest inhabitant placement needs valid room coordinates.');
+  const [x, y, z] = key.split(',');
   const base = String(saved || '')
+    .replace(/^Coordinates:.*$/m, `Coordinates: X: ${x}, Y: ${y}, Z: ${z}`)
     .replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:|$)/, 'Monsters in Room: None\n')
     .replace(/Monsters Equipped Properties: .*/, 'Monsters Equipped Properties: None')
     .replace(/Monsters State: .*/, 'Monsters State: None');
@@ -2188,6 +2176,20 @@ async function generateMonstersBlockIsolated($, roomName, roomDescription, roomC
   }
   const block = generated.match(/Monsters in Room:[\s\S]*?(?=Rooms Visited:|$)/);
   return block ? block[0].trim() : 'Monsters in Room: None';
+}
+
+async function generateMonsterEquipmentName($, objectType, ownerName) {
+    $.model = 'gpt-4.1-mini';
+    $.temperature = 1.0;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await $.assistant`Name one portable fantasy ${objectType} for ${ownerName}. Respond ONLY with {"name":"the item name"}. Use a short lowercase noun phrase. Do not return statistics, modifiers, a blank name, numbering, or punctuation. ${attempt ? 'The previous response was not a valid item name; create a replacement.' : ''}`;
+        // A previous modifier generation can leave its schema active; explicitly select the name schema.
+        const result = await $.assistant.generation({ maxTokens: 60, parameters: { name: String } });
+        const name = Inhabitants.equipmentName(result?.content);
+        if (name) return name.toLowerCase();
+        console.warn('[MonsterEquipment] Rejected invalid item name', { owner: ownerName, type: objectType, attempt: attempt + 1 });
+    }
+    return null;
 }
 
 async function generateMonstersForRoomUsingGPT($, roomName, roomDescription, roomCoordinates) {
@@ -2249,6 +2251,10 @@ if (currentCoordinatesMatch) {
     console.error("Current room coordinates could not be extracted.");
 }
 
+    if (currentCoordinatesMatch && currentCoordinatesMatch.slice(1).some(value => Number(value) !== 0) &&
+        (!bossRoomCoordinates || currentCoordinatesMatch.slice(1).some((value, index) => Number(value) !== [bossRoomCoordinates.x, bossRoomCoordinates.y, bossRoomCoordinates.z][index]))) {
+      return generateRoomInhabitantPopulation($, roomName, roomDescription, currentCoordinatesMatch.slice(1).map(Number).join(','));
+    }
     const numMonsters = getRandomInt(1, 4); // Random number of monsters
     const monsters = [];
     const monstersEquippedProperties = [];
@@ -2499,11 +2505,8 @@ if (currentCoordinatesMatch) {
                 const objectTypes = ['weapon', 'armor', 'shield', 'other'];
                 const objectType = objectTypes[Math.floor(Math.random() * objectTypes.length)];
 
-                $.model = "gpt-4.1-mini";
-                $.temperature = 1.0;
-                await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure. The object should be all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType}.`;
-                const objectResult = await $.assistant.generation({ maxTokens: 30 });
-                const objectName = objectResult.content.trim().toLowerCase();
+                const objectName = await generateMonsterEquipmentName($, objectType, monster.Name);
+                if (!objectName) continue;
 
                 const object = { name: objectName, type: objectType };
                 const objectModifiers = await generateObjectModifiers($, object);
@@ -2555,17 +2558,78 @@ if (currentCoordinatesMatch) {
       Attack: ${monster.Attack}
       Damage: ${monster.Damage}
       Armor: ${monster.Armor}
-      Magic: ${monster.Magic}`;
+      Magic: ${monster.Magic}
+      State: ${Inhabitants.state(monster, monstersState)}`;
     }).join("\n");
 
     // Convert monstersEquippedProperties to a formatted string
     const monstersEquippedPropertiesString = monstersEquippedProperties.map(equip => `{name: "${equip.name}", type: "${equip.type}", attack_modifier: ${equip.attack_modifier}, damage_modifier: ${equip.damage_modifier}, ac: ${equip.ac}, magic: ${equip.magic}}`).join(', ');
 
     // Update the game console with new monsters and their equipped properties
-    updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: \n${monstersInRoomString}`);
-    updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${monstersEquippedPropertiesString}`);
-    updatedGameConsole = updatedGameConsole.replace(/Monsters State: .*/, `Monsters State: ${monstersState}`);
+    updatedGameConsole = MonsterConsoleSync.syncConsole(updatedGameConsole, {
+      inRoom: monstersInRoomString || 'None', equippedProperties: monstersEquippedPropertiesString || 'None', state: monstersState
+    }).consoleText;
 
+}
+
+async function generateRoomInhabitantPopulation($, roomName, roomDescription, geoKey) {
+  const { characters, npcs } = extractCharactersAndNpcs(updatedGameConsole);
+  const pc = characters[0];
+  if (!pc) return;
+  let room = {};
+  let records = {};
+  let usedNames = [];
+  try {
+    const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+    records = db;
+    room = db[geoKey] || {};
+    usedNames = Object.values(db).flatMap(record => Object.keys(record?.inhabitants?.actors || {}));
+  } catch {}
+  const seeded = sharedState.getRoomPopulation?.(geoKey) || room.inhabitants;
+  if (seeded?.initialSheets) {
+    const current=Inhabitants.parseSheets(updatedGameConsole);
+    if (current.length && current.every(actor=>Object.hasOwn(seeded.actors,actor.name))) return;
+    const original=Inhabitants.parseSheets(`Monsters in Room:\n${seeded.initialSheets}\nMonsters Equipped Properties: None`);
+    const retained=original.filter(actor=>seeded.actors[actor.name]?.status==='present');
+    const sheets=retained.length===original.length ? seeded.initialSheets : retained.map(actor=>actor.sheet).join('\n');
+    updatedGameConsole=updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,`Monsters in Room: \n${sheets || 'None'}\n`)
+      .replace(/Monsters Equipped Properties: .*/,`Monsters Equipped Properties: ${seeded.initialEquipmentProperties || 'None'}`)
+      .replace(/Monsters State: .*/,`Monsters State: ${retained.length ? 'Mixed' : 'None'}`);
+    populationService.save(seeded);
+    console.info('[RoomPopulation]',JSON.stringify({geoKey,phase:'reuse-seeded',actors:retained.length}));
+    return;
+  }
+  const indoor = room.classification?.indoor ?? room.indoor ?? !/wasteland|dunes|expanse|outdoors|forest|mountain|canyon/i.test(roomDescription);
+  const party = characters.concat(npcs), mortal = party.filter(a => a.Name !== 'Mortacia');
+  const average = mortal.length ? Math.round(mortal.reduce((sum,a) => sum + a.Level, 0) / mortal.length) : 1;
+  const min = pc.Name === 'Mortacia' || pc.Name === 'Suzerain' && pc.Level >= 15 ? 1 : Math.max(1, average);
+  const max = Math.min(20, pc.Name === 'Mortacia' ? 15 : pc.Name === 'Suzerain' && pc.Level >= 15 ? 13 : average + 2);
+  const result = await generateInhabitants($, { roomName, roomDescription, geoKey, indoor,
+    partyNames: party.map(a => a.Name), usedNames, quest: sharedState.getCurrentQuest(),
+    questSeed: needsQuestIntroduction(sharedState.getCurrentQuest(), records, geoKey, sharedState.getCurrentTaskIndex() || 0) }, {
+    random: getRandomInt, sex: getRandomSex, level: () => getRandomInt(min, max),
+    xp: level => calculateCumulativeXp(2000, level),
+    equipment: async actor => {
+      const object = { name: `${actor.Name.toLowerCase()} guard blade`, type: 'weapon' };
+      const modifiers = await generateObjectModifiers($, object);
+      if (!modifiers) return null;
+      actor.Equipped.Weapon = { ...object, ...modifiers };
+      actor.Attack += modifiers.attack_modifier || 0; actor.Damage += modifiers.damage_modifier || 0;
+      actor.Armor += modifiers.ac || 0; actor.AC += modifiers.ac || 0; actor.Magic += modifiers.magic || 0;
+      return { ...object, ...modifiers };
+    }
+  });
+  updatedGameConsole = updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,
+    `Monsters in Room: \n${result.sheets || 'None'}\n`);
+  const properties = result.equipment.map(e => `{name: "${e.name}", type: "${e.type}", attack_modifier: ${e.attack_modifier || 0}, damage_modifier: ${e.damage_modifier || 0}, ac: ${e.ac || 0}, magic: ${e.magic || 0}}`).join(', ');
+  // Retain the first seed only for first-time room construction, never as live HP authority.
+  result.population.initialSheets=result.sheets;
+  result.population.initialEquipmentProperties=properties || 'None';
+  updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${properties || 'None'}`)
+    .replace(/Monsters State: .*/, `Monsters State: ${result.sheets ? 'Mixed' : 'None'}`);
+  populationService.save(result.population);
+  console.info('[RoomPopulation]', JSON.stringify({ geoKey, indoor, actors: Object.keys(result.population.actors).length,
+    groups: result.population.groups.map(g => ({ id: g.id, members: g.members.length })) }));
 }
 
 async function generateRoomObjects($, roomName, roomDescription) {
@@ -3486,7 +3550,7 @@ JSON only.`;
   }
 }
 
-function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles) {
+function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles, sceneSpec) {
   const w = dungeon.layout.width;
   const h = dungeon.layout.height;
   const cells = dungeon.cells = {};
@@ -3584,6 +3648,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
         const key = `${x},${y}`;
         const cell = cells[key];
         if (!cell) continue;
+        if (cell.exteriorFoundation || cell.exteriorRole) continue;
         if (terrain && tile !== 'floor' && cell.navigationReserved) continue;
         cell.tile = tile;
         if (Number.isFinite(floor)) cell.floorHeight = floor;
@@ -3633,6 +3698,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
           const key = `${x + ox},${y + oy}`;
           const cell = cells[key];
           if (!cell) continue;
+          if (cell.exteriorFoundation || cell.exteriorRole) continue;
           cell.tile = 'floor';
           if (terrain && (path.flatten || doRamp)) {
             // Grade a narrow trail at local elevation, not a broad trench at global zero.
@@ -3679,6 +3745,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
         const dy = y - cy;
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist > radius) continue;
+        if (cells[`${x},${y}`]?.exteriorFoundation || cells[`${x},${y}`]?.exteriorRole) continue;
         const t = 1 - dist / radius;
         const key = `${x},${y}`;
         const cell = cells[key];
@@ -3879,6 +3946,10 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   applyRoomsAndPaths();
+  if (sceneSpec) {
+    applySafeSpawnZone();
+    console.info('[SceneExteriorSites]', dungeon.geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
+  }
   applyBlueprintFeatures();
 
   // Convert steep slopes into walls for outdoor cliffs
@@ -4271,9 +4342,9 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
 
     logDungeonConstruction('scene-graphics', dungeon);
     if (blueprint) {
-      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles);
+      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles, sceneSpec);
     } else if (classification && classification.indoor === false) {
-      buildOutdoorLayout(dungeon, classification, customTiles);
+      buildOutdoorLayout(dungeon, classification, customTiles, sceneSpec);
     } else {
       buildIndoorLayout(dungeon, classification);
     }
@@ -4282,6 +4353,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
     applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
     logDungeonConstruction('geography', dungeon);
+    console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
     dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
     console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
     logDungeonConstruction('architecture', dungeon);
@@ -4321,7 +4393,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       for (let x = 1; x < dungeon.layout.width - 1; x++) {
         const key = `${x},${y}`;
         const cell = dungeon.cells[key];
-        if (!cell || cell.tile !== "wall" || cell.architectureRole) continue;
+        if (!cell || cell.tile !== "wall" || cell.architectureRole || cell.exteriorRole) continue;
         const N = dungeon.cells[`${x},${y-1}`];
         const S = dungeon.cells[`${x},${y+1}`];
         const E = dungeon.cells[`${x+1},${y}`];
@@ -4342,7 +4414,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       for (let x = 1; x < dungeon.layout.width - 1; x++) {
         const key = `${x},${y}`;
         const cell = dungeon.cells[key];
-        if (!cell || cell.tile !== "wall") continue;
+        if (!cell || cell.tile !== "wall" || cell.exteriorRole) continue;
         const N = dungeon.cells[`${x},${y-1}`];
         const S = dungeon.cells[`${x},${y+1}`];
         const E = dungeon.cells[`${x+1},${y}`];
@@ -4676,7 +4748,7 @@ function buildIndoorLayout(dungeon, classification) {
 }
 
 
-function buildOutdoorLayout(dungeon, classification, customTiles = []) {
+function buildOutdoorLayout(dungeon, classification, customTiles = [], sceneSpec) {
   // Set larger grid for wasteland openness (override if needed)
   if (!dungeon.layout) {
     dungeon.layout = { width: 24, height: 24 };
@@ -4716,13 +4788,14 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
     }
   }
 
+  if (sceneSpec) console.info('[SceneExteriorSites]', dungeon.geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
   // Turn steep edges into walls / cliffs
   const diffThreshold = terrain ? 1.35 : 0.45;
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const key = `${x},${y}`;
       const cell = cells[key];
-      if (!cell) continue;
+      if (!cell || cell.navigationReserved || cell.exteriorRole) continue;
       const neighbors = [
         cells[`${x+1},${y}`],
         cells[`${x-1},${y}`],
@@ -4762,7 +4835,7 @@ function buildOutdoorLayout(dungeon, classification, customTiles = []) {
     const y = 3 + Math.floor(random() * (h - 6));
     const key = `${x},${y}`;
     const cell = cells[key];
-    if (!cell || cell.tile !== 'floor') continue;
+    if (!cell || cell.tile !== 'floor' || cell.navigationReserved) continue;
 
     // Skip near start (safe zone)
     const dx = x - sx, dy = y - sy;
@@ -5078,11 +5151,8 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
         const objectTypes = ['weapon', 'armor', 'shield', 'other'];
         const objectType = objectTypes[Math.floor(Math.random() * objectTypes.length)];
 
-        $.model = "gpt-4.1-mini";
-        $.temperature = 1.0;
-        await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure. The object should be all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType}.`;
-        const objectResult = await $.assistant.generation({ maxTokens: 30 });
-        const objectName = objectResult.content.trim().toLowerCase();
+        const objectName = await generateMonsterEquipmentName($, objectType, monster.Name);
+        if (!objectName) continue;
 
         const object = { name: objectName, type: objectType };
         const objectModifiers = await generateObjectModifiers($, object);
@@ -5131,27 +5201,24 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
       Attack: ${monster.Attack}
       Damage: ${monster.Damage}
       Armor: ${monster.Armor}
-      Magic: ${monster.Magic}`;
+      Magic: ${monster.Magic}
+      State: ${Inhabitants.state(monster, 'Hostile')}`;
 
     // Update Monsters in Room in game console
-    const monstersInRoomMatch = updatedGameConsole.match(/Monsters in Room: (.*)/);
-    let monstersInRoom = monstersInRoomMatch ? monstersInRoomMatch[1].trim() : '';
-    if (monstersInRoom === 'None') {
-        monstersInRoom = bossDetailsString;
-    } else {
-        monstersInRoom = `${bossDetailsString}, ${monstersInRoom}`;
-    }
-    updatedGameConsole = updatedGameConsole.replace(/Monsters in Room: .*/, `Monsters in Room: ${monstersInRoom}`);
+    const monstersInRoomMatch = updatedGameConsole.match(Inhabitants.sectionPattern('Monsters in Room'));
+    const existingMonsters = monstersInRoomMatch?.[2]?.trim() || 'None';
+    const monstersInRoom = [bossDetailsString, /^none$/i.test(existingMonsters) ? '' : existingMonsters].filter(Boolean).join('\n');
 
     // Convert monstersEquippedProperties to a formatted string and append to existing properties
     const monstersEquippedPropertiesMatch = updatedGameConsole.match(/Monsters Equipped Properties: (.*)/);
     let existingMonstersEquippedProperties = monstersEquippedPropertiesMatch && monstersEquippedPropertiesMatch[1].trim() !== 'None' ? monstersEquippedPropertiesMatch[1] : '';
     const monstersEquippedPropertiesString = monstersEquippedProperties.map(equip => `{name: "${equip.name}", type: "${equip.type}", attack_modifier: ${equip.attack_modifier}, damage_modifier: ${equip.damage_modifier}, ac: ${equip.ac}, magic: ${equip.magic}}`).join(', ');
-    existingMonstersEquippedProperties = existingMonstersEquippedProperties ? `${existingMonstersEquippedProperties}, ${monstersEquippedPropertiesString}` : monstersEquippedPropertiesString;
-    updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${existingMonstersEquippedProperties}`);
+    existingMonstersEquippedProperties = [existingMonstersEquippedProperties, monstersEquippedPropertiesString].filter(Boolean).join(', ');
 
     // Set the monsters state to Hostile
-    updatedGameConsole = updatedGameConsole.replace(/Monsters State: .*/, `Monsters State: Hostile`);
+    updatedGameConsole = MonsterConsoleSync.syncConsole(updatedGameConsole, {
+      inRoom: monstersInRoom, equippedProperties: existingMonstersEquippedProperties || 'None', state: 'Hostile'
+    }).consoleText;
 
     console.log("Updated game console after generating boss:", updatedGameConsole);
 
@@ -5711,8 +5778,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     const pcDetails = updatedGameConsole.match(/PC:([\s\S]*?)(?=(NPCs in Party|Rooms Visited))/)?.[1]?.trim();
     const npcsInPartyDetails = updatedGameConsole.match(/NPCs in Party:([\s\S]*?)(?=(Monsters in Room|Rooms Visited))/)?.[1]?.trim();
     const extractDetails = (details) => {
-      // Blank separators are not fields in the existing 14-line character format.
-      const lines = details.split('\n').map(line => line.trim()).filter(Boolean);
+      const lines = details.split('\n').map(line => line.trim()).filter(line => line && !/^State:/i.test(line));
       const characters = [];
       for (let i = 0; i < lines.length; i += 14) {
         const name = lines[i] || 'Unknown';
@@ -5750,7 +5816,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     updatedGameConsole = applyLevelAndHpAdjustments(updatedGameConsole);
     $.model = "gpt-4.1-mini";
     $.temperature = 1.0;
-    await $.assistant`Current Game Console: ${updatedGameConsole}`;
+    await $.assistant`Current Game Console (only monsters within shouting distance): ${gameConsoleForPerception()}`;
 
     // Generate new adjacent rooms (names)
     const questIntentContext = snapshotQuestContext(sharedState, updatedGameConsole);
@@ -6318,15 +6384,17 @@ async function pruneAndDedupeRoomObjectsOnEntry($, coordKey, roomNameDatabasePla
       // (so the list doesn't "respawn" or stay duplicated with Inventory after equip/take).
       // The sync later will also enforce via filter, and 45s autos skip prune entirely.
       try {
-        const nm = String(o.name || '');
-        const nameEsc = nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const nm = String(o.name).toLowerCase();
+        // Only these two fields own room loot. Never delete a name from inventory, prose or sheets.
         updatedGameConsole = String(updatedGameConsole || '').replace(
-          new RegExp(`\\b${nameEsc}\\b\\s*,?\\s*`, 'gi'),
-          ''
-        ).replace(/Objects in Room:\s*,/gi, 'Objects in Room: ')
-         .replace(/,\s*,/g, ',')
-         .replace(/Objects in Room:\s*$/mi, 'Objects in Room: None')
-         .replace(/Objects in Room:\s*,\s*/i, 'Objects in Room: ');
+          /^([ \t]*Objects in Room:)[ \t]*([^\r\n]*)/mi, (_, header, value) => {
+            const names = value.split(',').map(s => s.trim()).filter(s => s && !/^none$/i.test(s) && s.toLowerCase() !== nm);
+            return `${header} ${names.join(', ') || 'None'}`;
+          }).replace(/^([ \t]*Objects in Room Properties:)[ \t]*([^\r\n]*)/mi, (_, header, value) => {
+            const records = value.match(/\{[^{}]*\}/g) || [];
+            const remaining = records.filter(raw => Inhabitants.parseEquipmentProperties(raw)[0]?.name.toLowerCase() !== nm);
+            return records.length && remaining.length !== records.length ? `${header} ${remaining.join(', ') || 'None'}` : header + ' ' + value;
+          });
       } catch (e) {}
       continue;
     }
@@ -6460,6 +6528,8 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
     state: state || 'None',
     consoleBlock: parsed.consoleBlock || ''
   };
+  const population=sharedState.getRoomPopulation?.(roomKey);
+  if (population) db[roomKey].inhabitants=population;
   return db[roomKey].monsters;
 }
 // ===== end helpers =====
@@ -6610,6 +6680,10 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
   }
   let currentTasks = sharedState.getCurrentTasks() || [];
   let currentTaskIndex = sharedState.getCurrentTaskIndex() || 0;
+  if (currentTaskIndex < 2 && currentTasks[currentTaskIndex]) {
+    const task = normalizeDefeatTask(currentTasks[currentTaskIndex]);
+    if (task !== currentTasks[currentTaskIndex]) { currentTasks[currentTaskIndex] = task; sharedState.setCurrentTasks(currentTasks); }
+  }
   const allCoords = Object.keys(roomNameDatabasePlain);
   if (!allCoords.includes(currentRoomKey)) allCoords.push(currentRoomKey);
   const coordsExceptCurrent = allCoords.filter(c => c !== currentRoomKey);
@@ -6636,10 +6710,7 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
         reqs.push({ check: 'inventory_contains', value: firstObj.name });
       }
     } else if (t === 'defeat') {
-      if (firstMon) {
-        reqs.push({ check: 'at_coords', value: firstMon.placement });
-        reqs.push({ check: 'monster_hp_zero', value: firstMon.name });
-      }
+      for (const monster of elements.filter(e => e?.type === 'monster')) reqs.push({ check: 'monster_hp_zero', value: monster.name });
     } else if (t === 'deliver') {
       const dest = (elements.length > 1 ? elements[elements.length - 1].placement : (firstObj?.placement || currentRoomKey));
       if (firstObj) reqs.push({ check: 'inventory_contains', value: firstObj.name });
@@ -6653,6 +6724,7 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
   }
   function buildActionRequirements(taskType, elements) {
     const t = (taskType || '').toLowerCase();
+    if (t === 'defeat' && elements.length && elements.every(e => e?.type === 'monster')) return [];
     const reqs = [];
     for (const el of elements) {
       if (el?.type === 'key' && el.unlocks) {
@@ -6763,6 +6835,9 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
       // Avoid picking the header or stat labels
       const bad = /^(Monsters in Room:|Male|Female|Unknown|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic)\b/i;
       let first = pool.find(n => !bad.test(n)) || "";
+      const population = sharedState.getRoomPopulation?.(placementKey) || db?.[placementKey]?.inhabitants;
+      const hostile = pool.find(name => population?.actors?.[name]?.allegiance === 'Hostile' && !bad.test(name));
+      if (hostile) first = hostile;
    
       if (!first) {
         const block = String(fallbackBlock || db?.[placementKey]?.monsters?.consoleBlock || "");
@@ -6962,6 +7037,8 @@ Use the existing quest and characters for context. Do not place it inside the bo
       const [type, name, placement] = s.split("|");
       const el = { type, name, placement };
       const room = roomNameDatabasePlain[placement];
+      const resident = sharedState.getRoomPopulation?.(placement)?.actors?.[name] || room?.inhabitants?.actors?.[name];
+      if (resident) { el.allegiance = resident.allegiance; el.job = resident.job; el.activity = resident.activity; }
       if (type === 'key' && room && Array.isArray(room.objects)) {
         const m = room.objects.find(o => o.name === name && o.type === 'key' && o.unlocks);
         if (m && m.unlocks) el.unlocks = m.unlocks;
@@ -6972,6 +7049,7 @@ Use the existing quest and characters for context. Do not place it inside the bo
     await $.user`Given these ALREADY-EXISTING elements REQUIRED TO COMPLETE the next step (not merely to begin it):
 elementsJson=${JSON.stringify(actualElements)}
 NEVER select party NPCs as targets or monsters. Party NPCs: ${getNpcPartyNames(updatedGameConsole).join(', ') || '(none)'}.
+Individual allegiances are authoritative: friendly residents are allies and neutrals have their own work. Do not make killing a friendly or neutral a routine prerequisite; use their dialogue or assistance when fitting. Only hostile inhabitants are normal combat objectives. Existing boss, key and active task bindings are unchanged.
 Pick the best task type from: "fetch","defeat","deliver","investigate","negotiate","puzzle","protect","hybrid".
 Respond ONLY {"type":"X"}.`;
     const typeResp = await $.assistant.generation({ maxTokens: 50,
@@ -6993,6 +7071,7 @@ Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} w
     await $.user`Write a concise ONE-SENTENCE "desc" (<=200 chars) for a unique quest step of type "${pickedType}" that the player can COMPLETE using ONLY these elements:
 elementsJson=${JSON.stringify(actualElements)}
 Party NPCs remain allies; do not cast them as enemies.
+Placements are authoritative. If targets occupy different rooms, describe a journey between those rooms; never claim all of them inhabit the same room or entrance.
 Respond ONLY {"desc":"..."}.
 `;
     const descResp = await $.assistant.generation({ maxTokens: 80, parameters: { desc: String } });
@@ -7426,124 +7505,64 @@ function allocateXP(pc, npcs, xpEarned) {
 }
 
 function parseMonstersEquippedProperties(propertiesString) {
-    const properties = [];
-
-    // Split by '},' to get individual property strings
-    const propertyStrings = propertiesString.split(/},\s*/).map(s => s.trim());
-
-    propertyStrings.forEach(propStr => {
-        // Add missing '}' if needed
-        if (!propStr.endsWith('}')) {
-            propStr += '}';
-        }
-
-        // Match property key-value pairs
-        const regex = /\b(\w+):\s*("[^"]+"|\d+)/g;
-        let match;
-        const obj = {};
-
-        while ((match = regex.exec(propStr)) !== null) {
-            const key = match[1];
-            let value = match[2];
-
-            // Remove quotes from string values
-            if (value.startsWith('"') && value.endsWith('"')) {
-                value = value.slice(1, -1);
-            } else {
-                value = Number(value);
-            }
-
-            obj[key] = value;
-        }
-
-        properties.push(obj);
-    });
-
-    return properties;
+    return Inhabitants.parseEquipmentProperties(propertiesString);
 }
 
 function dropMonsterItemsToRoom(targetMonster) {
-    // Parse Monsters Equipped Properties
-    const monstersEquippedPropertiesMatch = updatedGameConsole.match(/Monsters Equipped Properties: (.*)/);
-    const monstersEquippedPropertiesString = monstersEquippedPropertiesMatch ? monstersEquippedPropertiesMatch[1].trim() : '';
-    const monstersEquippedProperties = monstersEquippedPropertiesString && monstersEquippedPropertiesString !== 'None'
-        ? parseMonstersEquippedProperties(monstersEquippedPropertiesString)
-        : [];
-
-    // Parse Objects in Room
-    const objectsInRoomMatch = updatedGameConsole.match(/Objects in Room: (.*)/);
-    const objectsInRoomString = objectsInRoomMatch ? objectsInRoomMatch[1].trim() : '';
-    const objectsInRoom = objectsInRoomString
-        ? objectsInRoomString.split(',').map(s => s.trim()).filter(s => s !== 'None')
-        : [];
-
-    // Parse Objects in Room Properties
-    const objectsInRoomPropertiesMatch = updatedGameConsole.match(/Objects in Room Properties: (.*)/);
-    const objectsInRoomPropertiesString = objectsInRoomPropertiesMatch ? objectsInRoomPropertiesMatch[1].trim() : '';
-    const objectsInRoomProperties = objectsInRoomPropertiesString && objectsInRoomPropertiesString !== 'None'
-        ? parseMonstersEquippedProperties(objectsInRoomPropertiesString)
-        : [];
-
-    // Iterate through each equipped item of the monster
-    for (const slot in targetMonster.equipped) {
-        const itemName = targetMonster.equipped[slot];
-        if (itemName && itemName !== 'None') {
-            // Find the item properties in Monsters Equipped Properties
-            const itemIndex = monstersEquippedProperties.findIndex(item => item.name === itemName);
-            if (itemIndex !== -1) {
-                const itemProperties = monstersEquippedProperties[itemIndex];
-
-                // Add the item to Objects in Room if not already present
-                if (!objectsInRoom.includes(itemName)) {
-                    objectsInRoom.push(itemName);
-                }
-
-                // Add the item's properties to Objects in Room Properties if not already present
-                if (!objectsInRoomProperties.some(item => item.name === itemName)) {
-                    objectsInRoomProperties.push(itemProperties);
-                }
-
-                // Remove the item from Monsters Equipped Properties
-                monstersEquippedProperties.splice(itemIndex, 1);
-            } else {
-                console.error(`Item "${itemName}" not found in Monsters Equipped Properties.`);
-            }
-
-            // Remove the item from the monster's equipped items
-            targetMonster.equipped[slot] = 'None';
+    const read = label => updatedGameConsole.match(new RegExp(`^${label}:[ \\t]*([^\\r\\n]*)`, 'm'))?.[1]?.trim() || '';
+    const write = (label, value) => {
+        updatedGameConsole = updatedGameConsole.replace(new RegExp(`^${label}:[^\\r\\n]*`, 'm'), () => `${label}: ${value || 'None'}`);
+    };
+    const sourceProperties = read('Monsters Equipped Properties');
+    const properties = parseMonstersEquippedProperties(sourceProperties);
+    const equipped = Inhabitants.parseEquipment(targetMonster.equipped);
+    const dropped = new Map();
+    for (const slot of Inhabitants.EQUIPMENT_SLOTS) {
+        const name = Inhabitants.equipmentName(equipped[slot]);
+        if (!name) continue;
+        const item = properties.find(p => p.name === name);
+        if (!item) {
+            console.warn('[MonsterLoot] No valid properties for equipped item', { monster: targetMonster.name, slot, name });
+            continue;
         }
+        dropped.set(name, item);
+        equipped[slot] = 'None';
     }
+    // No genuine loot means no room/inventory rewrite or repair of existing saved items.
+    if (!dropped.size) return;
+    const objects = read('Objects in Room').split(',').map(s => s.trim()).filter(s => s && s !== 'None');
+    const oldProperties = read('Objects in Room Properties');
+    const roomProperties = parseMonstersEquippedProperties(oldProperties);
+    const additions = [];
+    for (const [name, item] of dropped) {
+        if (!objects.includes(name)) objects.push(name);
+        if (!roomProperties.some(p => p.name === name)) additions.push(
+            `{name: ${JSON.stringify(name)}, type: ${JSON.stringify(item.type)}, attack_modifier: ${item.attack_modifier}, damage_modifier: ${item.damage_modifier}, ac: ${item.ac}, magic: ${item.magic}}`);
+    }
+    write('Objects in Room', objects.join(', '));
+    if (additions.length) write('Objects in Room Properties',
+        [oldProperties && oldProperties !== 'None' ? oldProperties : '', ...additions].filter(Boolean).join(', '));
 
-    // Update Objects in Room
-    const updatedObjectsInRoomString = objectsInRoom.length > 0 ? objectsInRoom.join(', ') : 'None';
-
-    // Update Objects in Room Properties
-    const updatedObjectsInRoomPropertiesString = objectsInRoomProperties.length > 0
-        ? objectsInRoomProperties.map(item => {
-            return `{name: "${item.name}", type: "${item.type}", attack_modifier: ${item.attack_modifier}, damage_modifier: ${item.damage_modifier}, ac: ${item.ac}, magic: ${item.magic}}`;
-        }).join(', ')
-        : 'None';
-
-    // Update Monsters Equipped Properties
-    const updatedMonstersEquippedPropertiesString = monstersEquippedProperties.length > 0
-        ? monstersEquippedProperties.map(item => {
-            return `{name: "${item.name}", type: "${item.type}", attack_modifier: ${item.attack_modifier}, damage_modifier: ${item.damage_modifier}, ac: ${item.ac}, magic: ${item.magic}}`;
-        }).join(', ')
-        : 'None';
-
-    // Replace the corresponding sections in updatedGameConsole
-    updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${updatedObjectsInRoomString}`);
-    updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${updatedObjectsInRoomPropertiesString}`);
-    updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${updatedMonstersEquippedPropertiesString}`);
-
-    // Update the monster's equipped items in the Monsters in Room section
-    const newEquippedLine = Object.entries(targetMonster.equipped)
-        .map(([slot, item]) => `${slot}: ${item}`)
-        .join(', ');
-
-    const monsterNameEscaped = targetMonster.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const equippedLineRegex = new RegExp(`(${monsterNameEscaped}[\\s\\S]*?Equipped:)\\s*.*`, 'g');
-    updatedGameConsole = updatedGameConsole.replace(equippedLineRegex, `$1 ${newEquippedLine}`);
+    const stillEquipped = new Set(Inhabitants.parseSheets(updatedGameConsole).filter(a => a.name !== targetMonster.name)
+        .flatMap(a => Object.values(Inhabitants.parseEquipment(a.lines[9]))));
+    const remaining = (sourceProperties.match(/\{[^{}]*\}/g) || []).filter(raw => {
+        const name = parseMonstersEquippedProperties(raw)[0]?.name;
+        return !dropped.has(name) || stillEquipped.has(name);
+    });
+    write('Monsters Equipped Properties', remaining.join(', '));
+    targetMonster.equipped = equipped;
+    updatedGameConsole = updatedGameConsole.replace(Inhabitants.sectionPattern('Monsters in Room'), (match, header, block) => {
+        const actor = Inhabitants.parseBlocks(block).find(a => a.name === targetMonster.name);
+        if (!actor) return match;
+        const lines = block.split(/\r?\n/);
+        for (let i = actor.magicIndex - 1; i >= 0; i--) {
+            if (!/^[ \t]*Equipped:/.test(lines[i])) continue;
+            lines[i] = lines[i].replace(/Equipped:[^\r\n]*/, () => 'Equipped: ' +
+                Inhabitants.EQUIPMENT_SLOTS.map(slot => `${slot}: ${equipped[slot]}`).join(', '));
+            break;
+        }
+        return header + lines.join(block.includes('\r\n') ? '\r\n' : '\n');
+    });
 }
 
 async function tryDungeonDoorAction(userInput) {
@@ -7600,12 +7619,70 @@ async function tryDungeonDoorAction(userInput) {
 }
 
 let combatSpace = null;
+let combatPopulation = null;
+async function chooseDefenceTarget(combatant, targets) {
+  return new Promise(resolve => {
+    let remaining = 180000, previous = Date.now();
+    const finish = target => { clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond); resolve(target); };
+    const respond = message => {
+      if (message.actionId !== actionDice.active?.id || actionDice.paused) return;
+      if (message.cancelled) return finish(null);
+      const target = targets.find(t => t.name.toLowerCase() === String(message.target).toLowerCase() && t.hp > 0);
+      if (target) finish(target);
+    };
+    const timer = setInterval(() => {
+      const now = Date.now();
+      if (!actionDice.paused) remaining -= now - previous;
+      previous = now;
+      if (remaining <= 0) finish(null);
+    }, 1000);
+    timer.unref?.();
+    sharedState.emitter.on(`target_response_${combatant.name}`, respond);
+    broadcast({ type: 'target_prompt', actionId: actionDice.active.id, combatant: combatant.name,
+      targets: targets.map(t => t.name), positions: targets.map(t => ({ name: t.name, x: t.x, y: t.y,
+        distance: combatSpace ? combatSpace.distance(combatant,t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) })) });
+  });
+}
+function selectCombatTeams(pc, npcs, monsters, userInput, fallback, combatLog) {
+  if (pc) pc.type = 'pc';
+  npcs.forEach(a => { a.type = 'npc'; });
+  monsters.forEach(a => { a.type = 'monster'; });
+  const all = [...(pc ? [pc] : []), ...npcs, ...monsters];
+  const states = new Map(Inhabitants.parseSheets(updatedGameConsole).map(a => [a.name, a.state]));
+  for (const actor of monsters) if (states.get(actor.name)) actor.state = states.get(actor.name);
+  const teams = Inhabitants.teams(all, combatPopulation, combatSpace, userInput, fallback);
+  if (!teams.hostiles.length) combatLog.push('There are no hostile opponents within this encounter. Neutral inhabitants stand aside.');
+  const neutral = teams.spectators.filter(a => Inhabitants.allegiance(a) === 'Neutral');
+  if (teams.hostiles.length && neutral.length) combatLog.push(`${neutral.map(a => a.name).join(', ')} stand aside and watch.`);
+  return teams;
+}
+function nearbyHostileNames() {
+  const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+  const dungeon = sharedState.getRoomDungeonForSimulation(coords);
+  const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+  const pc = roster.find(a => a.type === 'pc');
+  if (!pc || !dungeon) return [];
+  const population = populationService.get(geoKey, updatedGameConsole, dungeon);
+  Inhabitants.attach(roster, population);
+  const point=pc.mazePoint || {x:pc.mazeX+0.5,y:pc.mazeY+0.5};
+  return Inhabitants.hostileEncounterNames(dungeon, roster, population, point);
+}
+function gameConsoleForPerception(consoleText = updatedGameConsole) {
+  const key = Inhabitants.roomKey(consoleText.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]);
+  const numbers = key?.split(',').map(Number);
+  const dungeon = numbers && sharedState.getRoomDungeonForSimulation({ x: numbers[0], y: numbers[1], z: numbers[2] });
+  const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+  const population = key && sharedState.getRoomPopulation(key);
+  const perception = Inhabitants.perceive(dungeon, roster, population);
+  return Inhabitants.perceivedConsole(consoleText, Inhabitants.nearbyMonsterNames(dungeon, roster, population, perception.player));
+}
 async function handleCombatRound($, userInput, combatMode) {
     const coords = sharedState.getLastCoords();
     const geoKey = `${coords.x},${coords.y},${coords.z}`;
     const dungeon = sharedState.getRoomDungeon(coords);
     const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
     combatSpace = dungeon ? createCombatSpace(dungeon, roster, geoKey) : null;
+    combatPopulation = sharedState.getRoomPopulation ? populationService.get(geoKey, updatedGameConsole, dungeon) : null;
     actionDice.begin('combat', geoKey, broadcast);
     try {
         return await resolveCombatRound($, userInput, combatMode);
@@ -7616,6 +7693,22 @@ async function handleCombatRound($, userInput, combatMode) {
                 sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(finalRoster)));
             }
         } finally {
+            updatedGameConsole = Inhabitants.withStates(sharedState.getUpdatedGameConsole?.() || updatedGameConsole, combatPopulation);
+            sharedState.setUpdatedGameConsole(updatedGameConsole);
+            if (combatPopulation) {
+                Inhabitants.sync(combatPopulation, Inhabitants.parseSheets(sharedState.getUpdatedGameConsole()),
+                    Inhabitants.parseSheets(sharedState.getUpdatedGameConsole(), 'NPCs in Party'));
+                populationService.recordPositions(combatPopulation, JSON.parse(sharedState.getCombatCharactersString() || '[]'));
+                populationService.save(combatPopulation);
+                broadcast({ type: 'room_population', population: combatPopulation, runId: sharedState.getDungeonRunId() });
+            }
+            if (sharedState.getCurrentTasks) {
+                try {
+                    updatedGameConsole = refreshCombatQuestProgress(sharedState, sharedState.getUpdatedGameConsole());
+                    console.info('[QuestCombatProgress]', updatedGameConsole.match(/^Quest Progress:[^\r\n]*/m)?.[0] || 'No active task');
+                } catch (error) { console.warn('[QuestCombatProgress]', error.message); }
+            }
+            combatPopulation = null;
             combatSpace = null;
             actionDice.end();
         }
@@ -7626,6 +7719,7 @@ async function rollCombatAttack(combatant, target, pc, combatLog) {
     if (combatSpace && !combatSpace.canAttack(combatant, target)) {
         const path = combatSpace.pursuitPath(combatant, target);
         for (const step of path) {
+            await actionDice.waitUntilResumed?.();
             combatSpace.move(combatant, step);
             const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
             sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(roster)));
@@ -7695,19 +7789,8 @@ async function resolveCombatRound($, userInput, combatMode) {
     let monstersStateMatch = updatedGameConsole.match(/Monsters State: ([^\n]+)/);
     let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "None";
     
-    if (monstersState === "Dead") {
-        combatLog.push("The monsters are already dead.");
-        return { combatLog: combatLog.join("\n"), needsUpdate: false };
-    }
-    
-    if (monstersState !== "Hostile") {
-        updatedGameConsole = updatedGameConsole.replace(/Monsters State: [^\n]+/, "Monsters State: Hostile");
-        monstersState = "Hostile";
-        needsUpdate = true;
-    }
-    
     const extractDetails = (details) => {
-        const lines = details.split('\n').map(line => line.trim());
+        const lines = details.split('\n').map(line => line.trim()).filter(line => !/^State:/i.test(line));
         const characters = [];
         let i = 0;
         while (i < lines.length) {
@@ -7752,23 +7835,14 @@ async function resolveCombatRound($, userInput, combatMode) {
     };
     
     function parseEquippedLine(line) {
-        const equipped = {};
-        const equippedMatch = line.match(/^Equipped:\s*(.*)$/);
-        if (equippedMatch) {
-            const items = equippedMatch[1].split(',').map(item => item.trim());
-            items.forEach(item => {
-                const [slot, itemName] = item.split(':').map(s => s.trim());
-                equipped[slot] = itemName;
-            });
-        }
-        return equipped;
+        return Inhabitants.parseEquipment(line);
     }
 
     const pc = pcDetails ? extractDetails(pcDetails)[0] : null;
     const npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
     let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(monster => monster.hp > 0) : [];
 
-    const monsterOpponents = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(npc => npc.hp > 0)];
+    const combatTeams = selectCombatTeams(pc, npcs, aliveMonsters, userInput, monstersState, combatLog);
 
     const allCombatants = [
         ...(pc && pc.hp > 0 ? [pc] : []),
@@ -7777,7 +7851,7 @@ async function resolveCombatRound($, userInput, combatMode) {
     ];
     combatSpace?.setHealth(allCombatants);
 
-    allCombatants.forEach(combatant => {
+    allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a)).forEach(combatant => {
         const initiativeRoll = roll1d20();
         // Initiative orders the live combatants; copying them forks HP during successive hits.
         combatant.initiative = initiativeRoll;
@@ -7790,14 +7864,7 @@ async function resolveCombatRound($, userInput, combatMode) {
     for (const combatant of initiativeOrder) {
         if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) continue;
 
-        let targets;
-        if (aliveMonsters.some(monster => monster.name === combatant.name)) {
-            // Monsters attack PCs/NPCs (monsterOpponents: PC and NPCs with hp > 0, excluding already killed)
-            targets = monsterOpponents.filter(target => target.hp > 0 && !alreadyKilled.has(target.name));
-        } else {
-            // PCs/NPCs attack Monsters (aliveMonsters, already filtered for hp > 0 and updated after kills)
-            targets = aliveMonsters;
-        }
+        const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
 
         if (targets.length === 0) {
             combatLog.push(`${combatant.name} has no valid targets to engage.`);
@@ -7805,6 +7872,10 @@ async function resolveCombatRound($, userInput, combatMode) {
         }
 
         let target;
+        if (combatant.name === pc?.name && (userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
+            target = await chooseDefenceTarget(combatant, targets);
+            if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
+        }
         if (combatant.name === pc.name && specifiedTargetName) {
             const matchingMonsters = targets.filter(monster => 
                 monster.name.toLowerCase().startsWith(specifiedTargetName.toLowerCase())
@@ -7861,11 +7932,11 @@ async function resolveCombatRound($, userInput, combatMode) {
                     combatLog.push(`${target.name} is killed by ${combatant.name}.`);
                     updateHPInConsole(target, 'NPCs in Party');
                 } else if (aliveMonsters.some(monster => monster.name.trim() === target.name.trim())) {
-                    const xpEarned = getRandomInt(1000, 1500) * target.level;
-                    combatLog.push(`${target.name} is killed by ${combatant.name} and the party earns ${xpEarned} XP.`);
+                    const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
+                    combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
                     updateHPInConsole(target, 'Monsters in Room');
 
-                    allocateXP(pc, npcs, xpEarned);
+                    if (xpEarned) allocateXP(pc, npcs, xpEarned);
                     dropMonsterItemsToRoom(target);
                     aliveMonsters = aliveMonsters.filter(monster => monster.hp > 0);
                 }
@@ -7898,6 +7969,7 @@ async function resolveCombatRound($, userInput, combatMode) {
     }
 
     if (needsUpdate) {
+        updatedGameConsole = Inhabitants.withStates(updatedGameConsole, combatPopulation);
         sharedState.setUpdatedGameConsole(updatedGameConsole);
     }
 
@@ -7932,38 +8004,18 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     let monstersStateMatch = updatedGameConsole.match(/Monsters State: ([^\n]+)/);
     let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "None";
 
-    if (monstersState === "Dead") {
-        combatLog.push("The monsters are already dead.");
-        return { combatLog: combatLog.join("\n"), needsUpdate: false };
-    }
-    
-    if (monstersState === "None") {
+    if (!monstersInRoomDetails || monstersInRoomDetails.toLowerCase() === 'none') {
         combatLog.push("There are no monsters.");
         return { combatLog: combatLog.join("\n"), needsUpdate: false };
     }
 
-    if (monstersState !== "Hostile") {
-        updatedGameConsole = updatedGameConsole.replace(/Monsters State: [^\n]+/, "Monsters State: Hostile");
-        monstersState = "Hostile";
-        needsUpdate = true;
-        combatLog.push("Monsters State set to Hostile.");
-    }
 
     function parseEquippedLine(line) {
-        const equipped = {};
-        const equippedMatch = line.match(/^Equipped:\s*(.*)$/);
-        if (equippedMatch) {
-            const items = equippedMatch[1].split(',').map(item => item.trim());
-            items.forEach(item => {
-                const [slot, itemName] = item.split(':').map(s => s.trim());
-                equipped[slot] = itemName;
-            });
-        }
-        return equipped;
+        return Inhabitants.parseEquipment(line);
     }
 
     const extractDetails = (details) => {
-        const lines = details.split('\n').map(line => line.trim());
+        const lines = details.split('\n').map(line => line.trim()).filter(line => !/^State:/i.test(line));
         const characters = [];
         let i = 0;
         while (i < lines.length) {
@@ -7999,7 +8051,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     // combatLog.push(`Combatants initialized - PC: ${pc ? pc.name : 'None'}, NPCs: ${npcs.map(n => n.name).join(', ')}, Monsters: ${aliveMonsters.map(m => m.name).join(', ')}`);
 
-    const monsterOpponents = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0)];
+    const combatTeams = selectCombatTeams(pc, npcs, aliveMonsters, userInput, monstersState, combatLog);
     const allCombatants = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0), ...aliveMonsters];
     combatSpace?.setHealth(allCombatants);
 
@@ -8082,7 +8134,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
 
-    allCombatants.forEach(combatant => {
+    allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a)).forEach(combatant => {
         const initiativeRoll = roll1d20();
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
@@ -8162,14 +8214,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             continue;
         }
 
-        let targets;
-        if (aliveMonsters.some(m => m.name === combatant.name)) {
-            // Monsters attack PCs/NPCs (monsterOpponents: PC and NPCs with hp > 0, excluding already killed)
-            targets = monsterOpponents.filter(target => target.hp > 0 && !alreadyKilled.has(target.name));
-        } else {
-            // PCs/NPCs attack Monsters (aliveMonsters, filtered for hp > 0 and not already killed)
-            targets = aliveMonsters.filter(m => m.hp > 0 && !alreadyKilled.has(m.name));
-        }
+        const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
 
         if (targets.length === 0) {
             combatLog.push(`${combatant.name} has no valid targets to engage.`);
@@ -8177,6 +8222,10 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
         }
 
         let target;
+        if (combatant.name === pc?.name && (userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
+            target = await chooseDefenceTarget(combatant, targets);
+            if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
+        }
         if (combatant.name === pc.name && specifiedTargetName) {
             // Try to find the specified monster among living, valid targets
             const matchingMonsters = targets.filter(monster => 
@@ -8305,10 +8354,10 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                         combatLog.push(`${target.name} is killed by ${combatant.name}.`);
                         updateHPInConsole(npcs.find(n => n.name === target.name), 'NPCs in Party');
                     } else if (aliveMonsters.some(m => m.name === target.name)) {
-                        const xpEarned = getRandomInt(1000, 1500) * target.level;
-                        combatLog.push(`${target.name} is killed by ${combatant.name} and the party earns ${xpEarned} XP.`);
+                        const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
+                        combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
                         updateHPInConsole(aliveMonsters.find(m => m.name === target.name), 'Monsters in Room');
-                        allocateXP(pc, npcs, xpEarned);
+                        if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
                         aliveMonsters = aliveMonsters.filter(m => m.hp > 0);
                     }
@@ -8355,6 +8404,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     combatSpace?.syncRoster(combatCharacters);
     if (needsUpdate) {
         sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
+        updatedGameConsole = Inhabitants.withStates(updatedGameConsole, combatPopulation);
         sharedState.setUpdatedGameConsole(updatedGameConsole);
     }
 
@@ -8387,7 +8437,7 @@ function patchLiveHPToConsole(consoleText, pcData, npcList, monsterList) {
   if (pcData) updateStatBlock(pcData);
   (npcList || []).forEach(n => updateStatBlock(n));
   (monsterList || []).forEach(m => updateStatBlock(m));
-  return text;
+  return Inhabitants.withStates(text, combatPopulation);
 }
 
 // Update the combat map in Phaser (unchanged, logging moved to combatLog in handleCombatRoundWithMap)
@@ -8432,38 +8482,18 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     let monstersStateMatch = updatedGameConsole.match(/Monsters State: ([^\n]+)/);
     let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "None";
 
-    if (monstersState === "Dead") {
-        combatLog.push("The monsters are already dead.");
-        return { combatLog: combatLog.join("\n"), needsUpdate: false };
-    }
-
-    if (monstersState === "None") {
+    if (!monstersInRoomDetails || monstersInRoomDetails.toLowerCase() === 'none') {
         combatLog.push("There are no monsters.");
         return { combatLog: combatLog.join("\n"), needsUpdate: false };
     }
 
-    if (monstersState !== "Hostile") {
-        updatedGameConsole = updatedGameConsole.replace(/Monsters State: [^\n]+/, "Monsters State: Hostile");
-        monstersState = "Hostile";
-        needsUpdate = true;
-        combatLog.push("Monsters State set to Hostile.");
-    }
 
     function parseEquippedLine(line) {
-        const equipped = {};
-        const equippedMatch = line.match(/^Equipped:\s*(.*)$/);
-        if (equippedMatch) {
-            const items = equippedMatch[1].split(',').map(item => item.trim());
-            items.forEach(item => {
-                const [slot, itemName] = item.split(':').map(s => s.trim());
-                equipped[slot] = itemName;
-            });
-        }
-        return equipped;
+        return Inhabitants.parseEquipment(line);
     }
 
     const extractDetails = (details) => {
-        const lines = details.split('\n').map(line => line.trim());
+        const lines = details.split('\n').map(line => line.trim()).filter(line => !/^State:/i.test(line));
         const characters = [];
         let i = 0;
         while (i < lines.length) {
@@ -8493,7 +8523,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     let npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
     let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(m => m.hp > 0) : [];
 
-    const monsterOpponents = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0)];
+    const combatTeams = selectCombatTeams(pc, npcs, aliveMonsters, userInput, monstersState, combatLog);
     let allCombatants = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0), ...aliveMonsters];
     combatSpace?.setHealth(allCombatants);
 
@@ -8568,7 +8598,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     combatLog.push(`Combatants positioned: ${combatCharacters.map(c => `${c.name} at (${c.x}, ${c.y})`).join(', ')}`);
 
     // Roll initiative
-    allCombatants.forEach(combatant => {
+    allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a)).forEach(combatant => {
         const initiativeRoll = roll1d20();
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
@@ -8646,29 +8676,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                 return currentCombatant || t; // Fallback to original target if not found (shouldn't happen)
             }).filter(t => t.hp > 0 && !alreadyKilled.has(t.name));
 
-            const targetNames = validTargets.map(t => t.name);
-            let timer;
-            const finish = target => {
-                clearTimeout(timer);
-                sharedState.emitter.removeListener(`target_response_${combatant.name}`, handleTargetResponse);
-                resolve(target);
-            };
-            const handleTargetResponse = response => {
-                if (response.actionId !== actionDice.active?.id) return;
-                if (response.cancelled) { finish(null); return; }
-                const selectedTarget = validTargets.find(t => t.name.toLowerCase() === String(response.target).toLowerCase());
-                if (selectedTarget) finish(selectedTarget);
-            };
-            sharedState.emitter.on(`target_response_${combatant.name}`, handleTargetResponse);
-            timer = setTimeout(() => finish(null), 180000);
-            broadcast({
-                type: 'target_prompt',
-                actionId: actionDice.active.id,
-                combatant: combatant.name,
-                targets: targetNames,
-                positions: validTargets.map(t => ({ name: t.name, x: t.x, y: t.y,
-                    distance: combatSpace ? combatSpace.distance(combatant, t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) }))
-            });
+            chooseDefenceTarget(combatant, validTargets).then(resolve);
 
         });
     }
@@ -8679,12 +8687,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             continue;
         }
 
-        let targets;
-        if (aliveMonsters.some(m => m.name === combatant.name)) {
-            targets = monsterOpponents.filter(t => t.hp > 0 && !alreadyKilled.has(t.name));
-        } else {
-            targets = aliveMonsters.filter(m => m.hp > 0 && !alreadyKilled.has(m.name));
-        }
+        const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
 
         if (targets.length === 0) {
             combatLog.push(`${combatant.name} has no valid targets to engage.`);
@@ -8799,9 +8802,9 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                     } else if (npcs.some(n => n.name === target.name)) {
                         combatLog.push(`${target.name} is killed by ${combatant.name}.`);
                     } else if (aliveMonsters.some(m => m.name === target.name)) {
-                        const xpEarned = getRandomInt(1000, 1500) * target.level;
-                        combatLog.push(`${target.name} is killed by ${combatant.name} and the party earns ${xpEarned} XP.`);
-                        allocateXP(pc, npcs, xpEarned);
+                        const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
+                        combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
+                        if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
                         aliveMonsters = aliveMonsters.filter(m => m.hp > 0);
                     }
@@ -8846,6 +8849,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     combatSpace?.syncRoster(combatCharacters);
     if (needsUpdate) {
         sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
+        updatedGameConsole = Inhabitants.withStates(updatedGameConsole, combatPopulation);
         sharedState.setUpdatedGameConsole(updatedGameConsole);
     }
 
@@ -9136,8 +9140,8 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
   }
 
   // Only the acting party members roll, not every observer and creature in the room.
-  pcs = parseSheets(pcDetails?.[1], 'pc').map(c => c.name);
-  npcs = parseSheets(npcsDetails?.[1], 'npc').map(c => c.name);
+  pcs = parseSheets(pcDetails?.[1], 'pc').filter(c => c.hp > 0).map(c => c.name);
+  npcs = parseSheets(npcsDetails?.[1], 'npc').filter(c => c.hp > 0 && c.state !== 'Dead').map(c => c.name);
   const commandedNpcs = selectCommandedNpcs(userInput, npcs);
   const selectedCharacters = commandedNpcs.length ? commandedNpcs : pcs;
   if (selectedCharacters.length === 0) {
@@ -9166,6 +9170,8 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
   }) : "{}";
 
   // Step 1 (single): Determine player intent using retort-js string enum
+  const recalled = typeof CampaignMemory !== 'undefined' ? CampaignMemory.context(sharedState, userInput, updatedGameConsole, activeTask) : null;
+  if (recalled?.evidence.length || recalled?.profiles?.length) await $.user(CampaignMemory.prompt(recalled));
   $.model = "gpt-4.1-mini";
   $.temperature = 1.0;
   const ACTION_ENUM = ["Search","Dialogue","Movement","ObjectInteraction","PuzzleSolving","Combat"];
@@ -9186,9 +9192,11 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
   const outcomes = [];
   const diceRolls = [];
   const outcomeRangesList = [];
+  const metadataEligible = new Set();
 
     // Step 2: Generate outcomes for all characters
     const charactersForPrompt = selectedCharacters.map(character => `"${character}"`).join(", ");
+    if (typeof AdjudicationMetadata !== 'undefined') await $.user(AdjudicationMetadata.prompt(selectedCharacters, action, recalled?.evidence.map(row => row.id) || []));
     $.user`I am the player and ${pcs} is my PC. The detected action is "${action}". The room is ${isExhausted ? 'exhausted (no new discoveries possible from Search or PuzzleSolving)' : 'not exhausted'}. Store this information and await the next prompt.`;
 
     await $.user`The detected action is "${action}". The room is ${isExhausted ? 'exhausted (no new discoveries possible from Search or PuzzleSolving)' : 'not exhausted'}. For the following characters: ${charactersForPrompt}, generate exactly 3-6 unique and vivid outcomes for each character based on the user input "${userInput}" and the game state (objects: ${objectsInRoom.join(", ")}, puzzle: "${puzzleInRoom}", puzzle solution: "${puzzleSolution}"). Provide outcomes with dice roll ranges covering the full range 1-20 with no overlaps or gaps, in the format:
@@ -9204,8 +9212,9 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
     - Combat: Low rolls (1-6) miss/take damage (e.g., "Strikes miss, wraith retaliates with chilling claws that sap strength"), mid rolls (7-14) minor hits (e.g., "Grazes the wraith with a faint spark of dark energy"), high rolls (15-20) succeed (e.g., "Channels necromantic power, wounding the wraith deeply").
     Outcomes must prioritize the player’s action, be unique to each character’s role and motivations, and advance the Mortacia plot with lore fragments or dilemmas. If the room is exhausted and the action is Search or PuzzleSolving, generate non-discovery outcomes (e.g., "The shadows yield only echoes of a forsaken past"). For Movement, describe the destination vividly with underworld elements. For PuzzleSolving, if the input matches the puzzle solution, set success to 95+% (rolls 2-20). For Dialogue/ObjectInteraction, favor evocative information/discovery tied to the underworld. NPCs/monsters respond dynamically to the player’s action, reflecting their motivations and the underworld’s atmosphere. Ensure exactly 3-6 outcomes per character, covering 1-20 with no gaps or overlaps. Provide all outcomes in this single response.`;
 
-  const outcomesResponse = await $.assistant.generation({ maxTokens: 600 });
-  let outcomesData = (outcomesResponse.content || "").trim();
+  const outcomesResponse = await $.assistant.generation({ maxTokens: Math.min(7200, 800 + selectedCharacters.length * 1000) });
+  const decodedMetadata = typeof AdjudicationMetadata !== 'undefined' ? AdjudicationMetadata.extract(outcomesResponse.content) : null;
+  let outcomesData = (decodedMetadata?.content ?? outcomesResponse.content ?? "").trim();
   console.log("Raw LLM outcomes response:", outcomesData);
 
   const normalizeCharacterName = (name) => name.replace(/[*"'`]/g, "").trim();
@@ -9237,6 +9246,8 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
         for (let i = low; i <= high; i++) acc.add(i);
         return acc;
       }, new Set());
+      if (coveredRanges.size === 20 && characterOutcomes.length >= 3 && characterOutcomes.length <= 6 &&
+          characterOutcomes.reduce((sum, row) => sum + row.high - row.low + 1, 0) === 20) metadataEligible.add(character);
 
       if (coveredRanges.size !== 20 || characterOutcomes.length < 3 || characterOutcomes.length > 6) {
         console.warn(`Invalid outcomes for ${character}: ${coveredRanges.size} covered, count=${characterOutcomes.length}.`);
@@ -9305,6 +9316,8 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
   };
 
   console.log("Generated Outcomes:", JSON.stringify(initialOutcomes, null, 2));
+  if (decodedMetadata) initialOutcomes.metadata = AdjudicationMetadata.select(decodedMetadata.candidates.filter(row => metadataEligible.has(row?.actor)), initialOutcomes,
+    recalled?.evidence.map(row => row.id) || []);
   return initialOutcomes;
 }
 
@@ -9400,12 +9413,13 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
   $.model = "gpt-4.1-mini";
   $.temperature = 1.0;
   const TRUE_FALSE = ["true", "false"];
+  const metadataFlags = typeof AdjudicationMetadata !== 'undefined' ? AdjudicationMetadata.flags(initialOutcomes) : null;
 
-  await $.user`Given the player input "${userInput}", the initial outcomes (dice + narrative), and ACTIVE QUEST TASK CONTEXT ${activeTaskJson}:
+  if (!metadataFlags) await $.user`Given the player input "${userInput}", the initial outcomes (dice + narrative), and ACTIVE QUEST TASK CONTEXT ${activeTaskJson}:
 Is the player clearly attempting to complete the active quest step right now?
 Respond ONLY {"questAttempted":"X"} with X ∈ {"true","false"}.`;
 
-  const qaResp = await $.assistant.generation({ maxTokens: 50,
+  const qaResp = metadataFlags ? { content: JSON.stringify({ questAttempted: initialOutcomes.metadata.some(row => row.questAttempted) }) } : await $.assistant.generation({ maxTokens: 50,
     parameters: { questAttempted: { type: String, enum: TRUE_FALSE } }
   });
 
@@ -9432,7 +9446,7 @@ Respond ONLY {"questAttempted":"X"} with X ∈ {"true","false"}.`;
 ${serializedInitialOutcomes}
 Store this information in memory and await the next prompt`;
 
-  await $.user`Based on the user input "${userInput}" and the game context, answer the following questions with true or false:
+  if (!metadataFlags) await $.user`Based on the user input "${userInput}" and the game context, answer the following questions with true or false:
 1. engagedInDialogue (True/False)
 2. justLooking (True/False)
 3. searchAttempted (True/False)
@@ -9443,7 +9457,7 @@ Store this information in memory and await the next prompt`;
 8. puzzleRequiresObject (True/False)
 Respond ONLY a JSON object with these exact keys.`;
 
-  const intentResponse = await $.assistant.generation({ maxTokens: 120, 
+  const intentResponse = metadataFlags ? { content: JSON.stringify(metadataFlags) } : await $.assistant.generation({ maxTokens: 120,
     parameters: {
       engagedInDialogue: { type: Boolean },
       justLooking: { type: Boolean },
@@ -9830,6 +9844,10 @@ async function shouldRunAdjudication($, userInput, updatedGameConsole) {
 
   $.model = "gpt-4.1-mini";
   $.temperature = 0.0;
+  if (typeof CampaignMemory !== 'undefined') {
+    const recall = CampaignMemory.context(sharedState, userInput, updatedGameConsole, sharedState.getActiveTask?.());
+    if (recall.evidence.length || recall.profiles?.length) await $.user(CampaignMemory.prompt(recall));
+  }
 
   // Clear definitions + lots of labeled examples so GPT can generalize without regex.
   await $.user`
@@ -10112,13 +10130,15 @@ async function adjudicateActionWithSimulation($, userInput, updatedGameConsole, 
   const coords = sharedState.getLastCoords();
   actionDice.begin('exploration', `${coords.x},${coords.y},${coords.z}`, broadcast);
   try {
-    return await resolveActionWithSimulation($, userInput, updatedGameConsole, activeTask, maxRetries, delayMs);
+    return await resolveActionWithSimulation($, userInput, updatedGameConsole, activeTask, maxRetries, delayMs,
+      gameConsoleForPerception(updatedGameConsole));
   } finally {
     actionDice.end();
   }
 }
 
-async function resolveActionWithSimulation($, userInput, updatedGameConsole, activeTask = null, maxRetries = 3, delayMs = 1000) {
+async function resolveActionWithSimulation($, userInput, updatedGameConsole, activeTask = null, maxRetries = 3, delayMs = 1000,
+  perceivedGameConsole = updatedGameConsole) {
   if (!activeTask) {
     const tasks = sharedState.getCurrentTasks?.() || [];
     const idx   = sharedState.getCurrentTaskIndex?.() || 0;
@@ -10137,7 +10157,7 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
 
             // Step 1: Generate initial outcomes
             console.log("Generating outcomes...");
-            const outcomesResult = initialOutcomes || await generateOutcomes($, userInput, updatedGameConsole, activeTask);
+            const outcomesResult = initialOutcomes || await generateOutcomes($, userInput, perceivedGameConsole, activeTask);
             if (outcomesResult.cancelled) return { narrative: outcomesResult.reason, updatedGameConsole };
 
             // Validate outcomes result
@@ -10172,6 +10192,9 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
             console.log("Generating Narrative...");
             const narrative = generateNarrative(initialOutcomes, additionalOutcomes, userInput);
             console.log("Generated Narrative:", narrative);
+            if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberCommit(sharedState, userInput, initialOutcomes,
+              additionalOutcomes, updatedGameConsole, gameUpdateResult, activeTask,
+              typeof broadcast === 'function' ? broadcast : null);
             
             if (typeof sharedState.setLastAdjudication === 'function') {
                 sharedState.setLastAdjudication({
@@ -10185,7 +10208,7 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
                 });
               }
 
-            return { narrative, updatedGameConsole: gameUpdateResult };
+            return { narrative, updatedGameConsole: gameUpdateResult, adjudicationMetadata: initialOutcomes.metadata || [] };
         } catch (error) {
             console.error(`Error on attempt ${attempt + 1}: ${error.message}`);
             if (attempt + 1 < maxRetries) {
@@ -10655,6 +10678,13 @@ async function logThreadMessages() {
     }
 }
 
+    if (options.realtimeEncounter) {
+      const result = await handleCombatRound({}, '__ENCOUNTER_DEFENCE__', combatMode);
+      updatedGameConsole = sharedState.getUpdatedGameConsole();
+      return { content: `${options.realtimeEncounter} confronts the party.\n${result.combatLog}`,
+        updatedGameConsole, combatCharactersString: sharedState.getCombatCharactersString(),
+        roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatRoundOnly: true };
+    }
     return run(retort(async ($) => {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.2;
@@ -10747,6 +10777,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
 
         // Call generateMissingRoomDetails and check if a new room was generated
     let roomDescriptionGenerated =  await $.run($ => generateMissingRoomDetails($));
+    const entryRoomKey = Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:\s*(.*)$/m)?.[1]);
+    const entryPrevious = sharedState.getLastCoords();
+    const enteringRoom = roomDescriptionGenerated || entryRoomKey !== `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`;
 
     
     const roomDescMatch = updatedGameConsole.match(/Room Description: ([^\n]+)/);
@@ -11035,7 +11068,7 @@ The scene must capture Suzerain's exhaustion from being sent back to Tartarus ye
 If there are monsters in the room, they may not know who Suzerain is or understand his quest. `;
 }
     
-    $.user`This is the current game console: ${updatedGameConsole}
+    $.user`This is the current game console (monsters shown only within shouting distance): ${gameConsoleForPerception()}
     Store the game console information including the current quest, any NPCs in the party and monsters in the room into memory and await the next prompt.`;
 
     const currentCoordsMatch = updatedGameConsole.match(
@@ -11089,7 +11122,7 @@ If there are monsters in the room, they may not know who Suzerain is or understa
     if (monstersInRoom.toLowerCase() !== 'none') {
         $.model = "gpt-4.1-mini"
         //$.temperature = 1.0;
-        $.user`The monsters in the ${roomName} are currently in a ${monstersState} state. Store this information in memory and await the next prompt.`        
+        $.user`Each monster has its own State field; the room summary is not an allegiance. Only living nearby characters can interact or attack. Store this information and await the next prompt.`
     } else { 
         $.model = "gpt-4.1-mini"
         //$.temperature = 1.0;
@@ -11116,7 +11149,7 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
       content: combatLog,
       updatedGameConsole,
       combatCharactersString: sharedState.getCombatCharactersString(),
-      roomNameDatabaseString: roomNameDatabaseString || '',
+      roomNameDatabaseString: sharedState.getRoomNameDatabase() || roomNameDatabaseString || '',
       combatRoundOnly: true,
     };
 }
@@ -11136,14 +11169,14 @@ let monstersAttack = '';
 
 let formattedCurrentSituation = ''; // Declare it at a higher scope
    
-if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
+if (!roomDescriptionGenerated && !enteringRoom && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
     
     const outcomes = await $.run($ => adjudicateAction($, updatedGameConsole));    
    // await adjudicateActionWithCodeInterpreter(userInput, updatedGameConsole);
 }   
     if (attackDecision === "Attack") {
     // Store the generated description in a variable    
-    const combatResult = await handleCombatRound($, userInput, combatMode);
+    const combatResult = await handleCombatRound($, '__ENCOUNTER_DEFENCE__', combatMode);
     combatLog = combatResult.combatLog || '';
     console.log("combatLog (monster attack): ", combatLog);
 
@@ -11157,7 +11190,7 @@ if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") &&
       roomNameDatabaseString: roomNameDatabaseString || '',
       combatRoundOnly: true,
     };
-    } else if (!roomDescriptionGenerated && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
+    } else if (!roomDescriptionGenerated && !enteringRoom && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
   // NEW: ask the LLM whether to run dice adjudication
   const { runSimulation } = await shouldRunAdjudication($, userInput, updatedGameConsole);
 
@@ -11223,11 +11256,18 @@ $.user`I am the player and my character is the PC: ${pcs}. You are the Grave Mas
 let response;
 try {
     
+const taskMemoryBefore = JSON.parse(JSON.stringify(sharedState.getCurrentTasks?.() || []));
+if (typeof CampaignMemory !== 'undefined') {
+  const recall = CampaignMemory.context(sharedState, userInput, updatedGameConsole, sharedState.getActiveTask?.());
+  if (recall.evidence.length || recall.profiles?.length) await $.user(CampaignMemory.prompt(recall));
+}
 const { questJustSeeded, questUpdate, activeTask } = await seedAndManageQuest($, updatedGameConsole, userInput);
+if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberQuest(sharedState, taskMemoryBefore, broadcast);
 
 // Refresh local copies because seedAndManageQuest may have updated shared state
 updatedGameConsole = sharedState.getUpdatedGameConsole() || updatedGameConsole;
 roomNameDatabaseString = sharedState.getRoomNameDatabase() || roomNameDatabaseString;
+await $.user(JourneyMemory.progressPrompt(sharedState));
 
 // (Optional but recommended) re-parse values you rely on below from the fresh console
 const roomNameMatch2 = updatedGameConsole.match(/Room Name: ([^\n]+)/);
@@ -11293,7 +11333,7 @@ Rules:
 - Do NOT output lists or bullet points. Keep immersion: no meta-talk, no asterisks.
 - Adjudicate my most recent input directly first: Parse query (e.g., 'Who/What/How' → answer facts/backstories before twists). Limit meta-riffs (e.g., no 'talking about talking' unless query evokes); ground dialogue in query + 1 room element max.
 - Then organically seed the quest via either an encounter (if monsters present) or a strange environmental event, and fold the first task into the prose as a call-to-action.
-- If a required MONSTER is in this room (${curKey}), use that existing monster by NAME and respect its current state: ${monstersState}. Give it intentions and dialogue.
+- Required monsters elsewhere in this level must be discovered, not brought into the scene merely because their quest placement is ${curKey}. Only living monsters visible in the perceived Game Console may speak or act; respect each individual's State.
 - Party NPCs in the party are allies and MUST NOT be portrayed as enemies or monsters: ${partyNpcSummary}.
 - If a required element shares a name with a party NPC, rename or substitute the hostile entity — never use the party NPC as a foe.
 - If required OBJECTS/KEYS are in this room, surface them via sensory detail; do NOT auto-grant or teleport them. Let me act.
@@ -11302,7 +11342,7 @@ Rules:
 
 Context anchors:
 - Room context (coordinates, exits, objects, NPCs in party, monsters in ${roomName}) comes from the game console.
-- Monsters are ${monstersState} and act with motivations/backstories.
+- Each visible monster has its own State, motivations and backstory. The room summary is not an allegiance.
 - Resolve NPC/monster actions with implied die rolls and include dialogue in quotes.
 - Keep it strange and thought-provoking.
 
@@ -11331,7 +11371,7 @@ Core Rules:
 - Never act, decide, or complete the game for me; wait for my commands.
 - Maintain RPG immersion: Use text descriptions only, no asterisks, no rules discussions. 
 - NPCs and monsters above all are individuals with free will and agency, are subject to their own emotions and biases, have unique personalities and character traits, and draw from original, well-developed backstories and experiences, possessing limited but also specialized knowledge (expert in some areas, novice in others), thereby expression certainty in some instances but confusion in others, getting it wrong sometimes and can have disagreements. 
-- Control NPCs in party (friendly with free will/agency/motivations/backstories) and monsters (${monstersState} state, also with free will/agency/motivations/backstories); if hostile, have them express intentions and prepare attacks.
+- Control living NPCs in party and nearby monsters, each with their own State and motivations. Friendly residents support the party, neutrals stand aside, and nearby hostiles may threaten. Dead characters cannot speak or act.
 - Resolve actions based on die rolls for NPCs/monsters; include dialogue in quotes with their thoughts/opinions.
 
 Narrative Guidelines:
@@ -11369,7 +11409,7 @@ Core Rules:
 - Never act, decide, or complete the game for me; wait for my commands.
 - Maintain RPG immersion: Use text descriptions only, no asterisks, no rules discussions. 
 - NPCs and monsters above all are individuals with free will and agency, are subject to their own emotions and biases, have unique personalities and character traits, and draw from original, well-developed backstories and experiences, possessing limited but also specialized knowledge (expert in some areas, novice in others), thereby expression certainty in some instances but confusion in others, getting it wrong sometimes and can have disagreements. 
-- Control NPCs in party (friendly with free will/agency/motivations/backstories) and monsters (${monstersState} state, also with free will/agency/motivations/backstories); if hostile, have them express intentions and prepare attacks.
+- Control living NPCs in party and nearby monsters, each with their own State and motivations. Friendly residents support the party, neutrals stand aside, and nearby hostiles may threaten. Dead characters cannot speak or act.
 - Resolve actions based on die rolls for NPCs/monsters; include dialogue in quotes with their thoughts/opinions.
 
 Narrative Guidelines:
@@ -11407,9 +11447,34 @@ if (isAutoSimAdvance) {
   $.model = "gpt-4.1-mini";
 }
 const autoMax = isAutoSimAdvance ? 280 : 850;
-const result = await $.assistant.generation({ maxTokens: autoMax }); // shorter for 45s auto ticks to keep them as quick integrated history-line updates
-console.log('Retort-JS execution completed, result:', result);
-response = result.content || result; // Ensure response is set from the result
+const perceivedGameConsole = gameConsoleForPerception();
+const presentCompanions = Inhabitants.parseSheets(updatedGameConsole, 'NPCs in Party').filter(a => a.hp > 0 && a.state !== 'Dead').map(a => a.name);
+const dialogueNames = [...Inhabitants.parseSheets(perceivedGameConsole, 'PC'),
+  ...Inhabitants.parseSheets(perceivedGameConsole, 'NPCs in Party'), ...Inhabitants.parseSheets(perceivedGameConsole)]
+  .filter(a => a.hp > 0 && a.state !== 'Dead').map(a => a.name);
+const memoryGeoKey = (updatedGameConsole.match(/^Coordinates: X:\s*(-?\d+), Y:\s*(-?\d+), Z:\s*(-?\d+)/m) || []).slice(1).join(',');
+const castPopulation = sharedState.getRoomPopulation(memoryGeoKey);
+const mentioned = selectCommandedNpcs(userInput, dialogueNames);
+const inputAudience = typeof CampaignMemory !== 'undefined' ? new Set(CampaignMemory.cast(sharedState, updatedGameConsole).audible) : null;
+const inputRecipients = typeof DialogueAudience !== 'undefined' ? DialogueAudience.resolve(userInput,
+  [...Inhabitants.parseSheets(updatedGameConsole, 'NPCs in Party'), ...Inhabitants.parseSheets(updatedGameConsole)], inputAudience ? [...inputAudience] : dialogueNames) : null;
+if (!enteringRoom) DialogueMemory.rememberPlayerInput(sharedState, userInput,
+  (inputRecipients?.directed ? inputRecipients.responders : mentioned.length ? mentioned : presentCompanions)
+    .filter(name => !inputAudience || inputAudience.has(name)), castPopulation);
+if (!enteringRoom && typeof CampaignMemory !== 'undefined') CampaignMemory.rememberInput(sharedState, userInput, updatedGameConsole, broadcast);
+const characterMemory = DialogueMemory.memoryContext(sharedState, [...mentioned, ...presentCompanions, ...dialogueNames], castPopulation);
+const visibleCast = Inhabitants.parseSheets(perceivedGameConsole);
+const individualRoles = visibleCast.filter(a => a.hp > 0).map(a => {
+  const record = castPopulation?.actors?.[a.name];
+  return { name: a.name, state: Inhabitants.state(a), job: record?.job, activity: record?.activity };
+});
+await $.user`Individual character allegiances override the room's summary state: ${JSON.stringify(individualRoles)}. Friendly residents fight on the player's side, neutrals stand aside and do not join, and only nearby hostile encounters can attack. Other inhabitants continue their own activities. Character recollections (beliefs, promises and previous speech, not proof of world events): ${JSON.stringify(characterMemory)}.`;
+if (typeof CampaignMemory !== 'undefined') {
+  const recall = CampaignMemory.context(sharedState, userInput, updatedGameConsole, activeTask);
+  if (recall.evidence.length || recall.profiles?.length) await $.user(CampaignMemory.prompt(recall));
+}
+let spoken = {dialogue:[],replies:[]};
+response = '';
 
 const coordsMatch = updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
 const currentCoordinates = coordsMatch 
@@ -11760,9 +11825,9 @@ try {
     logDungeonConstruction('scene-graphics', dungeon);
     // 🔴 STEP 4 — Build layout using blueprint (fallback to legacy if missing)
     if (blueprint) {
-      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles);
+      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles, sceneSpec);
     } else if (classification && classification.indoor === false) {
-      buildOutdoorLayout(dungeon, classification, customTiles);
+      buildOutdoorLayout(dungeon, classification, customTiles, sceneSpec);
     } else {
       buildIndoorLayout(dungeon, classification);
     }
@@ -11770,6 +11835,7 @@ try {
   applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
   applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
   logDungeonConstruction('geography', dungeon);
+  console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
   dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
   console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
   logDungeonConstruction('architecture', dungeon);
@@ -11778,7 +11844,7 @@ try {
     for (let x = 1; x < dungeon.layout.width - 1; x++) {
       const key = `${x},${y}`;
       const cell = dungeon.cells[key];
-      if (!cell || cell.tile !== "wall" || cell.architectureRole) continue;
+      if (!cell || cell.tile !== "wall" || cell.architectureRole || cell.exteriorRole) continue;
       const N = dungeon.cells[`${x},${y-1}`];
       const S = dungeon.cells[`${x},${y+1}`];
       const E = dungeon.cells[`${x+1},${y}`];
@@ -11802,7 +11868,7 @@ try {
     for (let x = 1; x < dungeon.layout.width - 1; x++) {
       const key = `${x},${y}`;
       const cell = dungeon.cells[key];
-      if (!cell || cell.tile !== "wall") continue;
+      if (!cell || cell.tile !== "wall" || cell.exteriorRole) continue;
       const N = dungeon.cells[`${x},${y-1}`];
       const S = dungeon.cells[`${x},${y+1}`];
       const E = dungeon.cells[`${x+1},${y}`];
@@ -11846,6 +11912,53 @@ try {
   console.log('Dungeon built with VISUAL STYLE → SPRITE → RAYCASTER');
 }
 
+// Narration runs only after placement, so a room-wide console list cannot become an entrance mob.
+const activeDungeonForPopulation = sharedState.getRoomDungeonForSimulation(geoCoords);
+const population = populationService.prepare(updatedGameConsole, activeDungeonForPopulation);
+if (population) population.journey = JourneyMemory.progressSynopsis(sharedState);
+updatedGameConsole = Inhabitants.withStates(updatedGameConsole, population);
+sharedState.setUpdatedGameConsole(updatedGameConsole);
+const dialogueRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+const perception = Inhabitants.perceive(activeDungeonForPopulation,dialogueRoster,population,enteringRoom);
+const entryQuestContact = enteringRoom && typeof prepareEntryQuestContact !== 'undefined' ? prepareEntryQuestContact(
+  population, activeDungeonForPopulation, dialogueRoster, perception, sharedState.getCurrentQuest()) : null;
+// A planned spawn position is not proof that the player has met a resident.
+const narrationSpeakers = perception.conversational.filter(actor => Inhabitants.hasEncountered(actor, population));
+const audibleNames = narrationSpeakers.map(a=>a.name);
+// Startup must finish the original Retort scene, including its TURN 0 premise.
+const initialArrival = enteringRoom && typeof isFirstTurn !== 'undefined' && isFirstTurn && geoKey === '0,0,0';
+const responseAudience = !enteringRoom && typeof DialogueAudience !== 'undefined' ? DialogueAudience.resolve(
+  typeof userInput === 'string' ? userInput : '', dialogueRoster, audibleNames) : null;
+const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabitants.state(a)!=='Dead'&&
+  (a.type==='npc'||population?.actors?.[a.name]?.status==='present')).map(a=>a.name);
+{
+  $.model = 'gpt-4.1-mini';
+  if (initialArrival) await $.user`INITIAL GAME ARRIVAL: Complete the TURN 0 party-awakening or solo premise already supplied in this conversation. This is the full opening scene, not a routine room greeting. Keep each character's existing identity, personality and history; non-divine newcomers do not yet know the other souls or understand their circumstances. Mortacia is the exception to awakening and retains her established premise. Describe the player's arrival without choosing actions or speaking for the PC. Leave the player free to decide what happens next. Keep the current quest, boss, inventory, stats and exits unchanged.`;
+  else if (enteringRoom) await $.user`ROOM ENTRY NARRATION: Finish the full Retort entry scene using the room, puzzle, current quest, task-seeding instructions and history already supplied. Carry through the established quest hook and let nearby companions react to the place and its implications. This is not a two-greeting cache update. Do not duplicate the static room description or puzzle that the game already displays. Do not invent quest completion, rewards, equipment, exits, a replacement boss, or dialogue from distant or undiscovered inhabitants.`;
+  if (entryQuestContact) await $.user`The entry quest hook has a real, visibly encountered ${entryQuestContact.state} contact within speaking distance: ${JSON.stringify(entryQuestContact)}. Introduce this character naturally and have them seed the EXISTING quest in actual labelled speech, with an invitation or useful next lead supported by the established task instructions. They are not an enemy, and their greeting is not quest completion. No other unseen group members are introduced by association. Do not invent a different quest giver or relay private facts from distant inhabitants.`;
+  if (responseAudience?.directed) await $.user(DialogueAudience.prompt(responseAudience));
+  if (typeof CampaignMemory !== 'undefined') await $.user`Future cached replies must use each character's own history, voice and personally witnessed memories, not another character's secrets: ${JSON.stringify(CampaignMemory.dialogueContext(sharedState, describeCharacters(dialogueRoster, population), typeof userInput === 'string' ? userInput : ''))}. Refer to specific personal concerns or earlier exchanges when appropriate; avoid generic commentary about sands, shadows and ancient stones. An unheard current conversation cannot change a distant inhabitant's knowledge.`;
+  await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${Inhabitants.MONSTER_DIALOGUE_RANGE} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
+  await $.user`Preserve the existing flowing narrative: prose, actions, quotation marks and paragraph breaks stay natural, not a screenplay or JSON document. Mark EVERY actual spoken passage inside its normal quotation marks with invisible backend labels: [[SPEECH:"exact nearby name"]]all words spoken in this quote[[/SPEECH]]. Use the JSON-quoted exact name from ${JSON.stringify(audibleNames)}. Label every continuation and later paragraph, even when the prose uses he, she, their voice, an epithet, or omits the name. Do not summarize, truncate, omit later sentences or repeat the speech elsewhere. Never label narration, thoughts, inscriptions, the PC's words or distant characters. At most ${initialArrival ? 6 : 4} nearby speakers; allow complete natural monologues, not a 40-word metadata excerpt. The server removes only these labels before displaying the unchanged narrative in the Game Log.
+After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh two 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;
+  const result = await $.assistant.generation({maxTokens:Math.min(4200,autoMax+replyNames.length*110)});
+  spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
+  spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
+  response = spoken.content;
+  if (initialArrival) console.info('[ArrivalNarration]', JSON.stringify({ geoKey, speakers: spoken.dialogue.map(row => row.speaker) }));
+  if (enteringRoom) console.info('[EntryDialogue]',JSON.stringify({geoKey,mode:'full-retort',nearby:audibleNames,
+    questContact:entryQuestContact?.speaker || null,
+    undiscovered:perception.conversational.filter(actor => !narrationSpeakers.includes(actor)).map(actor => actor.name),
+    distant:perception.distant.length,spoken:spoken.dialogue.length,monsterDialogueRange:Inhabitants.MONSTER_DIALOGUE_RANGE}));
+}
+if (population && responseAudience?.directed) {
+  const duration = spoken.dialogue.flatMap(row => Inhabitants.splitSpeech(row.line)).reduce((sum, line) =>
+    sum + Math.min(18000, Math.max(3500, line.trim().split(/\s+/).length * 300 + 700)), 0);
+  population.dialogueFocus = { responders: responseAudience.responders, until: Date.now() + Math.min(180000, duration + 15000) };
+} else if (population) delete population.dialogueFocus;
+Inhabitants.applyReplies(population,spoken.replies,dialogueRoster);
+Inhabitants.noteSpoken(population,spoken.dialogue,enteringRoom);
+
 // Include musicArrangement here
 if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRoom.toLowerCase() !== 'none') {
   returnObj.content = charactersAttack + "\n\n" + combatLog + "\n\n" + response;
@@ -11881,7 +11994,7 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
   returnObj.content = monstersAttack + "\n\n" + combatLog + "\n\n" + response;
   returnObj.combatCharactersString = sharedState.getCombatCharactersString();
   returnObj.roomNameDatabaseString = roomNameDatabaseString;
-} else if (roomDescriptionGenerated) {
+} else if (roomDescriptionGenerated || enteringRoom) {
   let roomDescription = updatedGameConsole.match(/Room Description: ([^\n]+)/)?.[1]?.trim() || '';
   let puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: ([^\n]+)/)?.[1]?.trim() || '';
   let sentences = (roomDescription + "\n\n" + puzzleInRoom).split('. ');
@@ -11925,6 +12038,15 @@ if (isAutoSimAdvance) {
 }
 
 returnObj.updatedGameConsole = updatedGameConsole;
+returnObj.population = population;
+returnObj.dialogue = spoken.dialogue;
+DialogueMemory.rememberDialogue(sharedState, population, spoken.dialogue, 'turn');
+if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberDialogue(sharedState, population, spoken.dialogue, 'turn-dialogue', broadcast);
+if (population) populationService.save(population);
+returnObj.roomNameDatabaseString = sharedState.getRoomNameDatabase();
+returnObj.combatCharactersString = sharedState.getCombatCharactersString();
+if (population) broadcast({ type: 'room_population', population, runId: sharedState.getDungeonRunId() });
+if (spoken.dialogue.length) broadcast({ type: 'character_dialogue', dialogue: spoken.dialogue, geoKey, runId: sharedState.getDungeonRunId() });
 returnObj.questUpdate = sharedState.getLastQuestUpdate?.() || '';
 returnObj.activeTask = sharedState.getActiveTask?.() || null;
 returnObj.questProgress = updatedGameConsole.match(/^Quest Progress:[ \t]*([^\r\n]*)/m)?.[1] || '';
@@ -12231,7 +12353,44 @@ function extractAndParseJson(text) {
   }
 }
 
-async function runNpcAutonomyTick() {
+async function runNpcAutonomyTick(isCurrent = () => true) {
+  const runId = sharedState.getDungeonRunId(), coords = sharedState.getLastCoords();
+  const geoKey = `${coords.x},${coords.y},${coords.z}`;
+  if (sharedState.getGamePaused()) return { dialogue: [], summary: '' };
+  const dungeon = sharedState.getRoomDungeonForSimulation(coords);
+  if (!dungeon) return { dialogue: [], summary: '' };
+  const population = populationService.get(geoKey, undefined, dungeon);
+  const consoleAtStart = sharedState.getUpdatedGameConsole();
+  const live = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
+  if (!dungeon || !live?.player || Inhabitants.roomKey(live.roomKey) !== geoKey) return { dialogue: [], summary: '' };
+  const refreshAtStart = population.lastDialogueRefreshAt || 0;
+  if (Date.now()-refreshAtStart < Inhabitants.DIALOGUE_REFRESH_MS) return {dialogue:[],summary:'',cached:true};
+  const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+  Inhabitants.attach(roster,population);
+  const context = describeCharacters(roster.filter(a=>a.type==='npc'||population.actors[a.name]?.status==='present'),population);
+  if (!context.length) return { dialogue: [], summary: '' };
+  const nearby = Inhabitants.perceive(dungeon,roster,population).conversational.filter(a => Inhabitants.hasEncountered(a, population)).map(a=>a.name);
+  const recollections = DialogueMemory.memoryContext(sharedState,[...nearby,...context.map(a=>a.name)],population,2400);
+  let parsed;
+  try {
+    parsed = await run(retort(agent=>generateCharacterDialogue(agent,{characters:context,recollections,
+      personalMemories: typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState, context,
+        `${live.currentConversation || ''} ${sharedState.getCurrentQuest() || ''}`) : [],
+      roomDescription:consoleAtStart.match(/^Room Description:\s*(.*)$/m)?.[1],quest:sharedState.getCurrentQuest(),
+      conversation:live.currentConversation})));
+  } catch (error) { console.warn('[RoomAutonomy]', error.message); return { dialogue: [], summary: '' }; }
+  const current = sharedState.getLastCoords();
+  if (!isCurrent() || sharedState.getGamePaused() || sharedState.getDungeonRunId() !== runId || `${current.x},${current.y},${current.z}` !== geoKey ||
+      sharedState.getUpdatedGameConsole() !== consoleAtStart || (population.lastDialogueRefreshAt || 0)!==refreshAtStart) return { dialogue: [], summary: '' };
+  const currentRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+  const count = Inhabitants.applyReplies(population,parsed.replies,currentRoster);
+  if (!count) return {dialogue:[],summary:''};
+  populationService.save(population);
+  console.info('[DialogueRefresh]',JSON.stringify({geoKey,runId,characters:count,mode:'five-minute-cache'}));
+  return {dialogue:[],summary:'',population,refreshed:true,ts:Date.now()};
+}
+
+async function runLegacyNpcAutonomyTick() {
   const updatedGameConsole = sharedState.getUpdatedGameConsole() || '';
   const fullConsoleReference = getFullNpcAutonomyConsoleReference(updatedGameConsole);
   const liveWorldState = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
@@ -12361,11 +12520,22 @@ async function generateFullCharacterWithRetortSprite(baseCharacter) {
   };
 }
 
+async function generatePartyCharacterProfiles(characters, runId) {
+  const { generateProfiles } = require('./characterProfiles');
+  try { return await run(retort($ => generateProfiles($, characters, runId))); }
+  catch (error) {
+    console.warn('[CharacterProfiles]', error.message);
+    const Profiles = require('../assets/characterProfiles');
+    return characters.map(actor => Profiles.create(actor, runId));
+  }
+}
+
 // Export everything the rest of the app needs
 module.exports = {
   finalizeRoomDungeon,
   retortWithUserInput,
   runNpcAutonomyTick,
   generateCharacterSpriteSpecWithRetort,
-  generateFullCharacterWithRetortSprite
+  generateFullCharacterWithRetortSprite,
+  generatePartyCharacterProfiles
 };

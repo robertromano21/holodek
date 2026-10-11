@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const os = require('node:os');
 const path = require('node:path');
-const { prepareSceneExteriors, applySceneExteriors, EXTERIOR_VERSION } = require('../retort/sceneExterior');
+const { prepareSceneExteriors, buildSceneExteriorSites, applySceneExteriors, EXTERIOR_VERSION } = require('../retort/sceneExterior');
 const { makeNavigation, reachable } = require('../retort/sceneArchitecture');
 const Exits = require('../assets/dungeonExits');
 const Voxels = require('../assets/scenePropVoxels');
@@ -45,7 +45,7 @@ function assertNavigation(before, dungeon) {
   for (const [key, old] of Object.entries(before.cells)) {
     const c = dungeon.cells[key], [x, y] = key.split(',').map(Number), index = y * width + x;
     assert.equal(c.floorHeight, old.floorHeight, `elevation changed at ${key}`);
-    if (prior.seen[index] && (c.tile === 'floor' || c.tile === 'door')) assert.ok(after.seen[index], `lost ${key}`);
+    if (prior.seen[index] && !c.blocked && !c.obstacle && (c.tile === 'floor' || c.tile === 'door')) assert.ok(after.seen[index], `lost ${key}`);
   }
   return after;
 }
@@ -80,7 +80,7 @@ test('known return to the root temple creates rendered shell, towers, supported 
   }
   assert.equal(doorway.supports.length, 2);
   const lintel = d.sceneStructures.find(p => p.role === 'exterior-doorway-lintel');
-  assert.ok(doorway.supports.every(key => d.cells[key].tile === 'wall' && d.cells[key].ceilHeight >= lintel.position.z));
+  assert.ok(doorway.supports.every(key => ['wall', 'torch'].includes(d.cells[key].tile) && d.cells[key].ceilHeight >= lintel.position.z));
   const court = b.forecourt;
   for (let y = court.y; y < court.y + court.height; y++) for (let x = court.x; x < court.x + court.width; x++) {
     assert.equal(d.cells[`${x},${y}`].tile, 'floor');
@@ -246,7 +246,7 @@ test('compass and corner markers have physical orthogonal doorways, not blocking
   }
 });
 
-test('the real game movement predicates allow a body-radius approach through the travel doorway', () => {
+test('the real game movement predicates allow a body-radius approach to the exit but block the closed gate', () => {
   const source = fs.readFileSync(require.resolve('../assets/game'), 'utf8');
   const code = ['isBlockedDungeonCell', 'canEnterTile', 'getDungeonCellFloorHeight', 'getDungeonSurfaceAt', 'canOccupyPos', 'isObstacleAtPos']
     .map(name => {
@@ -265,12 +265,13 @@ test('the real game movement predicates allow a body-radius approach through the
       PLAYER_EYE_HEIGHT: 0.65, MAX_STEP: 1.5, isObstacleTile: tile => tile === 'pillar' || tile.startsWith('custom_'),
       getObstacleRadiusForTile: () => 0.5, playerPosX: door.x + 0.5 - fx * 2, playerPosY: door.y + 0.5 - fy * 2 };
     vm.runInNewContext(code, context);
-    for (let step = 0; step <= 32; step++) {
+    for (let step = 0; step <= 16; step++) {
       const x = door.x + 0.5 + fx * (step / 8 - 2), y = door.y + 0.5 + fy * (step / 8 - 2);
       assert.equal(context.isBlockedDungeonCell(d.cells[`${Math.floor(x)},${Math.floor(y)}`]), false);
       assert.equal(context.canOccupyPos(x, y), true, `${name}: step ${step}`);
       context.playerPosX = x; context.playerPosY = y;
     }
+    assert.equal(context.canOccupyPos(door.x + 0.5 + fx, door.y + 0.5 + fy), false, 'The travel confirmation, not walking into a shell, enters the destination');
     const jamb = door.supports[0].split(',').map(Number);
     assert.equal(context.isBlockedDungeonCell(d.cells[door.supports[0]]), true);
     assert.equal(context.canOccupyPos(jamb[0] + 0.5, jamb[1] + 0.5), false);
@@ -288,7 +289,8 @@ test('exactly one front entrance leaves solid rear/side walls and a reserved two
     for (let v = 0; v < b.depth; v++) for (let u = -half; u <= half; u++) {
       if (v !== 0 && v !== b.depth - 1 && Math.abs(u) !== half) continue;
       const cell = point(u, v), c = d.cells[`${cell.x},${cell.y}`];
-      assert.equal(c.tile, v === 0 && Math.abs(u) <= 1 ? 'floor' : 'wall', `${name}: shell ${u},${v}`);
+      if (v === 0 && Math.abs(u) <= 1) assert.equal(c.tile, 'floor', `${name}: doorway ${u},${v}`);
+      else assert.ok(['wall', 'torch'].includes(c.tile), `${name}: solid shell ${u},${v}`);
     }
     assert.equal(Object.values(d.cells).filter(c => c.complexExit === name).length, 3);
     assert.equal(b.ringWidth, 2);
@@ -441,7 +443,7 @@ test('disabled/indoor/malformed layouts and older exterior reports do not trigge
   assert.deepEqual(d, snapshot);
 });
 
-test('roofless evidence stays roofless and canonical roof meshes are reused without tile overwrites', () => {
+test('roofless evidence stays roofless and destination-colored canonical shapes do not overwrite existing tiles', () => {
   const input = spec();
   const d = room(), canonical = { url: '/entablature.png', spriteSpec: { voxelShape: 'entablature', material: 'marble' } };
   d.tiles.old_entablature = canonical;
@@ -450,7 +452,7 @@ test('roofless evidence stays roofless and canonical roof meshes are reused with
   assert.equal(report.buildings[0].roofFamily, 'open');
   assert.equal(report.buildings[0].counts.roofParts, 0);
   assert.equal(d.tiles.old_entablature, canonical);
-  assert.ok(d.sceneStructures.filter(p => p.shape === 'entablature').every(p => p.tile === 'old_entablature'));
+  assert.ok(d.sceneStructures.filter(p => p.role === 'exterior-wall-box').every(p => d.tiles[p.tile].spriteSpec.palette.primary === report.buildings[0].palette.primary));
   assert.ok(!d.sceneStructures.some(p => p.role === 'exterior-roof-shell'));
 });
 
@@ -512,7 +514,8 @@ test('the selectable outdoor lab builds two known destinations with real graphic
       const fx = door.x - door.approach.x, fy = door.y - door.approach.y;
       Object.assign(context.window, { playerPosX: door.x + 0.5 - fx * 2, playerPosY: door.y + 0.5 - fy * 2,
         playerDungeonX: door.x - fx * 2, playerDungeonY: door.y - fy * 2 });
-      for (let step = 0; step <= 32; step++) walk(door.x + 0.5 + fx * (step / 8 - 2), door.y + 0.5 + fy * (step / 8 - 2));
+      for (let step = 0; step <= 16; step++) walk(door.x + 0.5 + fx * (step / 8 - 2), door.y + 0.5 + fy * (step / 8 - 2));
+      assert.equal(context.clear(door.x + 0.5 + fx, door.y + 0.5 + fy), false, 'The destination gate is closed');
       // Walk a complete circuit in the inner lane of the two-wide perimeter using the lab's real collision function.
       const corners = [[f.x - 0.5, f.y - 0.5], [f.x + f.width + 0.5, f.y - 0.5],
         [f.x + f.width + 0.5, f.y + f.height + 0.5], [f.x - 0.5, f.y + f.height + 0.5]];

@@ -830,3 +830,104 @@ Original startup boilerplate still runs the complete existing population pipelin
 
 Verification: `node --test tests/*.test.cjs`, desktop/narrow
 `node tests/run-dungeon-ui-probe.cjs`, and `node tests/run-gpu-probe.cjs --software`.
+
+### Inhabitants and Dialogue (2026-10-09)
+
+Non-starting, non-boss rooms generate a batched cast of eight indoor or sixteen
+outdoor inhabitants, reserving space under the ten/twenty character construction
+caps for quest additions. Original starting-room and boss spawning stays intact.
+Character sheets retain their fourteen original fields in order and add a trailing
+`State:` field: Alive/Dead for the PC; Friendly/Neutral/Hostile/Dead for inhabitants
+and companions. Legacy fourteen-line saves still parse. HP death overrides any
+living state. The old room summary remains a compatibility field, not a combat
+allegiance or the visible state label. Encounter groups, jobs, routines, homes,
+positions and exhaustion live in room metadata.
+Quest-seeded casts retain their initial sheets for first-time construction only;
+live HP remains authoritative in the original plain-text game console.
+
+Reachable encounter sites are spread across the existing geometry. Groups have
+at most four members; unplaceable groups are not dumped beside the player. Some
+arrivals have one small peaceful group nearby. Perception requires local distance
+and clear sight lines. Friendly inhabitants fight with the party, neutrals watch,
+and combat engages one local hostile group rather than the whole level. Jobs
+drive bounded local guard/work/rest/patrol routines; recruited companions keep
+the original party-following movement. Room metadata persists exhaustion across
+revisits. The simulation does not rewrite terrain, roofs, exits or objects.
+
+Room-entry narration runs after placement and finishes the main Retort response:
+retain the room description, puzzle and quest-seeding context, then narrate the
+entry scene with speech only from companions and nearby, discovered inhabitants.
+Startup keeps the original party awakening and Mortacia/Suzerain solo premises.
+One visibly present neutral/friendly quest contact can introduce the existing
+hook on entry; unseen group members and distant inhabitants remain excluded.
+Its invitation persists across cache refreshes without completing any quest step.
+Entry and normal command responses supply attributed subtitles and refresh cached
+dialogue in the same model request. Clearly attributed prose is also recognized
+when speech tags are missing. Unknown speakers and invalid cache updates are rejected.
+
+While actively exploring, a single batched request refreshes all current-room
+dialogue caches after five active minutes. A command-supplied refresh restarts
+that timer. Routine movement, discovery and playing cached lines do not call an
+LLM. Future cached lines are not treated as already-spoken memories. Nearby workers
+and companions take turns according to last-spoken time, retaining that fairness
+when caches refresh. Stale run, room, pause, console and newer-cache results are
+discarded. Background refreshes
+can change only cached speech, never inventory, items, exits, HP or quest state.
+
+Character memory retains the first exchange, three recent remarks, three concise
+recollections and two player inputs. Saved room records preserve that memory;
+the in-memory index holds at most 64 characters. Prompt memory is limited to eight
+relevant characters and 2,400/3,600 characters. Ambient speech uses a dedicated
+IndexedDB transcript-only writer with one rolling six-line entry: it cannot
+overwrite room equipment, exits or the original command-turn records.
+
+Subtitles use the existing visual language above the command prompt. Nearby
+companions can approach a clear front position; residents face the player without
+teleporting across the level. `P` outside text fields or the menu Pause button
+pauses movement, local speech timers, proximity actions, target selection and
+pending dice deadlines. Discovery checks run at most once every three seconds.
+Position-only checkpoints persist at most once every fifteen seconds; discoveries,
+speech, deaths and other meaningful transitions are saved immediately. This avoids
+serializing the growing campaign database on every idle discovery poll. Ambient
+history scans once after loading, then updates only its own rolling entry.
+Automatic close encounters call the existing combat round directly, without a
+synthetic player text command or a room-generation/narration call. PC targeting
+and dice remain player-controlled; interactive mode retains companion targeting.
+
+Game Console monster blocks and narrator perception hide distant and occluded
+residents without deleting the canonical roster or its plain-text saved sheets.
+The existing dungeon IndexedDB upgrades to schema two with a small `inhabitants`
+store keyed by run and room: frequent population checkpoints do not rewrite large
+geometry records. Reopening the combat map retains the complete roster. Early
+speech waits briefly for matching actors to initialize, in its original order;
+dead or out-of-range actors cannot produce subtitles.
+
+Revisit rendering excludes each dead, recruited or departed resident using its
+own HP/state/presence, never the room summary. The same check runs before and
+after legacy position/stat merges in the combat map, and before 3D sprite work.
+Dead sheets remain saved for quest evidence; living actors of every allegiance
+still render. The hamburger menu includes an explicit `Revive Party (Test)`
+action that lazily loads the optional recovery helper, restores only PC/party HP,
+and refuses active combat. It does not revive enemies or alter quests, and never
+runs automatically.
+
+Combat stores current monster sheets for bound quest evidence and refreshes
+partial progress without a model call. Legacy multi-room defeat steps track each
+bound target once, not a duplicated first target or the player's current room.
+Verified non-boss defeat steps advance when all targets are dead. Final boss,
+key, puzzle and mixed-objective gates keep their original completion mechanism.
+No additional XP or key is granted by progress bookkeeping.
+
+Outdoor continuation names use seeded words rather than visible hashes or
+coordinate suffixes. Existing suffixed fallback names are cleaned only for
+display, preserving saved room identity, geometry and exit links. Coordinate keys
+remain separate navigation and diagnostic fields.
+
+Diagnostics: `[RoomPopulation]` (including group placement), `[DialogueSubtitle]`,
+`[QuestCombatProgress]`, `[EntryDialogue]`, `[DialogueRefresh]` and
+`[EncounterCombat]`. New population, dialogue, memory, pause, route and actual
+combat tests run in `node --test`. Desktop/narrow HUD probes also verify real
+IndexedDB history writes, subtitles, typing-safe pause and the existing inventory,
+map, compass and confirmation behavior. Live API generation and hardware-driven
+playtesting are separate from these isolated tests; no live game is restarted or
+repopulated by the tests.

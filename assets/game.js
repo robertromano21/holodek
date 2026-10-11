@@ -14,6 +14,7 @@ const MUSIC_STORE   = 'rooms';
 // --- IndexedDB for dungeon layouts ---
 const DUNGEON_DB_NAME = 'cotg-dungeons';
 const DUNGEON_STORE   = 'rooms';
+const DUNGEON_INHABITANTS_STORE = 'inhabitants';
 window.dungeonRunId = null;
 const DUNGEON_CACHE_VERSION = 7; // v7: geometry-stamped scene rooms for accelerated render cache invalidation
 let dungeonDBPromise = null;
@@ -62,16 +63,21 @@ function openDungeonDB() {
   if (dungeonDBPromise) return dungeonDBPromise;
 
   dungeonDBPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DUNGEON_DB_NAME, 1);
+    const req = indexedDB.open(DUNGEON_DB_NAME, 2);
 
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains(DUNGEON_STORE)) {
         db.createObjectStore(DUNGEON_STORE); // key = "x,y,z"
       }
+      if (!db.objectStoreNames.contains(DUNGEON_INHABITANTS_STORE)) db.createObjectStore(DUNGEON_INHABITANTS_STORE);
     };
 
-    req.onsuccess = () => resolve(req.result);
+    req.onsuccess = () => {
+      const database = req.result;
+      database.onversionchange = () => { database.close(); dungeonDBPromise = null; };
+      resolve(database);
+    };
     req.onerror   = () => reject(req.error);
   });
 
@@ -83,10 +89,12 @@ async function idbGetDungeon(coordsKey) {
   const cacheKey = `${window.dungeonRunId}:${coordsKey}`;
   const db = await openDungeonDB();
   return new Promise((resolve, reject) => {
-    const tx  = db.transaction(DUNGEON_STORE, 'readonly');
+    const tx  = db.transaction([DUNGEON_STORE, DUNGEON_INHABITANTS_STORE], 'readonly');
     const req = tx.objectStore(DUNGEON_STORE).get(cacheKey);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror   = () => reject(req.error);
+    const population = tx.objectStore(DUNGEON_INHABITANTS_STORE).get(cacheKey);
+    tx.oncomplete = () => resolve(req.result ? { ...req.result, inhabitants: population.result || req.result.inhabitants } : null);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Dungeon cache read was aborted.'));
   });
 }
 
@@ -103,20 +111,35 @@ async function idbSetDungeon(coordsKey, dungeon) {
   });
 }
 
+async function idbSetPopulation(population, runId = window.dungeonRunId) {
+  if (!runId || !population?.geoKey) return;
+  const database = await openDungeonDB();
+  if (runId !== window.dungeonRunId) return;
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction(DUNGEON_INHABITANTS_STORE, 'readwrite');
+    tx.objectStore(DUNGEON_INHABITANTS_STORE).put(population, `${runId}:${population.geoKey}`);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function discardPreviousDungeonRuns(runId) {
   const db = await openDungeonDB();
   if (window.dungeonRunId !== runId) return;
   await new Promise((resolve, reject) => {
-    const tx = db.transaction(DUNGEON_STORE, 'readwrite');
-    const request = tx.objectStore(DUNGEON_STORE).openKeyCursor();
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor) return;
-      if (!String(cursor.key).startsWith(`${runId}:`)) cursor.delete();
-      cursor.continue();
-    };
+    const tx = db.transaction([DUNGEON_STORE, DUNGEON_INHABITANTS_STORE], 'readwrite');
+    for (const name of [DUNGEON_STORE, DUNGEON_INHABITANTS_STORE]) {
+      const request = tx.objectStore(name).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        if (!String(cursor.key).startsWith(`${runId}:`)) cursor.delete();
+        cursor.continue();
+      };
+    }
     tx.oncomplete = resolve;
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Dungeon cache cleanup was aborted.'));
   });
 }
 
@@ -257,6 +280,7 @@ async function switchDungeonForCoordinates(coordString) {
 
   currentDungeon = ensureDungeonGeometryStamp(cached, geoKey);
   currentDungeon.geoKey = geoKey;
+  if (cached.inhabitants) window.DungeonLife?.receivePopulation({ population: cached.inhabitants, runId: window.dungeonRunId });
 
   const rawStart  = currentDungeon.start || { x: 10, y: 18 };
   const safeStart = findNearestWalkableStart(currentDungeon, rawStart);
@@ -616,10 +640,12 @@ eventSource.onmessage = function(event) {
   if (data.type === 'dungeonRun') {
     if (window.dungeonRunId !== data.runId) {
       window.dungeonRunId = data.runId;
+      window.DungeonCampaignMemory?.begin(data.runId);
       ++dungeonSwitchRequest;
       currentDungeon = null;
       window.DungeonExplorationMap?.reset();
       window.InventoryUi?.reset();
+      window.DungeonLife?.reset();
       window.ItemInteractionUi?.reset();
       window.DungeonCompass?.setNavigation(null, null);
       window.questProgressText = '';
@@ -632,6 +658,28 @@ eventSource.onmessage = function(event) {
     return;
   }
 
+  if (data.type === 'game_pause') {
+    window.DungeonLife?.setPaused(data);
+    return;
+  }
+  if (data.type === 'room_population') {
+    window.DungeonLife?.receivePopulation(data);
+    refreshPartyDungeonPresence(false);
+    renderDungeonView();
+    return;
+  }
+  if (data.type === 'character_dialogue') {
+    window.DungeonLife?.receiveDialogue(data);
+    return;
+  }
+  if (data.type === 'campaign_memory') {
+    window.DungeonCampaignMemory?.receive(data);
+    return;
+  }
+  if (data.type === 'realtime_combat_result') {
+    Promise.resolve(window.applyRealtimeCombatResult?.(data)).catch(error=>console.warn('[EncounterResult]',error.message));
+    return;
+  }
   if (data.type === 'dice_state') {
     window.receiveDiceState?.(data);
     if (!data.active) window._combatRoundActiveUntil = 0;
@@ -700,6 +748,7 @@ eventSource.onmessage = function(event) {
         // 🔒 REINFORCE GEO KEY (covers cached + fresh + fallback)
         if (geoKey && currentDungeon) {
           currentDungeon.geoKey = geoKey;
+          if (currentDungeon.inhabitants) window.DungeonLife?.receivePopulation({ population: currentDungeon.inhabitants, runId: window.dungeonRunId });
           logDungeonLayout(currentDungeon);
         }
     
@@ -828,7 +877,7 @@ function updateCharacterPosition(characterName, x, y) {
 
 // Move the player by a delta — DUNGEON-CENTRIC (player stays centered in combat map)
 function movePlayerByDelta(dx, dy) {
-  if (window.actionDiceState?.active || isCombatRoundActive()) return;
+  if (window.gamePaused || window.actionDiceState?.active || isCombatRoundActive()) return;
   const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
   if (!combatScene || !combatScene.pcName || !combatScene.characters[combatScene.pcName]) {
     console.warn('movePlayerByDelta: no combatScene/pc yet');
@@ -1220,12 +1269,13 @@ function getVisibleSceneObjects() {
     console.info('[SceneObjectsSynced]', { geoKey: currentDungeon.geoKey, added: result.added,
       removed: result.removed, updated: result.updated, pending: result.pending.length });
   }
-  return result?.objects || currentDungeon?.sceneObjects || [];
+  const objects = result?.objects || currentDungeon?.sceneObjects || [];
+  return window.OutdoorDiscovery?.objects(objects, window.DungeonLife?.population()) || objects;
 }
 window.getVisibleSceneObjects = getVisibleSceneObjects;
 
 function isBlockedDungeonCell(cell) {
-  if (!cell) return true;
+  if (!cell || cell.blocked || cell.obstacle) return true;
   const tile = String(cell.tile || '');
   if (tile === 'wall' || tile === 'torch') return true;
   if (tile === 'door' && !cell.door?.isOpen) return true;
@@ -1680,7 +1730,7 @@ function getCombatMapRotationAngle() {
 }
 
 function updateDungeonMovement(now) {
-  if (window.actionDiceState?.active || isCombatRoundActive()) {
+  if (window.gamePaused || window.actionDiceState?.active || isCombatRoundActive()) {
     DUNGEON_MOVE.lastTime = now;
     DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
     return false;
@@ -1951,7 +2001,7 @@ class MainScene extends Phaser.Scene {
             existingPopup.remove();
         }
                 // Safely use the passed data or set defaults
-        const roomName = data?.roomName || "Ruined Temple Entrance";
+        const roomName = window.OutdoorRoutes?.displayName?.(data?.roomName || "Ruined Temple Entrance") || data?.roomName || "Ruined Temple Entrance";
         const roomDescription = data?.roomDescription || "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...";
         const coordinates = data?.coordinates || "None";
         const objects = data?.objects || "None";
@@ -1972,7 +2022,7 @@ class MainScene extends Phaser.Scene {
         const nextBoss = data?.nextBoss || "None";
         const nextBossRoom = data?.nextBossRoom || "None";
         const bossCoordinates = data?.bossCoordinates || "None";
-        const adjacentRooms = data?.adjacentRooms || "None";
+        const adjacentRooms = window.OutdoorRoutes?.displayName?.(data?.adjacentRooms || "None") || data?.adjacentRooms || "None";
         
         // In MainScene create method, before constructing fullText
         const imageHtml = (window.roomImages && window.roomImages[coordinates]) ? `<img src="${window.roomImages[coordinates]}" alt="Room Image" style="max-width:100%;"><br>` : `<img src="https://childrenofthegrave.com/test22/Tartarus.png" alt="Default Room Image" style="max-width:100%;"><br>`;
@@ -2002,6 +2052,11 @@ class MainScene extends Phaser.Scene {
             const pcEquippedLine = pc.match(/Equipped: (.+)/)?.[1]; // Extract the Equipped line
         
             let updatedPcBlock = pcLines.join("\n"); // Remove extra whitespace and reformat
+            const pcSheet = window.DungeonInhabitants.parseBlocks(pc, 'pc')[0];
+            if (pcSheet) {
+                const stateLine = `State: ${characterState(pcSheet, 'pc')}`;
+                updatedPcBlock = /^State:/m.test(updatedPcBlock) ? updatedPcBlock.replace(/^State:[^\n]*/m, stateLine) : `${updatedPcBlock}\n${stateLine}`;
+            }
         
             if (pcEquippedLine) {
                 // Replace items in the Equipped line with clickable spans
@@ -2026,9 +2081,9 @@ class MainScene extends Phaser.Scene {
             const npcLines = npcs.split("\n").map(line => line.trim()).filter(line => line); // Clean up and split into lines
             const indentedNpcBlocks = []; // Array to hold NPC blocks with indentation
         
-            for (let i = 0; i < npcLines.length; i += 14) {
-                const npcBlock = npcLines.slice(i, i + 14).join("\n"); // Get the full block of NPC data
-                const npcName = npcLines[i]; // NPC name is the first line of the block
+            for (const sheet of window.DungeonInhabitants.parseBlocks(npcs, 'npc')) {
+                const npcBlock = sheet.lines.slice(0, 14).join('\n') + `\nState: ${characterState(sheet, 'npc')}`;
+                const npcName = sheet.name;
                 const npcEquippedLine = npcBlock.match(/Equipped: (.+)/)?.[1]; // Extract Equipped line
         
                 let updatedNpcBlock = npcBlock;
@@ -2059,24 +2114,27 @@ class MainScene extends Phaser.Scene {
             npcsHtml = `${indentedNpcBlocks.join("\n")}`;
         }
 
-        let monstersHtml = monsters;
+        let monstersHtml = '';
         if (monsters !== "None") {
-            const monsterLines = monsters.split("\n").map(line => line.trim()).filter(line => line); // Clean up and split into lines
             const indentedMonsterBlocks = []; // Array to hold monster blocks with indentation
         
-            for (let i = 0; i < monsterLines.length; i += 14) {
-                const monsterBlock = monsterLines.slice(i, i + 14).join("\n"); // Get the full block of monster data
-                const monsterName = monsterLines[i]; // Monster name is the first line of the block
+            for (const sheet of window.DungeonInhabitants.parseBlocks(monsters)) {
+                const monsterName = sheet.name;
+                const monsterBlock = sheet.lines.slice(0, 14).join('\n') +
+                    `\n<span data-character-state="${escapedText(monsterName)}">State: ${characterState(sheet, 'monster', monstersState)}</span>`;
         
                 // Make the monster name clickable
-                const clickableMonsterName = `<span class="clickable-monster" data-monster="${monsterName}">${monsterName}</span>`;
+                const resident = window.DungeonLife?.population()?.actors?.[monsterName];
+                const detail = resident?.job ? ` (${escapedText(resident.job)})` : '';
+                const clickableMonsterName = `<span class="clickable-monster" data-monster="${escapedText(monsterName)}" title="${escapedText(resident?.activity || '')}">${escapedText(monsterName)}${detail}</span>`;
                 const updatedMonsterBlock = monsterBlock.replace(monsterName, clickableMonsterName);
         
                 // Wrap the updated monster block in a div with a class for indentation
-                indentedMonsterBlocks.push(`<div class="monster-block">${updatedMonsterBlock}</div>`);
+                indentedMonsterBlocks.push(`<div class="monster-block" data-monster-name="${escapedText(monsterName)}" data-monster-hp="${sheet.hp}" data-monster-state="${characterState(sheet, 'monster', monstersState)}">${updatedMonsterBlock}</div>`);
             }
         
-            monstersHtml = indentedMonsterBlocks.join("\n"); // Combine the blocks
+            // Hidden sheets must not leave newline text nodes in the preformatted console.
+            monstersHtml = indentedMonsterBlocks.join('');
         }
 
         // Combine all data into a single string for display
@@ -2106,9 +2164,7 @@ NPCs:
 ${npcsHtml}
 
 Monsters in Room:
-${monstersHtml}
-
-Monsters State: ${monstersState}
+<div id="console-monsters">${monstersHtml}<span id="nearby-monsters-none" hidden>None within shouting distance.</span></div>
 
 Puzzle: ${puzzle.inRoom}
 
@@ -2135,6 +2191,8 @@ ${adjacentRooms}
     
         // Update the content inside the popup
         contentDiv.innerHTML = fullText;
+        contentDiv.dataset.consoleGeoKey = window.DungeonInhabitants.roomKey(coordinates) || '';
+        window.refreshDungeonConsoleStates?.();
         window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs });
         const consoleCoordNumbers = String(coordinates).match(/-?\d+/g);
         window.dungeonConsoleExits = { geoKey: consoleCoordNumbers?.length === 3 ? consoleCoordNumbers.join(',') : null, exits };
@@ -2232,10 +2290,7 @@ ${adjacentRooms}
                         characters.push(pcName);
                     }
                     if (npcs !== "None") {
-                        const npcLines = npcs.split("\n").map(line => line.trim()).filter(line => line); // Split into lines and clean up
-                        for (let i = 0; i < npcLines.length; i += 14) {
-                            characters.push(npcLines[i]); // Every 14th line is the name
-                        }
+                        characters.push(...window.DungeonInhabitants.parseBlocks(npcs, 'npc').map(actor => actor.name));
                     }
                
                     // Create a new popup for character selection
@@ -2515,6 +2570,8 @@ ${adjacentRooms}
         if (pc && pc !== 'No PC data') {
             const pcName = pc.split('\n')[0].trim().replace(/^Name:\s*/i, '');
             let pcEntry = { name: pcName, type: 'pc' };
+            const pcSheet = window.DungeonInhabitants.parseBlocks(pc, 'pc')[0];
+            if (pcSheet) { pcEntry.hp = pcSheet.hp; pcEntry.state = characterState(pcSheet, 'pc'); }
             // Ensure the PC in combat mode uses the exact selected/generated sprite from the character review.
             // This build path (from console text parse on room/coordinate change) was stripping sprite data,
             // Attach selected custom sprite so PC in combat always uses the review-generated image (no green triangle).
@@ -2530,20 +2587,19 @@ ${adjacentRooms}
             window.cotgPCName = pcName;   // <-- remember PC name for dungeon sync
         }
         if (npcs && npcs !== 'None') {
-            let npcNames = npcs.split('\n').filter(line => line.trim() !== '');
-            for (let i = 0; i < npcNames.length; i += 14) {
-                let name = npcNames[i].trim().replace(/^Name:\s*/i, '');
-                const npcEntry = { name, type: 'npc' };
+            for (const sheet of window.DungeonInhabitants.parseBlocks(npcs, 'npc')) {
+                if (!window.DungeonInhabitants.isPresent(sheet)) continue;
+                const name = sheet.name;
+                const npcEntry = { name, type: 'npc', hp: sheet.hp, state: characterState(sheet, 'npc') };
                 const npcSprite = resolveKnownCharacterSprite(name, 'npc');
                 if (npcSprite) npcEntry.sprite = npcSprite;
                 characters.push(npcEntry);
             }
         }
         if (monsters && monsters !== 'None') {
-            let monsterNames = monsters.split('\n').filter(line => line.trim() !== '');
-            for (let i = 0; i < monsterNames.length; i += 14) {
-                let name = monsterNames[i].trim().replace(/^Name:\s*/i, '');
-                characters.push({ name, type: 'monster' });
+            for (const sheet of window.DungeonInhabitants.parseBlocks(monsters)) {
+                if (!window.DungeonInhabitants.isPresent(sheet)) continue;
+                characters.push({ name: sheet.name, type: 'monster', hp: sheet.hp, state: characterState(sheet, 'monster', monstersState) });
             }
         }
        
@@ -2708,7 +2764,7 @@ function syncCombatActorOverlayFromMaze(scene) {
   if (!shouldUsePartyMazeAnchors()) {
     window.combatCharacters.forEach((entry) => {
       if (!entry || entry.type === 'pc') return;
-      setCombatVisualOverlayVisible(scene.characters[entry.name], true);
+      setCombatVisualOverlayVisible(scene.characters[entry.name], entry.discoveryState !== 'pending');
     });
     return;
   }
@@ -2851,7 +2907,7 @@ class CombatScene extends Phaser.Scene {
         this.characters = {};
         this.pcName = '';
         // Store characters in scene data and globally for access from game.php
-        const characters = data.characters || [];
+        const characters = (data.characters || []).filter(isDungeonActorPresent);
         this.data.set('characters', characters);
         window.combatCharacters = characters; // Expose to global scope for game.php
         ensurePCSpriteInCombatList(window.combatCharacters);
@@ -2947,6 +3003,7 @@ class CombatScene extends Phaser.Scene {
     this.input.keyboard.on('keydown', (event) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'q', 'e', 'W', 'A', 'S', 'D', 'Q', 'E', 'Shift'].includes(event.key)) return;
       if (isTypingTarget(event)) return;
+      if (window.gamePaused) return;
       if (event.preventDefault) event.preventDefault();
       if (event.stopPropagation) event.stopPropagation();
       setMoveKey(event, true);
@@ -2965,6 +3022,7 @@ class CombatScene extends Phaser.Scene {
     }
 
     update(time, delta) {
+        if (window.gamePaused) return;
         if (!this.characters) return;
         const dt = Math.max(0.001, Math.min(0.05, (delta || 16) / 1000));
         Object.values(this.characters).forEach(charData => {
@@ -3239,7 +3297,7 @@ class CombatScene extends Phaser.Scene {
         if (Array.isArray(window.combatCharacters)) {
             const actorSize = (this.cellSize / this.PIXEL_SCALE) * COMBAT_ACTOR_TOKEN_SCALE;
             for (const entry of window.combatCharacters) {
-                if (!entry || entry.type === 'pc') continue;
+                if (!isDungeonActorPresent(entry) || entry.type === 'pc' || entry.discoveryState === 'pending') continue;
                 if (entry.type === 'monster') ensureMonsterSpriteData(entry);
                 const rp = (typeof getPartyEntryRenderMazePosition === 'function')
                     ? getPartyEntryRenderMazePosition(entry)
@@ -3554,6 +3612,7 @@ class CombatScene extends Phaser.Scene {
         });
     }
     updateCharacters(characters) {
+        characters = characters.filter(isDungeonActorPresent);
        // console.log("CombatScene.updateCharacters called with:", characters);
         ensurePCSpriteInCombatList(characters);
         window.combatCharacters = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
@@ -3574,6 +3633,7 @@ class CombatScene extends Phaser.Scene {
                 this.positionCharacters(pcsAndNpcs, monsters, positioning);
             }
         });
+        characters = characters.filter(isDungeonActorPresent);
    
         // Update window.combatCharacters with the merged character data, ensuring all positions are included
         // Preserve sprite (for the selected PC image) so it doesn't get stripped for CombatScene redraws.
@@ -3590,6 +3650,7 @@ class CombatScene extends Phaser.Scene {
             if (char.mazeRoomKey) entry.mazeRoomKey = char.mazeRoomKey;
             if (Number.isFinite(char.walkFrame)) entry.walkFrame = char.walkFrame;
             if (char.facing) entry.facing = char.facing;
+            copyCombatPersistentFields(entry, char);
             return entry;
         });
         syncPartyMazeToCombatPositions(false);
@@ -3640,6 +3701,7 @@ class CombatScene extends Phaser.Scene {
     
             this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type, texKey: sprite._holodekTexKey || null };
             applyCombatVisualFrame(sprite, character);
+            setCombatVisualOverlayVisible(this.characters[character.name], character.discoveryState !== 'pending');
         });
    
         this.time.delayedCall(50, () => this.sys.game.loop.sleep());
@@ -3694,6 +3756,7 @@ class CombatScene extends Phaser.Scene {
     }
    
     updatePositions(characters) {
+        characters = characters.filter(isDungeonActorPresent);
     // console.log("Updating CombatScene positions with:", characters);
         if (this.sys && this.sys.game && this.sys.game.loop) {
             this.sys.game.loop.wake();
@@ -3704,6 +3767,7 @@ class CombatScene extends Phaser.Scene {
             const existingChar = window.combatCharacters.find(c => c.name === character.name);
             copyCombatPersistentFields(character, existingChar);
         });
+        characters = characters.filter(isDungeonActorPresent);
         characters.forEach(character => {
             const charData = this.characters[character.name];
             if (charData) {
@@ -3762,6 +3826,7 @@ class CombatScene extends Phaser.Scene {
             charData.y = character.y;
             applyCombatVisualFrame(charData.sprite, character);
             moveCombatVisualTo(this, charData, character, false);
+            setCombatVisualOverlayVisible(charData, character.discoveryState !== 'pending');
         });
         ensurePCSpriteInCombatList(window.combatCharacters);
         // Update combatCharactersString globally
@@ -3969,6 +4034,8 @@ function saveRoomConversationHistory(coordinates, roomHistory, roomEquipment, ob
   const filteredRoomEquipment = roomEquipment.join(", "); // Convert roomEquipment to a string
 
   roomConversationHistories[coordinatesString].push({
+    runId: typeof window !== 'undefined' ? window.dungeonRunId : undefined,
+    geoKey: coordinatesString,
     prompt: prompt,
     response: filteredRoomHistory,
     roomEquipment: filteredRoomEquipment,
@@ -4028,6 +4095,8 @@ function updateRoomConversationFirstResponse(coordinates, serverGameConsole) {
 
         // Create a new conversation history entry with server game console details
         const newConversationEntry = {
+            runId: typeof window !== 'undefined' ? window.dungeonRunId : undefined,
+            geoKey: coordinatesString,
             prompt: "",  // Add your actual prompt logic here
             response: "",
             roomEquipment,
@@ -4072,9 +4141,12 @@ function addPromptAndResponse(prompt, assistantPrompt, systemPrompt, response, p
     personalNarrative: `personalNarrative \`${personalNarrative}\``, // Format if you're storing this as a single entry
     conversationId: conversationId,
     gameConsole: gameConsole,
+    runId: typeof window !== 'undefined' ? window.dungeonRunId : undefined,
+    geoKey: typeof window !== 'undefined' ? window.CampaignMemory?.roomKey(gameConsole.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]) : undefined,
   };
 
-  store.add(newPromptAndResponse);
+  const savedExchange = store.add(newPromptAndResponse);
+  if (savedExchange) savedExchange.onsuccess = event => window.DungeonCampaignMemory?.rememberRoomTurn({ ...newPromptAndResponse, id: event.target.result });
   
 // Extract room equipment from gameConsole
 const roomEquipment = gameConsole.match(/Objects in Room: ([^\n]+)/) ? gameConsole.match(/Objects in Room: ([^\n]+)/)[1].split(", ") : [];
@@ -4092,6 +4164,8 @@ const adjacentRooms = gameConsole.match(/Adjacent Rooms: ([^\n]+)/) ? gameConsol
 
 // Define the conversationHistory here
 const roomHistory = {
+    runId: typeof window !== 'undefined' ? window.dungeonRunId : undefined,
+    geoKey: coordinatesToString(currentCoordinates),
     prompt: prompt,
     response: response,
     roomEquipment: roomEquipment,
@@ -4811,9 +4885,8 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
             if (monstersStateMatch) {
                 monstersState = monstersStateMatch[1].trim(); // Extract the captured group
             }
-            const monsterEntries = monsterDataMatch[1].trim().split(/\n(?=\w)/);
-            monsters = monsterEntries.map(monsterBlock => {
-                const lines = monsterBlock.split('\n').map(line => line.trim());
+            monsters = window.DungeonInhabitants.parseBlocks(monsterDataMatch[1]).map(sheet => {
+                const lines = sheet.lines;
                 if (lines.length < 14) {
                     console.error("Unexpected format in monsterBlock:", lines);
                     return null; // Skip improperly formatted blocks
@@ -4862,7 +4935,8 @@ function generateMonstersForRoom(roomCoordinates, serverGameConsole) {
                     Attack: parseInt(lines[10].split(' ')[1]),
                     Damage: parseInt(lines[11].split(' ')[1]),
                     Armor: parseInt(lines[12].split(' ')[1]),
-                    Magic: parseInt(lines[13].split(' ')[1])
+                    Magic: parseInt(lines[13].split(' ')[1]),
+                    State: characterState(sheet, 'monster', monstersState)
                 };
             }).filter(Boolean); // Remove any null entries
 
@@ -4948,18 +5022,7 @@ async function completeQuestIfArtifactFound() {
 
 // Function to parse equipped items from a line
 function parseEquippedItems(line) {
-    const equippedItems = {
-        Weapon: "None",
-        Armor: "None",
-        Shield: "None",
-        Other: "None"
-    };
-    const itemPairs = line.replace("Equipped:", "").split(",");
-    itemPairs.forEach(pair => {
-        const [type, item] = pair.split(":").map(str => str.trim());
-        equippedItems[type] = item;
-    });
-    return equippedItems;
+    return window.DungeonInhabitants.parseEquipment(line);
 }
 
 // Function to find item properties from monstersEquippedProperties
@@ -4968,8 +5031,12 @@ function findItemProperties(itemName) {
 }
 
 // Define the extractDetails function
+function characterState(character, type = 'monster', fallback = 'Neutral') {
+    return window.DungeonInhabitants.state({ ...character, type }, fallback);
+}
+
 function extractDetails(details) {
-    const lines = details.split('\n').map(line => line.trim());
+    const lines = details.split('\n').map(line => line.trim()).filter(line => line && !/^State:/i.test(line));
     const characters = [];
     for (let i = 0; i < lines.length; i += 14) {
         const name = lines[i] || 'Unknown';
@@ -5365,9 +5432,8 @@ if (matchingConsole) {
 
         // Check if there are any monsters listed or if it's just "None"
         if (monstersDataString !== "None") {
-            const monsterEntries = monstersDataString.split(/\n(?=\w)/);
-            const monstersData = monsterEntries.map(monsterBlock => {
-                const lines = monsterBlock.trim().split('\n').map(line => line.trim());
+            const monstersData = window.DungeonInhabitants.parseBlocks(monstersDataString).map(sheet => {
+                const lines = sheet.lines;
                 const equippedItems = parseEquippedItems(lines[9]); // Parse equipped items
 
                 const monster = {
@@ -5385,6 +5451,7 @@ if (matchingConsole) {
                     Damage: parseInt(lines[11].split(':')[1].trim()),
                     Armor: parseInt(lines[12].split(':')[1].trim()),
                     Magic: parseInt(lines[13].split(':')[1].trim()),
+                    State: characterState(sheet, 'monster', monstersState),
                 };
                 return monster;
             });
@@ -5453,7 +5520,8 @@ let monstersInRoomString = monstersInRoom.length > 0
         Attack: ${monster.Attack}
         Damage: ${monster.Damage}
         Armor: ${monster.Armor}
-        Magic: ${monster.Magic}`;
+        Magic: ${monster.Magic}
+        State: ${characterState(monster, 'monster', monstersState)}`;
     }).join("\n")
     : "None";
 
@@ -5640,9 +5708,8 @@ npcs.forEach(npc => {
 
             // Check if there are any monsters listed or if it's just "None"
             if (monstersDataString !== "None") {
-                const monsterEntries = monstersDataString.split(/\n(?=\w)/);
-                const monstersData = monsterEntries.map(monsterBlock => {
-                    const lines = monsterBlock.trim().split('\n').map(line => line.trim());
+                const monstersData = window.DungeonInhabitants.parseBlocks(monstersDataString).map(sheet => {
+                    const lines = sheet.lines;
                     const equippedItems = parseEquippedItems(lines[9]); // Parse equipped items
 
                     const monster = {
@@ -5659,7 +5726,8 @@ npcs.forEach(npc => {
                         Attack: parseInt(lines[10].split(':')[1].trim()),
                         Damage: parseInt(lines[11].split(':')[1].trim()),
                         Armor: parseInt(lines[12].split(':')[1].trim()),
-                        Magic: parseInt(lines[13].split(':')[1].trim())
+                        Magic: parseInt(lines[13].split(':')[1].trim()),
+                        State: characterState(sheet, 'monster', monstersState)
                     };
                     return monster;
                 });
@@ -5732,7 +5800,8 @@ npcs.forEach(npc => {
                 Attack: ${monster.Attack}
                 Damage: ${monster.Damage}
                 Armor: ${monster.Armor}
-                Magic: ${monster.Magic}`;
+                Magic: ${monster.Magic}
+                State: ${characterState(monster, 'monster', monstersState)}`;
             }).join("\n")
             : "None";
             
@@ -6047,7 +6116,8 @@ let charactersString = characters.map((char, index) => {
       Attack: ${char.Attack}
       Damage: ${char.Damage}
       Armor: ${char.Armor}
-      Magic: ${char.Magic}`;
+      Magic: ${char.Magic}
+      State: ${characterState(char, 'pc')}`;
 }).join("\n");
 
 // Duplicate old start-menu block neutralized to avoid conflict with the primary
@@ -6094,7 +6164,8 @@ let npcsString = npcs.length > 0
         Attack: ${char.Attack || 0}
         Damage: ${char.Damage || 0}
         Armor: ${char.Armor || 0}
-        Magic: ${char.Magic || 0}`;
+        Magic: ${char.Magic || 0}
+        State: ${characterState(char, 'npc')}`;
   }).join('\n')
   : "None";
 
@@ -6221,7 +6292,8 @@ if (addMonsterToPartyPattern.test(userInput)) {
                 Attack: ${monster.Attack}
                 Damage: ${monster.Damage}
                 Armor: ${monster.Armor}
-                Magic: ${monster.Magic}`;
+                Magic: ${monster.Magic}
+                State: ${characterState(monster, 'monster', monstersState)}`;
             })
             .join("\n");
 
@@ -6396,7 +6468,8 @@ if (removeMonsterFromPartyPattern.test(userInput)) {
                 Attack: ${char.Attack}
                 Damage: ${char.Damage}
                 Armor: ${char.Armor}
-                Magic: ${char.Magic}`;
+                Magic: ${char.Magic}
+                State: ${characterState(char, 'npc')}`;
             })
             .join("\n");
 
@@ -6416,7 +6489,8 @@ if (removeMonsterFromPartyPattern.test(userInput)) {
                 Attack: ${monster.Attack}
                 Damage: ${monster.Damage}
                 Armor: ${monster.Armor}
-                Magic: ${monster.Magic}`;
+                Magic: ${monster.Magic}
+                State: ${characterState(monster, 'monster', monstersState)}`;
             })
             .join("\n");
 
@@ -6816,6 +6890,7 @@ function populateRoomNameDatabase(coordinates, adjacentRooms) {
         };
       } else {
         room.monsters = {
+          ...room.monsters,
           inRoom: room.monsters.inRoom !== undefined ? room.monsters.inRoom : "None",
           equippedProperties: room.monsters.equippedProperties !== undefined ? room.monsters.equippedProperties : "None",
           state: room.monsters.state !== undefined ? room.monsters.state : "None",
@@ -7124,139 +7199,66 @@ function areObjectsEqual(obj1, obj2) {
 }
 
 
-// Function to perform dynamic search using TF-IDF
-async function performDynamicSearch(query, maxWordCount = 700) {
-  // Retrieve the conversation history from IndexedDB
-  const conversationId = localStorage.getItem("conversationId");
-  const promptAndResponses = await getPromptsAndResponsesForConversation(conversationId);
-
-  // Get the last 8 prompts and responses from the end of the array
-  const last8PromptAndResponses = promptAndResponses.slice(-8);
-
-  // Extract the prompts and responses
-  const prompts = last8PromptAndResponses.map(item => item.prompt);
-  const responses = last8PromptAndResponses.map(item => item.response);
-  console.log("Last 8 responses:", last8PromptAndResponses);
-
-  // Keywords to exclude
-  const excludeKeywords = [
-    "Seed:", "Room Description:", "Coordinates:", "Objects in Room:", 
-    "Exits:", "XP:", "Score:", "Artifacts Found:", 
-    "Quests Achieved:", "HP:", "Inventory:", "PC:", 
-    "NPCs:", "Rooms Visited:", "Turns:", "north", "south", "east", "west", "northeast", "southeast", "northwest", "southwest", "up", "down"
-  ];
-
-  // Function to check if a line includes any of the exclude keywords
-const shouldExcludeLine = (line) => line && excludeKeywords.some(keyword => line.toLowerCase().trim().includes(keyword.toLowerCase()));
-
-  // Filter out lines that include exclude keywords
-const filteredResponses = last8PromptAndResponses.filter(promptAndResponse => {
-  const excluded = shouldExcludeLine(promptAndResponse.response); // Access response as promptAndResponse.response.response
-  console.log(`Response ${promptAndResponse.response.response} excluded? ${excluded}`);
-  return !excluded;
-});
-  // Preprocess the query and filtered responses (lowercase and remove punctuation)
-  const preprocessText = (text) => text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
-
-  // Tokenize the query and responses into words (unigrams)
-  const wordsInQuery = preprocessText(query).split(/\s+/);
-  const wordsInResponses = promptAndResponses.map(promptAndResponse =>
-    preprocessText(promptAndResponse.response).split(/\s+/)
-  );
-
-  // Calculate the TF-IDF scores for each word in the query and responses
-  const wordTFIDFScores = {};
-  const queryWordCounts = {};
-  wordsInQuery.forEach(word => {
-    queryWordCounts[word] = (queryWordCounts[word] || 0) + 1;
+function getRecentPromptsAndResponsesForConversation(conversationId, limit = 15) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(['conversation'], 'readonly');
+    const request = transaction.objectStore('conversation').index('conversationId')
+      .openCursor(IDBKeyRange.only(conversationId), 'prev');
+    const rows = [];
+    request.onsuccess = event => {
+      const cursor = event.target.result;
+      if (!cursor || rows.length >= limit) { resolve(rows.reverse()); return; }
+      rows.push(cursor.value);
+      if (rows.length >= limit) resolve(rows.reverse());
+      else cursor.continue();
+    };
+    request.onerror = () => reject(request.error || new Error('Could not read recent conversation history.'));
   });
-
-  // Calculate Term Frequency (TF) for the query
-  const queryWordTFIDFScores = {};
-  Object.keys(queryWordCounts).forEach(word => {
-    const termFrequency = queryWordCounts[word] / wordsInQuery.length;
-    const inverseDocumentFrequency = Math.log(promptAndResponses.length / wordsInResponses.filter(words => words.includes(word)).length);
-    queryWordTFIDFScores[word] = termFrequency * inverseDocumentFrequency;
-  });
-
-  // Calculate TF-IDF scores for words in the responses
-  wordsInResponses.forEach((responseWords, responseIndex) => {
-    responseWords.forEach(word => {
-      if (!wordTFIDFScores[word]) {
-        const termFrequency = responseWords.filter(w => w === word).length / responseWords.length;
-        const inverseDocumentFrequency = Math.log(promptAndResponses.length / wordsInResponses.filter(words => words.includes(word)).length);
-        wordTFIDFScores[word] = termFrequency * inverseDocumentFrequency;
-      }
-    });
-  });
-
-// Calculate the relevance score for each response and prompt
-const responsePromptRelevanceScores = last8PromptAndResponses.map(({ prompt, response, index }) => {
-  const responseWords = preprocessText(response).split(/\s+/);
-  const promptWords = preprocessText(prompt).split(/\s+/);
-
-  let relevanceScore = 0;
-
-  responseWords.forEach(word => {
-    if (queryWordTFIDFScores[word]) {
-      relevanceScore += queryWordTFIDFScores[word] * wordTFIDFScores[word];
-    }
-  });
-
-  promptWords.forEach(word => {
-    if (queryWordTFIDFScores[word]) {
-      relevanceScore += queryWordTFIDFScores[word] * wordTFIDFScores[word];
-    }
-  });
-
-  return { prompt, response, relevanceScore, index };
-});
-
-// Sort the responses and prompts in chronological order first and then by relevance score
-responsePromptRelevanceScores.sort((a, b) => {
-  if (a.index === b.index) {
-    // If responses/prompts have the same index, sort by relevance score
-    return b.relevanceScore - a.relevanceScore;
-  }
-  // Otherwise, sort by index (chronological order)
-  return a.index - b.index;
-});
-
-  // Sort the responses by original index (chronological order)
-  filteredResponses.sort((a, b) => a.index - b.index);
-
-// Calculate the total word count of selected sentences
-let currentWordCount = 0;
-const selectedResponsesPrompts = [];
-
-for (const { prompt, response } of responsePromptRelevanceScores) {
-  const promptWords = prompt.split(/\s+/);
-  const responseWords = response.split(/\s+/);
-
-  if (currentWordCount + promptWords.length + responseWords.length <= maxWordCount) {
-    selectedResponsesPrompts.push({ prompt, response });
-    currentWordCount += promptWords.length + responseWords.length;
-  } else {
-    break;
-  }
 }
 
-  console.log("filteredResponses:", filteredResponses); // Debug: Print filtered responses
+function boundedConversationHistory(rows, maxWordCount = 700) {
+  const budget = Number.isFinite(maxWordCount) ? Math.max(0, Math.min(4000, Math.floor(maxWordCount))) : 700;
+  if (budget < 6) return '';
+  const charBudget = budget * 12;
+  const unwrap = value => {
+    const text = typeof value === 'string' ? value : '';
+    return (text.match(/^\s*\$\.(?:user|assistant)\s*`([\s\S]*)`\s*$/)?.[1] ?? text).trim();
+  };
+  const words = value => (value.match(/\S+/g) || []).length;
+  const render = (prompt, response) => `$.user \`${prompt}\`\n$.assistant \`${response}\``;
+  function excerpt(value, wordLimit, charLimit) {
+    if (wordLimit < 1 || charLimit < 10) return '';
+    const tokens = value.slice(0, charLimit - 10).match(/\S+/g) || [];
+    const text = tokens.slice(0, Math.max(0, wordLimit - 1)).join(' ');
+    return text === value ? text : `${text} [excerpt]`.trim();
+  }
+  const selected = [];
+  let usedWords = 0, usedChars = 0;
+  for (const row of (Array.isArray(rows) ? rows : []).slice(-15).reverse()) {
+    let prompt = unwrap(row?.prompt), response = unwrap(row?.response);
+    if (!prompt && !response) continue;
+    let entry = render(prompt, response);
+    let count = entry.length <= charBudget ? words(entry) : Infinity;
+    if (!selected.length && (count > budget || entry.length > charBudget)) {
+      // Excerpt only the newest oversized exchange; never truncate stored history or role markers.
+      prompt = excerpt(prompt, Math.min(160, Math.floor(budget / 3)), Math.floor(charBudget / 3));
+      const prefix = render(prompt, '');
+      response = excerpt(response, budget - words(prefix), charBudget - prefix.length);
+      entry = render(prompt, response); count = words(entry);
+    }
+    if (usedWords + count > budget || usedChars + entry.length + (selected.length ? 2 : 0) > charBudget) continue;
+    selected.push(entry); usedWords += count; usedChars += entry.length + (selected.length > 1 ? 2 : 0);
+  }
+  return selected.reverse().join('\n\n');
+}
 
-  // ... (rest of the code)
-
-  console.log("responseRelevanceScores:", responsePromptRelevanceScores); // Debug: Print relevance scores
-
-  // ... (rest of the code)
-
-  console.log("selectedResponses:", selectedResponsesPrompts); // Debug: Print selected responses
-
-
-// Join the selected responses and prompts into a single string
-const selectedResults = last8PromptAndResponses.map(({ prompt, response }) => `${prompt}\n${response}`).join("\n\n");
-
-return selectedResults;
-  
+async function performDynamicSearch(query, maxWordCount = 700) {
+  const conversationId = localStorage.getItem('conversationId');
+  const recent = await getRecentPromptsAndResponsesForConversation(conversationId);
+  if (typeof window !== 'undefined' && window.DungeonCampaignMemory) await window.DungeonCampaignMemory.prepare(query,
+    { db, conversationId, roomHistories: roomConversationHistories,
+      roomKey: window.CampaignMemory?.roomKey(coordinatesToString(currentCoordinates)) });
+  return boundedConversationHistory(recent, maxWordCount);
 }
 
 var previousResponse = [];
@@ -8028,6 +8030,8 @@ function buildCombatEntryFromCharacter(character, type) {
   const entry = {
     name: character.Name || character.name,
     type: type,
+        hp: character.HP ?? character.hp,
+        state: characterState(character, type),
     facing: 'left',
     walkFrame: 0
   };
@@ -8045,7 +8049,20 @@ function copyCombatPersistentFields(target, source) {
   if (source.mazeRoomKey) target.mazeRoomKey = source.mazeRoomKey;
   if (Number.isFinite(source.walkFrame)) target.walkFrame = source.walkFrame;
   if (source.facing) target.facing = source.facing;
+  for (const field of ['hp', 'state', 'allegiance', 'encounterId', 'job', 'activity', 'routine', 'home', 'personality', 'motivation', 'race', 'className', 'mazePoint', 'discoveryState', 'discoveryRevision', '_discoveryRevision']) {
+    if (source[field] !== undefined && (!['hp', 'state', 'allegiance'].includes(field) || target[field] === undefined)) target[field] = source[field];
+  }
 }
+
+function isDungeonActorPresent(actor) {
+  if (!actor) return false;
+  // Keep the player's location marker even on defeat; only living residents/companions get world actors.
+  if (actor.type === 'pc') return true;
+  const population = window.DungeonLife?.population();
+  const key = window.DungeonInhabitants.roomKey(window.currentCoordinates);
+  return window.DungeonInhabitants.isPresent(actor, population?.geoKey === key ? population : null);
+}
+window.isDungeonActorPresent = isDungeonActorPresent;
 
 function seedPartyCombatRoster(pcCharacter, partyMembers) {
   const roster = [buildCombatEntryFromCharacter(pcCharacter, 'pc')];
@@ -8139,6 +8156,7 @@ window.refreshPartyDungeonPresence = refreshPartyDungeonPresence;
 // and could briefly read as inside walls during party steps.
 function getPartyEntryRenderMazePosition(entry, now = Date.now()) {
   if (!entry || !Number.isFinite(entry.mazeX) || !Number.isFinite(entry.mazeY)) return null;
+  if (window.gamePaused && Number.isFinite(entry.renderMazeX) && Number.isFinite(entry.renderMazeY)) return { x: entry.renderMazeX, y: entry.renderMazeY };
   const toX = entry.mazeX;
   const toY = entry.mazeY;
   if (!Number.isFinite(entry._renderFromMazeX) || !Number.isFinite(entry._renderFromMazeY)) {
@@ -8599,14 +8617,31 @@ function ensureMonsterSpriteData(entry) {
 
 function ensurePartyMazeAnchors(forceReset = false) {
   if (!shouldUsePartyMazeAnchors()) return;
+  window.combatCharacters = window.combatCharacters.filter(isDungeonActorPresent);
   const roomKey = getCurrentCombatRoomKey();
   const origin = { x: playerDungeonX, y: playerDungeonY };
   const tiles = collectNearbyWalkableTiles(currentDungeon, origin, 18)
     .filter(tile => !(tile.x === origin.x && tile.y === origin.y));
   const occupied = new Set([`${origin.x},${origin.y}`]);
+  const population = window.DungeonLife?.population();
+  if (population) window.DungeonInhabitants.attach(window.combatCharacters, population);
+  const residentNames = new Set(Object.keys(population?.actors || {}));
+  window.combatCharacters.filter(c => c.type === 'monster' && residentNames.has(c.name)).forEach(entry => {
+    const record = population.actors[entry.name];
+    ensureMonsterSpriteData(entry);
+    const existing = !forceReset && window.DungeonInhabitants.roomKey(entry.mazeRoomKey) === currentDungeon.geoKey &&
+      window.DungeonInhabitants.walkable(currentDungeon, entry.mazeX, entry.mazeY);
+    const point = existing ? { x: entry.mazeX, y: entry.mazeY } : record.position;
+    if (record.status !== 'present' || !point || occupied.has(`${point.x},${point.y}`)) {
+      delete entry.mazeX; delete entry.mazeY;
+      return;
+    }
+    entry.mazeX = point.x; entry.mazeY = point.y; entry.mazeRoomKey = roomKey;
+    occupied.add(`${point.x},${point.y}`);
+  });
   // NPCs and monsters both get a dungeon cell through the same placement path.
   const npcEntries = window.combatCharacters
-    .filter(c => c && (c.type === 'npc' || c.type === 'monster'))
+    .filter(c => c && (c.type === 'npc' || c.type === 'monster' && !residentNames.has(c.name)))
     .sort((a, b) => ((a.type === 'monster') - (b.type === 'monster')) || (hashCharacterName(a.name) - hashCharacterName(b.name)));
   npcEntries.forEach(ensureMonsterSpriteData);
 
@@ -8694,6 +8729,7 @@ function syncPartyMazeToCombatPositions(forceReset = false) {
       entry.y = COMBAT_GRID_CENTER;
       entry.mazeX = playerDungeonX;
       entry.mazeY = playerDungeonY;
+      entry.mazePoint={x:playerPosX,y:playerPosY};
       entry.mazeRoomKey = roomKey;
     } else if ((entry.type === 'npc' || entry.type === 'monster') && Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
       const projected = projectMazePointToCombatGrid(entry.mazeX + 0.5, entry.mazeY + 0.5);
@@ -8820,12 +8856,45 @@ function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
   const key = (x, y) => `${x},${y}`;
   const startKey = key(start.x, start.y);
   const goalKey = key(goal.x, goal.y);
-  const queue = [{ x: start.x, y: start.y }];
-  const visited = new Set([startKey]);
+  const distance = p => Math.abs(p.x - goal.x) + Math.abs(p.y - goal.y);
+  const queue = [{ ...start, cost: 0, rank: distance(start) }];
+  const costs = new Map([[startKey, 0]]);
   const prev = new Map();
+  const push = p => {
+    let i = queue.length; queue.push(p);
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (queue[parent].rank <= p.rank) break;
+      queue[i] = queue[parent]; i = parent;
+    }
+    queue[i] = p;
+  };
+  const pop = () => {
+    const first = queue[0], last = queue.pop();
+    if (queue.length) {
+      let i = 0;
+      while (i * 2 + 1 < queue.length) {
+        let child = i * 2 + 1;
+        if (child + 1 < queue.length && queue[child + 1].rank < queue[child].rank) child++;
+        if (queue[child].rank >= last.rank) break;
+        queue[i] = queue[child]; i = child;
+      }
+      queue[i] = last;
+    }
+    return first;
+  };
+  const firstStep = end => {
+    let cursor = end, parent = prev.get(cursor);
+    while (parent && parent !== startKey) { cursor = parent; parent = prev.get(cursor); }
+    const [x, y] = cursor.split(',').map(Number);
+    return { x, y };
+  };
+  let closest = start, closestDistance = distance(start);
 
-  while (queue.length) {
-    const current = queue.shift();
+  // A bounded A* search follows long outdoor routes without flooding a 512x512 level.
+  for (let index = 0; queue.length && index < 512; index++) {
+    const current = pop(), currentKey = key(current.x, current.y);
+    if (current.cost !== costs.get(currentKey)) continue;
     const neighbors = [
       { x: current.x + 1, y: current.y },
       { x: current.x - 1, y: current.y },
@@ -8839,27 +8908,28 @@ function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
 
     for (const next of neighbors) {
       const nextKey = key(next.x, next.y);
-      if (visited.has(nextKey)) continue;
+      const cost = current.cost + 1;
+      if (cost >= (costs.get(nextKey) ?? Infinity)) continue;
       if (blockedTiles.has(nextKey) && nextKey !== goalKey) continue;
       if (!canEnterTile(current.x, current.y, next.x, next.y, excludeName)) continue;
       if (isObstacleAtPos(next.x + 0.5, next.y + 0.5, excludeName)) continue;
-      visited.add(nextKey);
+      costs.set(nextKey, cost);
       prev.set(nextKey, key(current.x, current.y));
       if (nextKey === goalKey) {
-        let cursor = nextKey;
-        let parent = prev.get(cursor);
-        while (parent && parent !== startKey) {
-          cursor = parent;
-          parent = prev.get(cursor);
-        }
-        const [sx, sy] = cursor.split(',').map(Number);
-        return { x: sx, y: sy };
+        return firstStep(nextKey);
       }
-      queue.push(next);
+      const remaining = distance(next);
+      if (remaining < closestDistance) { closest = next; closestDistance = remaining; }
+      push({ ...next, cost, rank: cost + remaining + remaining * .001 });
     }
   }
 
-  return start;
+  return closest === start ? start : firstStep(key(closest.x, closest.y));
+}
+
+function partyFollowCadence(entry, normalCadence) {
+  const distance = Math.hypot(entry.mazeX - playerDungeonX, entry.mazeY - playerDungeonY);
+  return distance > 5 ? Math.min(normalCadence, 150) : normalCadence;
 }
 
 // ---- Monster wandering ---------------------------------------------------------------------------------
@@ -8880,6 +8950,8 @@ function getCurrentRoomMonsterEntries() {
   return window.combatCharacters.filter(entry =>
     entry
     && entry.type === 'monster'
+    && entry.discoveryState !== 'pending'
+    && isDungeonActorPresent(entry)
     && Number.isFinite(entry.mazeX)
     && Number.isFinite(entry.mazeY)
     && (!entry.mazeRoomKey || entry.mazeRoomKey === roomKey)
@@ -8887,6 +8959,9 @@ function getCurrentRoomMonsterEntries() {
 }
 
 function isMonsterHostile(entry) {
+  if (entry?.allegiance || window.DungeonLife?.population()?.actors?.[entry?.name]) {
+    return window.DungeonLife?.actorAllegiance(entry) === 'Hostile';
+  }
   const negative = /\b(not|non)[-\s]?hostile|friendly|peaceful|neutral|calm|asleep|sleeping|dormant|docile/i;
   const positive = /hostile|aggress|attack|angry|enrag|furious|hunting/i;
   const latest = window.latestUpdatedData && typeof window.latestUpdatedData.monstersState === 'string'
@@ -8901,6 +8976,7 @@ function chebyshevDist(ax, ay, bx, by) {
 }
 
 function getMonsterHomeAnchor(entry, roomKey) {
+  if (entry.home) return entry.home;
   const key = roomKey + '|' + entry.name;
   let home = window._monsterHomeAnchors[key];
   const cell = home && currentDungeon && currentDungeon.cells ? currentDungeon.cells[`${home.x},${home.y}`] : null;
@@ -8947,6 +9023,13 @@ function chooseMonsterWanderStep(entry, home, blockedTiles, hostile, rng) {
     const homeDist = chebyshevDist(opt.x, opt.y, home.x, home.y);
     if (homeDist > MONSTER_WANDER_RADIUS && homeDist >= chebyshevDist(cx, cy, home.x, home.y)) return;
     let score = rng() * 4;                                // random walk
+    const routine = entry.routine;
+    if (['guard', 'work', 'rest'].includes(routine)) score += homeDist * 3;
+    if (routine === 'patrol') {
+      const phase = Math.floor(Date.now() / 10000 + hashCharacterName(entry.name)) % 4;
+      const vector = [[3,0],[0,3],[-3,0],[0,-3]][phase];
+      score += Math.hypot(opt.x - home.x - vector[0], opt.y - home.y - vector[1]) * 1.2;
+    }
     score += countBlockedNeighbors(opt.x, opt.y) * 0.45;   // prefer open floor
     score += Math.max(0, homeDist - MONSTER_WANDER_RADIUS * 0.6) * 1.2; // soft leash
     if (opt.x === entry._prevMazeX && opt.y === entry._prevMazeY) score += 1.5; // avoid jitter
@@ -8958,10 +9041,11 @@ function chooseMonsterWanderStep(entry, home, blockedTiles, hostile, rng) {
 
 function updateMonsterWandering(monsterEntries, reservedTiles, now, force = false) {
   if (!monsterEntries || !monsterEntries.length || !currentDungeon || !currentDungeon.cells) return false;
-  if (isCombatRoundActive()) return false;
+  if (window.gamePaused || isCombatRoundActive()) return false;
   const roomKey = getCurrentCombatRoomKey();
   let anyMoved = false;
   monsterEntries.forEach(entry => {
+    if (window.DungeonLife?.isWaitingToSpeak?.(entry.name)) { resetWalkFrame(entry); return; }
     const home = getMonsterHomeAnchor(entry, roomKey);
     const seed = hashCharacterName(entry.name);
     if (!Number.isFinite(entry._nextWanderAt)) {
@@ -8969,11 +9053,14 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
       return;
     }
     if (!force && now < entry._nextWanderAt) return;
-    const hostile = isMonsterHostile(entry);
+    const hostile = isMonsterHostile(entry) && window.DungeonInhabitants?.lineClear(currentDungeon,
+      { x: entry.mazeX + 0.5, y: entry.mazeY + 0.5 }, { x: playerPosX, y: playerPosY }) &&
+      chebyshevDist(entry.mazeX, entry.mazeY, playerDungeonX, playerDungeonY) <= 10;
     const span = MONSTER_WANDER_MAX_MS - MONSTER_WANDER_MIN_MS;
     entry._nextWanderAt = now + MONSTER_WANDER_MIN_MS + Math.floor(Math.random() * span) - (hostile ? 300 : 0);
     // Idle sometimes (non-hostile monsters linger more).
-    if (!force && Math.random() < (hostile ? 0.12 : 0.3)) { resetWalkFrame(entry); return; }
+    const idleChance = ['work', 'rest', 'guard'].includes(entry.routine) && !hostile ? 0.82 : hostile ? 0.12 : 0.3;
+    if (!force && (Date.now() < (entry._conversationUntil || 0) || Math.random() < idleChance)) { resetWalkFrame(entry); return; }
     const blocked = new Set(reservedTiles);
     blocked.delete(`${entry.mazeX},${entry.mazeY}`);
     const step = chooseMonsterWanderStep(entry, home, blocked, hostile, Math.random);
@@ -8996,7 +9083,7 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
 window.updateMonsterWandering = updateMonsterWandering;
 
 function updatePartyMazeLocomotion(force = false) {
-  if (isCombatRoundActive()) return false;
+  if (window.gamePaused || isCombatRoundActive()) return false;
   if (!shouldUsePartyMazeAnchors()) return false;
   const now = Date.now();
   if (!force && now - _partyMazeStepAt < NPC_MOVE_THINK_MS) return false;
@@ -9017,17 +9104,22 @@ function updatePartyMazeLocomotion(force = false) {
   const reservedTiles = new Set([`${playerDungeonX},${playerDungeonY}`]);
   // Monster cells are occupied too, so NPC goals / paths never land on a monster.
   monsterEntries.forEach(m => reservedTiles.add(`${m.mazeX},${m.mazeY}`));
+  partyEntries.forEach(m => reservedTiles.add(`${m.mazeX},${m.mazeY}`));
   let anyMoved = false;
 
   orderedEntries.forEach(entry => {
+    if (window.DungeonLife?.isWaitingToSpeak?.(entry.name)) { resetWalkFrame(entry); return; }
     const behavior = getPartyNpcBehavior(entry, now);
+    const cadence = partyFollowCadence(entry, behavior.cadenceMs);
+    if (cadence < behavior.cadenceMs && entry._nextMazeStepAt > now + cadence) entry._nextMazeStepAt = now;
     if (!force && Number.isFinite(entry._nextMazeStepAt) && now < entry._nextMazeStepAt) {
       return;
     }
     const blockedTiles = new Set(reservedTiles);
     blockedTiles.delete(`${entry.mazeX},${entry.mazeY}`);
 
-    const goal = buildPartyNpcGoalTile(entry, blockedTiles, now);
+    const conversation = now < (entry._conversationUntil || 0) && entry._conversationGoal;
+    const goal = conversation || buildPartyNpcGoalTile(entry, blockedTiles, now);
     const nextStep = findNextPartyMazeStep(
       { x: entry.mazeX, y: entry.mazeY },
       goal,
@@ -9053,12 +9145,12 @@ function updatePartyMazeLocomotion(force = false) {
       entry.mazeY = nextStep.y;
       entry.mazeRoomKey = roomKey;
       advanceWalkFrame(entry, now, NPC_WALK_FRAME_MS);
-      entry.moveTweenMs = NPC_MOVE_TWEEN_MS;
+      entry.moveTweenMs = Math.min(NPC_MOVE_TWEEN_MS, cadence);
       anyMoved = true;
-      entry._nextMazeStepAt = now + behavior.cadenceMs;
+      entry._nextMazeStepAt = now + cadence;
     } else {
       resetWalkFrame(entry);
-      entry._nextMazeStepAt = now + Math.max(180, Math.floor(behavior.cadenceMs * 0.55));
+      entry._nextMazeStepAt = now + Math.max(90, Math.floor(cadence * 0.55));
     }
 
     reservedTiles.add(`${entry.mazeX},${entry.mazeY}`);
@@ -9083,6 +9175,130 @@ if (typeof window !== 'undefined') {
   window.refreshPartyDungeonPresence = refreshPartyDungeonPresence;
   window.getPartyEntryRenderMazePosition = getPartyEntryRenderMazePosition;
 }
+
+window.getDungeonLifeContext = () => ({ dungeon: currentDungeon, roomName: roomNameDatabase.get(currentDungeon?.geoKey)?.name,
+  actors: window.combatCharacters || [],
+  player: { x: playerPosX, y: playerPosY }, busy: isCombatRoundActive() || !!window._characterStartupPending });
+window.persistDungeonPopulation = population => {
+  const record = roomNameDatabase.get(population.geoKey);
+  if (record) record.inhabitants = population;
+  idbSetPopulation(population).catch(error => console.warn('[RoomPopulationSave]', error.message));
+};
+window.applyOutdoorDiscoveries = population => {
+  if (currentDungeon?.geoKey !== population.geoKey || !population.travelDiscovery) return;
+  syncPartyMazeToCombatPositions(false);
+  const scene = window.combatGame?.scene?.getScene('CombatScene');
+  scene?.updatePositions?.(window.combatCharacters);
+  for (const [name, visual] of Object.entries(scene?.characters || {})) {
+    const visible = population.actors[name]?.discoveryState !== 'pending';
+    visual.sprite?.setVisible?.(visible); visual.label?.setVisible?.(visible);
+  }
+};
+window.refreshDungeonConsoleStates = () => {
+  const container = document.getElementById('phaser-container');
+  if (!container) return;
+  const population = window.DungeonLife?.population();
+  const active = currentDungeon?.geoKey === container.dataset.consoleGeoKey;
+  const nearby = active ? new Set(window.DungeonInhabitants.nearbyMonsterNames(currentDungeon,
+    window.combatCharacters || [], population, { x: playerPosX, y: playerPosY })) : null;
+  let visible = 0;
+  for (const block of container.querySelectorAll('[data-monster-name]')) {
+    const name = block.dataset.monsterName;
+    const record = population?.geoKey === container.dataset.consoleGeoKey ? population.actors?.[name] : null;
+    const state = characterState({ hp: record?.hp ?? Number(block.dataset.monsterHp),
+      state: record?.state || block.dataset.monsterState, allegiance: record?.allegiance, status: record?.status });
+    const label = block.querySelector('[data-character-state]');
+    if (label && label.textContent !== `State: ${state}`) label.textContent = `State: ${state}`;
+    block.hidden = nearby !== null && !nearby.has(name);
+    if (!block.hidden) visible++;
+  }
+  const none = document.getElementById('nearby-monsters-none');
+  if (none) none.hidden = visible > 0;
+};
+window.onDungeonPause = paused => {
+  Object.keys(DUNGEON_MOVE.keys).forEach(key => { DUNGEON_MOVE.keys[key] = false; });
+  DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
+  DUNGEON_MOVE.lastTime = performance.now();
+  if (paused) {
+    window._dungeonPausedAt = Date.now();
+    (window.combatCharacters || []).forEach(entry => {
+      const position = getPartyEntryRenderMazePosition(entry);
+      if (position) { entry.renderMazeX = position.x; entry.renderMazeY = position.y; }
+    });
+  } else {
+    const elapsed = Date.now() - (window._dungeonPausedAt || Date.now());
+    (window.combatCharacters || []).forEach(entry => {
+      for (const field of ['_nextWanderAt', '_nextMazeStepAt', '_behaviorUntil', '_renderTweenStartedAt', '_conversationUntil']) {
+        if (Number.isFinite(entry[field])) entry[field] += elapsed;
+      }
+    });
+  }
+};
+window.focusDungeonSpeaker = (name, duration) => {
+  const actor = (window.combatCharacters || []).find(a => a.name === name);
+  if (!actor || !currentDungeon || !Number.isFinite(actor.mazeX)) return;
+  actor._conversationUntil = Date.now() + duration;
+  actor.facing = deriveFacingFromDelta(playerPosX - actor.mazeX - 0.5, playerPosY - actor.mazeY - 0.5, actor.facing);
+  if (actor.type !== 'npc' || isCombatRoundActive() || Math.hypot(actor.mazeX - playerDungeonX, actor.mazeY - playerDungeonY) > 6) return;
+  const front = { x: playerPosX + Math.cos(playerAngle) * 2, y: playerPosY + Math.sin(playerAngle) * 2 };
+  const occupied = new Set((window.combatCharacters || []).filter(a => a !== actor).map(a => `${a.mazeX},${a.mazeY}`));
+  const tiles = collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 3)
+    .filter(t => t.dist >= 1 && !occupied.has(`${t.x},${t.y}`) &&
+      window.DungeonInhabitants.lineClear(currentDungeon, { x: playerPosX, y: playerPosY }, { x: t.x + 0.5, y: t.y + 0.5 }))
+    .sort((a,b) => Math.hypot(a.x + 0.5-front.x,a.y + 0.5-front.y) - Math.hypot(b.x + 0.5-front.x,b.y + 0.5-front.y));
+  actor._conversationGoal = tiles[0] || null;
+};
+window.beginEncounterCombat = name => {
+  const input = document.getElementById('chatuserinput');
+  if (!input || input.value.trim() || window.gamePaused || isCombatRoundActive() || window._npcCombatQueued) return;
+  window._npcCombatQueued = true;
+  window._combatCommandPending = true;
+  markCombatRoundActive(180000);
+  fetch('/room-population/engage', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId: window.dungeonRunId, geoKey: currentDungeon.geoKey, target: name,
+      player: { x: playerPosX, y: playerPosY }, actors: (window.combatCharacters || []).map(a => ({ name: a.name, mazeX: a.mazeX, mazeY: a.mazeY })) }) })
+    .then(async response => { const event = await response.json(); if (!response.ok) throw Error(event.error || 'Encounter failed.'); await window.applyRealtimeCombatResult(event); })
+    .catch(error => console.warn('[EncounterCombat]', error.message))
+    .finally(() => { window._npcCombatQueued = false; window._combatCommandPending = false; window._combatRoundActiveUntil = 0; });
+};
+const realtimeCombatResultsSeen = new Set();
+window.applyRealtimeCombatResult = async event => {
+  if (!event || typeof event.eventId!=='string' || event.runId !== window.dungeonRunId || event.geoKey !== currentDungeon?.geoKey || realtimeCombatResultsSeen.has(event.eventId)) return;
+  const text = event.updatedGameConsole;
+  if (typeof text !== 'string' || window.DungeonInhabitants.roomKey(text.match(/^Coordinates:\s*(.*)$/m)?.[1])!==event.geoKey) return;
+  let roster;
+  if (event.combatCharactersString) {
+    try {roster=JSON.parse(event.combatCharactersString);}catch{return;}
+    if(!Array.isArray(roster)||roster.some(actor=>!actor||typeof actor.name!=='string'))return;
+  }
+  realtimeCombatResultsSeen.add(event.eventId);
+  if (realtimeCombatResultsSeen.size > 32) realtimeCombatResultsSeen.delete(realtimeCombatResultsSeen.values().next().value);
+  window._combatCommandPending = false; window._combatRoundActiveUntil = 0;
+  window.lastServerGameConsole = text;
+  updateCharacterSheetsFromConsole(text);
+  if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
+  if (roster) {
+    window.combatCharacters = roster;
+    ensureKnownSpritesInCombatList(window.combatCharacters);
+    syncPartyMazeToCombatPositions(false);
+  }
+  generateMonstersForRoom(event.geoKey, text);
+  updateGameConsole('', currentCoordinates, text, null, text);
+  window.latestUpdatedData = window.DungeonInhabitants.consoleView(text, window.latestUpdatedData);
+  window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
+  const entry = document.createElement('p'); entry.style.whiteSpace = 'pre-wrap'; entry.textContent = event.content;
+  document.getElementById('chatlog')?.appendChild(entry);
+  const conversationId = localStorage.getItem('conversationId');
+  if (conversationId) await addPromptAndResponse('[Encounter]', '', '', event.content, '', conversationId, text);
+  window.renderPartyIconDock?.(); renderDungeonView();
+};
+window.appendDungeonDialogueLog = (speaker, line) => {
+  const entry = document.createElement('p'); entry.textContent = `${speaker}: "${line}"`;
+  document.getElementById('chatlog')?.appendChild(entry);
+  const conversationId = localStorage.getItem('conversationId');
+  if (conversationId) return window.DungeonDialogueHistory.append(db, { conversationId, geoKey: currentDungeon?.geoKey, speaker, line, runId: window.dungeonRunId })
+    .catch(error => console.warn('[DialogueHistory]', error.message));
+};
 
 // Function to create Mortacia character and add her to npcsString
 function createMortaciaNPC() {
@@ -9675,6 +9891,7 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
 }
 
 async function chatbotprocessinput(textin) {
+  if (window.gamePaused) { updateChatLog('<br>The game is paused. Press P outside the command prompt to resume.<br>'); return; }
   const completedStartResult = textin?.completedStartResult;
   if (window._characterStartupPending && !completedStartResult) {
     updateChatLog('<br>The first room is still being built. Please wait.<br>');
@@ -10118,7 +10335,8 @@ Equipped: ${equippedItemsString}
 Attack: ${char.Attack}
 Damage: ${char.Damage}
 Armor: ${char.Armor}
-Magic: ${char.Magic}`;
+Magic: ${char.Magic}
+State: ${characterState(char, 'pc')}`;
     }).join("\n");
     if (typeof displayPCData === 'function') {
       displayPCData(charactersString);
@@ -10201,7 +10419,8 @@ Equipped: ${equippedItemsString}
 Attack: ${char.Attack}
 Damage: ${char.Damage}
 Armor: ${char.Armor}
-Magic: ${char.Magic}`;
+Magic: ${char.Magic}
+State: ${characterState(char, 'npc')}`;
     }).join("\n");
     if (typeof displayPCData === 'function') {
       displayPCData(charactersString);
@@ -10552,7 +10771,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
     if (itemsToTake.toLowerCase() === "all") {
             
         // Check if Monsters State is Hostile and any monsters have HP > 0
-        if (monstersState === "Hostile" && monstersInRoom.some(monster => monster.HP > 0)) {
+        if ((window.DungeonLife?.lootBlocked(monstersState) ?? monstersState === 'Hostile') && monstersInRoom.some(monster => monster.HP > 0)) {
             const message = "The monsters growl and block you from taking any items.";
             chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
             scrollToBottom();
@@ -10986,7 +11205,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
 } else {
         
         // Check if Monsters State is Hostile and any monsters have HP > 0
-        if (monstersState === "Hostile" && monstersInRoom.some(monster => monster.HP > 0)) {
+        if ((window.DungeonLife?.lootBlocked(monstersState) ?? monstersState === 'Hostile') && monstersInRoom.some(monster => monster.HP > 0)) {
             const message = "The monsters growl and block you from taking any items.";
             chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
             scrollToBottom();
@@ -11949,10 +12168,15 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
     }
 
     const correctCasedMonsterName = matchingMonsters[0].Name;
+    monstersState = characterState(matchingMonsters[0], 'monster', monstersState);
     userInput = `add ${correctCasedMonsterName} to party`;
 
     // Check the state of the monster
-    if (monstersState === "Hostile") {
+    if (monstersState === 'Dead') {
+        chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + `<br><br>${correctCasedMonsterName} is dead and cannot join the party.`;
+        scrollToBottom();
+        return;
+    } else if (monstersState === "Hostile") {
         const message = `${correctCasedMonsterName} refuses to join your party. The monster is hostile and not willing to cooperate.`;
         chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
         scrollToBottom();
@@ -12373,6 +12597,7 @@ const taskRequest = {
             // Task complete: Process the response with error handling
             try {
               const result = pollResponse.result || {};
+              if (result.population) window.DungeonLife?.receivePopulation({ population: result.population, runId: window.dungeonRunId });
               if (result.characterGenerationPhase) {
                 console.warn('[Poll] Server reports character generation phase still active; skipping normal response parsing.');
                 if (result.response) {
@@ -12619,6 +12844,8 @@ const taskRequest = {
                 }
             }
     
+            window.DungeonLife?.receiveTurnDialogue(content, { dialogue: result.dialogue, consoleText: serverGameConsole,
+              geoKey: coordsKey, runId: window.dungeonRunId });
             console.log("Server response content:", content);
             console.log("Formatted content:", formattedContent);
     

@@ -22,20 +22,32 @@
  <script src="/assets/roomDatabaseSync.js"></script>
  <script src="/assets/characterStartup.js"></script>
  <script src="/assets/scenePropVoxels.js"></script>
+ <script src="/assets/sceneExteriorDetails.js"></script>
 <script src="/assets/voxelCollision.js"></script>
 <script src="/assets/terrainCamera.js"></script>
 <script src="/assets/dungeonExits.js"></script>
 <script src="/assets/outdoorRoutes.js"></script>
 <script src="/assets/dungeonCartography.js"></script>
+<script src="/assets/landmarkCatalog.js"></script>
+<script src="/assets/areaTitleUi.js"></script>
 <script src="/assets/compassUi.js"></script>
 <script src="/assets/explorationMapUi.js"></script>
 <script src="/assets/inventoryUi.js"></script>
 <script src="/assets/itemInteractionUi.js"></script>
 <script src="/assets/mapShortcutUi.js"></script>
 <script src="/assets/gameMenuUi.js"></script>
+<script src="/assets/characterProfiles.js"></script>
+<script src="/assets/dialogueAudience.js"></script>
+<script src="/assets/dungeonInhabitants.js"></script>
+<script src="/assets/dialogueHistory.js"></script>
+<script src="/assets/campaignMemory.js"></script>
+<script src="/assets/campaignMemoryUi.js"></script>
+<script src="/assets/dungeonLifeUi.js"></script>
+<script src="/assets/outdoorDiscovery.js"></script>
 <script src="/assets/game.js"></script>
  <script src="/assets/masonryPatterns.js"></script>
  <script src="/assets/voxelMaterials.js"></script>
+ <script src="/assets/characterMotion3d.js"></script>
  <script src="/assets/rendererWebGL.js"></script>
  <script src="/assets/rendererWebGPU.js"></script>
    <script>
@@ -57,7 +69,7 @@ function playRoomMusic() {
   audio.load();
   audio.play()
     .then(() => {
-      statusElement.textContent = 'Playing room music';
+      statusElement.textContent = '';
     })
     .catch(err => {
       console.warn('Autoplay blocked or error:', err);
@@ -343,7 +355,9 @@ function toggleCombatMode() {
             // Refresh combat roster/art. Initial open may center once; manual scrolling remains respected after that.
             const combatScene = window.combatGame && window.combatGame.scene ? window.combatGame.scene.getScene('CombatScene') : null;
             if (combatScene) {
-                const combatRoster = getCombatRosterForUi();
+                // Party UI has a filtered roster; opening this map must never replace the room's monsters.
+                const combatRoster = Array.isArray(window.combatCharacters) && window.combatCharacters.length
+                    ? window.combatCharacters : getCombatRosterForUi();
                 if (combatRoster.length) {
                     window.combatCharacters = combatRoster;
                     window.combatCharactersString = JSON.stringify(combatRoster);
@@ -1454,8 +1468,10 @@ function toggleCombatMode() {
     .exploration-map-header { display: flex; justify-content: space-between; align-items: center;
       padding: 10px; background: linear-gradient(#555, #333); font-weight: bold; border-bottom: 1px solid #888; }
     #exploration-map-close { color: white; background: none; border: none; cursor: pointer; font-size: 16px; }
-    .exploration-map-tools { display: flex; gap: 3px; padding: 6px; }
+    .exploration-map-tools { display: flex; flex-wrap: wrap; gap: 3px; padding: 6px; }
     .exploration-map-tools button { background: #444; color: white; border: none; padding: 4px 8px; cursor: pointer; }
+    #exploration-map-landmarks { background: #30291d; color: #ead6a3; border: 1px solid #897247;
+      font: 11px monospace; min-width: 0; max-width: 100%; padding: 4px; flex: 1 1 100%; }
     #exploration-map-canvas { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; image-rendering: pixelated; touch-action: none; }
     #exploration-map-caption, .exploration-map-hint { margin: 6px 8px; }
     .exploration-map-hint { color: #bcbcbc; font-size: 10px; }
@@ -1530,6 +1546,15 @@ function toggleCombatMode() {
         white-space: pre-wrap; /* Preserve formatting */
         font-family: monospace; /* Match game console styling */
     }
+
+    #console-monsters {
+        display: flex;
+        flex-direction: column;
+        gap: 1em;
+        white-space: normal;
+    }
+
+    #console-monsters [hidden] { display: none; }
 
     #game-container {
         background-color: #222;
@@ -1833,7 +1858,7 @@ function toggleCombatMode() {
       </div>
       <canvas id="exploration-map-canvas" width="640" height="640" aria-label="North-up map of explored terrain"></canvas>
       <p id="exploration-map-caption">Explore a dungeon to begin mapping.</p>
-      <p class="exploration-map-hint">Drag to pan. Dark ground is unexplored; known exits are marked. Roofed halls are blue; higher ground is lighter.</p>
+      <p class="exploration-map-hint">Drag to pan. Dark ground is unexplored. Green squares are exits; gold diamonds are landmarks. Discovered residents have colored portraits at their last-seen locations. Choose a known marker for distance and bearing, or hover to see its name.</p>
     </div>
     
     <div id="combat-mode-toggle" style="position: fixed; top: 40px; left: 10px; z-index: 1100; background-color: #444; color: white; padding: 4.75px 6px; border: none; cursor: pointer;">

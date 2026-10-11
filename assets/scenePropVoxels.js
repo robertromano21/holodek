@@ -45,6 +45,9 @@
     rock_face: { drawer: 'boulder', material: 'stone', heightRatio: 2.2, baseWidth: 1.5 },
     portcullis: { drawer: 'gate', material: 'metal', heightRatio: 1.1, baseWidth: 0.9 },
     timber_gate: { drawer: 'gate', material: 'wood', heightRatio: 1.1, baseWidth: 0.9 },
+    timber_gate_side: { drawer: 'gate', material: 'wood', heightRatio: 1.1, baseWidth: 0.9 },
+    grand_gate: { drawer: 'gate', material: 'metal', heightRatio: 1, baseWidth: 1 },
+    grand_gate_side: { drawer: 'gate', material: 'metal', heightRatio: 1, baseWidth: 1 },
     buttress: { drawer: 'obelisk', material: 'stone', heightRatio: 1.2, baseWidth: 0.8 },
     battlement: { drawer: 'rubble', material: 'stone', heightRatio: 0.85, baseWidth: 0.95 },
     arrow_slit: { drawer: 'gate', material: 'stone', heightRatio: 1.1, baseWidth: 0.9 },
@@ -55,6 +58,10 @@
     gothic_pier: { drawer: 'pillar', material: 'stone', heightRatio: 1, baseWidth: 0.85 },
     timber_post: { drawer: 'pillar', material: 'wood', heightRatio: 1, baseWidth: 0.8 },
     entablature: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
+    corbel_east: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
+    corbel_west: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
+    corbel_north: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
+    corbel_south: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
     pediment: { drawer: 'archway', material: 'stone', heightRatio: 1, baseWidth: 1 },
     pediment_side: { drawer: 'archway', material: 'stone', heightRatio: 1, baseWidth: 1 },
     entablature_ring: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
@@ -132,8 +139,17 @@
   function build(shape, size = 16, seed = 0) {
     if (!shapes.has(shape)) return null;
     if (!Number.isInteger(size) || size < 8 || size > 64) throw new RangeError('Voxel size must be 8..64.');
-    if (shape === 'pediment_side') {
-      const source = build('pediment', size), rotated = new Uint8Array(source.length);
+    if (shape.startsWith('corbel_') && shape !== 'corbel_east') {
+      const source = build('corbel_east', size, seed), rotated = new Uint8Array(source.length);
+      for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const rx = shape === 'corbel_west' ? size - 1 - x : y;
+        const ry = shape === 'corbel_west' ? y : shape === 'corbel_north' ? size - 1 - x : x;
+        rotated[rx + ry * size + z * size * size] = source[x + y * size + z * size * size];
+      }
+      return rotated;
+    }
+    if (shape === 'pediment_side' || shape === 'timber_gate_side' || shape === 'grand_gate_side') {
+      const source = build(shape.slice(0, -5), size, seed), rotated = new Uint8Array(source.length);
       for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         rotated[(size - 1 - y) + x * size + z * size * size] = source[x + y * size + z * size * size];
       }
@@ -242,6 +258,23 @@
       box(0.04, 0.04, 0, 0.18, 0.96, 0.6); box(0.82, 0.04, 0, 0.96, 0.96, 0.6);
       box(0.18, 0.04, 0, 0.82, 0.18, 0.6); box(0.18, 0.82, 0, 0.82, 0.96, 0.6);
       branch([0.5, 0.35, 0.6], [0.5, 0.65, 0.6], 0.045);
+    } else if (shape === 'grand_gate') {
+      // Full-height leaves seal the view; all ornament is relief, never holes.
+      box(0, .38, 0, 1, .62, 1);
+      for (const face of [.25, .62]) {
+        for (const x of [0, .46, .92]) box(x, face, 0, x + .08, face + .13, 1);
+        for (const z of [0, .2, .58, .92]) box(0, face, z, 1, face + .13, z + .08);
+        for (const cx of [.25, .75]) {
+          box(cx - .1, face, .3, cx + .1, face + .07, .52);
+          for (let i = 0; i < 12; i++) {
+            const angle = i * Math.PI / 12;
+            const x = cx + Math.cos(angle) * .16, z = .71 + Math.sin(angle) * .16;
+            box(x - .025, face, z - .025, x + .025, face + .13, z + .025);
+          }
+          box(cx - .16, face, .64, cx - .11, face + .13, .74);
+          box(cx + .11, face, .64, cx + .16, face + .13, .74);
+        }
+      }
     } else if (shape === 'portcullis' || shape === 'timber_gate') {
       box(0, 0.3, 0, 0.12, 0.7, 1);
       box(0.88, 0.3, 0, 1, 0.7, 1);
@@ -279,6 +312,11 @@
         }
       }
       for (const z of [0.3, 0.6]) box(0, 0.6, z, 1, 0.7, z + 0.07);
+    } else if (shape === 'corbel_east') {
+      for (let tier = 0; tier < 5; tier++) {
+        const projection = (tier + 1) / 5, low = tier / 5, high = (tier + 1) / 5;
+        box(0, .2, low, projection, .8, high);
+      }
     } else if (shape === 'flying_buttress') {
       box(0, 0.15, 0, 0.22, 0.85, 0.88);
       box(0.03, 0.24, 0.88, 0.18, 0.76, 1);
@@ -718,6 +756,14 @@
       const edge = palette.highlight || base.map(v => v + (1 - v) * .45);
       const dark = palette.shadow || base.map(v => v * .3);
       const mix = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+      if (/^grand_gate/.test(shape)) {
+        const u = shape.endsWith('_side') ? y : x;
+        const depth = shape.endsWith('_side') ? x : y;
+        const raised = depth < .38 || depth > .62;
+        const seam = Math.abs(u - .5) < .025;
+        return (seam ? mix(dark, body, .3) : raised ? mix(edge, body, .2) : mix(body, trim, .15))
+          .map(value => Math.max(0, Math.min(1, value)));
+      }
       const column = /column|pier|post/.test(shape);
       const molding = /entablature|pediment|coffer|obelisk|altar|sarcophagus|tomb/.test(shape);
       const band = column ? z < .16 || z > .84 : molding && (z < .18 || z > .78);

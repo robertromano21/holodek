@@ -81,3 +81,9 @@ test('non-d20 NPC damage is published, and invalid die sizes are rejected', asyn
   await assert.rejects(dice.roll({ actor: 'PC', sides: 0 }), /Invalid dice/);
   dice.end();
 });
+test('ending a paused automatic roll releases its wait without applying its rolled result',async()=>{
+  const dice=new ActionDice({animationMs:10,random:()=>12});dice.begin('combat','1,0,0');
+  const waiting=dice.roll({actor:'Guard',label:'Attack'});dice.setPaused(true);
+  await new Promise(resolve=>setTimeout(resolve,20));
+  assert.equal(dice.resumeWaiters.length,1);dice.end();assert.equal(await waiting,null);assert.equal(dice.resumeWaiters.length,0);
+});

@@ -165,10 +165,28 @@
   }
 
   function wastelandName(seed, key) {
-    const adjectives = ['Ashen', 'Silent', 'Sundered', 'Bleached', 'Ember', 'Hollow', 'Forsaken', 'Windworn'];
+    const adjectives = ['Ashen', 'Silent', 'Sundered', 'Bleached', 'Ember', 'Hollow', 'Forsaken', 'Windworn',
+      'Shrouded', 'Stormworn', 'Blighted', 'Shattered', 'Cinder', 'Umbral', 'Desolate', 'Bonewhite'];
+    const places = ['Reach', 'Crossing', 'Vale', 'March', 'Expanse', 'Hollow', 'Passage', 'Frontier'];
+    const qualities = ['Broken', 'Silent', 'Fallen', 'Forgotten', 'Veiled', 'Lost', 'Sleeping', 'Buried',
+      'Shattered', 'Wandering', 'Last', 'Empty', 'Hidden', 'Weeping', 'Bound', 'Hushed',
+      'Ancient', 'Hollow', 'Fading', 'Twilight', 'Withered', 'Nameless', 'Drowned', 'Unquiet',
+      'Pale', 'Burning', 'Bitter', 'Sunken', 'Severed', 'Endless', 'Unspoken', 'Unanswered'];
+    const landmarks = ['Cairns', 'Oaths', 'Bells', 'Crowns', 'Vigils', 'Spirits', 'Graves', 'Stars',
+      'Lanterns', 'Echoes', 'Shadows', 'Altars', 'Pilgrims', 'Kings', 'Queens', 'Guardians',
+      'Memories', 'Songs', 'Vows', 'Embers', 'Spires', 'Barrows', 'Wells', 'Shrines',
+      'Gates', 'Watchers', 'Names', 'Thrones', 'Dreams', 'Promises', 'Relics', 'Roads',
+      'Prayers', 'Whispers', 'Wings', 'Masks', 'Daggers', 'Wreaths', 'Feathers', 'Shields',
+      'Banners', 'Candles', 'Mirrors', 'Reeds', 'Roots', 'Roses', 'Thorns', 'Wolves',
+      'Ravens', 'Serpents', 'Drakes', 'Giants', 'Prophets', 'Mourners', 'Sentinels', 'Seers',
+      'Flames', 'Ashes', 'Tears', 'Dust', 'Bone', 'Salt', 'Glass', 'Stone'];
     const stamp = hash(`${seed}:${key}`);
-    // Coordinates guarantee uniqueness without scanning the database or keeping a counter.
-    return `${adjectives[stamp % adjectives.length]} Wasteland Reach ${stamp.toString(16)} (${key})`;
+    // Seeded words provide variety; the coordinate key, not the name, identifies a room.
+    return `${adjectives[stamp & 15]} Wasteland ${places[(stamp >>> 4) & 7]} of the ${qualities[(stamp >>> 7) & 31]} ${landmarks[(stamp >>> 12) & 63]}`;
+  }
+
+  function displayName(value) {
+    return String(value ?? '').replace(/(\b(?:Ashen|Silent|Sundered|Bleached|Ember|Hollow|Forsaken|Windworn) Wasteland Reach) [a-f\d]{1,8} \(\s*-?\d+\s*,\s*-?\d+\s*,\s*-?\d+\s*\)/gi, '$1');
   }
 
   function biome(room) {
@@ -315,5 +333,5 @@
     return finish(reused ? 'reused-reserved-continuation' : 'added-outward-continuation', true, dir, key);
   }
 
-  return { ensureContinuation, coordinates, keyOf, direction, exitEntries, resolveExit, coordinateKeys, indexDatabase, indoor };
+  return { ensureContinuation, displayName, coordinates, keyOf, direction, exitEntries, resolveExit, coordinateKeys, indexDatabase, indoor };
 });

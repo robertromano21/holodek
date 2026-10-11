@@ -84,7 +84,7 @@ for (const holdDamage of [false, true]) test(`existing map combat pursues and ${
     }
   };
   const context = {
-    console: quiet, updatedGameConsole: consoleText, createCombatSpace, actionDice: dice, broadcast,
+    console: quiet, updatedGameConsole: consoleText, Inhabitants: require('../assets/dungeonInhabitants'), createCombatSpace, actionDice: dice, broadcast,
     characterClasses: [{ name: 'Fighter', baseHP: 10 }], roll1d20: (() => { let i = 0; return () => ++i === 1 ? 20 : 10; })(),
     ensureSelectedPCSprite() {}, patchLiveHPToConsole: value => value, allocateXP() {}, dropMonsterItemsToRoom() {},
     setTimeout: fn => { setImmediate(fn); }, getRandomInt: () => { throw Error('Damage must use the dice request.'); },
@@ -199,14 +199,15 @@ test('interactive targeting uses the existing PC/NPC selection request and holdi
   const foe = { name: 'Pyraxus', hp: 40, x: 5, y: 6 };
   const events = [];
   const context = { initiativeOrder: [foe], alreadyKilled: new Set(), sharedState: { emitter },
-    actionDice: { active: { id: 'round-1' } }, combatSpace: { distance: () => 3 }, setTimeout, clearTimeout,
+    actionDice: { active: { id: 'round-1' } }, combatSpace: { distance: () => 3 }, setTimeout, clearTimeout, setInterval, clearInterval,
     broadcast: event => {
       events.push(event);
       setImmediate(() => emitter.emit(`target_response_${event.combatant}`,
         { actionId: event.actionId, target: 'Pyraxus', cancelled: event.combatant === 'Ally' }));
     }
   };
-  vm.runInNewContext(prompt, context);
+  const helper = source.slice(source.indexOf('async function chooseDefenceTarget('), source.indexOf('function selectCombatTeams('));
+  vm.runInNewContext(helper + '\n' + prompt, context);
   assert.equal((await context.promptForTarget({ name: 'Mortacia' }, [foe])).name, 'Pyraxus');
   assert.equal(await context.promptForTarget({ name: 'Ally' }, [foe]), null);
   assert.deepEqual(events.map(e => e.combatant), ['Mortacia', 'Ally']);

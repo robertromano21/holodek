@@ -38,9 +38,10 @@ function plan(spec = {}, width = 512, height = width) {
   const seed = spec.generation?.seed;
   if (spec.indoor !== false || !seed) return null;
   const text = `${spec.biome || ''} ${spec.source?.roomName || ''} ${spec.source?.description || ''}`.toLowerCase();
-  const flat = /\b(flat|level) (?:\w+ )?(plains?|wastes?|terrain|ground)|salt flat|frozen lake/.test(text);
+  const flat = /\b(flat|level) (?:\w+ )?(plains?|wastes?|terrain|ground)|\bflatlands?\b|\bflats\b|salt flat|frozen lake/.test(text);
   const wetland = /swamp|bog|marsh|mire|wetland|lake/.test(text);
-  const urban = /city|street|town|village|forum|amphitheater|theater|circus|harbou?r/.test(text);
+  // Match geographic nouns, not substrings such as "capacity" or the verb "harbors".
+  const urban = /\b(city|cities|streets?|towns?|villages?|forums?|amphitheaters?|theaters?|circus|circuses|harbou?r)\b/.test(text);
   const garden = /\bgarden|orchard/.test(text) && !/mountain|crag|cliff/.test(text);
   const rnd = random(`${seed}:outdoor-terrain`), span = Math.min(width, height);
   const profile = flat ? 'flat' : wetland ? 'wetland' : urban ? 'urban' : garden ? 'garden' :

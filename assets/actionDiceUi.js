@@ -68,9 +68,9 @@
       option.textContent = `${name}${Number.isFinite(pos?.distance) ? ` - ${pos.distance.toFixed(1)} tiles away` : ''}`;
       select.appendChild(option);
     });
-    select.disabled = targetSubmitting;
+    select.disabled = !!(targetSubmitting || state.paused || window.gamePaused);
     async function submit(cancelled) {
-      if (targetSubmitting || targetPrompt !== prompt) return;
+      if (targetSubmitting || targetPrompt !== prompt || state.paused || window.gamePaused) return;
       const target = select.value;
       targetSubmitting = true;
       window.renderPartyIconDock?.();
@@ -87,7 +87,7 @@
     confirm.type = hold.type = 'button';
     confirm.className = hold.className = 'popup-button';
     confirm.textContent = 'Attack target'; hold.textContent = 'Hold position';
-    confirm.disabled = hold.disabled = targetSubmitting;
+    confirm.disabled = hold.disabled = !!(targetSubmitting || state.paused || window.gamePaused);
     confirm.addEventListener('click', () => submit(false));
     hold.addEventListener('click', () => submit(true));
     panel.appendChild(heading); panel.appendChild(select); panel.appendChild(confirm); panel.appendChild(hold);
@@ -100,7 +100,7 @@
 
   async function submitRoll() {
     const request = state.pending;
-    if (!request || submitting === request.id) return;
+    if (!request || submitting === request.id || state.paused || window.gamePaused) return;
     submitting = request.id;
     error = '';
     animateRoll(request);
@@ -136,7 +136,7 @@
       const die = document.createElement('button');
       die.className = 'party-d20' + (pending ? ' awaiting-roll' : '') + (rolling ? ' rolling' : '');
       die.type = 'button';
-      die.disabled = !!rolling || !pending || submitting === pending.id;
+      die.disabled = !!(rolling || !pending || submitting === pending.id || state.paused || window.gamePaused);
       if (rolling) {
         die.setAttribute('data-dice-roll', animation.id);
         die.style.animationDelay = `-${Date.now() - animation.startedAt}ms`;
@@ -169,7 +169,7 @@
       const button = document.createElement('button');
       button.className = 'popup-button';
       button.textContent = `Roll d${p.sides || 20}`;
-      button.disabled = submitting === p.id;
+      button.disabled = !!(submitting === p.id || state.paused || window.gamePaused);
       button.onclick = submitRoll;
       status.appendChild(button);
     }

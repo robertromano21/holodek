@@ -417,7 +417,7 @@ function placeSceneLandmarks(dungeon, spec) {
       // keep a one-cell walkway around each landmark
       pool = pool.filter(p => Math.max(Math.abs(p.x - choice.x), Math.abs(p.y - choice.y)) > 1);
       wallPool = wallPool.filter(p => Math.max(Math.abs(p.x - choice.x), Math.abs(p.y - choice.y)) > 1);
-      placed.push({ type: lm.type, tile: tileName, x: choice.x, y: choice.y });
+      placed.push({ type: lm.type, tile: tileName, x: choice.x, y: choice.y, ...(lm.label ? { label: lm.label } : {}) });
     }
     if (have < want) missing.push(`${lm.type} (${have}/${want})`);
   }

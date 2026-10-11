@@ -8,6 +8,9 @@
 <script src="../assets/masonryPatterns.js"></script>
 <script src="../assets/voxelMaterials.js"></script>
 <script src="../assets/scenePropVoxels.js"></script>
+<script src="../assets/sceneExteriorDetails.js"></script>
+<script src="../assets/renderCharacterProcedural.js"></script>
+<script src="../assets/characterMotion3d.js"></script>
 <script src="../assets/rendererWebGL.js"></script>
 <script>
 try {
@@ -85,6 +88,25 @@ try {
   }
   const paletteApplied = voxelColors[0].color[0] > voxelColors[0].color[2] &&
     voxelColors[1].color[2] > voxelColors[1].color[0] && voxelColors.every(c => c.texturesOn && c.glError === gl.NO_ERROR);
+  const corbels = [];
+  for (const direction of ['east', 'west', 'north', 'south']) {
+    const shape = 'corbel_' + direction;
+    const d = { layout: { width: 3, height: 4 }, cells: {}, tiles: {
+      [shape]: { spriteSpec: { voxelShape: shape, material: 'marble' } }
+    } };
+    const mesh = renderer.getVoxelMesh(shape, d);
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vbo);
+    for (const [attribute, offset] of [[renderer.voxelAttribs.pos, 0], [renderer.voxelAttribs.norm, 12], [renderer.voxelAttribs.color, 24]]) {
+      gl.enableVertexAttribArray(attribute); gl.vertexAttribPointer(attribute, 3, gl.FLOAT, false, 36, offset);
+    }
+    gl.uniform3f(u.modelPos, 1, -.5, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+    gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let visiblePixels = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) visiblePixels++;
+    corbels.push({ direction, vertices: mesh.count, visiblePixels, glError: gl.getError() });
+  }
+  const corbelPass = corbels.every(c => c.vertices > 0 && c.visiblePixels > 0 && c.glError === gl.NO_ERROR);
   // Positive control: reproduce the old vertex-teleport bug on exactly the same triangle.
   const badVs = gl.createShader(gl.VERTEX_SHADER), redFs = gl.createShader(gl.FRAGMENT_SHADER);
   gl.shaderSource(badVs, `#version 300 es
@@ -176,12 +198,100 @@ try {
   }
   window.dungeonViewShift = 0;
   const downhillPass = downhill[1].floorPixels > downhill[0].floorPixels && downhill.every(v => v.glError === gl.NO_ERROR);
+  const gates = [];
+  for (const direction of ['east', 'north']) {
+    const forward = direction === 'east' ? [1, 0] : [0, -1], door = direction === 'east' ? { x: 5, y: 10 } : { x: 10, y: 14 };
+    const d = { geoKey: 'gate-' + direction, _geometryStamp: 'gate-' + direction, layout: { width: 20, height: 20 },
+      cells: {}, tiles: {}, sceneStructures: [], classification: { indoor: false },
+      skyTop: '#0000ff', skyBot: '#0000ff', lighting: { intensity: 0 } };
+    for (let y = 0; y < 20; y++) for (let x = 0; x < 20; x++) d.cells[x + ',' + y] = {
+      tile: direction === 'east' ? x === 12 ? 'wall' : 'floor' : y === 7 ? 'wall' : 'floor', floorHeight: 0, ceilHeight: 6 };
+    for (const offset of [-1, 0, 1]) {
+      const x = door.x + forward[0] - forward[1] * offset, y = door.y + forward[1] + forward[0] * offset;
+      Object.assign(d.cells[x + ',' + y], { blocked: true, exteriorRole: 'closed-gate', exteriorDestination: '0,0,0' });
+    }
+    window.playerDungeonX = direction === 'east' ? 2 : 10; window.playerDungeonY = direction === 'east' ? 10 : 17;
+    window.playerPosX = window.playerDungeonX + .5; window.playerPosY = window.playerDungeonY + .5;
+    window.playerAngle = direction === 'east' ? 0 : -Math.PI / 2; window.playerZ = .65;
+    for (const closed of [false, true]) {
+      if (closed) d.sceneExteriors = { buildings: [{ direction, doorway: { ...door, floor: 0 }, targetKey: '0,0,0',
+        entrance: 'closed-gate', wallHeight: 5, transverse: 9, depth: 7,
+        palette: { primary: '#cab577', secondary: '#5b735c', highlight: '#f1e7bd', shadow: '#32392e' } }] };
+      window.currentDungeon = d; renderer.renderScene();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      let interiorPixels = 0, gatePixels = 0;
+      for (let y = 18; y < 54; y++) for (let x = 26; x < 38; x++) {
+        const i = (y * 64 + x) * 4;
+        if (pixels[i] > pixels[i + 1] * 2 && pixels[i] > pixels[i + 2] * 2) interiorPixels++;
+        if (pixels[i] > 0 && pixels[i + 1] > 0 && pixels[i] < pixels[i + 1] * 2) gatePixels++;
+      }
+      gates.push({ direction, closed, interiorPixels, gatePixels, glError: gl.getError() });
+    }
+  }
+  const gatePass = ['east', 'north'].every(direction => {
+    const open = gates.find(g => g.direction === direction && !g.closed), closed = gates.find(g => g.direction === direction && g.closed);
+    return open.interiorPixels > 0 && closed.interiorPixels === 0 && closed.gatePixels > 0;
+  }) && gates.every(g => g.glError === gl.NO_ERROR);
+  // Exercise unchanged character artwork through the production sprite shader.
+  renderer.canvas.width = renderer.canvas.height = 256;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, 256, 256);
+  gl.useProgram(renderer.spriteProgram); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.bindBuffer(gl.ARRAY_BUFFER, renderer.spriteBuffer);
+  for (const [attribute, size, offset] of [[renderer.spriteAttribs.pos, 2, 0], [renderer.spriteAttribs.uv, 2, 8], [renderer.spriteAttribs.depth, 1, 16]]) {
+    gl.enableVertexAttribArray(attribute); gl.vertexAttribPointer(attribute, size, gl.FLOAT, false, 20, offset);
+  }
+  gl.uniform1i(renderer.spriteUniforms.torchCount, 0);
+  gl.uniform1f(renderer.spriteUniforms.shadowStrength, 0);
+  gl.uniform1f(renderer.spriteUniforms.haloMode, 0);
+  const actor = { name: 'Mortacia', walkFrame: 0 }, characterPixels = new Uint8Array(256 * 256 * 4);
+  const idleTextures = new Set(), idleImages = new Set(), walkFrames = new Set(), characterErrors = [];
+  const drawCharacter = (bb, animate) => {
+    const worldHeight = bb.worldHeight * (animate ? bb.motion.heightScale : 1), scale = 150 / bb.worldHeight;
+    const drawEndY = 220 + bb.footInset * worldHeight * scale;
+    gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    renderer._drawCharacterBillboard({ actorTex: bb.tex, drawLeft: 53, drawRight: 203,
+      drawStartY: drawEndY - worldHeight * scale, drawEndY, depth: .1, lightX: 0, lightY: 0,
+      baseZ: 0, worldHeight, upperShift: animate ? bb.motion.upperShift * scale : 0 },
+      256, 256, { dirX: 1, dirY: 0, elevation: .6, intensity: .6 }, 0);
+    gl.readPixels(0, 0, 256, 256, gl.RGBA, gl.UNSIGNED_BYTE, characterPixels);
+    let hash = 2166136261, visible = 0;
+    for (let i = 0; i < characterPixels.length; i += 4) {
+      if (characterPixels[i] || characterPixels[i + 1] || characterPixels[i + 2]) visible++;
+      hash = Math.imul(hash ^ characterPixels[i], 16777619);
+      hash = Math.imul(hash ^ characterPixels[i + 1], 16777619);
+      hash = Math.imul(hash ^ characterPixels[i + 2], 16777619);
+    }
+    characterErrors.push(gl.getError());
+    return { hash: hash >>> 0, visible };
+  };
+  let minimumVisible = Infinity;
+  for (const now of [0, 200, 400, 600]) {
+    actor.walkFrame = now / 200;
+    const bb = renderer._getCharacterBillboard(actor, 0, 0, 5, 0, now);
+    idleTextures.add(bb.tex); const image = drawCharacter(bb, false);
+    idleImages.add(image.hash); minimumVisible = Math.min(minimumVisible, image.visible);
+  }
+  const walkImages = new Set();
+  for (let now = 620; now <= 3020; now += 20) {
+    const bb = renderer._getCharacterBillboard(actor, (now - 600) / 1000 * 1.6, 0, 10, 0, now);
+    walkFrames.add(bb.motion.frame);
+    if (now % 200 === 20) {
+      const image = drawCharacter(bb, true); walkImages.add(image.hash);
+      minimumVisible = Math.min(minimumVisible, image.visible);
+    }
+  }
+  const characterMotion = { idleTextures: idleTextures.size, idleImages: idleImages.size,
+    walkFrames: walkFrames.size, walkImages: walkImages.size, minimumVisible,
+    glErrors: characterErrors.filter(error => error !== gl.NO_ERROR) };
+  const characterMotionPass = characterMotion.idleTextures === 1 && characterMotion.idleImages === 1 &&
+    characterMotion.walkFrames === 4 && characterMotion.walkImages > 4 && minimumVisible > 100 && !characterMotion.glErrors.length;
   document.getElementById('results').textContent = JSON.stringify({
     shadersCompiled: true,
     initializationMs, adapter, startupEvents: renderer.startupEvents,
     pass: results.every(result => result.gpuUploadByteMismatches === 0 && result.glError === gl.NO_ERROR) &&
-      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && horizonPass && downhillPass,
-      results, nearClip, voxelColors, paletteApplied, visibility, horizonPass, downhill, downhillPass
+      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && gatePass && characterMotionPass,
+      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, gates, gatePass, characterMotion, characterMotionPass
   });
 } catch (error) {
   document.getElementById('results').textContent = JSON.stringify({ error: error.message });

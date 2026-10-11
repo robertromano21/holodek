@@ -4,8 +4,9 @@
     const result = [];
     let start = 0;
     for (let end = 0; end < lines.length; end++) {
-      // Magic terminates the existing sheet format; blank lines and labels are optional.
+      // Old sheets end at Magic; newer sheets append State without shifting the stats.
       if (!/^Magic:\s*-?\d+/i.test(lines[end])) continue;
+      if (/^State:\s*(?:Alive|Friendly|Neutral|Hostile|Dead)$/i.test(lines[end + 1] || '')) end++;
       const block = lines.slice(start, end + 1);
       start = end + 1;
       while (/^(?:PC|NPCs|NPCs in Party):?$/i.test(block[0] || '')) block.shift();
@@ -19,6 +20,8 @@
         const match = /^(Level|AC|XP|HP|MaxHP|Attack|Damage|Armor|Magic):\s*(-?\d+)/i.exec(line);
         if (match) entry[match[1].toLowerCase()] = Number(match[2]);
       });
+      entry.state = entry.hp <= 0 ? 'Dead' : type === 'pc' ? 'Alive' : 'Friendly';
+      entry.State = entry.state;
       result.push(entry);
     }
     return result;

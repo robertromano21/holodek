@@ -3,8 +3,14 @@ require('./serverLogger').installServerLogger();
 const express = require('express');
 const { createGameJsonParser, gameJsonErrorHandler, createRoomDatabaseReceiver } = require('./gameStateTransport');
 const cors = require('cors');
-const { retortWithUserInput, runNpcAutonomyTick } = require('./retort/retortWithUserInput.js');
+const { retortWithUserInput, runNpcAutonomyTick, generatePartyCharacterProfiles } = require('./retort/retortWithUserInput.js');
 const sharedState = require('./sharedState');
+const Inhabitants = require('./assets/dungeonInhabitants');
+const CampaignMemory = require('./retort/campaignMemory');
+const DialogueTurns = require('./retort/dialogueTurns');
+const { createPopulationService } = require('./retort/roomPopulation');
+const populationService = createPopulationService(sharedState);
+DialogueTurns.install(sharedState, Inhabitants);
 const fs = require('fs');
 const path = require('path');
 const { renderArrangementToWav } = require('./retort/renderAudio');
@@ -60,7 +66,12 @@ app.get('/combat-updates2', (req, res) => {
     };
     clients.push(client);
     client.send({ type: 'dungeonRun', runId: sharedState.getDungeonRunId() });
+    client.send({ type: 'campaign_memory', runId: sharedState.getDungeonRunId(), records: CampaignMemory.exportRecords(sharedState).slice(-128) });
     client.send(actionDice.snapshot());
+    client.send({ type: 'game_pause', paused: sharedState.getGamePaused(), runId: sharedState.getDungeonRunId() });
+    const coords = sharedState.getLastCoords();
+    const population = coords && sharedState.getRoomPopulation(`${coords.x},${coords.y},${coords.z}`);
+    if (population) client.send({ type: 'room_population', population, runId: sharedState.getDungeonRunId() });
 
     req.on('close', () => {
         clearInterval(keepAlive);
@@ -115,6 +126,38 @@ app.post('/debug/dungeon-rendering', (req, res) => {
     res.json({ recorded: true, comparison });
 });
 
+app.post('/debug/dialogue-subtitles', (req, res) => {
+  const { runId, reports } = req.body || {};
+  const stages = ['queued', 'displayed', 'skipped', 'deferred', 'duplicate', 'dismissed'];
+  if (typeof runId !== 'string' || !Array.isArray(reports) || reports.length > 32 || reports.some(row =>
+      !row || row.runId !== runId || typeof row.geoKey !== 'string' || !/^-?\d+,-?\d+,-?\d+$/.test(row.geoKey) || !stages.includes(row.stage) ||
+      typeof row.speaker !== 'string' || row.speaker.length > 70 || typeof row.line !== 'string' || row.line.length > (row.stage === 'displayed' ? 24000 : 320) ||
+      !Number.isFinite(row.at) || !Number.isInteger(row.queueDepth) || row.queueDepth < 0 || row.queueDepth > 32 ||
+      ['reason', 'source', 'kind'].some(key => row[key] !== undefined && (typeof row[key] !== 'string' || row[key].length > 80)) ||
+      ['distance', 'range'].some(key => row[key] !== undefined && row[key] !== null && (!Number.isFinite(row[key]) || row[key] < 0)) ||
+      ['part', 'parts'].some(key => row[key] !== undefined && (!Number.isInteger(row[key]) || row[key] < 1 || row[key] > 1000)))) {
+    return res.status(400).json({ error: 'Invalid subtitle diagnostic report.' });
+  }
+  if (runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That game is no longer active.' });
+  for (const row of reports) console.info('[DialogueSubtitle]', JSON.stringify({
+    runId, geoKey: row.geoKey, stage: row.stage, speaker: row.speaker, line: row.line, source: row.source, kind: row.kind,
+    at: row.at, queueDepth: row.queueDepth, reason: row.reason, distance: row.distance, range: row.range,
+    lineOfSight: row.lineOfSight === true, canHear: row.canHear === true, part: row.part, parts: row.parts
+  }));
+  const memoryRoom = typeof CampaignMemory !== 'undefined' ? CampaignMemory.cast(sharedState).geo : null;
+  for (const row of reports) if (row.stage === 'displayed' && row.geoKey === memoryRoom) CampaignMemory.rememberDialogue(sharedState, null,
+    [{ speaker: row.speaker, line: row.line }], 'subtitle-displayed', broadcast);
+  res.json({ recorded: reports.length });
+});
+
+app.post('/campaign-memory/recall', (req, res) => {
+  if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That campaign is no longer active.' });
+  try {
+    const records = CampaignMemory.restore(sharedState, req.body.records, req.body.runId);
+    res.json({ indexed: records.length });
+  } catch (error) { res.status(400).json({ error: error.message }); }
+});
+
 // Procedural character sprites: structured visual trait specs (one cheap LLM call per new character, cached by name).
 // Body: { sheets: [{name, sex, race, class, level, equipped, isMonster}], wait?: boolean, reroll?: boolean }
 // Returns cached entries immediately (source 'llm' | 'pending'); finished specs are also broadcast as
@@ -167,6 +210,7 @@ app.post('/set-dungeon-testing-mode', (req, res) => {
 });
 
 app.post('/submit-target2', (req, res) => {
+    if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before choosing a target.' });
     const { combatant, target, cancelled, actionId } = req.body;
     if (!actionDice.active || actionDice.active.kind !== 'combat' || actionDice.active.id !== actionId) {
       return res.status(409).json({ error: 'That combat turn is no longer active.' });
@@ -201,6 +245,7 @@ app.get('/environment-lab/:kind', (req, res) => {
 });
 
 app.post('/living-environment/interact', (req, res) => {
+  if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before interacting.' });
   if (inputTaskInFlight || actionDice.active) return res.status(409).json({ error: 'Finish the current action first.' });
   const coords = sharedState.getLastCoords();
   if (!coords || !req.body || typeof req.body !== 'object') return res.status(400).json({ error: 'No active room or action.' });
@@ -228,10 +273,78 @@ app.post('/action-dice/roll', (req, res) => {
     res.status(409).json({ error: error.message });
   }
 });
-const NPC_AUTONOMY_TICK_MS = 45000; // changed to 45s; main story simulation now also driven via client chatbotprocessinput(every 45s) with char positions for narrative continuity
+const NPC_AUTONOMY_TICK_MS = Inhabitants.DIALOGUE_REFRESH_MS;
 let npcAutonomyTickInFlight = false;
+let lastAutonomyAt = 0;
 
+app.post('/game/pause', (req, res) => {
+  if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That game is no longer active.' });
+  if (typeof req.body.paused !== 'boolean') return res.status(400).json({ error: 'A pause setting is required.' });
+  sharedState.setGamePaused(req.body.paused);
+  actionDice.setPaused(req.body.paused);
+  const event = { type: 'game_pause', paused: req.body.paused, runId: sharedState.getDungeonRunId() };
+  broadcast(event); res.json(event);
+});
+
+app.post('/room-population/visit', (req, res) => {
+  if (inputTaskInFlight || actionDice.active) return res.status(409).json({ error: 'The current action is resolving.' });
+  const result = populationService.visit(req.body || {});
+  if (result.error) return res.status(result.status).json({ error: result.error });
+  if (result.dialogue.length) console.info('[RoomPopulation]', JSON.stringify({ phase: 'speech', geoKey: req.body.geoKey,
+    speakers: result.dialogue.map(row => row.speaker), player: req.body.player, speech: result.speech, nearby: true }));
+  if (result.dialogue.length) broadcast({ type: 'character_dialogue', dialogue: result.dialogue,
+    geoKey: req.body.geoKey, runId: sharedState.getDungeonRunId() });
+  res.json(result);
+});
+
+app.post('/room-population/engage', async (req, res) => {
+  if (inputTaskInFlight || actionDice.active || sharedState.getGamePaused() || sharedState.getDungeonTestingMode()) return res.status(409).json({ error: 'The simulation is busy or paused.' });
+  const visit = populationService.visit(req.body || {});
+  if (visit.error) return res.status(visit.status).json({ error: visit.error });
+  if (visit.dialogue.length) broadcast({type:'character_dialogue',dialogue:visit.dialogue,geoKey:req.body.geoKey,runId:sharedState.getDungeonRunId()});
+  const record = visit.population.actors[req.body.target], coords = sharedState.getLastCoords();
+  const dungeon = sharedState.getRoomDungeonForSimulation(coords);
+  const livingPc=JSON.parse(sharedState.getCombatCharactersString() || '[]').some(a=>a.type==='pc'&&(a.hp ?? 1)>0);
+  if (!livingPc || visit.population.starting || !record?.position || record.status !== 'present' || record.allegiance !== 'Hostile' ||
+      Math.hypot(record.position.x + 0.5 - req.body.player.x, record.position.y + 0.5 - req.body.player.y) > 3.5 ||
+      !Inhabitants.lineClear(dungeon, req.body.player, { x: record.position.x + 0.5, y: record.position.y + 0.5 })) return res.status(409).json({ error: 'There is no nearby hostile encounter.' });
+  inputTaskInFlight = true;
+  const runId = sharedState.getDungeonRunId(), eventId = require('node:crypto').randomUUID();
+  try {
+    const result = await retortWithUserInput('', broadcast, sharedState.getCombatMode(), { realtimeEncounter: record.name });
+    const event = { type: 'realtime_combat_result', runId, geoKey: req.body.geoKey, eventId,
+      ...result, updatedGameConsole: sharedState.getUpdatedGameConsole(), population: sharedState.getRoomPopulation(req.body.geoKey) };
+    broadcast(event); res.json(event);
+  } catch (error) { console.warn('[EncounterCombat]', error.message); res.status(503).json({ error: 'The encounter could not resolve.' }); }
+  finally { actionDice.end(); inputTaskInFlight = false; }
+});
+
+app.post('/room-population/autonomy', async (req, res) => {
+  if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That game is no longer active.' });
+  const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+  if (req.body.geoKey !== geoKey) return res.status(409).json({ error: 'That room is no longer active.' });
+  if (sharedState.getGamePaused() || inputTaskInFlight || actionDice.active || npcAutonomyTickInFlight) return res.status(409).json({ error: 'The simulation is busy or paused.' });
+  const live=req.body.liveWorldState,dungeon=sharedState.getRoomDungeonForSimulation(coords);
+  if(Inhabitants.roomKey(live?.roomKey)!==geoKey || !Inhabitants.pointWalkable(dungeon,live?.player?.x,live?.player?.y))
+    return res.status(400).json({error:'A valid current-room observer is required.'});
+  if (Date.now() - lastAutonomyAt < NPC_AUTONOMY_TICK_MS) return res.json({ dialogue: [], summary: '' });
+  npcAutonomyTickInFlight = true; lastAutonomyAt = Date.now();
+  const runId = sharedState.getDungeonRunId();
+  try {
+    sharedState.setLiveWorldState(req.body.liveWorldState);
+    const result = await runNpcAutonomyTick(() => !inputTaskInFlight && !actionDice.active);
+    if (sharedState.getGamePaused() || runId !== sharedState.getDungeonRunId() ||
+        geoKey !== `${sharedState.getLastCoords().x},${sharedState.getLastCoords().y},${sharedState.getLastCoords().z}` || inputTaskInFlight || actionDice.active) return res.json({ dialogue: [], summary: '' });
+    if (result.population) broadcast({type:'room_population',population:result.population,runId});
+    broadcast({ type: 'character_dialogue', dialogue: result.dialogue, summary: result.summary, geoKey, runId, eventId: String(result.ts) });
+    res.json(result);
+  } catch (error) { console.warn('[RoomAutonomy]', error.message); res.status(503).json({ error: 'The inhabitants are quiet for now.' }); }
+  finally { npcAutonomyTickInFlight = false; }
+});
+
+app.use('/processInput7', (req, res, next) => DialogueTurns.run(req.body?.userInput, next));
 app.post('/processInput7', async (req, res) => {
+  if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before issuing a command.' });
   if (inputTaskInFlight) return res.status(409).json({ error: 'The previous action is still resolving.' });
   // If we're still in the character generation / review phase, don't let the main Retort flow
   // (which triggers full dungeon creation) run yet. The client should be showing the Save/Reroll menu.
@@ -270,6 +383,7 @@ app.post('/processInput7', async (req, res) => {
             sharedState.setUpdatedGameConsole(updatedGameConsole);
         }
       const combatCharactersString = sharedState.getCombatCharactersString();
+      CampaignMemory.rememberRoomHistory(sharedState, req.body.userInput, result.content, updatedGameConsole, broadcast);
       characterTraits.ensureTraitSpecsForConsole(updatedGameConsole, broadcast); // new PCs/NPCs/monsters -> trait specs (async)
       const roomNameDatabaseString = sharedState.getRoomNameDatabase(); // Add this
       const currentQuest = sharedState.getCurrentQuest(); // New: Include current quest
@@ -282,6 +396,8 @@ app.post('/processInput7', async (req, res) => {
         imageUrl: result.imageUrl,
         musicArrangement: result.musicArrangement || null,
         npcDirectives: Array.isArray(result.npcDirectives) ? result.npcDirectives : [],
+        population: result.population || null,
+        dialogue: result.dialogue || [],
         combatRoundOnly: !!(result.combatRoundOnly || result.actionOnly)
       };
       tasks.set(taskId, { 
@@ -319,6 +435,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
 
       console.log(`[Server] Starting game with finalized character:`, characterData?.Name || characterData?.name);
       const runId = sharedState.beginDungeonRun();
+      actionDice.setPaused(false);
       roomDatabaseReceiver.reset();
       broadcast({ type: 'dungeonRun', runId });
 
@@ -362,12 +479,20 @@ app.post('/startGameWithCharacter', async (req, res) => {
       sharedState.setRoomNameDatabase(initialWorld.roomNameDatabaseString);
       sharedState.setPersonalNarrative('');
       sharedState.setUpdatedGameConsole(buildInitialGameConsole(initialWorld.console, characterData, partyNpcData));
+      const profiles = typeof generatePartyCharacterProfiles === 'function' ? await generatePartyCharacterProfiles([characterData, ...partyNpcData], runId) : [];
+      if (profiles.length) CampaignMemory.rememberProfiles(sharedState, profiles, broadcast);
+      if (profiles.length) {
+        const profileRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+        for (const actor of profileRoster) actor.originProfile = profiles.find(profile => profile.name === actor.name);
+        sharedState.setCombatCharactersString(JSON.stringify(profileRoster));
+      }
 
       // We send a special internal command to retortWithUserInput so it knows to skip the normal start menu
       // and use the provided character directly, then begin dungeon generation.
       const specialInput = `__START_WITH_CHARACTER__${JSON.stringify(characterData)}`;
 
       const result = await retortWithUserInput(specialInput, broadcast, combatMode);
+      CampaignMemory.rememberRoomHistory(sharedState, '', result.content, sharedState.getUpdatedGameConsole(), broadcast);
 
       let updatedGameConsole = sharedState.getUpdatedGameConsole();
       if (!updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/)) {
@@ -387,6 +512,8 @@ app.post('/startGameWithCharacter', async (req, res) => {
         currentQuest,
         imageUrl: (result && result.imageUrl) || null,
         musicArrangement: (result && result.musicArrangement) || null,
+        population: result.population || null,
+        dialogue: result.dialogue || [],
         characterConfirmed: true
       };
 

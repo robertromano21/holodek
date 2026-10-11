@@ -474,7 +474,10 @@
     },
 
     _getVisibleCharacterVoxelActors() {
-      const list = Array.isArray(window.combatCharacters) ? window.combatCharacters : [];
+      const list = (Array.isArray(window.combatCharacters) ? window.combatCharacters : []).filter(entry =>
+        typeof window.isDungeonActorPresent === 'function' ? window.isDungeonActorPresent(entry) :
+        window.DungeonInhabitants?.isPresent ? window.DungeonInhabitants.isPresent(entry, window.DungeonLife?.population()) :
+        entry && (entry.hp ?? entry.HP ?? 1) > 0 && String(entry.state ?? entry.State ?? '').trim().toLowerCase() !== 'dead');
       if (typeof window.ensureKnownSpritesInCombatList === 'function' && list.length) {
         try {
           window.ensureKnownSpritesInCombatList(list);
@@ -484,6 +487,7 @@
       return list.filter((entry) => (
         entry
         && entry.type !== 'pc'
+        && entry.discoveryState !== 'pending'
         && entry.sprite
         && this._getActorWorldSpec(entry)
         && this._getActorWorldSpec(entry).kind !== 'placeholder' // trait spec still pending: nothing in 3D
@@ -496,7 +500,8 @@
     _getCharacterMazeRenderPosition(actor, now = Date.now()) {
       if (!actor) return null;
       if (typeof window.getPartyEntryRenderMazePosition === 'function') {
-        const pos = window.getPartyEntryRenderMazePosition(actor, now);
+        // Maze tweens store epoch timestamps; renderScene's performance clock is unrelated.
+        const pos = window.getPartyEntryRenderMazePosition(actor, Date.now());
         if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) return pos;
       }
       if (Number.isFinite(actor.renderMazeX) && Number.isFinite(actor.renderMazeY)) {
@@ -3716,58 +3721,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
     // a cached GL texture of the procedural billboard plus its world size / foot inset.
     // Pick front / threeQuarter / side / back from camera↔actor yaw (with hysteresis so views don't flicker).
     _pickActorBillboardView(actor, wx, wy, camX, camY, now) {
-      this._actorMotion = this._actorMotion || {};
-      const key = actor && actor.name ? actor.name : 'actor';
-      const m = this._actorMotion[key] || { x: wx, y: wy, view: 'front', mirror: false, faceAng: NaN, movedAt: 0, viewHoldUntil: 0 };
-      const mvx = wx - (Number.isFinite(m.x) ? m.x : wx);
-      const mvy = wy - (Number.isFinite(m.y) ? m.y : wy);
-      const moved = mvx * mvx + mvy * mvy;
-      if (moved > 1e-6) {
-        m.faceAng = Math.atan2(mvy, mvx);
-        m.movedAt = now;
-      } else if (!Number.isFinite(m.faceAng)) {
-        // Idle with no history: face the camera (front view)
-        m.faceAng = Math.atan2(camY - wy, camX - wx);
-      } else if (now - (m.movedAt || 0) > 1100) {
-        // Idle long enough: ease facing toward camera so they look at the party
-        const want = Math.atan2(camY - wy, camX - wx);
-        let d = want - m.faceAng;
-        while (d > Math.PI) d -= Math.PI * 2;
-        while (d < -Math.PI) d += Math.PI * 2;
-        m.faceAng += d * 0.12;
-      }
-      m.x = wx; m.y = wy;
-      const toCamAng = Math.atan2(camY - wy, camX - wx);
-      let rel = m.faceAng - toCamAng;
-      while (rel > Math.PI) rel -= Math.PI * 2;
-      while (rel < -Math.PI) rel += Math.PI * 2;
-      const a = Math.abs(rel);
-      let view = 'front';
-      if (a < Math.PI * 0.22) view = 'front';
-      else if (a < Math.PI * 0.48) view = 'threeQuarter';
-      else if (a < Math.PI * 0.78) view = 'side';
-      else if (a < Math.PI * 0.95) view = 'threeQuarter'; // rear ¾ — use back art if available below
-      else view = 'back';
-      // Rear threeQuarter: prefer true back sprite when nearly behind
-      if (view === 'threeQuarter' && a >= Math.PI * 0.78) view = 'back';
-      // facing +1 = figure faces screen-right (weapon/right-hand on forward/right for side/¾);
-      // facing -1 = faces screen-left. Procedural remap keeps the SAME body hand (never flip whole sprite).
-      const facing = rel < 0 ? -1 : 1;
       const api = window.ProceduralCharacters;
       const spec = this._getActorWorldSpec(actor);
-      if (view === 'back' && api && api.supportsBackView && spec && !api.supportsBackView(spec)) {
-        view = 'front';
-      }
-      // Hysteresis: hold current view briefly unless the new one is clearly different
-      if (m.view && m.view !== view && now < (m.viewHoldUntil || 0)) {
-        // keep m.view / m.facing
-      } else if (m.view !== view || m.facing !== facing) {
-        m.view = view;
-        m.facing = facing;
-        m.viewHoldUntil = now + 140;
-      }
-      this._actorMotion[key] = m;
-      return { view: m.view || 'front', facing: (m.facing === -1 ? -1 : 1), mirror: false };
+      const motion = window.CharacterMotion3D;
+      if (motion && !this._billboardMotion3D) this._billboardMotion3D = motion.createController();
+      const dungeon = window.currentDungeon;
+      const scope = [window.dungeonRunId || '', dungeon?.geoKey || this._getCurrentRoomKey(), dungeon?._geometryStamp || ''].join('|');
+      return this._billboardMotion3D?.sample(actor?.name || 'actor', {
+        scope, x: wx, y: wy, camX, camY, now, paused: !!window.gamePaused,
+        supportsBack: !(api?.supportsBackView && spec && !api.supportsBackView(spec))
+      }) || { view: 'front', facing: 1, frame: 0, heightScale: 1, upperShift: 0, moving: false };
     },
 
     _getCharacterBillboard(actor, wx, wy, camX, camY, now) {
@@ -3777,14 +3740,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const pick = this._pickActorBillboardView(actor, wx, wy, camX, camY, now);
       const view = pick.view;
       const facing = pick.facing === -1 ? -1 : 1;
-      // Walk cycle: while tweening, advance by time; idle holds frame 0-ish
-      const moving = (() => {
-        const m = this._actorMotion[actor.name];
-        return m && (now - (m.movedAt || 0) < 320);
-      })();
-      const frame = Number.isFinite(actor.walkFrame)
-        ? Math.abs(actor.walkFrame | 0) % 4
-        : (moving ? (Math.floor(now / 180) % 4) : 0);
+      // The combat-map clock must not animate a stationary 3D billboard.
+      const frame = pick.frame;
       const bbRev = Number.isFinite(window.CHARACTER_BILLBOARD_REV) ? window.CHARACTER_BILLBOARD_REV : 0;
       // Cache by facing (drawn art), never by bitmap-mirror — keeps weapon on the same hand
       const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev].join('|');
@@ -3794,7 +3751,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const pix = api.renderBillboardPixels(spec, { frame, view, facing });
         if (!pix || !pix.bounds) return null;
         const data = new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength);
-        const bounds = pix.bounds;
         const gl = this.gl;
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -3806,9 +3762,19 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
         try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
         const ws = Number.isFinite(spec.worldScale) ? Math.max(0.55, Math.min(1.7, spec.worldScale)) : 1;
-        const rawInset = (pix.h - 1 - bounds.maxY) / pix.h;
-        entry = { tex, worldHeight: 1.22 * ws, footInset: Math.max(0, Math.min(0.08, rawInset)), view, facing };
-        if (this._billboardTexCache.size > 256) {
+        // Anchor all walking poses to the same idle soles, not frame-specific padding.
+        const footKey = [spec.key, view, facing, bbRev].join('|');
+        this._billboardFootInsets = this._billboardFootInsets || new Map();
+        let footInset = this._billboardFootInsets.get(footKey);
+        if (!Number.isFinite(footInset)) {
+          const idle = frame === 0 ? pix : api.renderBillboardPixels(spec, { frame: 0, view, facing });
+          const rawInset = idle?.bounds ? (idle.h - 1 - idle.bounds.maxY) / idle.h : 0;
+          footInset = Math.max(0, Math.min(0.08, rawInset));
+          if (this._billboardFootInsets.size >= 256) this._billboardFootInsets.delete(this._billboardFootInsets.keys().next().value);
+          this._billboardFootInsets.set(footKey, footInset);
+        }
+        entry = { tex, worldHeight: 1.22 * ws, footInset, view, facing };
+        if (this._billboardTexCache.size >= 256) {
           const oldKey = this._billboardTexCache.keys().next().value;
           const old = this._billboardTexCache.get(oldKey);
           try { gl.deleteTexture(old.tex); } catch (e) { /* ignore */ }
@@ -3816,7 +3782,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
         this._billboardTexCache.set(key, entry);
       }
-      return entry;
+      return { ...entry, motion: pick };
     },
 
     // Item billboard texture (Objects in Room), cached per name/type/magic.
@@ -3848,11 +3814,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (!spr.actorTex) return;
       const x0 = (spr.drawLeft / width) * 2 - 1, x1 = (spr.drawRight / width) * 2 - 1;
       const y0 = 1 - (spr.drawEndY / height) * 2, y1 = 1 - (spr.drawStartY / height) * 2;
+      const upperShift = Number.isFinite(spr.upperShift) ? spr.upperShift / width * 2 : 0;
       const verts = new Float32Array([
         x0, y0, 0, 1, spr.depth,
         x1, y0, 1, 1, spr.depth,
-        x0, y1, 0, 0, spr.depth,
-        x1, y1, 1, 0, spr.depth
+        x0 + upperShift, y1, 0, 0, spr.depth,
+        x1 + upperShift, y1, 1, 0, spr.depth
       ]);
       gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
       gl.activeTexture(gl.TEXTURE0);
@@ -4151,7 +4118,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const width = this.canvas ? this.canvas.width : Math.max(1, Math.floor(displayW / pixelScale));
       const height = this.canvas ? this.canvas.height : Math.max(1, Math.floor(displayH / pixelScale));
 
-      const dungeon = window.currentDungeon;
+      const dungeon = window.SceneExteriorDetails?.forRendering(window.currentDungeon) || window.currentDungeon;
       const textures = window.dungeonTextures;
       if (!dungeon || !textures) return;
       this.rebuildDungeonTextures(dungeon, textures);
@@ -4350,6 +4317,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const TORCH_VIS_RADIUS = VOXEL_VIS_RADIUS;
       const TORCH_MOUNT_HEIGHT = 0.45;
       const TORCH_MOUNT_RATIO = 0.55;
+      const torchMountZ = cell => {
+        const floor = Number.isFinite(cell.floorHeight) ? cell.floorHeight : 0;
+        const height = Math.max(.1, (Number.isFinite(cell.ceilHeight) ? cell.ceilHeight : floor + TORCH_MOUNT_HEIGHT) - floor);
+        const mount = Number.isFinite(cell.torchMountHeight) ? Math.max(.05, Math.min(height - .05, cell.torchMountHeight)) : height * TORCH_MOUNT_RATIO;
+        return floor + mount;
+      };
       const TORCH_LIGHT_OFFSET = 0.515;
       const TORCH_SPRITE_OFFSET = 0.56;
       const TORCH_SPRITE_DEPTH_BIAS = 0.008;
@@ -4498,10 +4471,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const worldX = placement.lightX;
           const worldY = placement.lightY;
 
-          const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
-          const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + TORCH_MOUNT_HEIGHT;
-          const wallH = Math.max(0.1, ceilH - floorH);
-          const torchZ = floorH + wallH * TORCH_MOUNT_RATIO;
+          const torchZ = torchMountZ(cell);
           const seed = ((wx * 928371 + wy * 1237) % 1000) / 1000;
           const flicker = torchFlicker(seed, now);
 
@@ -4833,7 +4803,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           if (isTorch) {
             spriteWorldHeight = TORCH_WORLD_HEIGHT;
             spriteWidthRatio = TORCH_WIDTH_RATIO;
-            spriteBaseZ = floorH + (ceilH - floorH) * TORCH_MOUNT_RATIO;
+            spriteBaseZ = torchMountZ(cell);
           } else if (ceilH > floorH) {
             spriteWorldHeight = Math.max(0.5, (ceilH - floorH) * heightRatio);
             spriteWidthRatio = spriteBaseWidth;
@@ -5018,7 +4988,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const transformY = invDet * (-planeY * dxp + planeX * dyp);
         if (transformY <= 0.05) continue;
         const screenX = (width / 2) * (1 + transformX / transformY);
-        const worldH = bb.worldHeight;
+        const worldH = bb.worldHeight * bb.motion.heightScale;
         // Feet sit ON the walkable floor: clamp footInset so transparent padding cannot sink the figure
         // into the floor plane (that made the tan floor slab bisect winged characters).
         const inset = Math.max(0, Math.min(0.08, Number.isFinite(bb.footInset) ? bb.footInset : 0));
@@ -5033,7 +5003,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (right < 0 || left >= width || bottomY < 0 || topY >= height) continue;
         // Strong depth pull so floor raycast depth does not win through the billboard mid-body
         const actorDepth = Math.min(1.0, Math.max(0.0, (transformY - 0.42) / depthFarDepth));
-        const shadowWorldR = Math.max(0.18, Math.min(0.42, worldH * 0.22));
+        const shadowWorldR = Math.max(0.18, Math.min(0.42, bb.worldHeight * 0.22));
         const shadowScreenW = shadowWorldR * 2.2 * focalLength / transformY;
         const shadowScreenH = shadowWorldR * 0.85 * focalLength / transformY;
         const footScreenY = horizon + (eyeZ - feetZ) * focalLength / transformY;
@@ -5072,7 +5042,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           depth: actorDepth,
           viewDist: transformY,
           baseZ,
-          worldHeight: worldH
+          worldHeight: worldH,
+          upperShift: bb.motion.upperShift * focalLength / transformY
         });
       }
 

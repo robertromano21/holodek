@@ -23,5 +23,5 @@ const output = { wallMs: Date.now() - started, status: result.status,
   rendererLog: result.stderr?.split(/\r?\n/).filter(line => /RendererStartup|Shader compilation|Shader linking|CONTEXT_LOST|GPU process/.test(line)).slice(-24) };
 console.log(JSON.stringify(process.argv.includes('--summary') ? { wallMs: output.wallMs, status: output.status,
   processError: output.processError, pass: report.pass, adapter: report.adapter,
-  initializationMs: report.initializationMs, nearClip: report.nearClip, error: report.error } : output, null, 2));
+  initializationMs: report.initializationMs, nearClip: report.nearClip, characterMotion: report.characterMotion, error: report.error } : output, null, 2));
 process.exitCode = report.pass && !result.error ? 0 : 1;
