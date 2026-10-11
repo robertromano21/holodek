@@ -12,7 +12,8 @@ function fixture() {
   const nodes = new Map(), reports = [], timers = [], posts = [];
   function element() {
     const node = { style: {}, hidden: true, textContent: '', offsetWidth: 500, children: [],
-      setAttribute() {}, removeAttribute() {}, addEventListener() {}, append(...children) { this.children.push(...children); },
+      setAttribute() {}, removeAttribute() {}, addEventListener() {}, blur() {}, append(...children) { this.children.push(...children); },
+      appendChild(child) { this.children.push(child); },
       getBoundingClientRect: () => ({ left: 300, top: 750, width: 500, height: 80 }) };
     Object.defineProperty(node, 'id', { get: () => node._id, set: id => { node._id = id; nodes.set(id, node); } });
     return node;
@@ -46,6 +47,47 @@ test('subtitle logging distinguishes queued lines from exact text actually displ
   assert.equal(shown[0].distance, 1); assert.equal(shown[0].lineOfSight, true);
   f.flush(); assert.equal(f.posts[0].url, '/debug/dialogue-subtitles');
   assert.ok(f.posts[0].body.reports.some(row => row.stage === 'displayed'));
+});
+
+test('dismissing a subtitle hides the card immediately, logs its reason and retains the next queued line', () => {
+  const f = fixture();
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [f.event.dialogue[0], { speaker: f.actor.name, line: 'Mind the cracked arch.' }] });
+  f.root.DungeonLife.dismissSubtitle();
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+  assert.ok(f.reports.some(row => row.stage === 'dismissed' && row.reason === 'player-dismissed'));
+  assert.equal(f.posts.length, 0);
+  f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, 'Mind the cracked arch.');
+  f.root.DungeonLife.dismissSubtitle(); f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+  f.root.DungeonLife.receiveDialogue(f.event);
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+});
+
+test('quick-dismiss advances through every sentence card without deleting the rest of a monologue', () => {
+  const f = fixture(), line = Array.from({ length: 12 }, (_, i) => `Remember passage ${i}: the old watch kept these stones safe through all the long years.`).join(' ');
+  const chunks = I.splitSpeech(line); assert.ok(chunks.length > 1);
+  const event = { ...f.event, dialogue: [{ speaker: f.actor.name, line }] };
+  f.root.DungeonLife.receiveDialogue(event);
+  for (const chunk of chunks) {
+    assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, chunk);
+    f.root.DungeonLife.dismissSubtitle(); assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+    f.root.DungeonLife.tick();
+  }
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+  assert.equal(f.reports.filter(row => row.stage === 'displayed').map(row => row.line).join(' '), line);
+  assert.equal(event.dialogue[0].line, line); assert.equal(f.posts.length, 0);
+});
+
+test('paused subtitle dismissal retains unread cards until resuming and does not alter pause state', () => {
+  const f = fixture(), line = Array.from({ length: 12 }, (_, i) => `Passage ${i} recalls the old gate and its long forgotten keeper.`).join(' ');
+  const chunks = I.splitSpeech(line); assert.ok(chunks.length > 1);
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: f.actor.name, line }] });
+  f.root.DungeonLife.setPaused({ paused: true, runId: 'run' });
+  f.root.DungeonLife.dismissSubtitle(); f.advance(60000); f.root.DungeonLife.tick();
+  assert.equal(f.root.gamePaused, true); assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+  f.root.DungeonLife.setPaused({ paused: false, runId: 'run' }); f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, chunks[1]);
 });
 
 test('distance, occlusion and death suppress subtitles and record specific reasons', () => {

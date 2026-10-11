@@ -18,6 +18,9 @@ const { drawSceneSurface } = require('../assets/renderSceneTextures');
 const { landmarkSpriteSpec, resolveLandmarkDrawer } = require('../assets/renderSceneProps');
 
 const descriptions = {
+  puzzle_buttons: 'A stone archive has a readable procession plaque, marked push buttons and a closed reading cabinet.',
+  puzzle_dials: 'A surveyor workshop has three-position rotating dials, an engraved reference relief and a reading cabinet.',
+  puzzle_channels: 'A sluice workshop has channel levers, an engraved water diagram and a reading cabinet.',
   exteriors: 'The crossroads has no roof. Beneath a yellow sky, flat ash flagstones lead north to Ruined Temple Entrance and east to Basalt Gatehouse. Each known destination has stone shell walls, paired towers, one physical entrance and a clear walking perimeter. The green floor markers identify the only entrances; the rear and side walls remain closed.',
   deadwood: 'An open grove of Tartarus contains pale hollow trees, lightning-split snags, wind-bent dead trees, dead willows, skeletal pines, twisted yews and rootbound trees. Thorn bushes, bramble patches and ash reeds surround clear walking trails.',
   geography: 'An open mountain pass of Tartarus rises into craggy peaks above a deep canyon and a rocky escarpment. Boulders and rock faces stand beside a traversable mountain approach. A canyon descent leads toward a crypt entrance below.',
@@ -352,12 +355,12 @@ function buildEnvironmentLab(kind, options = {}) {
     shellkeep: 'Shell Keep Castle', stonekeep: 'Stone Keep Castle', concentric: 'Concentric Castle', amphitheater: 'Roman Amphitheater',
     theater: 'Roman Theater', circus: 'Roman Circus', forum: 'Roman Forum', warehouse: 'Roman Horreum', domus: 'Roman Domus',
     villa: 'Roman Villa', insula: 'Roman Insula', aqueduct: 'Roman Aqueduct' };
-  const spec = buildSceneSpec({ roomName: roomNames[kind] || Living.THEMES[kind]?.name || 'Tartarus Voxel Gallery', description: descriptions[kind], puzzle: '', objects: [],
+  const spec = buildSceneSpec({ roomName: roomNames[kind] || ({ forge: 'Furnace Court', graves: 'Grave Shrine', grove: 'Dead Grove' })[kind] || 'Tartarus Voxel Gallery', description: descriptions[kind], puzzle: '', objects: [],
     exits: kind === 'citadel' ? ['north', 'east', 'up', 'down'] : kind === 'exteriors' ? ['north', 'east'] : [],
     coords: { x: 0, y: kind === 'exteriors' ? -1 : 0, z: 0 } });
   spec.indoor = !['exteriors', 'deadwood', 'geography', 'grove', 'gallery', 'rubble', 'amphitheater', 'theater', 'circus', 'forum', 'aqueduct'].includes(kind);
   spec.livingTheme = kind === 'gallery' ? 'grove' : kind;
-  spec.landmarks = [...new Set(props[kind])].map(type => ({ type, label: type, count: 1, condition: [], placement: 'scattered' }));
+  spec.landmarks = [...new Set(props[kind] || [])].map(type => ({ type, label: type, count: 1, condition: [], placement: 'scattered' }));
   if (kind === 'geography') spec.exits = spec.source.exits = ['up', 'down'];
   prepareSceneGeography(spec, kind === 'geography' ? {
     '0,0,1': { name: 'Mountain Summit', indoor: false, classification: { indoor: false, biome: 'mountain' } },
@@ -389,7 +392,7 @@ function buildEnvironmentLab(kind, options = {}) {
   applySceneGraphics(dungeon, spec, { geoKey: dungeon.geoKey, customTiles: [] });
   if (structured) applySceneRoofs(dungeon, spec);
   if (structured || ['exteriors', 'deadwood', 'geography'].includes(kind)) placeSceneLandmarks(dungeon, spec);
-  else props[kind].forEach((type, i) => {
+  else (props[kind] || []).forEach((type, i) => {
     const index = dungeon.customTiles.findIndex(t => t.type === type);
     if (index < 0) throw new Error(`Missing lab prop ${type}`);
     const key = `${5 + (i % 4) * 6},${18 - Math.floor(i / 4) * 3}`;
@@ -404,7 +407,17 @@ function buildEnvironmentLab(kind, options = {}) {
     applySceneExteriors(dungeon, spec);
   }
   if (kind === 'deadwood') { DungeonExits.install(dungeon); applySceneVegetation(dungeon, spec); }
-  if (Living.THEMES[spec.livingTheme]) dungeon.livingEnvironmentReport = Living.install(dungeon, spec);
+  if (kind.startsWith('puzzle_')) {
+    const design = Living.fallback(kind, 'the workshop');
+    design.kind = { puzzle_buttons: 'sequence', puzzle_dials: 'alignment', puzzle_channels: 'channels' }[kind];
+    const suffix = { sequence: 'button', alignment: 'dial', channels: 'lever' }[design.kind];
+    design.controls.forEach((c, i) => Object.assign(c, { label: `${c.mark} ${suffix}`, options: ['Sun', 'Wave', 'Moon'],
+      goal: design.kind === 'channels' ? (i + 1) % 2 : (i + 1) % 3, initial: 0 }));
+    design.order = design.controls.map(c => c.id);
+    spec.puzzleMechanism = Living.compile(design);
+    spec.source.puzzle = Living.prose(spec.puzzleMechanism).description;
+    dungeon.puzzleBuildReport = Living.install(dungeon, spec);
+  }
   dungeon.environment = buildEnvironment(dungeon);
   dungeon._geometryStamp = `lab-${kind}-v6`;
   return dungeon;

@@ -4,6 +4,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const I = require('../assets/dungeonInhabitants');
+const { createPopulationService } = require('../retort/roomPopulation');
+const Sync = require('../retort/monsterConsoleSync');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
 const source = fs.readFileSync(require.resolve('../retort/retortWithUserInput'), 'utf8');
 const slice = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -102,4 +104,48 @@ test('shared equipment metadata stays available for another monster carrying the
   context.dropMonsterItemsToRoom({ name: 'Guard Captain', equipped: { Weapon: 'glaive' } });
   assert.match(context.updatedGameConsole, /^Monsters Equipped Properties: None$/m);
   assert.match(context.updatedGameConsole, /^Objects in Room: glaive$/m);
+});
+
+test('spawned gear properties survive population save and proximity omission, then drop with original modifiers', () => {
+  const blade = item('guard blade'), captainBlade = item('captain blade');
+  const guardSheet = sheet('Guard', 'Weapon: guard blade, Armor: None, Shield: None, Other: None').replace('HP: 0', 'HP: 10');
+  const captainSheet = sheet('Guard Captain', 'Weapon: captain blade, Armor: None, Shield: None, Other: None').replace('HP: 0', 'HP: 10');
+  let text = `Coordinates: X: 1, Y: 0, Z: 0\nObjects in Room: None\nObjects in Room Properties: None\nInventory: silver ring\nMonsters in Room:\n${guardSheet}\n${captainSheet}\nMonsters Equipped Properties: ${legacy(blade)}, ${legacy(captainBlade)}\nMonsters State: Hostile\nExits: east`;
+  let db = JSON.stringify({ '1,0,0': { name: 'Court', objects: [], monsters: { inRoom: 'None', equippedProperties: 'None', state: 'None' } } });
+  const population = I.createPopulation('1,0,0', [{ name: 'Guard', allegiance: 'Hostile' }, { name: 'Guard Captain', allegiance: 'Hostile' }]);
+  population.initialSheets = guardSheet + '\n' + captainSheet;
+  population.initialEquipmentProperties = population.equipmentProperties = `${legacy(blade)}, ${legacy(captainBlade)}`;
+  const state = { getUpdatedGameConsole: () => text, setUpdatedGameConsole: value => { text = value; },
+    getRoomNameDatabase: () => db, setRoomNameDatabase: value => { db = value; }, setRoomPopulation() {} };
+  const service = createPopulationService(state);
+  I.sync(population, I.parseSheets(text)); service.save(population);
+  assert.deepEqual(I.parseEquipmentProperties(JSON.parse(db)['1,0,0'].monsters.equippedProperties), [blade, captainBlade]);
+  text = I.perceivedConsole(text, []); service.save(population);
+  assert.deepEqual(I.parseEquipmentProperties(JSON.parse(db)['1,0,0'].monsters.equippedProperties), [blade, captainBlade]);
+  text = Sync.syncConsole(text, JSON.parse(db)['1,0,0'].monsters).consoleText;
+  const context = { updatedGameConsole: text, Inhabitants: I, sharedState: state, console: { warn() {} } };
+  vm.runInNewContext(lootSource, context);
+  context.updatedGameConsole = context.updatedGameConsole.replace(/(Guard\n[\s\S]*?HP:) 10/, '$1 0');
+  context.dropMonsterItemsToRoom({ name: 'Guard', hp: 0, equipped: { Weapon: 'guard blade' } });
+  text = context.updatedGameConsole;
+  I.sync(population, I.parseSheets(text)); service.save(population);
+  assert.match(text, /^Objects in Room: guard blade$/m);
+  assert.deepEqual(I.parseEquipmentProperties(text.match(/^Objects in Room Properties: (.*)$/m)[1]), [blade]);
+  assert.deepEqual(I.parseEquipmentProperties(JSON.parse(db)['1,0,0'].monsters.equippedProperties), [captainBlade]);
+  assert.equal(JSON.parse(db)['1,0,0'].objects[0].properties.damage, blade.damage_modifier);
+  const revisited = Sync.syncConsole(text, JSON.parse(db)['1,0,0'].monsters).consoleText;
+  assert.equal(I.parseEquipment(I.parseSheets(revisited).find(a => a.name === 'Guard').lines[9]).Weapon, 'None');
+  assert.equal(I.parseEquipment(I.parseSheets(revisited).find(a => a.name === 'Guard Captain').lines[9]).Weapon, 'captain blade');
+  assert.match(revisited, /^Inventory: silver ring$/m);
+});
+
+test('final room-population snapshot carries generated sheets and modifiers instead of its earlier None defaults', () => {
+  const begin = source.indexOf('    // Keep freshly generated sheets and modifiers together'), end = source.indexOf('    persistRoomDb(roomNameDatabasePlain);', begin);
+  const blade = item('guard blade'), sheets = sheet('Guard', 'Weapon: guard blade, Armor: None, Shield: None, Other: None');
+  const context = { currentRoomData: { monsters: { inRoom: 'None', equippedProperties: 'None' } }, monstersInRoom: sheets, coordKey: '1,0,0',
+    updatedGameConsole: `Monsters Equipped Properties: ${legacy(blade)}\nMonsters State: Hostile`, sharedState: { getRoomPopulation: () => ({ equipmentProperties: legacy(blade) }) } };
+  vm.runInNewContext(source.slice(begin, end), context);
+  assert.equal(context.currentRoomData.monsters.inRoom, sheets);
+  assert.deepEqual(I.parseEquipmentProperties(context.currentRoomData.monsters.equippedProperties), [blade]);
+  assert.equal(context.currentRoomData.populationComplete, true);
 });

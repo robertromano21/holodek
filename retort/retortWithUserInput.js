@@ -20,6 +20,9 @@ const RETORT_DIR = path.join(ROOT, 'retort');
 const SID_DIR    = path.join(ROOT, 'sid');
 const RENDER_JS  = path.join(ROOT, 'assets', 'renderSid_poke.js');
 const { generateCharacterSprite, createCharacterSpriteSpec } = require('../assets/renderCharacterSprite.js');
+const CommandIntent = require('../assets/commandIntent');
+const ActionFeedback = require('../assets/actionFeedback');
+const PhysicalPuzzles = require('../assets/physicalPuzzles');
 const {
   buildSceneSpec,
   sceneInputFromConsole,
@@ -58,6 +61,8 @@ const { applyAdditionalOutcomes, selectCommandedNpcs } = require('./adjudication
 const { doorIntent, prepareDoorAction, applyDoorAction } = require('./dungeonActions');
 const { buildEnvironment } = require('../assets/dungeonEnvironment');
 const LivingEnvironments = require('../assets/livingEnvironments');
+const { generateDesign: generatePhysicalPuzzleDesign } = require('./physicalPuzzleDesign');
+const { prepare: preparePhysicalPuzzleAction, bindTask: bindPhysicalPuzzleTask } = require('./physicalPuzzleActions');
 const Inhabitants = require('../assets/dungeonInhabitants');
 const { createPopulationService, prepareEntryQuestContact } = require('./roomPopulation');
 const { generateInhabitants, needsQuestIntroduction } = require('./inhabitantGeneration');
@@ -67,6 +72,7 @@ const MonsterConsoleSync = require('./monsterConsoleSync');
 const JourneyMemory = require('./journeyMemory');
 const CampaignMemory = require('./campaignMemory');
 const AdjudicationMetadata = require('./adjudicationMetadata');
+const PuzzleRewards = require('./puzzleRewards');
 const DialogueAudience = require('../assets/dialogueAudience');
 
 function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
@@ -940,6 +946,12 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
     console.log('Dungeon testing mode enabled; running dungeon-only pipeline.');
     return run(retort(async ($) => runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast)));
   }
+
+  // Mechanical puzzle commands never enter a model session unless this action just solved it.
+  const physicalPuzzleResult = options.realtimeEncounter ? null : await tryPhysicalPuzzleAction(userInput);
+  options.onPhysicalPuzzlePrepared?.(physicalPuzzleResult);
+  if (physicalPuzzleResult && !physicalPuzzleResult.completed) return physicalPuzzleResponse(physicalPuzzleResult);
+  if (physicalPuzzleResult) roomNameDatabaseString = sharedState.getRoomNameDatabase();
 
   let dialogueParts = personalNarrative.split('\n');
   let narrative = ``;
@@ -2625,8 +2637,10 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   // Retain the first seed only for first-time room construction, never as live HP authority.
   result.population.initialSheets=result.sheets;
   result.population.initialEquipmentProperties=properties || 'None';
+  result.population.equipmentProperties=properties || 'None';
   updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${properties || 'None'}`)
     .replace(/Monsters State: .*/, `Monsters State: ${result.sheets ? 'Mixed' : 'None'}`);
+  sharedState.setUpdatedGameConsole(updatedGameConsole);
   populationService.save(result.population);
   console.info('[RoomPopulation]', JSON.stringify({ geoKey, indoor, actors: Object.keys(result.population.actors).length,
     groups: result.population.groups.map(g => ({ id: g.id, members: g.members.length })) }));
@@ -3403,6 +3417,7 @@ Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
   Features: ${Array.isArray(classification?.features) && classification.features.length ? classification.features.join(", ") : "none"}.
   Available custom tile ids: ${customList.length ? customList.join(", ") : "none"}.
   Puzzle description: ${puzzleDesc || "none"}.
+  Puzzle construction ownership: ${sceneSpec?.puzzleMechanism ? 'The dedicated physical puzzle builder owns ALL dials, buttons, levers, instruction plaques and reading cabinets. Do NOT create decorative copies of these devices in props, volumes or modules. Leave a reachable workshop space with clear approaches; the builder installs recognizable, clickable voxel controls there.' : 'No dedicated physical mechanism is specified.'}.
 
   Schema for THIS room only (all coordinate/radius fields are numbers, not these field descriptions):
   ${JSON.stringify(classification?.indoor === true ? {
@@ -4168,6 +4183,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
   sceneSpec.outdoorTerrain = OutdoorTerrain.plan(sceneSpec, sceneSpec.generation.gridSize);
   prepareSceneGeography(sceneSpec, roomNameDbString);
   prepareSceneExteriors(sceneSpec, roomNameDbString, { seed: sharedState.getDungeonRunId(), enabled: process.env.HOLODEK_SCENE_EXTERIORS !== '0' });
+  sceneSpec.puzzleMechanism = JSON.parse(roomNameDbString || '{}')[geoKey]?.puzzleMechanism || null;
   LivingEnvironments.enrichSceneSpec(sceneSpec);
   prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
   prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
@@ -4191,6 +4207,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       : [];
     let customTiles = [];
     customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, Array.from(new Set([...requiredCustomTypes, ...sceneRequiredCustomTypes(sceneSpec)])));
+    customTiles = customTiles.filter(tile => !LivingEnvironments.isReservedScenery(sceneSpec.puzzleMechanism, tile));
     console.log('[Custom Tiles] Generated:', customTiles);
 
     const blueprint = await generateDungeonBlueprint(
@@ -4354,8 +4371,6 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
     logDungeonConstruction('geography', dungeon);
     console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
-    dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
-    console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
     logDungeonConstruction('architecture', dungeon);
     try {
       const cellsArray = [];
@@ -4444,6 +4459,8 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       console.error('[SceneGfx] landmark placement failed:', e);
     }
 
+    dungeon.puzzleBuildReport = LivingEnvironments.install(dungeon, sceneSpec);
+    console.info('[PuzzleConstruction]', geoKey, JSON.stringify(dungeon.puzzleBuildReport));
     logDungeonConstruction('landmarks-and-objects', dungeon);
     dungeon.sceneSpec = sceneSpec;
     dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
@@ -6162,91 +6179,37 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     let monstersStateMatch = updatedGameConsole.match(/Monsters State: ([^\n]+)/);
     let monstersState = monstersStateMatch ? monstersStateMatch[1].trim() : "None";
 
-    // Puzzle Generation Logic (unchanged prompts)
-    const shouldGeneratePuzzle = Math.random() < 1.0;
-
-    // ---- quest context (safe) ----
-    function safeString(v, fallback = "None") {
-      if (v == null) return fallback;
-      try { return (typeof v === "string") ? v : JSON.stringify(v); } catch { return fallback; }
-    }
-    function getActiveTaskStringFromState() {
-      try {
-        const tasks = sharedState.getCurrentTasks ? (sharedState.getCurrentTasks() || []) : [];
-        const idx   = sharedState.getCurrentTaskIndex ? (sharedState.getCurrentTaskIndex() || 0) : 0;
-        const task  = (idx >= 0 && idx < tasks.length) ? tasks[idx] : null;
-        return safeString(task, "None");
-      } catch { return "None"; }
-    }
-    function getQuestUpdateStringFromState() {
-      try {
-        const s = sharedState.getLastQuestUpdate ? sharedState.getLastQuestUpdate() : "";
-        return (s && String(s).trim()) ? String(s) : "None";
-      } catch { return "None"; }
-    }
-
-    const activeTaskStr = getActiveTaskStringFromState();
-    const questUpdateStr = getQuestUpdateStringFromState();
-
-    if (shouldGeneratePuzzle) {
-      console.log("Generating puzzle for the room.");
-      $.model = "gpt-4.1-mini";
-      $.temperature = 1.0;
-      $.user`This is the ${roomName}'s exits: ${roomExits}. And here are the current objects in the room: ${objectsInRoom}. And here are the current monsters in the room: ${monstersInRoom} who are ${monstersState}. Store its contents and await the next prompt.`;
-      $.user`This is the current quest: ${currentQuest} and here is the current quest's task: ${activeTaskStr} and the latest quest update: ${questUpdateStr}. Store this information and await the next prompt.`;
-      $.user`FYI: For puzzle, tie to variability seed—vary type (e.g., ${diversitySeed}). Limit to 1 para; subvert history motif. Await.`;
-
-      await $.assistant`Generate a detailed description of the room's environment and architecture for ${roomName}, weaving in elements of its ecology (e.g., flora, fauna, natural processes), economy (e.g., remnants of trade, resources, societal structures), and archaeology (e.g., ancient ruins, historical artifacts tied to the underworld's lore). Ensure this fits seamlessly with the existing room description, enhancing the narrative flow as the characters explore to advance the current quest and ultimately reclaim the Sepulchra to restore balance to the underworld. Only reference existing NPCs or monsters from the game console, describing any ongoing events, interactions (without dialogue), puzzles, riddles, or obstacles—but do not generate new characters, portable objects, or conversations. Include subtle, built-in hints about underlying events or mysteries (e.g., faint echoes suggesting forgotten rituals), but never reveal solutions. Make the description strange, unusual, and thought-provoking by drawing from surreal inspirations like infinite labyrinths or psychological distortions, varying themes to differentiate this room (e.g., if previous rooms were desolate, make this one vibrant yet corrupted). Incorporate multi-sensory details (sights, sounds, smells, textures) for immersion, and tailor the situation to the player and characters' context, such as information-gathering via clues, research through inscriptions, geographical navigation challenges, resource management dilemmas, logic puzzles, cryptographic symbols, or opportunities for exploiting/persuading existing monsters/NPCs. Output as a single, flowing paragraph with no line breaks, avoiding the word "you" and focusing on third-person narrative that advances the story's tension. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn). - Dilemma cap: 1 moral hook per puzzle (e.g., 'does truth bind or free?'—vary phrasing, no 'reclamation' echoes).`;
-      const puzzleDescriptionResponse = await $.assistant.generation({ maxTokens: 280 });
-      puzzleInRoom = puzzleDescriptionResponse.content.trim();
-      environmentDescription = puzzleInRoom;
-
-      await $.user`Suggest exhaustion limit (2-6) for ${roomName} based on description complexity, lore, and features: ${puzzleInRoom}. Respond JSON: {"exhaustionLimit": int}.`;
-      const limitResp = await $.assistant.generation({ maxTokens: 60 });
-      let limitParsed;
-      try {
-        limitParsed = JSON.parse(limitResp.content || "{}");
-      } catch (error) {
-        console.error("Failed to parse exhaustion limit JSON:", error);
-        limitParsed = {};
-      }
-      const exhaustionLimit = limitParsed.exhaustionLimit || 4;
-      currentRoomData.exhaustionLimit = exhaustionLimit;
-      currentRoomData.attemptedSearches = 0;
-      currentRoomData.trapTriggered = currentRoomData.trapTriggered ?? false;
-      roomNameDatabasePlain[coordKey] = currentRoomData;
-
-      // IMPORTANT CHANGE:
-      // Do NOT re-classify shape here.
-      // If we have description, apply colors-only from description (again) to ensure palette exists.
-      if (roomDescription) {
-        await applyPaletteFromDescriptionToRoom(roomNameDatabasePlain, coordKey, roomDescription);
-        persistRoomDb(roomNameDatabasePlain);
-      }
-
-      $.model = "gpt-4.1-mini";
-      $.temperature = 1.2;
-      await $.assistant`Generate a puzzle or non-combat challenge (e.g., riddle, mechanical obstacle, social persuasion, environmental hazard, logic dilemma, cryptographic clue, or resource management task) and its solution for the room named ${roomName}, ensuring it draws directly from the room's environment, architecture, ecology, economy, or archaeology. Make the challenge strange, unusual, and thought-provoking by incorporating surreal or lore-inspired twists (e.g., echoing the underworld's imbalance or Mortacia's fading judgment), varying types to differentiate from previous rooms in the conversation history (e.g., if past puzzles were symbol-based, opt for persuasion or multi-step exploration). Keep it challenging yet resolvable with clear, engaging logic; the resolution should be satisfying, logical, somewhat simple, and tied to player actions like using carried items, conversing or persuading existing monsters/NPCs, or speaking specific words/phrases—include subtle hints in the description but never reveal the solution outright. Infuse multi-sensory details and narrative hooks for immersion, advancing the current quest toward reclaiming the Sepulchra while building tension through potential consequences or lore revelations upon resolution. Output in a single paragraph with no line breaks, avoiding the word "you," formatted as a description integrating the challenge into the room's narrative and clear steps for resolution. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn).`;
-      const puzzleSolutionResponse = await $.assistant.generation({ maxTokens: 280 });
-      puzzleSolution = puzzleSolutionResponse.content.trim();
-
-      if (puzzleInRoom && puzzleSolution) {
-        console.log("Generated Puzzle:", puzzleInRoom);
-        console.log("Puzzle Solution:", puzzleSolution);
-        updatedGameConsole = updatedGameConsole.replace(/Puzzle in Room: .*/, `Puzzle in Room: ${puzzleInRoom}`);
-        updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, `Puzzle Solution: ${puzzleSolution}`);
-      } else {
-        console.log("Failed to generate puzzle description or solution.");
-      }
-    } else {
-      console.log("No puzzle generated for this room.");
-      updatedGameConsole = updatedGameConsole.replace(/Puzzle in Room: .*/, `Puzzle in Room: None`);
-      updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, `Puzzle Solution: None`);
-    }
+    // One validated design supplies the physical controls, description and solution.
+    const activeTasks = sharedState.getCurrentTasks?.() || [];
+    const activeTask = activeTasks[sharedState.getCurrentTaskIndex?.() || 0] || null;
+    const recentKinds = Object.values(roomNameDatabasePlain).map(r => r.puzzleMechanism?.kind).filter(Boolean).slice(-3);
+    const definition = await generatePhysicalPuzzleDesign($, {
+      roomName, description: roomDescription, quest: currentQuest, task: activeTask,
+      seed: `${sharedState.getDungeonRunId()}:${coordKey}:${diversitySeed}`, recentKinds
+    });
+    const puzzleText = LivingEnvironments.prose(definition);
+    puzzleInRoom = puzzleText.description;
+    puzzleSolution = puzzleText.solution;
+    environmentDescription = puzzleInRoom;
+    currentRoomData.puzzleMechanism = { ...definition, state: LivingEnvironments.initialState(definition) };
+    currentRoomData.exhaustionLimit = definition.exhaustionLimit;
+    currentRoomData.attemptedSearches = 0;
+    currentRoomData.trapTriggered = currentRoomData.trapTriggered ?? false;
+    roomNameDatabasePlain[coordKey] = currentRoomData;
+    updatedGameConsole = updatedGameConsole.replace(/Puzzle in Room: .*/, () => `Puzzle in Room: ${puzzleInRoom}`);
+    updatedGameConsole = updatedGameConsole.replace(/Puzzle Solution: .*/, () => `Puzzle Solution: ${puzzleSolution}`);
+    console.info('[PuzzleDesignBound]', JSON.stringify({ roomKey: coordKey, id: definition.id, kind: definition.kind,
+      controls: definition.controls.length, descriptionAndSolutionAgree: true }));
 
     console.info('[RoomPopulation]', JSON.stringify({ phase: 'complete', geoKey: coordKey,
       generatedObjects: objects.length, hasMonsters: !!monstersInRoom && !/^(none|empty)$/i.test(monstersInRoom),
       hasPuzzle: puzzleInRoom !== 'None' && !!puzzleSolution, adjacentDirections: roomExitsArray }));
+    // Keep freshly generated sheets and modifiers together before persisting this local DB snapshot.
+    currentRoomData.monsters = { ...currentRoomData.monsters, inRoom: monstersInRoom, consoleBlock: monstersInRoom,
+      equippedProperties: updatedGameConsole.match(/^Monsters Equipped Properties:[ \t]*([^\r\n]*)/m)?.[1]?.trim() || 'None',
+      state: updatedGameConsole.match(/^Monsters State:[ \t]*([^\r\n]*)/m)?.[1]?.trim() || 'None' };
+    const seededPopulation = sharedState.getRoomPopulation?.(coordKey);
+    if (seededPopulation) currentRoomData.inhabitants = seededPopulation;
     currentRoomData.populationComplete = true;
     persistRoomDb(roomNameDatabasePlain);
     needsUpdate = true;
@@ -6536,7 +6499,7 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
 
 async function seedAndManageQuest($, updatedGameConsole, userInput) {
   const currentQuest = sharedState.getCurrentQuest();
-  if (!currentQuest) return { questJustSeeded: false, questUpdate: '', activeTask: null };
+  if (!currentQuest || /^none$/i.test(String(currentQuest).trim())) return { questJustSeeded: false, questUpdate: '', activeTask: null };
   // ---------- small utils ----------
   function parseOnlyJson(text, fallback) {
     let t = (text || "").trim();
@@ -6657,6 +6620,11 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
     ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
     : { x: 0, y: 0, z: 0 };
   const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
+  // Defer a new quest's first hook, but keep existing quest progress on return visits.
+  if (currentRoomKey === '0,0,0' && !sharedState.getQuestSeeded() &&
+      !(sharedState.getCurrentTasks() || []).length && !(sharedState.getCurrentTaskIndex() || 0)) {
+    return { questJustSeeded: false, questUpdate: '', activeTask: null };
+  }
   const bossGateReport = ensureBossGate(roomNameDatabasePlain, updatedGameConsole);
   if (bossGateReport.changed) {
     sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
@@ -6791,6 +6759,7 @@ function getMonsterHpFromDbOrConsole(monsterName, placementKey) {
     return !!ex && String(ex.status || '').toLowerCase() === 'open';
   }
   function gateWithRequirements(task, consoleText) {
+    if (typeof bindPhysicalPuzzleTask !== 'undefined') bindPhysicalPuzzleTask(task, roomNameDatabasePlain, currentRoomKey);
     return evaluateTaskRequirements(task, { roomKey: currentRoomKey, consoleText, database: roomNameDatabasePlain });
   }
   // Ensure DB.monsters has names-only inRoom and the full text in consoleBlock — with exclusion support
@@ -7240,6 +7209,9 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
 }
 
 async function generateQuest($) {
+    // The visited counter can advance while still at the entrance; location is authoritative.
+    const questRoomCoordinates = updatedGameConsole.match(/^Coordinates:[ \t]*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/m);
+    if (!questRoomCoordinates || questRoomCoordinates.slice(1).every(value => Number(value) === 0)) return;
     let needsUpdate = false;
     // Ensure updatedGameConsole is properly initialized
 // let updatedGameConsole = await getDelayedUpdatedGameConsole();
@@ -7563,25 +7535,80 @@ function dropMonsterItemsToRoom(targetMonster) {
         }
         return header + lines.join(block.includes('\r\n') ? '\r\n' : '\n');
     });
+    const coords = updatedGameConsole.match(/^Coordinates:[ \t]*X:[ \t]*(-?\d+),[ \t]*Y:[ \t]*(-?\d+),[ \t]*Z:[ \t]*(-?\d+)/m);
+    if (coords && typeof sharedState !== 'undefined' && sharedState.getRoomNameDatabase && sharedState.setRoomNameDatabase) {
+        const key = coords.slice(1).map(Number).join(',');
+        const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+        const room = db[key] || (db[key] = {});
+        room.objects = Array.isArray(room.objects) ? [...room.objects] : [];
+        for (const item of dropped.values()) {
+            const existing = room.objects.findIndex(o => String(o.name).toLowerCase() === item.name.toLowerCase());
+            const old = existing >= 0 ? room.objects[existing] : {};
+            const object = { ...old, name: item.name, type: item.type, properties: { ...old.properties,
+                attack: item.attack_modifier, damage: item.damage_modifier, ac: item.ac, magic: item.magic } };
+            if (existing >= 0) room.objects[existing] = object;
+            else room.objects.push(object);
+        }
+        sharedState.setRoomNameDatabase(JSON.stringify(db));
+    }
+    console.info?.('[MonsterLoot]', JSON.stringify({ monster: targetMonster.name, dropped: [...dropped.keys()] }));
+}
+
+async function tryPhysicalPuzzleAction(userInput) {
+    const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+    const dungeon = sharedState.getRoomDungeon(coords);
+    if (!dungeon?.physicalPuzzle || !PhysicalPuzzles.intent(userInput, dungeon.physicalPuzzle.definition)) return null;
+    const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+    const actor = roster.find(c => c.type === 'pc');
+    const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+    if (Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]) !== geoKey) return null;
+    const plan = preparePhysicalPuzzleAction({ input: userInput, dungeon, actor, consoleText: updatedGameConsole, room: db[geoKey] });
+    if (!plan) return null;
+    const definition = dungeon.physicalPuzzle.definition;
+    const fixture = dungeon.physicalPuzzle.fixtures.find(f => f.id === (plan.metadata?.controlId ||
+        PhysicalPuzzles.intent(userInput, definition)?.controlId));
+    const notice = () => ({ ...ActionFeedback.puzzle(plan, definition, fixture, actor),
+        icon: dungeon.tiles?.[dungeon.cells[fixture?.key]?.tile]?.url });
+    const result = { narrative: plan.message, physicalPuzzle: true, completed: false, updatedGameConsole,
+        adjudicationMetadata: plan.metadata ? [plan.metadata] : [] };
+    if (!plan.allowed || plan.inspect) {
+        ActionFeedback.publish(broadcast, sharedState, notice());
+        return result;
+    }
+    const consoleBefore = updatedGameConsole;
+    updatedGameConsole = processGameUpdate(plan.outcomes, updatedGameConsole);
+    result.updatedGameConsole = updatedGameConsole;
+    const next = finalizeRoomDungeon(geoKey, { ...dungeon, cells: { ...dungeon.cells, ...plan.delta.cells }, physicalPuzzle: plan.delta.physicalPuzzle }, dungeon.customTiles);
+    sharedState.setRoomDungeon(coords, next, next.customTiles);
+    broadcast({ type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp,
+        geometryStamp: next._geometryStamp, cells: plan.delta.cells, physicalPuzzle: next.physicalPuzzle });
+    const task = sharedState.getActiveTask?.() || (sharedState.getCurrentTasks?.() || [])[sharedState.getCurrentTaskIndex?.() || 0];
+    if (task) {
+        const database = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+        bindPhysicalPuzzleTask(task, database, geoKey);
+        const assessment = evaluateTaskRequirements(task, { roomKey: geoKey, consoleText: updatedGameConsole, database });
+        sharedState.setLastAdjudication?.({ taskBinding: taskBinding(task), roomKey: geoKey,
+            questAttempted: task.actionKind === 'solve_puzzle' || String(task.type).toLowerCase() === 'puzzle',
+            questSucceeded: plan.nextState.status === 'complete', prereqsMet: !assessment.hardFails.length,
+            actionKind: task.actionKind, taskType: task.type });
+    }
+    if (plan.outcomes.xp_awarded) result.narrative += ' ' + Object.entries(plan.outcomes.xp_awarded).map(([name, xp]) => `${name} gains ${xp} XP.`).join(' ');
+    result.completed = plan.nextState.status === 'complete';
+    ActionFeedback.publish(broadcast, sharedState, notice());
+    console.info('[PuzzleAction]', JSON.stringify({ geoKey, actor: actor.name, ...plan.metadata, xp: plan.outcomes.xp_awarded || {} }));
+    if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberCommit(sharedState, userInput,
+        { Action: 'PuzzleSolving', 'Selected Characters': [actor.name], metadata: [{ ...plan.metadata, actor: actor.name }], Outcomes: [{ character: actor.name, outcome: plan.message }] },
+        plan.outcomes, consoleBefore, updatedGameConsole, task, broadcast);
+    return result;
+}
+
+function physicalPuzzleResponse(result) {
+    return { content: result.narrative, updatedGameConsole: sharedState.getUpdatedGameConsole(),
+        combatCharactersString: sharedState.getCombatCharactersString(),
+        roomNameDatabaseString: sharedState.getRoomNameDatabase(), actionOnly: true, physicalPuzzle: true };
 }
 
 async function tryDungeonDoorAction(userInput) {
-    const sealCommand = String(userInput).trim().match(/^(?:touch|press|activate)\s+(ash|bone|ember)\s+seal[.!]?$/i);
-    if (sealCommand) {
-        const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
-        const dungeon = sharedState.getRoomDungeon(coords);
-        if (!dungeon?.livingEncounter) return { content: 'There is no seal encounter in this room.', actionOnly: true };
-        const pc = JSON.parse(sharedState.getCombatCharactersString() || '[]').find(c => c.type === 'pc' && c.mazeRoomKey === geoKey);
-        const result = LivingEnvironments.interact(dungeon, { fixtureId: sealCommand[1].toLowerCase(),
-            actor: pc ? { x: pc.mazeX + 0.5, y: pc.mazeY + 0.5 } : null, expectedRevision: dungeon.livingEncounter.revision });
-        if (result.ok) {
-            const next = finalizeRoomDungeon(geoKey, { ...dungeon, cells: { ...dungeon.cells, ...result.cells }, livingEncounter: result.encounter }, dungeon.customTiles);
-            sharedState.setRoomDungeon(coords, next, next.customTiles);
-            broadcast({ type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp,
-                geometryStamp: next._geometryStamp, cells: result.cells, livingEncounter: result.encounter });
-        }
-        return { content: result.message, actionOnly: true };
-    }
     if (!doorIntent(userInput)) return null;
     const coords = sharedState.getLastCoords();
     const geoKey = `${coords.x},${coords.y},${coords.z}`;
@@ -7924,6 +7951,7 @@ async function resolveCombatRound($, userInput, combatMode) {
 
             if (target.hp <= 0) {
                 alreadyKilled.add(target.name);
+                ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, combatant));
 
                 if (pc && target.name === pc.name) {
                     combatLog.push(`${target.name} is killed by ${combatant.name}.`);
@@ -8344,6 +8372,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
                 if (target.hp <= 0) {
                     alreadyKilled.add(target.name);
+                    ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, combatant));
                     currentOccupiedPositions.delete(`${target.x},${target.y}`);
                     updateCombatMap(target.name, -1, -1);
 
@@ -8794,6 +8823,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
 
                 if (target.hp <= 0) {
                     alreadyKilled.add(target.name);
+                    ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, combatant));
                     currentOccupiedPositions.delete(`${target.x},${target.y}`);
                     updateCombatMap(target.name, -1, -1);
 
@@ -9156,7 +9186,7 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
   // Room exhaustion
   let roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase() || "{}");
   let currentRoomData = roomNameDatabasePlain[coordKey] || { exhaustionLimit: 4, attemptedSearches: 0, trapTriggered: false };
-  const isExhausted = currentRoomData.attemptedSearches >= currentRoomData.exhaustionLimit;
+  const isSearchExhausted = currentRoomData.attemptedSearches >= currentRoomData.exhaustionLimit;
 
   // >>> Include ACTIVE QUEST TASK CONTEXT
   const activeTaskJson = activeTask ? JSON.stringify({
@@ -9187,6 +9217,8 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
   let action = (parseOnlyJson(intentResp.content, { action: "Search" }).action || "Search");
   if (!ACTION_ENUM.includes(action)) action = "Search"; // safe default
   console.log(`Detected action: ${action}`);
+  const isExhausted = action === 'PuzzleSolving' ? typeof PuzzleRewards !== 'undefined' &&
+    PuzzleRewards.completed(currentRoomData, PuzzleRewards.identity(updatedGameConsole)) : isSearchExhausted;
 
   // ---- Outcomes generation (unchanged logic below) ----
   const outcomes = [];
@@ -9198,6 +9230,7 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
     const charactersForPrompt = selectedCharacters.map(character => `"${character}"`).join(", ");
     if (typeof AdjudicationMetadata !== 'undefined') await $.user(AdjudicationMetadata.prompt(selectedCharacters, action, recalled?.evidence.map(row => row.id) || []));
     $.user`I am the player and ${pcs} is my PC. The detected action is "${action}". The room is ${isExhausted ? 'exhausted (no new discoveries possible from Search or PuzzleSolving)' : 'not exhausted'}. Store this information and await the next prompt.`;
+    await $.user`Search exhaustion and puzzle completion are separate. An unsolved mechanism may still be completed after the room has been searched; an already solved puzzle cannot award another reward. PuzzleSolving success means the ENTIRE current solution actually occurred, not a plan, hint or successful intermediate step. Do not narrate acquiring an item or key placed in a different quest room, and do not auto-take discoveries: item/exits/XP are committed by the existing effect pipeline.`;
 
     await $.user`The detected action is "${action}". The room is ${isExhausted ? 'exhausted (no new discoveries possible from Search or PuzzleSolving)' : 'not exhausted'}. For the following characters: ${charactersForPrompt}, generate exactly 3-6 unique and vivid outcomes for each character based on the user input "${userInput}" and the game state (objects: ${objectsInRoom.join(", ")}, puzzle: "${puzzleInRoom}", puzzle solution: "${puzzleSolution}"). Provide outcomes with dice roll ranges covering the full range 1-20 with no overlaps or gaps, in the format:
     - "Character Name":
@@ -9455,6 +9488,7 @@ Store this information in memory and await the next prompt`;
 6. exitDiscovered (True/False)
 7. puzzleRequiresExit (True/False)
 8. puzzleRequiresObject (True/False)
+Search success is not puzzle completion. For PuzzleSolving, searchSuccessful means the ENTIRE current solution was performed, not merely a clue, plan or intermediate step. Dialogue and observation cannot solve a puzzle unless the action is an actual puzzle-required utterance and classified as PuzzleSolving.
 Respond ONLY a JSON object with these exact keys.`;
 
   const intentResponse = metadataFlags ? { content: JSON.stringify(metadataFlags) } : await $.assistant.generation({ maxTokens: 120,
@@ -9603,14 +9637,28 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   }
 
   let exhausted = currentRoomData.attemptedSearches >= currentRoomData.exhaustionLimit;
+  const exhaustedBefore = exhausted;
+  const puzzleId = typeof PuzzleRewards !== 'undefined' ? PuzzleRewards.identity(updatedGameConsole) : null;
+  const puzzleAlreadySolved = typeof PuzzleRewards !== 'undefined' && PuzzleRewards.completed(currentRoomData, puzzleId);
+  if (currentRoomData.puzzleMechanism && action === 'PuzzleSolving') {
+    return { new_objects: [], object_modifiers: {}, new_exit: '', xp_awarded: {}, trap_damage: {},
+      exhausted: false, reason: 'Operate the reachable physical controls shown in the room. A description or proposed solution cannot change the mechanism.',
+      questAttempted: false, questSucceeded: false, prereqsMet };
+  }
+  const livingParty = [...parseSheets(pcDetails, 'pc'), ...parseSheets(npcsDetails, 'npc')].filter(actor => actor.hp > 0).map(actor => actor.name);
+  const contributors = [...new Set((initialOutcomes['Selected Characters'] || pcs).filter(name => livingParty.includes(name)))];
+  const puzzleSolved = !!puzzleId && contributors.length > 0 && action === 'PuzzleSolving' && searchAttempted && searchSuccessful &&
+    !currentRoomData.puzzleMechanism && !engagedInDialogue && !justLooking && (!questAttempted || !activeTask || prereqsMet);
+  const firstPuzzleCompletion = puzzleSolved && !puzzleAlreadySolved;
+  let puzzle_completed = null;
   let reason = exhausted ? "The room has been thoroughly searched; no new discoveries are made." : "";
 
   // If a puzzle-ish quest was attempted and succeeded, mark success
   let questSucceeded = false;
   if (activeTask && questAttempted && prereqsMet) {
     const kind = (activeTask.actionKind || "").toLowerCase();
-    if ((kind === "solve_puzzle" || (activeTask.type || "").toLowerCase() === "puzzle" || kind === "investigate")
-        && searchAttempted && searchSuccessful) {
+    if (((kind === "solve_puzzle" || (activeTask.type || "").toLowerCase() === "puzzle") && firstPuzzleCompletion) ||
+        (kind === "investigate" && action === 'Search' && searchAttempted && searchSuccessful && !engagedInDialogue && !justLooking)) {
       questSucceeded = true;
     }
   }
@@ -9619,11 +9667,17 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
     currentRoomData.attemptedSearches = currentRoomData.exhaustionLimit;
     exhausted = true;
     reason = "The puzzle tied to the quest was solved; the room yields no further discoveries.";
-  } else if (searchSuccessful && action === "PuzzleSolving") {
+  } else if (puzzleSolved) {
     currentRoomData.attemptedSearches = currentRoomData.exhaustionLimit;
     exhausted = true;
     reason = "The room’s puzzle was solved; it is now exhausted.";
   }
+  if (action === 'PuzzleSolving' && puzzleAlreadySolved) {
+    exhausted = true;
+    reason = 'This puzzle has already been solved; its completion reward cannot be earned again.';
+  }
+  console.info('[PuzzleResolution]', JSON.stringify({ roomKey: coordKey, action, puzzlePresent: !!puzzleId,
+    solved: puzzleSolved, firstCompletion: firstPuzzleCompletion, alreadySolved: puzzleAlreadySolved, contributors }));
 
   // ---------- explicit discoveries override ----------
   if (objectDiscovered || exitDiscovered) {
@@ -9663,8 +9717,10 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   // Force traps to 100% ONLY when the player is actually attempting search/puzzle and that attempt did NOT succeed.
   const forceTrap = isSearchOrPuzzleContext && searchAttempted && !searchSuccessful;
 
-  let objectToBeDiscovered = !exhausted && (objectDiscovered || (searchSuccessful && Math.random() < 0.4));
-  let exitToBeDiscovered   = !exhausted && (exitDiscovered   || (searchSuccessful && Math.random() < 0.2));
+  let objectToBeDiscovered = (!exhaustedBefore && !puzzleAlreadySolved && (objectDiscovered || (action !== 'PuzzleSolving' && searchSuccessful && Math.random() < 0.4))) ||
+    (firstPuzzleCompletion && puzzleRequiresObject);
+  let exitToBeDiscovered   = (!exhaustedBefore && !puzzleAlreadySolved && (exitDiscovered || (action !== 'PuzzleSolving' && searchSuccessful && Math.random() < 0.2))) ||
+    (firstPuzzleCompletion && puzzleRequiresExit);
   const trapsPresent       = !exhausted && !currentRoomData.trapTriggered && forceTrap;
 
   console.log("Discovery Checks:", {
@@ -9674,7 +9730,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   });
 
   // ---------- XP for discoveries ----------
-  if ((objectToBeDiscovered || exitToBeDiscovered) && !exhausted) {
+  if (objectToBeDiscovered || exitToBeDiscovered) {
     const xpEligibleCharacters = [...pcs, ...npcs];
     await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, assign XP for discovering new objects or exits in the room. Award up to 500 XP to each character who contributed to the discovery, based on the initial outcomes: ${serializedInitialOutcomes}. Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
     const xpResponse = await $.assistant.generation({ maxTokens: 60 });
@@ -9799,13 +9855,18 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
     }
   }
 
-  // ---------- additional XP if not exhausted ----------
-  if (!exhausted) {
-    const xpEligibleCharacters = [...pcs, ...npcs];
-    await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, decide which characters deserve XP based on their actions in the initial outcomes, excluding discovery-based XP already awarded, and assign up to 500 XP to each deserving character for non-discovery actions. Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
-    const xpResponse = await $.assistant.generation({ maxTokens: 60 });
+  // ---------- first-completion puzzle XP survives exhaustion ----------
+  if (!exhausted || firstPuzzleCompletion) {
+    const xpEligibleCharacters = firstPuzzleCompletion ? contributors : [...pcs, ...npcs];
+    await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, decide which characters deserve XP based on their actions in the initial outcomes, excluding discovery-based XP already awarded, and assign up to 500 XP to each deserving character for non-discovery actions. ${firstPuzzleCompletion ? 'This is a verified FIRST puzzle completion: award positive puzzle-solving XP to these living contributors even though the room is now exhausted.' : ''} Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
+    const xpResponse = await $.assistant.generation({ maxTokens: Math.min(500, 60 + xpEligibleCharacters.length * 24) });
     let additionalXp = {};
     try { additionalXp = JSON.parse((xpResponse.content || "{}").trim()); } catch {}
+    if (firstPuzzleCompletion) {
+      additionalXp = PuzzleRewards.awards(additionalXp, contributors);
+      // Completion and its reward are recorded together only by the state commit.
+      puzzle_completed = { id: puzzleId, contributors };
+    }
     for (const [ch, xp] of Object.entries(additionalXp)) {
       xp_awarded[ch] = (xp_awarded[ch] || 0) + (xp || 0);
     }
@@ -9831,7 +9892,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
     reason,
     questAttempted,
     questSucceeded,
-    prereqsMet
+    prereqsMet,
+    puzzle_completed
   };
   console.log("Generated Additional Outcomes:", JSON.stringify(result, null, 2));
   return result;
@@ -10187,6 +10249,9 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
             console.log("Updating Game Console...");
             gameUpdateResult = gameUpdateResult || processGameUpdate(additionalOutcomes, updatedGameConsole);
             console.log("Updated Game Console:", gameUpdateResult);
+            if (typeof ActionFeedback !== 'undefined' && typeof broadcast === 'function') {
+                for (const notice of ActionFeedback.adjudication(initialOutcomes, additionalOutcomes)) ActionFeedback.publish(broadcast, sharedState, notice);
+            }
 
             // Step 4: Generate the narrative
             console.log("Generating Narrative...");
@@ -10685,7 +10750,8 @@ async function logThreadMessages() {
         updatedGameConsole, combatCharactersString: sharedState.getCombatCharactersString(),
         roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatRoundOnly: true };
     }
-    return run(retort(async ($) => {
+    try {
+    return await run(retort(async ($) => {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.2;
 //    await $.run($ => generateMissingRoomDetails($)); 
@@ -11129,8 +11195,11 @@ If there are monsters in the room, they may not know who Suzerain is or understa
         $.user`There are no monsters in the ${roomName}. Store this information in memory and await the next prompt.`        
     }
     if (!roomDescriptionGenerated) {
-        const doorAction = await tryDungeonDoorAction(userInput);
-        if (doorAction) return doorAction;
+        if (physicalPuzzleResult) currentSituation = physicalPuzzleResult;
+        else {
+            const doorAction = await tryDungeonDoorAction(userInput);
+            if (doorAction) return doorAction;
+        }
     }
     let combatLog = ''; // Declare combatLog with an empty string as the initial value
 
@@ -11169,7 +11238,7 @@ let monstersAttack = '';
 
 let formattedCurrentSituation = ''; // Declare it at a higher scope
    
-if (!roomDescriptionGenerated && !enteringRoom && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
+if (!physicalPuzzleResult && !roomDescriptionGenerated && !enteringRoom && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
     
     const outcomes = await $.run($ => adjudicateAction($, updatedGameConsole));    
    // await adjudicateActionWithCodeInterpreter(userInput, updatedGameConsole);
@@ -11192,7 +11261,7 @@ if (!roomDescriptionGenerated && !enteringRoom && !(userInput.toLowerCase().incl
     };
     } else if (!roomDescriptionGenerated && !enteringRoom && !(userInput.toLowerCase().includes("attack") && attackDecision !== "Attack" && monstersInRoom && monstersInRoom.toLowerCase() !== 'none')) {
   // NEW: ask the LLM whether to run dice adjudication
-  const { runSimulation } = await shouldRunAdjudication($, userInput, updatedGameConsole);
+  const { runSimulation } = physicalPuzzleResult ? { runSimulation: false } : await shouldRunAdjudication($, userInput, updatedGameConsole);
 
   if (runSimulation) {
     currentSituation = await adjudicateActionWithSimulation($, userInput, updatedGameConsole);
@@ -11282,6 +11351,7 @@ const monstersState2 = monstersStateMatch2 ? monstersStateMatch2[1].trim() : '';
   $.model = "gpt-4.1-mini";
   //$.temperature = 1.0;
   const diversitySeed = ['vitality_contrast', 'auditory_twist', 'dialogue_inversion'][Math.floor(Math.random() * 3)];
+  await $.user(LivingEnvironments.HINT_POLICY);
   $.user`FYI: Variability seed for this turn—infuse subtle contrast: ${diversitySeed}. Await next.`;
 
   // --- Feed FYI state every turn ---
@@ -11482,7 +11552,7 @@ const currentCoordinates = coordsMatch
   : { x: 0, y: 0, z: 0 };
 // Replace the existing isNewRoom logic (~line 1200)
 const prevCoords = sharedState.getLastCoords ? sharedState.getLastCoords() : { x: 0, y: 0, z: 0 };
-const isNewRoom = userInput.toLowerCase().match(/^(n|s|e|w|ne|nw|se|sw|up|down|u|d)/) ||
+const isNewRoom = CommandIntent.travelDirection(userInput) !== null ||
                   (currentCoordinates.x !== prevCoords.x ||
                    currentCoordinates.y !== prevCoords.y ||
                    currentCoordinates.z !== prevCoords.z);
@@ -11649,6 +11719,7 @@ try {
   sceneSpec.outdoorTerrain = OutdoorTerrain.plan(sceneSpec, sceneSpec.generation.gridSize);
   prepareSceneGeography(sceneSpec, roomNameDatabaseString);
   prepareSceneExteriors(sceneSpec, roomNameDatabaseString, { seed: sharedState.getDungeonRunId(), enabled: process.env.HOLODEK_SCENE_EXTERIORS !== '0' });
+  sceneSpec.puzzleMechanism = JSON.parse(roomNameDatabaseString || '{}')[geoKey]?.puzzleMechanism || null;
   LivingEnvironments.enrichSceneSpec(sceneSpec);
   prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
   prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
@@ -11673,6 +11744,7 @@ try {
         : [];
       let customTiles = [];
       customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, Array.from(new Set([...requiredCustomTypes, ...sceneRequiredCustomTypes(sceneSpec)])));
+      customTiles = customTiles.filter(tile => !LivingEnvironments.isReservedScenery(sceneSpec.puzzleMechanism, tile));
       console.log('[Custom Tiles] Generated:', customTiles);
       const blueprint = await generateDungeonBlueprint(
         $,
@@ -11836,8 +11908,6 @@ try {
   applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
   logDungeonConstruction('geography', dungeon);
   console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
-  dungeon.livingEnvironmentReport = LivingEnvironments.install(dungeon, sceneSpec);
-  console.info('[LivingEnvironment]', geoKey, JSON.stringify(dungeon.livingEnvironmentReport));
   logDungeonConstruction('architecture', dungeon);
   // 🔴 STEP 4 — insert doors between floors
   for (let y = 1; y < dungeon.layout.height - 1; y++) {
@@ -11898,6 +11968,8 @@ try {
   } catch (e) {
     console.error('[SceneGfx] landmark placement failed:', e);
   }
+  dungeon.puzzleBuildReport = LivingEnvironments.install(dungeon, sceneSpec);
+  console.info('[PuzzleConstruction]', geoKey, JSON.stringify(dungeon.puzzleBuildReport));
   logDungeonConstruction('landmarks-and-objects', dungeon);
   // UPDATED: Pass customTiles to sharedState
   dungeon.sceneSpec = sceneSpec;
@@ -11933,15 +12005,22 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   (a.type==='npc'||population?.actors?.[a.name]?.status==='present')).map(a=>a.name);
 {
   $.model = 'gpt-4.1-mini';
+  if (physicalPuzzleResult?.completed) await $.user`VERIFIED PHYSICAL PUZZLE COMPLETION: ${physicalPuzzleResult.narrative} Code has already opened the cabinet, recorded the solve and awarded any XP. Describe this committed result and let nearby companions react or congratulate the player. You are narrating, not adjudicating: do not decide whether it was solved, grant another reward, move any controls, invent loot or unlock any other exits. Full details belong in this Game Log response.`;
   if (initialArrival) await $.user`INITIAL GAME ARRIVAL: Complete the TURN 0 party-awakening or solo premise already supplied in this conversation. This is the full opening scene, not a routine room greeting. Keep each character's existing identity, personality and history; non-divine newcomers do not yet know the other souls or understand their circumstances. Mortacia is the exception to awakening and retains her established premise. Describe the player's arrival without choosing actions or speaking for the PC. Leave the player free to decide what happens next. Keep the current quest, boss, inventory, stats and exits unchanged.`;
   else if (enteringRoom) await $.user`ROOM ENTRY NARRATION: Finish the full Retort entry scene using the room, puzzle, current quest, task-seeding instructions and history already supplied. Carry through the established quest hook and let nearby companions react to the place and its implications. This is not a two-greeting cache update. Do not duplicate the static room description or puzzle that the game already displays. Do not invent quest completion, rewards, equipment, exits, a replacement boss, or dialogue from distant or undiscovered inhabitants.`;
   if (entryQuestContact) await $.user`The entry quest hook has a real, visibly encountered ${entryQuestContact.state} contact within speaking distance: ${JSON.stringify(entryQuestContact)}. Introduce this character naturally and have them seed the EXISTING quest in actual labelled speech, with an invitation or useful next lead supported by the established task instructions. They are not an enemy, and their greeting is not quest completion. No other unseen group members are introduced by association. Do not invent a different quest giver or relay private facts from distant inhabitants.`;
   if (responseAudience?.directed) await $.user(DialogueAudience.prompt(responseAudience));
-  if (typeof CampaignMemory !== 'undefined') await $.user`Future cached replies must use each character's own history, voice and personally witnessed memories, not another character's secrets: ${JSON.stringify(CampaignMemory.dialogueContext(sharedState, describeCharacters(dialogueRoster, population), typeof userInput === 'string' ? userInput : ''))}. Refer to specific personal concerns or earlier exchanges when appropriate; avoid generic commentary about sands, shadows and ancient stones. An unheard current conversation cannot change a distant inhabitant's knowledge.`;
+  if (typeof CampaignMemory !== 'undefined') {
+    const cacheCharacters = describeCharacters(dialogueRoster, population).filter(actor => replyNames.includes(actor.name));
+    const cacheMemories = CampaignMemory.dialogueContext(sharedState, cacheCharacters, typeof userInput === 'string' ? userInput : '');
+    await $.user(CampaignMemory.dialoguePrompt(cacheCharacters, cacheMemories, population?.journey));
+    console.info('[DialogueGrounding]', JSON.stringify({ geoKey, mode: 'turn-cache', characters: cacheMemories.map(row => ({
+      name: row.name, partyMember: row.partyMember, heard: row.heardCurrentConversation, evidenceIds: row.memories.map(item => item.id) })) }));
+  }
   await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${Inhabitants.MONSTER_DIALOGUE_RANGE} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
   await $.user`Preserve the existing flowing narrative: prose, actions, quotation marks and paragraph breaks stay natural, not a screenplay or JSON document. Mark EVERY actual spoken passage inside its normal quotation marks with invisible backend labels: [[SPEECH:"exact nearby name"]]all words spoken in this quote[[/SPEECH]]. Use the JSON-quoted exact name from ${JSON.stringify(audibleNames)}. Label every continuation and later paragraph, even when the prose uses he, she, their voice, an epithet, or omits the name. Do not summarize, truncate, omit later sentences or repeat the speech elsewhere. Never label narration, thoughts, inscriptions, the PC's words or distant characters. At most ${initialArrival ? 6 : 4} nearby speakers; allow complete natural monologues, not a 40-word metadata excerpt. The server removes only these labels before displaying the unchanged narrative in the Game Log.
-After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh two 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;
-  const result = await $.assistant.generation({maxTokens:Math.min(4200,autoMax+replyNames.length*110)});
+After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}],"exchanges":[]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh the planned batch of 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Base the batch on this turn's actual conversation as well as the witnessed recap, without assuming these future lines were already said. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;
+  const result = await $.assistant.generation({maxTokens:Math.min(6000,autoMax+replyNames.length*160+400)});
   spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
   spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
   response = spoken.content;
@@ -11956,7 +12035,7 @@ if (population && responseAudience?.directed) {
     sum + Math.min(18000, Math.max(3500, line.trim().split(/\s+/).length * 300 + 700)), 0);
   population.dialogueFocus = { responders: responseAudience.responders, until: Date.now() + Math.min(180000, duration + 15000) };
 } else if (population) delete population.dialogueFocus;
-Inhabitants.applyReplies(population,spoken.replies,dialogueRoster);
+Inhabitants.applyReplies(population,spoken.replies,dialogueRoster,{exchanges:spoken.exchanges});
 Inhabitants.noteSpoken(population,spoken.dialogue,enteringRoom);
 
 // Include musicArrangement here
@@ -12021,7 +12100,7 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
   returnObj.roomNameDatabaseString = roomNameDatabaseString;
   returnObj.imageUrl = imageUrl;
 } else {
-  returnObj.content = narrative + "\n\n" + response;
+  returnObj.content = (physicalPuzzleResult?.narrative || narrative) + "\n\n" + response;
   returnObj.roomNameDatabaseString = roomNameDatabaseString;
 }
 
@@ -12069,9 +12148,15 @@ try {
 return returnObj;
 } catch (err) {
   console.error('Error in final Retort-JS execution or response compilation:', err);
+  if (physicalPuzzleResult?.completed) return physicalPuzzleResponse(physicalPuzzleResult);
   return { content: 'An error occurred - please try again.', updatedGameConsole: updatedGameConsole };
 }
 }));
+    } catch (error) {
+      if (!physicalPuzzleResult?.completed) throw error;
+      console.warn('[PuzzleNarration] Completion remains committed; narration unavailable:', error.message);
+      return physicalPuzzleResponse(physicalPuzzleResult);
+    }
 
           
 //    await restartGameServer2();
@@ -12371,22 +12456,30 @@ async function runNpcAutonomyTick(isCurrent = () => true) {
   if (!context.length) return { dialogue: [], summary: '' };
   const nearby = Inhabitants.perceive(dungeon,roster,population).conversational.filter(a => Inhabitants.hasEncountered(a, population)).map(a=>a.name);
   const recollections = DialogueMemory.memoryContext(sharedState,[...nearby,...context.map(a=>a.name)],population,2400);
+  const personalMemories = typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState, context,
+    `${live.currentConversation || ''} ${sharedState.getCurrentQuest() || ''}`) : [];
+  const journey = typeof JourneyMemory !== 'undefined' ? JourneyMemory.progressSynopsis(sharedState) : population.journey;
   let parsed;
   try {
     parsed = await run(retort(agent=>generateCharacterDialogue(agent,{characters:context,recollections,
-      personalMemories: typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState, context,
-        `${live.currentConversation || ''} ${sharedState.getCurrentQuest() || ''}`) : [],
+      personalMemories,
       roomDescription:consoleAtStart.match(/^Room Description:\s*(.*)$/m)?.[1],quest:sharedState.getCurrentQuest(),
+      journey,
       conversation:live.currentConversation})));
   } catch (error) { console.warn('[RoomAutonomy]', error.message); return { dialogue: [], summary: '' }; }
   const current = sharedState.getLastCoords();
   if (!isCurrent() || sharedState.getGamePaused() || sharedState.getDungeonRunId() !== runId || `${current.x},${current.y},${current.z}` !== geoKey ||
       sharedState.getUpdatedGameConsole() !== consoleAtStart || (population.lastDialogueRefreshAt || 0)!==refreshAtStart) return { dialogue: [], summary: '' };
   const currentRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
-  const count = Inhabitants.applyReplies(population,parsed.replies,currentRoster);
+  const count = Inhabitants.applyReplies(population,parsed.replies,currentRoster,{exchanges:parsed.exchanges});
   if (!count) return {dialogue:[],summary:''};
   populationService.save(population);
-  console.info('[DialogueRefresh]',JSON.stringify({geoKey,runId,characters:count,mode:'five-minute-cache'}));
+  console.info('[DialogueGrounding]',JSON.stringify({geoKey,mode:'five-minute-cache',journey:!!journey,
+    characters:personalMemories.map(row=>({name:row.name,partyMember:row.partyMember,heard:row.heardCurrentConversation,
+      evidenceIds:row.memories.map(item=>item.id)}))}));
+  console.info('[DialogueRefresh]',JSON.stringify({geoKey,runId,characters:count,mode:'five-minute-cache',
+    queuedLines:Object.values({...population.actors,...population.companions}).reduce((sum,actor)=>sum+(actor.dialogue?.length || 0),0),
+    exchanges:population.dialogueQueue?.length || 0}));
   return {dialogue:[],summary:'',population,refreshed:true,ts:Date.now()};
 }
 

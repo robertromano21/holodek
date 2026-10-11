@@ -26,7 +26,8 @@ const monsterSectionStart = game.indexOf('Monsters in Room:', monsterRenderStart
 const monsterSection = game.slice(monsterSectionStart, game.indexOf('Puzzle: ${puzzle.inRoom}', monsterSectionStart));
 const consoleStateRefresh = game.slice(game.indexOf('window.refreshDungeonConsoleStates ='), game.indexOf('window.onDungeonPause ='));
 const recentHistoryFunctions = game.slice(game.indexOf('function getRecentPromptsAndResponsesForConversation('), game.indexOf('var previousResponse ='));
-const scripts = ['renderSceneItems', 'sceneObjectSync', 'partyRoster', 'dungeonCartography', 'landmarkCatalog', 'areaTitleUi', 'compassUi', 'explorationMapUi', 'inventoryUi', 'itemInteractionUi', 'mapShortcutUi', 'gameMenuUi', 'characterProfiles', 'dialogueAudience', 'dungeonInhabitants', 'campaignMemory', 'campaignMemoryUi', 'dialogueHistory', 'dungeonLifeUi', 'outdoorDiscovery'];
+const travelDetection = game.slice(game.indexOf('async function chatbotprocessinput(')).match(/^\s*let validDirection = ([^;]+);/m)[1];
+const scripts = ['physicalPuzzles', 'commandIntent', 'worldInteractionUi', 'renderSceneItems', 'sceneObjectSync', 'partyRoster', 'dungeonCartography', 'landmarkCatalog', 'areaTitleUi', 'compassUi', 'explorationMapUi', 'inventoryUi', 'itemInteractionUi', 'mapShortcutUi', 'gameMenuUi', 'characterProfiles', 'dialogueAudience', 'dungeonInhabitants', 'campaignMemory', 'campaignMemoryUi', 'dialogueHistory', 'dungeonLifeUi', 'actionNoticeUi', 'commandGate', 'outdoorDiscovery'];
 const page = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
 ${scripts.map(name => `<script src="/assets/${name}.js"></script>`).join('')}
 </head><body>${menu}<button id="play-music-btn" style="display:none">Play Music</button>
@@ -66,6 +67,7 @@ ${dungeonCacheFunctions}
 ${dialogueLogHook}
 ${consoleStateRefresh}
 const commands = [], contentDiv = document.getElementById('phaser-container');
+const detectTravel = new Function('userInput','window',${JSON.stringify('return ' + travelDetection)});
 const renderMonsterSection = new Function('monsters', 'monstersState', 'escapedText', ${JSON.stringify(monsterRendering + '\nreturn `' + monsterSection + '`;')});
 function sheet(character) { return [character.Name, 'Female', 'Human', 'Adventurer', 'Level: 1', 'AC: 10', 'XP: 0',
   'HP: ' + character.HP, 'MaxHP: ' + character.MaxHP, 'Equipped: ' + Object.entries(character.Equipped).map(([slot, item]) => slot + ': ' + (item?.name || 'None')).join(', '),
@@ -87,9 +89,19 @@ function refreshFixture() {
 ${equipmentFunctions}
 async function chatbotprocessinput() {
   const input = document.getElementById('chatuserinput').value; commands.push(input);
+  if (window.currentDungeon?.physicalPuzzle && PhysicalPuzzles.intent(input,window.currentDungeon.physicalPuzzle.definition) && detectTravel(input,window))
+    throw Error('A puzzle control command was routed to travel.');
   if (input.startsWith('unequip ')) { const parts = input.slice(8).split(' from '); unequipItem(parts[0], parts[1] || null); }
   else if (input.startsWith('equip ')) { const parts = input.slice(6).split(' to '); equipItem(parts[0], parts[1] || null); }
   else if (input === 'take silver dagger') { roomItems = []; inventory.push(stock[5].name); inventoryProperties.push(JSON.stringify(stock[5])); }
+  else if (window.currentDungeon?.physicalPuzzle) {
+    const d = window.currentDungeon, e = d.physicalPuzzle, action = PhysicalPuzzles.intent(input, e.definition);
+    if (action && !action.inspect) {
+      const state = PhysicalPuzzles.step(e.definition, e.state, action.controlId, action.value);
+      const delta = PhysicalPuzzles.applyVisualState(d, state); Object.assign(d.cells, delta.cells); d.physicalPuzzle = delta.physicalPuzzle;
+    }
+    document.getElementById('chatuserinput').value = '';
+  }
   await Promise.resolve(); refreshFixture();
 }
 function bindOriginalActions() { const npcs = npcText; ${actionHandlers} }
@@ -286,6 +298,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     const speech = document.getElementById('dungeon-dialogue').getBoundingClientRect();
     const inputBounds = document.getElementById('chatuserinput').getBoundingClientRect();
     checks.dialogueAboveInput = speech.bottom < inputBounds.top && speech.left >= 0 && speech.right <= innerWidth;
+    const subtitleClose = document.getElementById('dungeon-dialogue-close'), subtitleCloseBounds = subtitleClose.getBoundingClientRect();
+    checks.subtitleCloseHasAccessibleLabel = subtitleClose.getAttribute('aria-label') === 'Dismiss subtitle';
+    checks.subtitleCloseIsClickable = getComputedStyle(subtitleClose).pointerEvents === 'auto' &&
+      document.elementFromPoint(subtitleCloseBounds.left + subtitleCloseBounds.width / 2, subtitleCloseBounds.top + subtitleCloseBounds.height / 2) === subtitleClose;
+    const dismissCommands = commands.length; let dismissBubbles = 0;
+    const trackDismiss = () => dismissBubbles++; document.addEventListener('click', trackDismiss);
+    subtitleClose.click(); document.removeEventListener('click', trackDismiss);
+    checks.subtitleXHidesImmediately = document.getElementById('dungeon-dialogue').hidden;
+    checks.subtitleXDoesNotClickThrough = dismissBubbles === 0 && commands.length === dismissCommands;
+    GameCommandGate.transportStarted('/processInput7');
+    DungeonLife.receiveDialogue({ geoKey: d.geoKey, runId: 'ui-probe', dialogue: [{ speaker: 'Zarthul', line: 'Stay ready while the room settles.' }] });
+    subtitleClose.click(); checks.subtitleXWorksDuringLoading = document.getElementById('dungeon-dialogue').hidden && GameCommandGate.busy();
+    GameCommandGate.transportFinished('/processInput7', { completedStartResult: {} });
     document.getElementById('chatuserinput').focus();
     document.getElementById('chatuserinput').dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -339,6 +364,15 @@ window.addEventListener('DOMContentLoaded', async () => {
         subtitleClock += 20000; DungeonLife.tick();
       }
       checks.fullSpeechReachesFinalCard = DungeonLife.subtitleDiagnostics().filter(row => row.stage === 'displayed').map(row => row.line).join(' ') === fullSpeech;
+      DungeonLife.reset();
+      DungeonLife.receiveTurnDialogue('Zarthul says, "' + fullSpeech + '"', { consoleText: turnText, geoKey: d.geoKey, runId: 'ui-probe' });
+      checks.subtitleXPreservesUnreadSpeech = true;
+      for (const text of speechCards) {
+        checks.subtitleXPreservesUnreadSpeech &&= document.getElementById('dungeon-dialogue-words').textContent === text;
+        subtitleClose.click(); checks.subtitleXPreservesUnreadSpeech &&= document.getElementById('dungeon-dialogue').hidden;
+        DungeonLife.tick();
+      }
+      checks.subtitleXPreservesUnreadSpeech &&= DungeonLife.subtitleDiagnostics().filter(row => row.stage === 'displayed').map(row => row.line).join(' ') === fullSpeech;
       DungeonLife.reset();
       const nativePlain = 'A familiar voice breaks the silence.\n\n"' + fullSpeech + '"\n\nThe lantern gutters.';
       const nativeResult = DungeonInhabitants.extractDialogue(nativePlain.replace(fullSpeech,
@@ -445,14 +479,23 @@ window.addEventListener('DOMContentLoaded', async () => {
     GameMenuUi.onDungeonReady(d);
     const ids = ['phaser-popup', 'combat-popup', 'game-log-popup'];
     checks.autoOpened = ids.every(id => document.getElementById(id).style.display === 'block');
+    const hudScale=parseFloat(getComputedStyle(document.body).zoom);
+    checks.defaultHudMatchesPrevious75PercentZoom=Math.abs(hudScale-1.75*.75)<.0001;
+    const consoleBounds=document.getElementById('phaser-popup').getBoundingClientRect();
+    checks.defaultConsoleIs25PercentSmaller=Math.abs(consoleBounds.width-200*1.75*.75)<1;
+    checks.consolePanelsFitAtNormalBrowserZoom=ids.every(id=>{
+      const r=document.getElementById(id).getBoundingClientRect();
+      return r.left>=0 && r.top>=0 && r.right<=innerWidth && r.bottom<=innerHeight;
+    });
     const c = document.getElementById('dungeon-compass').getBoundingClientRect(), command = document.getElementById('chatbotcontainer').getBoundingClientRect();
     checks.compassOutsideInput = c.right < command.left || c.bottom < command.top;
     checks.exitPins = document.querySelectorAll('.compass-exit-pin').length === 2;
     checks.distance = document.querySelector('.compass-exit-readout').textContent.includes('13 tiles');
     const log = document.getElementById('game-log-popup').getBoundingClientRect();
-    checks.logBottomRight = Math.abs(innerWidth - log.right - 8.75) < 2 && Math.abs(innerHeight - log.bottom - 8.75) < 2;
+    checks.logBottomRight = Math.abs(innerWidth - log.right - 5*hudScale) < 2 && Math.abs(innerHeight - log.bottom - 5*hudScale) < 2;
+    checks.consoleAndLogDoNotOverlap=consoleBounds.bottom<log.top;
     const combat = document.getElementById('combat-popup').getBoundingClientRect();
-    checks.combatTopLeft = Math.abs(combat.left - 8.75) < 2 && Math.abs(combat.top - 73.5) < 2;
+    checks.combatTopLeft = Math.abs(combat.left - 5*hudScale) < 2 && Math.abs(combat.top - 42*hudScale) < 2;
     checks.menuInitiallyHidden = document.getElementById('game-menu').hidden;
     document.getElementById('game-menu-toggle').click();
     checks.menuOpened = !document.getElementById('game-menu').hidden;
@@ -466,7 +509,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     const mapPanel = document.getElementById('exploration-map-popup');
     checks.mapFullyVisible = mapPanel.scrollHeight <= mapPanel.clientHeight + 1;
     if (innerWidth >= 1000) {
-      const consoleBounds = document.getElementById('phaser-popup').getBoundingClientRect();
       checks.mapBetweenSidePanels = map.left > combat.right && map.right < consoleBounds.left;
     }
     const pixel = document.getElementById('exploration-map-canvas').getContext('2d').getImageData(320, 320, 1, 1).data;
@@ -601,6 +643,178 @@ window.addEventListener('DOMContentLoaded', async () => {
     checks.takeRemovesOnlyItem = commands.at(-1) === 'take silver dagger' && inventory.includes('silver dagger') && pickupDungeon.sceneObjects.length === 0 &&
       JSON.stringify(pickupDungeon.cells) === cellsBefore && pickupDungeon._geometryStamp === 'fixture';
     await new Promise(resolve => setTimeout(resolve, 20));
+    checkpoint('physical-world-interactions');
+    InventoryUi.toggle(false);
+    const pd = { ...d, tiles: {}, cells: JSON.parse(JSON.stringify(d.cells)), sceneObjects: [], sceneLandmarks: [] };
+    const design = PhysicalPuzzles.compile({ kind:'alignment',title:'Probe instrument',context:'A survey instrument stands here.',lore:'An old route is recorded.',
+      controls:[{id:'west',label:'West dial',mark:'Crown',options:['Sun','Moon','Wave'],initial:0,goal:1},
+        {id:'east',label:'East dial',mark:'Eye',options:['Sun','Moon','Wave'],initial:0,goal:2}] });
+    PhysicalPuzzles.install(pd,{puzzleMechanism:design}); window.currentDungeon = pd;
+    const pf = pd.physicalPuzzle.fixtures[0], xy = pf.key.split(',').map(Number);
+    const eye = {x:xy[0]+1.5,y:xy[1]+.5}, camera={...eye,eyeZ:.65,dirX:-1,dirY:0,planeScale:Math.tan(Math.PI/6),verticalScale:1.3,viewShift:0};
+    const view = document.createElement('canvas'); view.width=240;view.height=180;
+    view.style.cssText='position:fixed;left:80px;top:100px;width:240px;height:180px;z-index:12000'; document.body.appendChild(view);
+    const rect=view.getBoundingClientRect(), at={clientX:rect.left+rect.width/2,clientY:rect.top+rect.height/2,bubbles:true};
+    document.getElementById('chatuserinput').value='';
+    WorldInteractionUi.updateFrame(pd,camera,view,eye); view.dispatchEvent(new PointerEvent('pointermove',at));
+    checks.reachableControlShowsHandAndName=view.style.cursor==='pointer' && document.getElementById('world-interaction-caption').textContent.includes('West dial | Crown: Sun');
+    const popupCount=document.querySelectorAll('.popup-container').length;
+    view.dispatchEvent(new MouseEvent('click',at)); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.puzzleClickUsesOriginalText=commands.at(-1)==='turn West dial' && pd.physicalPuzzle.state.values[0]===1;
+    checks.puzzleClickCreatesNoMenu=document.querySelectorAll('.popup-container').length===popupCount;
+    document.getElementById('chatuserinput').value='turn West dial'; await chatbotprocessinput();
+    checks.textPuzzleCommandDoesNotTravel=commands.at(-1)==='turn West dial' && pd.physicalPuzzle.state.values[0]===2;
+    document.getElementById('chatuserinput').value='my unfinished command';
+    const commandCount=commands.length; view.dispatchEvent(new MouseEvent('click',at)); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.worldClickPreservesTypedDraft=commands.length===commandCount && document.getElementById('chatuserinput').value==='my unfinished command';
+    document.getElementById('chatuserinput').value=''; window.gamePaused=true;
+    view.dispatchEvent(new PointerEvent('pointermove',at)); view.dispatchEvent(new MouseEvent('click',at));
+    checks.pausedWorldDoesNotInteract=commands.length===commandCount && view.style.cursor==='default'; window.gamePaused=false;
+    const loadingCount = commands.length;
+    GameCommandGate.transportStarted('/processInput7');
+    checks.loadingDisablesCommandButton = document.querySelector('#chatbotcontainer button').disabled;
+    view.dispatchEvent(new PointerEvent('pointermove',at)); view.dispatchEvent(new MouseEvent('click',at));
+    document.getElementById('chatuserinput').value='turn West dial'; await chatbotprocessinput();
+    checks.loadingBlocksDirectAndPropCommands = commands.length===loadingCount && view.style.cursor==='default';
+    contentDiv.querySelector('.clickable-object')?.click();
+    checks.loadingBlocksConsoleLinks = !document.getElementById('take-button');
+    checks.loadingDoesNotPauseWorld = !window.gamePaused && !window._combatCommandPending;
+    GameCommandGate.transportFinished('/poll-task2/probe',{status:'processing'});
+    checks.processingKeepsCommandLocked = document.querySelector('#chatbotcontainer button').disabled;
+    GameCommandGate.transportFinished('/poll-task2/probe',{status:'complete'});
+    checks.completedCommandUnlocksUi = !document.querySelector('#chatbotcontainer button').disabled;
+    document.getElementById('chatuserinput').value='';
+    DungeonActionNotices.reset();
+    const notice = {id:'probe-solve',runId:'ui-probe',geoKey:'0,0,0',kind:'puzzle-complete',title:'Survey Archive',
+      message:'The reading cabinet opens. 250 XP awarded. Check the Game Log for the full details.'};
+    checks.puzzleCompletionNoticeAccepted = DungeonActionNotices.receive(notice);
+    const noticePanel=document.getElementById('dungeon-action-notice'), noticeRect=noticePanel.getBoundingClientRect();
+    checks.completionNoticeHasLogCue = noticePanel.textContent.includes('Puzzle Solved') && noticePanel.textContent.includes('250 XP') && noticePanel.textContent.includes('Game Log');
+    checks.actionNoticeStaysAbovePrompt = noticeRect.bottom <= document.getElementById('chatuserinput').getBoundingClientRect().top;
+    checks.actionNoticeFitsViewport = noticeRect.left>=0 && noticeRect.top>=0 && noticeRect.right<=innerWidth && noticeRect.bottom<=innerHeight;
+    checks.actionNoticesRejectDuplicates = !DungeonActionNotices.receive(notice);
+    const noticeClose=document.getElementById('dungeon-action-notice-close'), noticeCloseBounds=noticeClose.getBoundingClientRect();
+    checks.actionNoticeCloseIsClickable = noticeClose.getAttribute('aria-label')==='Dismiss action notice' && getComputedStyle(noticeClose).pointerEvents==='auto' &&
+      document.elementFromPoint(noticeCloseBounds.left+noticeCloseBounds.width/2,noticeCloseBounds.top+noticeCloseBounds.height/2)===noticeClose;
+    GameCommandGate.transportStarted('/processInput7');
+    const noticeCommands=commands.length;
+    noticeClose.click();
+    checks.actionNoticeXWorksDuringLoading = noticePanel.hidden && GameCommandGate.busy() && commands.length===noticeCommands;
+    GameCommandGate.transportFinished('/processInput7',{completedStartResult:{}});
+    DungeonActionNotices.reset();
+    actors.push({name:'Defeated probe guard',type:'monster',hp:0,state:'Dead',sprite:{dataUrl:'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="gold" d="M4 2h16v20H4z"/></svg>')}});
+    DungeonActionNotices.receive({...notice,id:'probe-kill',kind:'defeat',title:'Defeated probe guard',subject:'Defeated probe guard',actor:'Mortacia',result:'defeated',message:'Killed by Mortacia.'});
+    checks.defeatedActorNoticeKeepsPortrait = !noticePanel.hidden && noticePanel.textContent.includes('Killed by Mortacia') && noticePanel.querySelector('img').src.startsWith('data:image/svg+xml,');
+    DungeonActionNotices.reset(); actors.pop();
+    pd.cells[pf.key].tile='custom_probe_prop'; delete pd.cells[pf.key].puzzleFixture; delete pd.physicalPuzzle;
+    pd.tiles.custom_probe_prop={landmark:{label:'Weathered survey pedestal'},spriteSpec:{baseWidth:.7,heightRatio:.4}}; pd._geometryStamp='new-prop';
+    WorldInteractionUi.updateFrame(pd,camera,view,eye); view.dispatchEvent(new PointerEvent('pointermove',at));
+    checks.decorativePropShowsNameWithoutHand=view.style.cursor==='default' && document.getElementById('world-interaction-caption').textContent.includes('Weathered survey pedestal');
+    const caption=document.getElementById('world-interaction-caption'), labelRect=caption.getBoundingClientRect();
+    checks.worldLabelStaysOnScreenAtPageZoom=!caption.hidden && labelRect.left>=0 && labelRect.top>=0 && labelRect.right<=innerWidth && labelRect.bottom<=innerHeight;
+    checks.worldLabelFollowsPointerAtPageZoom=Math.abs(labelRect.top-(at.clientY+18))<3;
+    for (const cell of Object.values(pd.cells)) if (cell.puzzleFixture) { cell.tile='floor'; delete cell.puzzleFixture; }
+    pd.cells[pf.key].tile='floor'; pd._geometryStamp='item-probe'; roomItems=['silver dagger']; refreshFixture(); bindOriginalActions();
+    window.getVisibleSceneObjects=()=>[{name:'silver dagger',x:xy[0],y:xy[1]}];
+    const itemAt={...at,clientY:rect.top+rect.height*.65};
+    WorldInteractionUi.updateFrame(pd,camera,view,eye); view.dispatchEvent(new PointerEvent('pointermove',itemAt));
+    checks.reachableItemShowsHand=view.style.cursor==='pointer';
+    view.dispatchEvent(new PointerEvent('pointerdown',{...itemAt,bubbles:true,cancelable:true,pointerId:70,isPrimary:true,button:0,buttons:1}));
+    view.dispatchEvent(new PointerEvent('pointerup',{...itemAt,bubbles:true,cancelable:true,pointerId:70,isPrimary:true,button:0,buttons:0}));
+    view.dispatchEvent(new MouseEvent('click',itemAt)); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.worldItemClickUsesExistingTakeConfirmation=!!document.getElementById('take-button');
+    document.getElementById('take-button')?.click(); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.worldPickupUsesOriginalTakeCommand=commands.at(-1)==='take silver dagger' && roomItems.length===0;
+    roomItems=['silver dagger']; refreshFixture(); bindOriginalActions();
+    view.dispatchEvent(new PointerEvent('pointermove',itemAt));
+    checks.worldCanvasCannotDragScreen = !view.draggable && !view.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:new DataTransfer()}));
+    function dragItemToPack(canvas, start, id) {
+      const pack = document.getElementById('dungeon-inventory-shortcut'), bounds=pack.getBoundingClientRect();
+      const dropAt = {clientX:bounds.left+bounds.width/2,clientY:bounds.top+bounds.height/2,bubbles:true,cancelable:true,pointerId:id,isPrimary:true,button:0,buttons:1};
+      canvas.dispatchEvent(new PointerEvent('pointerdown',{...start,bubbles:true,cancelable:true,pointerId:id,isPrimary:true,button:0,buttons:1}));
+      canvas.dispatchEvent(new PointerEvent('pointermove',dropAt));
+      checks.itemOnlyDragPreview = (checks.itemOnlyDragPreview ?? true) && !!document.getElementById('world-item-drag-preview')?.querySelector('img') &&
+        document.getElementById('world-item-drag-preview').textContent.includes('silver dagger');
+      checks.backpackHighlightsForWorldDrop = (checks.backpackHighlightsForWorldDrop ?? true) && pack.classList.contains('world-item-drop-hover');
+      const previewBounds=document.getElementById('world-item-drag-preview').getBoundingClientRect();
+      checks.itemDragPreviewFitsViewport = (checks.itemDragPreviewFitsViewport ?? true) && previewBounds.left>=0 && previewBounds.top>=0 &&
+        previewBounds.right<=innerWidth && previewBounds.bottom<=innerHeight;
+      pack.querySelector('img').dispatchEvent(new PointerEvent('pointerup',{...dropAt,buttons:0}));
+      canvas.dispatchEvent(new MouseEvent('click',start));
+      checks.worldDragPreviewClearedOnDrop = !document.getElementById('world-item-drag-preview') && !pack.classList.contains('world-item-drop-hover');
+    }
+    dragItemToPack(view,itemAt,71);
+    await new Promise(resolve=>setTimeout(resolve,5));
+    checks.dragWorldItemToBackpackAsksBeforeTaking=!!document.getElementById('take-button');
+    document.getElementById('cancel-button')?.click();
+    checks.cancelWorldDragKeepsItem=roomItems.includes('silver dagger');
+    const packBounds=document.getElementById('dungeon-inventory-shortcut').getBoundingClientRect();
+    const packPoint={clientX:packBounds.left+packBounds.width/2,clientY:packBounds.top+packBounds.height/2,bubbles:true,cancelable:true,isPrimary:true,button:0,buttons:1};
+    function startItemDrag(id) {
+      view.dispatchEvent(new PointerEvent('pointerdown',{...itemAt,bubbles:true,cancelable:true,pointerId:id,isPrimary:true,button:0,buttons:1}));
+      view.dispatchEvent(new PointerEvent('pointermove',{...packPoint,pointerId:id}));
+    }
+    startItemDrag(74); document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
+    view.dispatchEvent(new PointerEvent('pointerup',{...itemAt,pointerId:74,isPrimary:true,bubbles:true,button:0,buttons:0}));
+    view.dispatchEvent(new MouseEvent('click',itemAt));
+    checks.escapeCancelsWorldDrag = !document.getElementById('world-item-drag-preview') && !document.getElementById('take-button') && roomItems.includes('silver dagger');
+    startItemDrag(75); GameCommandGate.transportStarted('/processInput7');
+    document.getElementById('dungeon-inventory-shortcut').dispatchEvent(new PointerEvent('pointerup',{...packPoint,pointerId:75,buttons:0}));
+    view.dispatchEvent(new MouseEvent('click',itemAt));
+    checks.loadingCancelsWorldDrop = !document.getElementById('take-button') && !document.getElementById('world-item-drag-preview');
+    GameCommandGate.transportFinished('/processInput7',{completedStartResult:{}});
+    startItemDrag(76);
+    WorldInteractionUi.updateFrame(pd,{...camera,x:xy[0]+4.5},view,{...eye,x:xy[0]+4.5});
+    document.getElementById('dungeon-inventory-shortcut').dispatchEvent(new PointerEvent('pointerup',{...packPoint,pointerId:76,buttons:0}));
+    view.dispatchEvent(new MouseEvent('click',itemAt));
+    checks.worldDropRechecksPickupReach = !document.getElementById('take-button') && !document.getElementById('world-item-drag-preview') && roomItems.includes('silver dagger');
+    WorldInteractionUi.updateFrame(pd,camera,view,eye);
+    const furtherEye={...eye,x:xy[0]+2.75}, furtherCamera={...camera,...furtherEye};
+    WorldInteractionUi.updateFrame(pd,furtherCamera,view,furtherEye); view.dispatchEvent(new PointerEvent('pointermove',itemAt));
+    checks.longerPickupReachShowsHand = view.style.cursor==='pointer' && !caption.textContent.includes('Walk closer');
+    view.dispatchEvent(new MouseEvent('click',itemAt)); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.longerPickupReachUsesTakeConfirmation = !!document.getElementById('take-button'); document.getElementById('cancel-button')?.click();
+    dragItemToPack(view,itemAt,72); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.longerPickupReachAllowsBackpackDrag = !!document.getElementById('take-button'); document.getElementById('cancel-button')?.click();
+    WorldInteractionUi.updateFrame(pd,camera,view,eye);
+    checkpoint('webgpu-world-interactions');
+    const viewport=document.createElement('div'); viewport.id='dungeon-container';
+    viewport.style.cssText='position:fixed;left:80px;top:100px;width:240px;height:180px;z-index:12000';
+    document.body.appendChild(viewport); view.style.cssText=''; viewport.appendChild(view);
+    window.webglDungeonRenderer={canvas:view,init(){},renderScene(){WorldInteractionUi.updateFrame(pd,camera,view,eye);}};
+    await new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='/assets/rendererWebGPU.js';script.onload=resolve;script.onerror=reject;document.head.appendChild(script);});
+    const gpu=window.webgpuDungeonRenderer; gpu._container=viewport; gpu.mode='webgpu'; gpu._presentedAtLeastOnce=true;
+    const presented=gpu._createPresentationCanvas(); gpu._attachWebGPUViewport();
+    const gpuRect=presented.getBoundingClientRect(), gpuAt={...at,clientX:gpuRect.left+gpuRect.width/2,clientY:gpuRect.top+gpuRect.height*.65};
+    gpu.renderScene(); presented.dispatchEvent(new PointerEvent('pointermove',gpuAt));
+    checks.webgpuItemHoverUsesPresentedCanvas=presented.style.cursor==='pointer' && !caption.hidden && caption.textContent.includes('silver dagger');
+    gpu.renderScene();
+    checks.webgpuSourceFramesKeepPresentedHover=presented.style.cursor==='pointer' && !caption.hidden && view.parentNode!==viewport;
+    presented.dispatchEvent(new MouseEvent('click',gpuAt)); await new Promise(resolve=>setTimeout(resolve,5));
+    checks.webgpuItemClickUsesExistingTakeConfirmation=!!document.getElementById('take-button');
+    document.getElementById('cancel-button')?.click();
+    view.dispatchEvent(new PointerEvent('pointermove',itemAt)); view.dispatchEvent(new MouseEvent('click',itemAt));
+    checks.hiddenWebglSourceDoesNotInteract=caption.hidden && !document.getElementById('take-button');
+    presented.dispatchEvent(new PointerEvent('pointermove',gpuAt));
+    checks.webgpuCanvasCannotDragScreen = !presented.draggable && !presented.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:new DataTransfer()}));
+    dragItemToPack(presented,gpuAt,73);
+    await new Promise(resolve=>setTimeout(resolve,5));
+    checks.webgpuDragToBackpackUsesTakeConfirmation=!!document.getElementById('take-button');
+    document.getElementById('cancel-button')?.click();
+    gpu._restoreLegacyViewport('UI probe'); gpu.renderScene();
+    const legacyRect=view.getBoundingClientRect(), legacyAt={...gpuAt,clientX:legacyRect.left+legacyRect.width/2,clientY:legacyRect.top+legacyRect.height*.65};
+    view.dispatchEvent(new PointerEvent('pointermove',legacyAt)); view.dispatchEvent(new MouseEvent('click',legacyAt));
+    await new Promise(resolve=>setTimeout(resolve,5));
+    checks.webgpuFallbackRestoresWorldPicking=view.parentNode===viewport && !!document.getElementById('take-button');
+    document.getElementById('cancel-button')?.click();
+    pd.cells[pf.key].tile='custom_probe_prop'; pd._geometryStamp='gpu-prop'; window.getVisibleSceneObjects=()=>[];
+    gpu.mode='webgpu'; gpu._presentedAtLeastOnce=true; gpu._attachWebGPUViewport(); gpu.renderScene();
+    const propAt={...gpuAt,clientY:gpuRect.top+gpuRect.height/2};
+    presented.dispatchEvent(new PointerEvent('pointermove',propAt));
+    checks.webgpuPropHoverShowsName=!caption.hidden && caption.textContent.includes('Weathered survey pedestal');
+    window.WEBGPU_NATIVE_WORLD=true; gpu.renderScene();
+    checks.nativeWebgpuKeepsWorldPicking=!caption.hidden && caption.textContent.includes('Weathered survey pedestal');
+    viewport.remove(); gpu._hiddenHost?.remove(); window.currentDungeon=undefined;
   } catch (error) { errors.push(error.stack); }
   const report = { pass: Object.values(checks).every(Boolean) && !errors.length, checks, errors };
   document.getElementById('results').textContent = JSON.stringify(report);
@@ -626,13 +840,14 @@ for (const [, script] of page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) 
     if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(page); return; }
     if (['/assets/adventurers-map.svg', '/assets/adventurers-pack.svg'].includes(request.url)) { response.setHeader('Content-Type', 'image/svg+xml'); response.end(fs.readFileSync(path.join(root, request.url.slice(1)))); return; }
     const name = /^\/assets\/(\w+)\.js$/.exec(request.url)?.[1];
-    if (!scripts.includes(name) && name !== 'partyRecovery') { response.writeHead(404); response.end(); return; }
+    if (!scripts.includes(name) && !['partyRecovery','rendererWebGPU'].includes(name)) { response.writeHead(404); response.end(); return; }
     response.setHeader('Content-Type', 'application/javascript'); response.end(fs.readFileSync(path.join(root, 'assets', name + '.js')));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const browser = process.env.GPU_PROBE_BROWSER || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'holodek-ui-probe-'));
-  const size = process.argv.includes('--narrow') ? '540,900' : '1680,950';
+  const customSize=process.argv.find(arg=>/^--size=\d+,\d+$/.test(arg))?.slice(7);
+  const size = customSize || (process.argv.includes('--narrow') ? '540,900' : '1680,950');
   const child = spawn(browser, ['--headless=new', '--disable-gpu', '--no-first-run', '--window-size=' + size,
     '--user-data-dir=' + profile, 'http://127.0.0.1:' + server.address().port], { windowsHide: true });
   let stderr = '', timeout;

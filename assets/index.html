@@ -13,8 +13,10 @@
  <script src="/assets/renderSceneItems.js"></script>
  <script src="/assets/sceneObjectSync.js"></script>
  <script src="/assets/dungeonEnvironment.js"></script>
+ <script src="/assets/physicalPuzzles.js"></script>
+ <script src="/assets/commandIntent.js"></script>
  <script src="/assets/livingEnvironments.js"></script>
- <script defer src="/assets/livingEnvironmentUi.js"></script>
+ <script defer src="/assets/worldInteractionUi.js"></script>
  <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js"></script>
  <script src="/assets/partyRoster.js"></script>
@@ -43,6 +45,8 @@
 <script src="/assets/campaignMemory.js"></script>
 <script src="/assets/campaignMemoryUi.js"></script>
 <script src="/assets/dungeonLifeUi.js"></script>
+<script src="/assets/actionNoticeUi.js"></script>
+<script src="/assets/commandGate.js"></script>
 <script src="/assets/outdoorDiscovery.js"></script>
 <script src="/assets/game.js"></script>
  <script src="/assets/masonryPatterns.js"></script>
@@ -839,7 +843,9 @@ function toggleCombatMode() {
     
     body {
       background-color: black !important;
-      zoom: 175%;
+      /* Match the old 175% UI viewed at 75% browser zoom. */
+      --game-ui-scale: 1.3125;
+      zoom: var(--game-ui-scale);
       overflow: hidden;
     }
     
@@ -1309,6 +1315,8 @@ function toggleCombatMode() {
     #phaser-popup,
     #game-log-popup,
     #combat-popup {
+        max-width: calc(100vw / var(--game-ui-scale) - 10px);
+        max-height: calc(50vh / var(--game-ui-scale) - 10px);
         border: 1px solid #919191;
         border-radius: 6px;
         box-shadow: 0 0 0 1px rgba(214, 214, 214, 0.12) inset, 0 2px 6px rgba(0, 0, 0, 0.42);

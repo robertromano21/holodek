@@ -34,7 +34,7 @@ function fixture(pcName, companions, turns = 0, geoKey = '0,0,0') {
   }, assistant: { generation: async options => { requests.push(options); return { content: agent.output }; } } };
   const context = { Inhabitants: I, DialogueMemory: Memory, JourneyMemory, generateCharacterDialogue, describeCharacters,
     sharedState: state, geoCoords: { x: 0, y: 0, z: 0 }, geoKey, enteringRoom: true, isFirstTurn: turns === 0,
-    userInput: '', updatedGameConsole: consoleText, roomDescription: 'The Ruined Temple threshold.', personalNarrative: '',
+    userInput: '', updatedGameConsole: consoleText, roomDescription: 'The Ruined Temple threshold.', personalNarrative: '', physicalPuzzleResult: null,
     autoMax: 850, spoken: { dialogue: [], replies: [] }, populationService: { prepare: () => population }, $: agent,
     parseNpcPartyNamesFromConsole: text => I.parseSheets(text, 'NPCs in Party').map(row => row.name),
     run: async () => { throw Error('Startup must stay in the main Retort conversation, not a separate entry-dialogue run.'); },

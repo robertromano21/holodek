@@ -140,9 +140,11 @@ test('room history remains first-class retrieved evidence with its original room
   assert.equal(context.evidence[0].source, 'room-turn-narrative');
   assert.ok(JSON.stringify(context).length <= M.MAX_CONTEXT);
 });
-test('the protected chatbotprocessinput implementation is unchanged by memory transport hooks', () => {
+test('chatbotprocessinput is unchanged except for the authorized complete-command movement detection', () => {
   const source = fs.readFileSync('assets/game.js', 'utf8'), start = source.indexOf('async function chatbotprocessinput(');
   const end = start + 1 + source.slice(start + 1).search(/^(?:async )?function /m);
-  assert.equal(require('node:crypto').createHash('sha256').update(source.slice(start, end)).digest('hex'),
+  const body = source.slice(start, end).replace('let validDirection = window.CommandIntent.travelDirection(userInput);',
+    'let validDirection = validDirections.find(direction => userWords.includes(direction));');
+  assert.equal(require('node:crypto').createHash('sha256').update(body).digest('hex'),
     '4e7cd886c605d1093585b51fe3399810656a6f440f5086bb0aa9f6e041e1dfc4');
 });

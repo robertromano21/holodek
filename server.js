@@ -6,6 +6,7 @@ const cors = require('cors');
 const { retortWithUserInput, runNpcAutonomyTick, generatePartyCharacterProfiles } = require('./retort/retortWithUserInput.js');
 const sharedState = require('./sharedState');
 const Inhabitants = require('./assets/dungeonInhabitants');
+const PhysicalPuzzles = require('./assets/physicalPuzzles');
 const CampaignMemory = require('./retort/campaignMemory');
 const DialogueTurns = require('./retort/dialogueTurns');
 const { createPopulationService } = require('./retort/roomPopulation');
@@ -17,7 +18,6 @@ const { renderArrangementToWav } = require('./retort/renderAudio');
 const characterTraits = require('./retort/characterTraitSpec');
 const { summarizeDungeon } = require('./dungeonDiagnostics');
 const { actionDice } = require('./retort/actionDice');
-const LivingEnvironments = require('./assets/livingEnvironments');
 const { finalizeRoomDungeon } = require('./retort/retortWithUserInput');
 const { buildEnvironmentLab, descriptions: environmentLabKinds } = require('./retort/environmentLab');
 const { buildInitialWorldConsole, buildInitialGameConsole } = require('./retort/initialGameState');
@@ -245,23 +245,7 @@ app.get('/environment-lab/:kind', (req, res) => {
 });
 
 app.post('/living-environment/interact', (req, res) => {
-  if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before interacting.' });
-  if (inputTaskInFlight || actionDice.active) return res.status(409).json({ error: 'Finish the current action first.' });
-  const coords = sharedState.getLastCoords();
-  if (!coords || !req.body || typeof req.body !== 'object') return res.status(400).json({ error: 'No active room or action.' });
-  const geoKey = `${coords.x},${coords.y},${coords.z}`;
-  if (req.body.geoKey !== geoKey) return res.status(409).json({ error: 'That room is no longer active.' });
-  const dungeon = sharedState.getRoomDungeon(coords);
-  if (!dungeon?.livingEncounter) return res.status(404).json({ error: 'No seal encounter in this room.' });
-  const result = LivingEnvironments.interact(dungeon, req.body);
-  if (!result.ok) return res.status(409).json({ error: result.message });
-  const next = finalizeRoomDungeon(geoKey, { ...dungeon, cells: { ...dungeon.cells, ...result.cells }, livingEncounter: result.encounter }, dungeon.customTiles);
-  sharedState.setRoomDungeon(coords, next, next.customTiles);
-  const delta = { type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp,
-    geometryStamp: next._geometryStamp, cells: result.cells, livingEncounter: result.encounter };
-  broadcast(delta);
-  console.info('[LivingEnvironmentAction]', JSON.stringify({ geoKey, fixture: req.body.fixtureId, revision: result.encounter.revision, status: result.encounter.status }));
-  res.json({ message: result.message, delta });
+  res.status(410).json({ error: 'The old seal minigame has been retired. Operate room mechanisms through the normal text-command pipeline.' });
 });
 
 app.post('/action-dice/roll', (req, res) => {
@@ -365,16 +349,22 @@ app.post('/processInput7', async (req, res) => {
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
   inputTaskInFlight = true;
+  const puzzleDefinition = sharedState.getRoomDungeon(sharedState.getLastCoords())?.physicalPuzzle?.definition;
+  const physicalPuzzleCommand = puzzleDefinition && PhysicalPuzzles.intent(req.body.userInput, puzzleDefinition);
+  let resolvePuzzleNarration;
+  const puzzleNeedsNarration = new Promise(resolve => { resolvePuzzleNarration = resolve; });
 
   // Background process
-  (async () => {
+  const task = (async () => {
     try {
       if (req.body && req.body.liveWorldState !== undefined) {
         sharedState.setLiveWorldState(req.body.liveWorldState);
       }
       const combatMode = sharedState.getCombatMode();
       console.log(`Starting retortWithUserInput for taskId ${taskId}`);
-      const result = await retortWithUserInput(req.body.userInput, broadcast, combatMode);
+      const result = await retortWithUserInput(req.body.userInput, broadcast, combatMode, physicalPuzzleCommand ? {
+        onPhysicalPuzzlePrepared: result => resolvePuzzleNarration(!result || result.completed)
+      } : {});
       console.log(`retortWithUserInput completed for taskId ${taskId}, result:`, result);
       let updatedGameConsole = sharedState.getUpdatedGameConsole();
         if (!updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/)) {
@@ -384,7 +374,7 @@ app.post('/processInput7', async (req, res) => {
         }
       const combatCharactersString = sharedState.getCombatCharactersString();
       CampaignMemory.rememberRoomHistory(sharedState, req.body.userInput, result.content, updatedGameConsole, broadcast);
-      characterTraits.ensureTraitSpecsForConsole(updatedGameConsole, broadcast); // new PCs/NPCs/monsters -> trait specs (async)
+      if (!result.actionOnly) characterTraits.ensureTraitSpecsForConsole(updatedGameConsole, broadcast); // new actors only on narrative turns
       const roomNameDatabaseString = sharedState.getRoomNameDatabase(); // Add this
       const currentQuest = sharedState.getCurrentQuest(); // New: Include current quest
       const finalResult = { 
@@ -411,9 +401,17 @@ app.post('/processInput7', async (req, res) => {
     } finally {
       actionDice.end();
       inputTaskInFlight = false;
+      resolvePuzzleNarration(false);
     }
   })();
 
+  // Reuse the client's existing inline-result handler only for recognized physical controls.
+  // Room generation and all other commands retain the long-running background/polling path.
+  if (physicalPuzzleCommand && !await puzzleNeedsNarration) {
+    await task;
+    const completed = tasks.get(taskId);
+    if (completed.status === 'complete') return res.json({ completedStartResult: completed.result });
+  }
   res.status(202).json({ taskId }); // Immediate return
 });
 

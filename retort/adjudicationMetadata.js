@@ -23,12 +23,14 @@ function select(candidates, initial, evidenceIds = []) {
     selected.push({ actor: character, activity: row.activity, target: M.clean(row.target, 120), result: row.result,
       low: range.low, high: range.high, roll, outcome: M.clean(range.outcome), questAttempted: row.questAttempted,
       puzzleSteps: row.puzzleSteps.filter(step => typeof step === 'string').slice(0, 6).map(step => M.clean(step, 140)),
-      evidenceIds: (Array.isArray(row.evidenceIds) ? row.evidenceIds : []).filter(id => allowedEvidence.has(id)).slice(0, 8) });
+      evidenceIds: (Array.isArray(row.evidenceIds) ? row.evidenceIds : []).filter(id => allowedEvidence.has(id)).slice(0, 8),
+      ...(typeof row.puzzleRequiresExit === 'boolean' ? { puzzleRequiresExit: row.puzzleRequiresExit } : {}),
+      ...(typeof row.puzzleRequiresObject === 'boolean' ? { puzzleRequiresObject: row.puzzleRequiresObject } : {}) });
   }
   return selected;
 }
 function prompt(actors, action, evidenceIds) {
-  return `After the unchanged dice-range table append invisible metadata: [[ACTION_METADATA]][{"actor":"exact acting name","low":1,"high":6,"activity":"${action}","target":"existing item, mechanism or activity","result":"failure","questAttempted":false,"puzzleSteps":[],"evidenceIds":[]}] [[/ACTION_METADATA]]. Include one record for EVERY range for ${JSON.stringify(actors)}. Results: success, partial, failure, information. Record only puzzle steps actually performed by that potential outcome, not plans or hints. Evidence IDs may only come from ${JSON.stringify(evidenceIds)}. This metadata does not complete quests, grant loot/XP, unlock doors or override requirements. The server chooses only the metadata matching the real die roll; all other alternatives are discarded.`;
+  return `After the unchanged dice-range table append invisible metadata: [[ACTION_METADATA]][{"actor":"exact acting name","low":1,"high":6,"activity":"${action}","target":"existing item, mechanism or activity","result":"failure","questAttempted":false,"puzzleSteps":[],"puzzleRequiresExit":false,"puzzleRequiresObject":false,"evidenceIds":[]}] [[/ACTION_METADATA]]. Include one record for EVERY range for ${JSON.stringify(actors)}. Results: success, partial, failure, information. For PuzzleSolving, success means the ENTIRE current Puzzle Solution was actually performed; a successful intermediate step is partial, not completion. Set puzzleRequiresExit/Object only when that fully solved puzzle explicitly promises the corresponding discovery. Record only puzzle steps actually performed by that potential outcome, not plans or hints. Evidence IDs may only come from ${JSON.stringify(evidenceIds)}. This metadata does not complete quests, grant loot/XP, unlock doors or override requirements. The server chooses only the metadata matching the real die roll; all other alternatives are discarded.`;
 }
 function flags(initial) {
   const rows = initial?.metadata;
@@ -42,8 +44,11 @@ function flags(initial) {
         !RESULTS.includes(row.result) || typeof row.questAttempted !== 'boolean' || !Array.isArray(row.puzzleSteps)) return null;
   }
   const attempt = rows.some(row => ['Search', 'PuzzleSolving'].includes(row.activity));
+  const solved = initial.Action === 'PuzzleSolving' && rows.some(row => row.result === 'success');
   return { engagedInDialogue: initial.Action === 'Dialogue', justLooking: initial.Action === 'ObjectInteraction' && rows.every(row => row.result === 'information'),
     searchAttempted: attempt, searchSuccessful: attempt && rows.some(row => row.result === 'success'),
-    objectDiscovered: false, exitDiscovered: false, puzzleRequiresExit: false, puzzleRequiresObject: false };
+    objectDiscovered: false, exitDiscovered: false,
+    puzzleRequiresExit: solved && rows.some(row => row.result === 'success' && row.puzzleRequiresExit === true),
+    puzzleRequiresObject: solved && rows.some(row => row.result === 'success' && row.puzzleRequiresObject === true) };
 }
 module.exports = { extract, select, prompt, flags };

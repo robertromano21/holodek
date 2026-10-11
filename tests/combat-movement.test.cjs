@@ -231,7 +231,8 @@ test('console monster actions retain their popup while combat-turn targeting sta
   assert.equal(submitted.actionId, 'round');
   const html = read('assets/index.html');
   assert.match(html, /id="game-menu"[\s\S]*?id="environment-lab-button" class="game-menu-button"[\s\S]*?<\/div>/);
-  assert.doesNotMatch(read('assets/livingEnvironmentUi.js'), /Environment Lab|bottom:8px/);
+  assert.doesNotMatch(read('assets/worldInteractionUi.js'), /Environment Lab|bottom:8px/);
+  assert.doesNotMatch(html, /livingEnvironmentUi\.js/);
   const game = read('assets/game.js');
   const handler = game.slice(game.indexOf('console.log(`Clicked on monster:'), game.indexOf('// ---- Exit click handler'));
   assert.match(handler, /chatInput.value = `attack \$\{monsterName\}`/);

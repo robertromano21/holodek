@@ -47,6 +47,9 @@
         <option value="warehouse">Horreum / stores</option><option value="domus">Atrium house</option>
         <option value="villa">Roman villa</option><option value="insula">Insula ground floor</option><option value="aqueduct">Aqueduct arcade</option>
         <option value="forge">Furnace court</option><option value="graves">Grave shrine</option><option value="grove">Dead grove</option>
+        <option value="puzzle_buttons">Physical puzzle / procession buttons</option>
+        <option value="puzzle_dials">Physical puzzle / survey dials</option>
+        <option value="puzzle_channels">Physical puzzle / sluice levers</option>
         <optgroup label="Seeded biome compositions">
           <option value="badlands">Badlands / mesa canyon</option>
           <option value="caldera">Volcanic caldera / rim circuit</option>
@@ -77,7 +80,8 @@
       <small>Gold: props. Red: walls. Blue floor: covered. Gray floor: sky above. In biome compositions, outdoor shading shows elevation and pale trails mark graded walking lanes.</small>
       <label>Inspect <select id="viewpoint" disabled aria-label="Inspection viewpoint"><option value="">Spawn</option></select></label>
       <small id="composition"></small>
-      <p id="description"></p><p id="clue"></p><div id="seals"></div>
+      <p id="description"></p><p id="clue"></p>
+      <textarea id="chatuserinput" hidden aria-label="Isolated exhibit command"></textarea>
       <p id="inspection"></p>
     </aside>
   </main>
@@ -86,7 +90,9 @@
   <script src="/assets/terrainCamera.js"></script>
   <script src="/assets/masonryPatterns.js"></script>
   <script src="/assets/voxelMaterials.js"></script>
+  <script src="/assets/physicalPuzzles.js"></script>
   <script src="/assets/livingEnvironments.js"></script>
+  <script defer src="/assets/worldInteractionUi.js"></script>
   <script src="/assets/characterMotion3d.js"></script>
   <script src="/assets/rendererWebGL.js"></script>
   <script src="/assets/environment-lab.js"></script>

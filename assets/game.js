@@ -624,6 +624,7 @@ window.applyLivingEnvironmentDelta = function(data) {
   Object.assign(currentDungeon.cells, data.cells);
   if (data.actionAttempts) currentDungeon.actionAttempts = data.actionAttempts;
   if (data.livingEncounter) currentDungeon.livingEncounter = data.livingEncounter;
+  if (data.physicalPuzzle) currentDungeon.physicalPuzzle = data.physicalPuzzle;
   currentDungeon._geometryStamp = data.geometryStamp;
   currentDungeon._meta = { ...currentDungeon._meta, geometryStamp: data.geometryStamp };
   delete currentDungeon._lodCache;
@@ -647,6 +648,7 @@ eventSource.onmessage = function(event) {
       window.InventoryUi?.reset();
       window.DungeonLife?.reset();
       window.ItemInteractionUi?.reset();
+      window.DungeonActionNotices?.reset();
       window.DungeonCompass?.setNavigation(null, null);
       window.questProgressText = '';
       window.lastServerGameConsole = '';
@@ -670,6 +672,10 @@ eventSource.onmessage = function(event) {
   }
   if (data.type === 'character_dialogue') {
     window.DungeonLife?.receiveDialogue(data);
+    return;
+  }
+  if (data.type === 'action_notice') {
+    window.DungeonActionNotices?.receive(data);
     return;
   }
   if (data.type === 'campaign_memory') {
@@ -2195,6 +2201,8 @@ ${adjacentRooms}
         window.refreshDungeonConsoleStates?.();
         window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs });
         const consoleCoordNumbers = String(coordinates).match(/-?\d+/g);
+        window.DungeonActionNotices?.observeItems({ geoKey: consoleCoordNumbers?.length === 3 ? consoleCoordNumbers.join(',') : null,
+          objects, objectsProperties: objectsInRoomProperties, inventory, inventoryProperties });
         window.dungeonConsoleExits = { geoKey: consoleCoordNumbers?.length === 3 ? consoleCoordNumbers.join(',') : null, exits };
         window.dungeonItemConsole = consoleCoordNumbers?.length === 3
           ? `Coordinates: X: ${consoleCoordNumbers[0]}, Y: ${consoleCoordNumbers[1]}, Z: ${consoleCoordNumbers[2]}\nObjects in Room: ${objects}\nObjects in Room Properties: ${objectsInRoomProperties}`
@@ -9178,7 +9186,7 @@ if (typeof window !== 'undefined') {
 
 window.getDungeonLifeContext = () => ({ dungeon: currentDungeon, roomName: roomNameDatabase.get(currentDungeon?.geoKey)?.name,
   actors: window.combatCharacters || [],
-  player: { x: playerPosX, y: playerPosY }, busy: isCombatRoundActive() || !!window._characterStartupPending });
+  player: { x: playerPosX, y: playerPosY }, busy: isCombatRoundActive() || !!window._characterStartupPending || !!window.GameCommandGate?.busy() });
 window.persistDungeonPopulation = population => {
   const record = roomNameDatabase.get(population.geoKey);
   if (record) record.inhabitants = population;
@@ -9864,6 +9872,8 @@ window.startReviewedGame = async function(payload) {
 };
 
 async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAttempt = false) {
+  window.GameCommandGate?.begin();
+  try {
   const wirePayload = { ...payload, ...roomDatabaseSyncClient.prepare(payload.roomNameDatabaseString) };
   if (wirePayload.roomDatabaseSync.mode === 'patch') delete wirePayload.roomNameDatabaseString;
   const response = await transport('/updateState7', {
@@ -9875,7 +9885,7 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
     const detail = await response.json().catch(() => null);
     if (!resyncAttempt && detail?.code === 'ROOM_DATABASE_SYNC_REQUIRED') {
       roomDatabaseSyncClient.reset();
-      return syncGameStateBeforeCommand(payload, transport, true);
+      return await syncGameStateBeforeCommand(payload, transport, true);
     }
     throw new Error(detail?.error || `Game state update failed (HTTP ${response.status}).`);
   }
@@ -9888,6 +9898,10 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
   console.info('[StateSyncAccepted]', { geoKey });
   roomDatabaseSyncClient.acknowledge(payload.roomNameDatabaseString, acknowledgement.roomDatabaseSyncToken);
   return acknowledgement;
+  } catch (error) {
+    window.GameCommandGate?.end();
+    throw error;
+  }
 }
 
 async function chatbotprocessinput(textin) {
@@ -10064,7 +10078,7 @@ if (exitsMatch) {
   recentExits = exitsMatch[1].split(", ");
 }
 
-  let validDirection = validDirections.find(direction => userWords.includes(direction));
+  let validDirection = window.CommandIntent.travelDirection(userInput);
   for (let i = promptAndResponses.length - 1; i >= 0; i--) {
     if (promptAndResponses[i].gameConsole) {
       gameConsoleData = promptAndResponses[i].gameConsole;
@@ -13906,6 +13920,9 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const isOutdoor = currentDungeon && currentDungeon.classification && currentDungeon.classification.indoor === false;
   const viewShift = Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
   const HORIZON = Math.floor(H * (.5 + viewShift));
+  if (!renderToOffscreen) window.WorldInteractionUi?.updateFrame(currentDungeon,
+    { x: posX, y: posY, eyeZ, dirX, dirY, planeScale, viewShift, verticalScale: 2 * focalLength / H },
+    displayCanvas, { x: playerWorldX, y: playerWorldY });
   if (currentDungeon && !Number.isFinite(currentDungeon._minFloor)) {
     let minFloor = Infinity;
     for (const cell of Object.values(currentDungeon.cells || {})) {

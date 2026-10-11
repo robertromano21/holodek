@@ -103,24 +103,27 @@
     ctx.fillStyle = '#fff6d8'; ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x, y);
     ctx.lineTo(x + Math.cos(window.playerAngle) * 10, y + Math.sin(window.playerAngle) * 10); ctx.stroke();
-    const actor = { x: window.playerPosX, y: window.playerPosY }, e = d.livingEncounter;
-    $('clue').textContent = e ? `${e.clue} (${e.progress.length}/3)` : 'No seal puzzle in this architecture exhibit.';
-    $('seals').replaceChildren();
-    for (const fixture of e?.fixtures || []) {
-      const button = document.createElement('button'); button.textContent = fixture.label;
-      button.disabled = e.status === 'complete' || !LivingEnvironments.inReach(d, actor, fixture);
-      button.onclick = () => {
-        const result = LivingEnvironments.interact(d, { fixtureId: fixture.id, actor, expectedRevision: e.revision });
-        $('status').textContent = result.message;
-        if (result.ok) { Object.assign(d.cells, result.cells); d.livingEncounter = result.encounter; d._geometryStamp += ':seal'; dirty = true; }
-      };
-      $('seals').append(button);
-    }
+    $('clue').textContent = d.physicalPuzzle ? 'Walk up to a control or instruction plaque and click it directly in the view. This exhibit never awards campaign XP.' : '';
     const cell = d.cells[`${window.playerDungeonX},${window.playerDungeonY}`];
     const surface = window.VoxelCollision.surfaceAt(d, window.playerPosX, window.playerPosY);
     $('inspection').textContent = `Tile ${window.playerDungeonX},${window.playerDungeonY}: floor ${surface.height.toFixed(2)}; ${cell?.roof ? `${cell.roof.style} roof at ${cell.roof.height.toFixed(2)}` : 'open sky'}.${cell?.complexExit ? ` ${cell.complexExit} exit marker (inspection only).` : ''}`;
     dirty = false;
   }
+  window.chatbotprocessinput = async function() {
+    const input = $('chatuserinput').value; $('chatuserinput').value = '';
+    const d = window.currentDungeon, e = d?.physicalPuzzle;
+    if (!e) return;
+    const intent = PhysicalPuzzles.intent(input, e.definition);
+    const fixture = e.fixtures.find(f => f.id === intent?.controlId);
+    if (!fixture || !PhysicalPuzzles.inReach(d, { x: window.playerPosX, y: window.playerPosY }, fixture)) return;
+    if (intent.inspect) $('status').textContent = fixture.id === 'plaque' ? PhysicalPuzzles.clue(e.definition) : e.definition.lore;
+    else if (e.state.status !== 'complete') {
+      const state = PhysicalPuzzles.step(e.definition, e.state, fixture.id, intent.value), delta = PhysicalPuzzles.applyVisualState(d, state);
+      Object.assign(d.cells, delta.cells); d.physicalPuzzle = delta.physicalPuzzle; d._geometryStamp += ':puzzle';
+      $('status').textContent = PhysicalPuzzles.feedback(e.definition, state, fixture.id);
+    }
+    dirty = true;
+  };
   function frame(now) {
     const dt = Math.min((now - previous) / 1000, 0.05); previous = now;
     if (loaded) {

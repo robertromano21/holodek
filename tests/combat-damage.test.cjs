@@ -7,6 +7,7 @@ const { EventEmitter } = require('node:events');
 const { ActionDice } = require('../retort/actionDice');
 const { createCombatSpace } = require('../retort/dungeonReach');
 const { refreshCombatQuestProgress } = require('../retort/questProgress');
+const ActionFeedback = require('../assets/actionFeedback');
 const { buildInitialWorldConsole, buildInitialGameConsole, formatStartingCharacterSheet } = require('../retort/initialGameState');
 
 const source = fs.readFileSync(path.join(__dirname, '../retort/retortWithUserInput.js'), 'utf8').replace(/\r\n/g, '\n');
@@ -52,14 +53,14 @@ for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map'
     };
     const context = {
       console: { log() {}, info() {}, warn() {}, error() {} }, updatedGameConsole: gameConsole,
-      actionDice: dice, createCombatSpace, refreshCombatQuestProgress, Inhabitants: require('../assets/dungeonInhabitants'), broadcast, characterClasses: [{ name: 'Goddess', baseHP: 11 }],
+      actionDice: dice, createCombatSpace, refreshCombatQuestProgress, ActionFeedback, Inhabitants: require('../assets/dungeonInhabitants'), broadcast, characterClasses: [{ name: 'Goddess', baseHP: 11 }],
       roll1d20: () => initiatives.shift(), ensureSelectedPCSprite() {},
       allocateXP: (player, allies, amount) => xp.push(amount), dropMonsterItemsToRoom: target => loot.push(target.name),
       getRandomInt: (min, max) => { assert.equal(min, 1000); assert.equal(max, 1500); return 1000; },
       updateCombatMap() {}, setTimeout: (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms), clearTimeout, setInterval, clearInterval,
       Math: Object.assign(Object.create(Math), { random: () => 0 }),
       getDelayedUpdatedGameConsole: async () => context.updatedGameConsole,
-      sharedState: { emitter, getLastCoords: () => ({ x: 0, y: 0, z: 0 }), getRoomDungeon: () => dungeon,
+      sharedState: { emitter, getDungeonRunId: () => 'run', getLastCoords: () => ({ x: 0, y: 0, z: 0 }), getRoomDungeon: () => dungeon,
         getCombatCharactersString: () => roster, setCombatCharactersString: value => { roster = value; },
         getUpdatedGameConsole: () => context.updatedGameConsole, getRoomNameDatabase: () => '{}',
         getCurrentTasks: () => tasks, setCurrentTasks: value => { tasks = value; },
@@ -76,6 +77,9 @@ for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map'
     assert.equal(rolls.length, 0);
     assert.deepEqual(xp, [8000]);
     assert.deepEqual(loot, ['Sylvara']);
+    const notice = events.filter(event => event.type === 'action_notice');
+    assert.equal(notice.length, 1); assert.equal(notice[0].subject, 'Sylvara');
+    assert.equal(notice[0].actor, 'Zarthul the Veiled Sentinel'); assert.equal(notice[0].geoKey, '0,0,0');
     const monsterSheet = context.updatedGameConsole.match(/Monsters in Room:([\s\S]*?)Monsters Equipped Properties:/)[1];
     assert.match(monsterSheet, /Sylvara[\s\S]*?HP:\s*-3/);
     assert.equal(require('../assets/dungeonInhabitants').parseSheets(context.updatedGameConsole).find(a => a.name === 'Sylvara').state, 'Dead');

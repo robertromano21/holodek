@@ -8,6 +8,7 @@
 <script src="../assets/masonryPatterns.js"></script>
 <script src="../assets/voxelMaterials.js"></script>
 <script src="../assets/scenePropVoxels.js"></script>
+<script src="../assets/physicalPuzzles.js"></script>
 <script src="../assets/sceneExteriorDetails.js"></script>
 <script src="../assets/renderCharacterProcedural.js"></script>
 <script src="../assets/characterMotion3d.js"></script>
@@ -286,13 +287,64 @@ try {
     glErrors: characterErrors.filter(error => error !== gl.NO_ERROR) };
   const characterMotionPass = characterMotion.idleTextures === 1 && characterMotion.idleImages === 1 &&
     characterMotion.walkFrames === 4 && characterMotion.walkImages > 4 && minimumVisible > 100 && !characterMotion.glErrors.length;
+  gl.useProgram(renderer.voxelProgram); gl.viewport(0,0,256,256); gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
+  gl.depthMask(true); gl.depthFunc(gl.LEQUAL);
+  const pu=renderer.voxelUniforms;
+  gl.uniform2f(pu.resolution,256,256); gl.uniform2f(pu.camPos,0,0); gl.uniform2f(pu.camDir,1,0); gl.uniform2f(pu.plane,0,.577);
+  gl.uniform1f(pu.focalLength,180); gl.uniform1f(pu.eyeZ,.65); gl.uniform1f(pu.unlit,1); gl.uniform1f(pu.depthBias,0);
+  gl.uniform3f(pu.modelPos,1,-.35,0); gl.uniform3f(pu.modelScale,.7,.7,.8);
+  const puzzleMeshes=[];
+  const preview = new URLSearchParams(location.search).has('puzzle-preview'), cards = [];
+  for (const shape of Object.keys(ScenePropVoxels.architecture).filter(s=>s.startsWith('puzzle_'))) {
+    const value=Number(shape.slice(-1)) || 0;
+    const worldHeight=shape.includes('dial')?1.05:shape.includes('lever')?1.15:shape.includes('button')?.95:1;
+    gl.uniform3f(pu.modelScale,.7,.7,worldHeight);
+    const d={tiles:{[shape]:{spriteSpec:{voxelShape:shape,material:'metal',baseWidth:.7,heightRatio:.4,
+      puzzleFace:{axis:'x',mark:'Crown',option:['Sun','Moon','Wave'][value]}}}},visualStyle:{palette:{}}};
+    const mesh=renderer.getVoxelMesh(shape,d); if(!mesh) throw Error('Missing puzzle mesh: '+shape);
+    gl.bindBuffer(gl.ARRAY_BUFFER,mesh.vbo);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mesh.ibo);
+    for(const [attribute,offset] of [[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]) {
+      gl.enableVertexAttribArray(attribute); gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+    }
+    gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.drawElements(gl.TRIANGLES,mesh.count,gl.UNSIGNED_SHORT,0);
+    gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
+    let pixels=0, hash=2166136261, inkPixels=0, ivoryPixels=0;
+    for(let i=0;i<characterPixels.length;i+=4) {
+      if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2]) pixels++;
+      const r=characterPixels[i],g=characterPixels[i+1],b=characterPixels[i+2];
+      if(r>5 && r<60 && g>r*1.4 && b>g*.9) inkPixels++;
+      if(r>180 && g>170 && b>130) ivoryPixels++;
+      hash=Math.imul(hash^characterPixels[i],16777619); hash=Math.imul(hash^characterPixels[i+1],16777619); hash=Math.imul(hash^characterPixels[i+2],16777619);
+    }
+    puzzleMeshes.push({shape,vertices:mesh.count,pixels,inkPixels,ivoryPixels,hash:hash>>>0,error:gl.getError()});
+    if (preview) {
+      const card=document.createElement('figure'), label=document.createElement('figcaption'), canvas=document.createElement('canvas');
+      canvas.width=canvas.height=256;
+      const ctx=canvas.getContext('2d'), data=ctx.createImageData(256,256);
+      for (let y=0;y<256;y++) data.data.set(characterPixels.subarray((255-y)*1024,(256-y)*1024),y*1024);
+      ctx.putImageData(data,0,0); label.textContent=shape.replace('puzzle_','').replace(/_/g,' ');
+      card.append(canvas,label); cards.push(card);
+    }
+  }
+  const puzzleMeshesPass=puzzleMeshes.length===10 && puzzleMeshes.every(m=>m.vertices>0&&m.pixels>100&&m.error===gl.NO_ERROR) &&
+    puzzleMeshes.filter(m=>m.shape.includes('dial')).every(m=>m.inkPixels>12 && m.ivoryPixels>12) &&
+    ['dial','button','lever','cabinet'].every(type=>{
+      const family=puzzleMeshes.filter(m=>m.shape.startsWith('puzzle_'+type+'_'));
+      return new Set(family.map(m=>m.hash)).size===family.length;
+    });
   document.getElementById('results').textContent = JSON.stringify({
     shadersCompiled: true,
     initializationMs, adapter, startupEvents: renderer.startupEvents,
     pass: results.every(result => result.gpuUploadByteMismatches === 0 && result.glError === gl.NO_ERROR) &&
-      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && gatePass && characterMotionPass,
-      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, gates, gatePass, characterMotion, characterMotionPass
+      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && gatePass && characterMotionPass && puzzleMeshesPass,
+      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass
   });
+  if (preview) {
+    for(const node of document.querySelectorAll('body > canvas, #dungeon-popup, #results')) node.style.display='none';
+    const style=document.createElement('style'); style.textContent='body{margin:0;background:#171c21;color:#efd7a3;font:16px Georgia,serif}main{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:24px}figure{margin:0;background:#0b1015;border:1px solid #5c6c74;padding:8px;text-align:center}figure canvas{width:100%;height:auto;image-rendering:pixelated}figcaption{padding:8px}';
+    document.head.appendChild(style); const gallery=document.createElement('main'); gallery.append(...cards); document.body.appendChild(gallery);
+  }
 } catch (error) {
   document.getElementById('results').textContent = JSON.stringify({ error: error.message });
 }

@@ -209,8 +209,26 @@
       }
       return limit ? result : [];
     }
+    function recent(options = {}) {
+      const owner = key(options.owner), room = roomKey(options.roomKey);
+      const rows = [...records.values()].filter(row =>
+        (!owner || row.witnesses.some(name => key(name) === owner) || key(row.speaker) === owner) &&
+        (!options.roomOnly || row.roomKey === room) && !options.excludeKinds?.includes(row.kind) &&
+        (!options.verifiedOnly || ['adjudicated', 'state'].includes(row.authority)));
+      rows.sort((a, b) => b.turn - a.turn || b.at - a.at || b.id.localeCompare(a.id));
+      const result = [], limit = Math.max(0, Math.min(12, options.limit ?? 4));
+      const budget = Math.max(0, Math.min(MAX_CONTEXT, options.maxChars ?? MAX_CONTEXT));
+      let size = 2;
+      for (const row of rows) {
+        if (result.length >= limit) break;
+        const bytes = JSON.stringify(row).length + (result.length ? 1 : 0);
+        if (size + bytes > budget) continue;
+        result.push(structuredClone(row)); size += bytes;
+      }
+      return result;
+    }
     for (const record of initial) add(record);
-    return { runId, add, search, get: id => records.has(id) ? structuredClone(records.get(id)) : null,
+    return { runId, add, search, recent, get: id => records.has(id) ? structuredClone(records.get(id)) : null,
       all: () => [...records.values()].map(record => structuredClone(record)), size: () => records.size };
   }
   return { VERSION, MAX_TEXT, MAX_RECORDS, MAX_CONTEXT, clean, roomKey, normalize, canReplace, chunks, historyRecords, createIndex, hash };

@@ -1,12 +1,13 @@
 'use strict';
 
 const { parseSheets } = require('../assets/partyRoster');
+const PhysicalPuzzles = require('../assets/physicalPuzzles');
 
 const MAX_CHECKS = 64;
 const MAX_JSON_CHARS = 16384;
 const PHASES = { hard: 'hardRequirements', action: 'actionRequirements' };
 const SUPPORTED = { hard: ['at_coords', 'inventory_contains', 'monster_hp_zero'],
-  action: ['exit_open', 'monster_hp_zero'] };
+  action: ['exit_open', 'monster_hp_zero', 'puzzle_solved'] };
 const SECTION = /^(?:PC|NPCs(?: in Party)?|Monsters in Room|Monsters Equipped Properties|Monsters State|Objects in Room(?: Properties)?|Rooms Visited|Inventory(?: Properties)?|Room Name|Room Description|Coordinates(?: of Connected Rooms)?|Exits|Adjacent Rooms|Score|Turns|Puzzle in Room|Puzzle Solution|Artifacts Found|Quests Achieved|Next Artifact|Next Boss(?: Room)?|Boss Room Coordinates|Current Quest|Party Status):/i;
 const STAT = /^(?:Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic|State):/i;
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -174,6 +175,11 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
     } else if (!SUPPORTED[phase].includes(check)) {
       diagnostic = `Unknown ${phase} requirement "${r.check}"`;
       result = { passed: null, evidence: { reason: 'unsupported_requirement' } };
+    } else if (check === 'puzzle_solved') {
+      const target = coordKey(r.value), room = roomAt(database, target), p = room?.puzzleMechanism;
+      diagnostic = `Solve the physical mechanism at ${target || 'its bound room'}`;
+      result = { passed: !!p && (!r.mechanismId || r.mechanismId === p.id) && PhysicalPuzzles.validState(p, p.state) && p.state.status === 'complete',
+        evidence: { source: 'database.puzzleMechanism', roomKey: target, mechanismId: p?.id || null, status: p?.state?.status || 'missing' } };
     } else if (check === 'at_coords') {
       const targetRoomKey = coordKey(r.value);
       diagnostic = targetRoomKey ? `Be at ${targetRoomKey}` : 'at_coords requires valid coordinates';

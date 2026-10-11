@@ -138,6 +138,15 @@
         }
       }
     }
+    if (population?.equipmentProperties !== undefined) {
+      // Proximity projections may omit modifiers, but they cannot erase a resident's actual gear.
+      const referenced = new Set(parseSheets(value).flatMap(a => Object.values(parseEquipment(a.lines[9]))).map(keyOf));
+      const properties = new Map(parseEquipmentProperties(population.equipmentProperties).map(p => [keyOf(p.name), p]));
+      for (const p of parseEquipmentProperties(value.match(/^Monsters Equipped Properties:[ \t]*([^\r\n]*)/m)?.[1])) properties.set(keyOf(p.name), p);
+      const canonical = [...properties.values()].filter(p => referenced.has(keyOf(p.name))).map(p =>
+        `{name: ${JSON.stringify(p.name)}, type: ${JSON.stringify(p.type)}, attack_modifier: ${p.attack_modifier}, damage_modifier: ${p.damage_modifier}, ac: ${p.ac}, magic: ${p.magic}}`).join(', ') || 'None';
+      value = value.replace(/^Monsters Equipped Properties:[^\r\n]*/m, () => `Monsters Equipped Properties: ${canonical}`);
+    }
     const fallback = value.match(/^Monsters State:[ \t]*(\w+)/m)?.[1] || 'Neutral';
     const records = new Map(Object.values(population?.actors || {}).map(a => [keyOf(a.name), a]));
     for (const [label, type] of [['PC', 'pc'], ['NPCs in Party', 'npc'], ['Monsters in Room', 'monster']]) {
@@ -593,7 +602,7 @@
     }));
     dialogue = dialogue.map(row => ({ ...row, ...(memories.has(row.speaker) ? { remember: memories.get(row.speaker) } : {}) }));
     return { content, dialogue,
-      replies: sanitizeReplies(parsed?.replies, names) };
+      replies: sanitizeReplies(parsed?.replies, names), exchanges: sanitizeExchanges(parsed?.exchanges, names) };
   }
   function extractSpeechSpans(prose, allowed) {
     const strip = value => value.replace(/\[\[\/?SPEECH(?:\s*:[\s\S]*?)?\]\]/gi, '');
@@ -782,12 +791,21 @@
   }
   function sanitizeReplies(rows, names) {
     const allowed = new Map(names.map(name => [keyOf(name), name])), seen = new Set();
-    return (Array.isArray(rows) ? rows : []).slice(0, 32).flatMap(row => {
+    const valid = (Array.isArray(rows) ? rows : []).slice(0, 32).flatMap(row => {
       const speaker = allowed.get(keyOf(row?.speaker));
-      const lines = (Array.isArray(row?.lines) ? row.lines : []).filter(line=>typeof line==='string').map(line => text(line, 220)).filter(Boolean).slice(0, 3);
+      const lines = [...new Set((Array.isArray(row?.lines) ? row.lines : []).filter(line=>typeof line==='string').map(line => text(line, 220)).filter(Boolean))].slice(0, 8);
       if (!speaker || !lines.length || seen.has(speaker)) return [];
       seen.add(speaker); return [{ speaker, lines }];
     });
+    if (valid.reduce((sum, row) => sum + row.lines.length, 0) <= 64) return valid;
+    const bounded = valid.map(row => ({ speaker: row.speaker, lines: row.lines.slice(0, 2) }));
+    let remaining = 64 - bounded.reduce((sum, row) => sum + row.lines.length, 0);
+    while (remaining > 0 && bounded.some((row, i) => row.lines.length < valid[i].lines.length)) {
+      for (const [i, row] of bounded.entries()) if (remaining > 0 && row.lines.length < valid[i].lines.length) {
+        row.lines.push(valid[i].lines[row.lines.length]); remaining--;
+      }
+    }
+    return bounded;
   }
   function splitSpeech(raw, maxChars = 320, maxWords = 56) {
     maxChars = Number.isInteger(maxChars) && maxChars >= 40 ? maxChars : 320;
@@ -827,11 +845,22 @@
     }
     return chunks;
   }
-  function applyReplies(population, rows, roster = []) {
+  function sanitizeExchanges(rows, names) {
+    const allowed = new Map(names.map(name => [keyOf(name), name]));
+    return (Array.isArray(rows) ? rows : []).slice(0, 2).flatMap(exchange => {
+      if (!Array.isArray(exchange?.lines) || exchange.lines.length !== 2) return [];
+      const lines = exchange.lines.flatMap(row => {
+        const speaker = allowed.get(keyOf(row?.speaker)), line = typeof row?.line === 'string' ? text(row.line, 220) : '';
+        return speaker && line ? [{ speaker, line }] : [];
+      });
+      return lines.length === 2 && lines[0].speaker !== lines[1].speaker ? [{ lines }] : [];
+    });
+  }
+  function applyReplies(population, rows, roster = [], options = {}) {
     if (!population) return 0;
     population.companions ||= {};
     let count = 0;
-    for (const {speaker, lines} of sanitizeReplies(rows, roster.filter(a => a.type !== 'pc' && (a.hp ?? 1)>0).map(a=>a.name))) {
+    for (const {speaker, lines} of sanitizeReplies(rows, roster.filter(a => a.type !== 'pc' && (a.hp ?? 1)>0 && state(a)!=='Dead').map(a=>a.name))) {
       const actor = roster.find(a=>a.name===speaker);
       if (actor.type==='npc' && !Object.hasOwn(population.companions,speaker)) {
         const source=population.actors[speaker] || actor;
@@ -843,7 +872,12 @@
       if (!record || actor.type==='monster' && record.status!=='present') continue;
       record.dialogue = lines; record.dialogueIndex = 0; count++;
     }
-    if (count) { population.lastDialogueRefreshAt = Date.now(); population.replyRevision = (population.replyRevision || 0)+1; }
+    const exchanges = sanitizeExchanges(options.exchanges, roster.filter(a => a.type === 'npc' && (a.hp ?? 1)>0 && state(a)!=='Dead').map(a=>a.name));
+    if (count || exchanges.length) {
+      population.dialogueQueue = exchanges;
+      population.lastDialogueRefreshAt = Date.now(); population.replyRevision = (population.replyRevision || 0)+1;
+    }
+    if (!count && exchanges.length) count = new Set(exchanges.flatMap(exchange => exchange.lines.map(row => row.speaker))).size;
     return count;
   }
   function noteSpoken(population, rows, entry = false) {
@@ -940,7 +974,7 @@
   const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
-    attach, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
+    attach, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DungeonInhabitants = api;
 })(typeof window === 'undefined' ? globalThis : window);

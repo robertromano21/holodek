@@ -3,6 +3,7 @@ const M = require('../assets/campaignMemory');
 const I = require('../assets/dungeonInhabitants');
 const { taskBinding } = require('./questProgress');
 const Profiles = require('../assets/characterProfiles');
+const DialogueGrounding = require('./dialogueGrounding');
 const { selectCommandedNpcs } = require('./adjudicationState');
 const slots = new WeakMap();
 const field = (text, label) => String(text || '').match(new RegExp(`^${label}:[ \\t]*([^\\r\\n]*)`, 'm'))?.[1]?.trim() || '';
@@ -151,23 +152,50 @@ function prompt(recalled) {
 }
 function dialogueContext(state, characters, query, maxChars = 6000) {
   const slot = slotFor(state);
-  if (!slot) return [];
   const audience = cast(state), rows = [], limit = Math.min(6000, Math.max(0, maxChars));
-  const targets = characters.slice(0, 32), perActor = Math.max(100, Math.floor(limit / Math.max(1, targets.length)) - 160);
-  const keywords = String(query || '').toLowerCase().match(/[a-z]{5,}/g) || [];
-  for (const actor of targets) {
-    const records = slot.index.search(query, { owner: actor.name, roomKey: audience.geo, limit: 2, maxChars: 2400,
-      excludeKinds: ['biography'], turn: Number(field(state.getUpdatedGameConsole?.(), 'Turns')) || 0 });
-    const memories = records.map(record => {
-      const excerpts = I.splitSpeech(record.text, perActor, 56);
-      return { id: record.id, roomKey: record.roomKey, kind: record.kind, authority: record.authority,
-        excerpt: excerpts.find(text => keywords.some(word => text.toLowerCase().includes(word))) || excerpts[0] };
-    });
-    const row = { name: actor.name, heardCurrentConversation: audience.audible.includes(actor.name), memories };
-    while (JSON.stringify([...rows, row]).length > limit && memories.length) memories.pop();
+  const targets = characters.slice(0, 32);
+  const partyNames = new Set(audience.sheets.filter(actor => actor.type === 'npc').map(actor => actor.name));
+  const headers = targets.map(actor => ({ name: actor.name, partyMember: actor.partyMember === true || partyNames.has(actor.name),
+    heardCurrentConversation: audience.audible.includes(actor.name), memories: [] }));
+  const weights = headers.map(row => row.partyMember ? 4 : row.heardCurrentConversation ? 3 : 1);
+  const totalWeight = weights.reduce((sum, value) => sum + value, 0) || 1;
+  const remaining = Math.max(0, limit - 2 - Math.max(0, headers.length - 1) - headers.reduce((sum, row) => sum + JSON.stringify(row).length, 0));
+  for (const [i, actor] of targets.entries()) {
+    const row = headers[i], memories = row.memories, heard = row.heardCurrentConversation;
+    const perActor = JSON.stringify(row).length + Math.floor(remaining * weights[i] / totalWeight);
+    const options = { owner: actor.name, roomKey: audience.geo,
+      maxChars: 4800, excludeKinds: ['biography', 'room-history'] };
+    const recent = slot?.index.recent({ ...options, limit: 3 }) || [];
+    const outcomes = slot?.index.recent({ ...options, verifiedOnly: true, limit: 1 }) || [];
+    // Recency supplies continuity even when the last exchange has no query keywords.
+    // An unheard global conversation must not drive a distant character's recall.
+    const topic = [heard ? String(query || '').slice(-600) : '',
+      ...recent.filter(record => record.kind === 'player-input').map(record => record.text.slice(0, 200)),
+      actor.job, actor.activity, actor.motivation].filter(Boolean).join(' ').slice(0, 1200);
+    const found = slot?.index.search(topic, { ...options, excludeKinds: ['biography'], limit: 2,
+      turn: Number(field(state.getUpdatedGameConsole?.(), 'Turns')) || 0 }) || [];
+    const candidates = [...outcomes, ...recent, ...found];
+    const ids = new Set(), texts = new Set();
+    const keywords = topic.toLowerCase().match(/[a-z]{5,}/g) || [];
+    for (const record of candidates) {
+      if (ids.has(record.id) || texts.has(record.text)) continue;
+      const excerpt = I.splitSpeech(record.text, 220, 44).find(text => keywords.some(word => text.toLowerCase().includes(word))) || record.text;
+      const compact = { id: record.id, roomKey: record.roomKey, kind: record.kind, authority: record.authority,
+        turn: record.turn, ...(record.speaker ? { speaker: record.speaker } : {}),
+        ...(recent.some(item => item.id === record.id) || outcomes.some(item => item.id === record.id) ? { recent: true } : {}),
+        excerpt: '' };
+      const available = perActor - JSON.stringify(row).length - JSON.stringify(compact).length - 1;
+      compact.excerpt = excerpt.slice(0, Math.min(220, Math.max(0, available)));
+      if (!compact.excerpt) continue;
+      memories.push(compact);
+      if (JSON.stringify(row).length > perActor) { memories.pop(); continue; }
+      ids.add(record.id); texts.add(record.text);
+    }
+    memories.sort((a, b) => a.turn - b.turn);
     if (JSON.stringify([...rows, row]).length <= limit) rows.push(row);
   }
   return rows;
 }
 function exportRecords(state) { return slotFor(state)?.index.all() || []; }
-module.exports = { add, cast, context, prompt, dialogueContext, rememberInput, rememberDialogue, rememberCommit, rememberQuest, rememberRoomHistory, rememberProfiles, restore, exportRecords };
+module.exports = { add, cast, context, prompt, dialogueContext, dialoguePrompt: DialogueGrounding.prompt,
+  rememberInput, rememberDialogue, rememberCommit, rememberQuest, rememberRoomHistory, rememberProfiles, restore, exportRecords };

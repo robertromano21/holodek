@@ -63,6 +63,21 @@ test('closed doors and walls prevent pickup through them', () => {
   assert.equal(Pickup.nearby(dungeon, [item], player), null);
 });
 
+test('click and drag pickup reach extends to 2.5 tiles without widening automatic proximity prompts', () => {
+  const dungeon = ground(), item = { name: 'bronze sword', x: 3, y: 2 }, player = { x: 1, y: 2.5 };
+  assert.equal(Pickup.TAKE_RANGE, 2.5);
+  assert.equal(Pickup.reachable(dungeon, player, item), true);
+  assert.equal(Pickup.reachable(dungeon, { x: .99, y: 2.5 }, item), false);
+  assert.equal(Pickup.nearby(dungeon, [item], player), null, 'Walking by should not open distant confirmation popups.');
+  assert.equal(Pickup.reachable(dungeon, player, { ...item, geoKey: '1,0,0' }), false);
+  dungeon.cells['2,2'].tile = 'wall';
+  assert.equal(Pickup.reachable(dungeon, player, item), false);
+  dungeon.cells['2,2'] = { tile: 'door', door: { isOpen: false } };
+  assert.equal(Pickup.reachable(dungeon, player, item), false);
+  dungeon.cells['2,2'].door.isOpen = true;
+  assert.equal(Pickup.reachable(dungeon, player, item), true);
+});
+
 test('pickup proximity reuses Take confirmation once, does not take automatically, and rearms after leaving', () => {
   const source = fs.readFileSync(require.resolve('../assets/itemInteractionUi'), 'utf8');
   let popup = null, clicks = 0;

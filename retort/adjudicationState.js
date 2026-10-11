@@ -2,6 +2,8 @@
 
 const { parseSheets } = require('../assets/partyRoster');
 const { ensureBossGate, isReservedBossKeyName, bossRoomNameForTarget } = require('./bossGate');
+const PuzzleRewards = require('./puzzleRewards');
+const PhysicalPuzzles = require('../assets/physicalPuzzles');
 const directions = {
   north: [0, 1, 0], south: [0, -1, 0], east: [1, 0, 0], west: [-1, 0, 0],
   northeast: [1, 1, 0], northwest: [-1, 1, 0], southeast: [1, -1, 0], southwest: [-1, -1, 0],
@@ -51,6 +53,24 @@ function applyAdditionalOutcomes(outcomes, consoleText, database = {}) {
   const xyz = coords.slice(1).map(Number), key = xyz.join(',');
   const current = db[key] && typeof db[key] === 'object' ? db[key] : { name: field(text, 'Room Name'), exits: {}, objects: [] };
   db[key] = current;
+  const transition = outcomes.puzzle_action;
+  if (transition) {
+    const mechanism = current.puzzleMechanism;
+    if (!mechanism || mechanism.id !== transition.mechanismId || mechanism.state.revision !== transition.expectedRevision) throw Error('Stale puzzle action.');
+    const next = PhysicalPuzzles.step(mechanism, mechanism.state, transition.controlId, transition.value);
+    if (JSON.stringify(next) !== JSON.stringify(transition.nextState)) throw Error('Puzzle transition does not match the performed action.');
+    if ((next.status === 'complete') !== !!outcomes.puzzle_completed) throw Error('Puzzle reward does not match its completion state.');
+    current.puzzleMechanism = { ...mechanism, state: next };
+  }
+  const puzzle = outcomes.puzzle_completed;
+  if (puzzle) {
+    if (current.puzzleMechanism && (!transition || current.puzzleMechanism.state.status !== 'complete')) throw Error('Physical puzzles require a verified control action, not narrative success.');
+    if (puzzle.id !== PuzzleRewards.identity(text) || !Array.isArray(puzzle.contributors) ||
+        !puzzle.contributors.length || puzzle.contributors.some(name => !validName(name))) throw Error('Invalid puzzle completion.');
+    if (PuzzleRewards.completed(current, puzzle.id)) {
+      outcomes = { ...outcomes, new_objects: [], new_exit: '', xp_awarded: {}, trap_damage: {} };
+    }
+  }
   if (outcomes.new_objects !== undefined && !Array.isArray(outcomes.new_objects)) throw Error('Discovered objects must be a list.');
   const objects = list(field(text, 'Objects in Room'));
   const properties = parseObjectProperties(field(text, 'Objects in Room Properties'));
@@ -117,6 +137,9 @@ function applyAdditionalOutcomes(outcomes, consoleText, database = {}) {
   const sheets = [...parseSheets(text.match(/PC:([\s\S]*?)(?=NPCs in Party:|$)/)?.[1], 'pc'),
     ...parseSheets(text.match(/NPCs in Party:([\s\S]*?)(?=Monsters in Room:|$)/)?.[1], 'npc')];
   const eligible = new Set(sheets.filter(s => s.hp > 0).map(s => s.name.toLowerCase()));
+  if (puzzle && (puzzle.contributors.length > 32 || puzzle.contributors.some(name => !eligible.has(name.toLowerCase())))) {
+    throw Error('Puzzle rewards require living party contributors.');
+  }
   for (const [property, stat, operation, applied] of [
     ['xp_awarded', 'XP', (a, b) => a + b, appliedXp], ['trap_damage', 'HP', (a, b) => Math.max(0, a - b), appliedDamage]
   ]) {
@@ -131,6 +154,10 @@ function applyAdditionalOutcomes(outcomes, consoleText, database = {}) {
         return prefix + operation(Number(value), amount);
       });
     }
+  }
+  if (puzzle && !PuzzleRewards.completed(current, puzzle.id)) {
+    current.puzzleCompletions ||= {};
+    current.puzzleCompletions[puzzle.id] = { completedAt: Date.now(), contributors: [...new Set(puzzle.contributors)].slice(0, 32), xp: appliedXp };
   }
   return { console: text, database: db, roomKey: key, discoveries, exit: revealedExit, xp: appliedXp, damage: appliedDamage };
 }

@@ -93,7 +93,9 @@ function createPopulationService(state) {
       const states = new Set(sheets.map(actor => Inhabitants.state(actor)));
       room.monsters = { ...room.monsters,
         inRoom: sheets.map(actor => actor.rawSheet || actor.sheet).join('\n') || 'None',
+        equippedProperties: projected.match(/^Monsters Equipped Properties:[ \t]*([^\r\n]*)/m)?.[1]?.trim() || 'None',
         state: states.size > 1 ? 'Mixed' : [...states][0] || 'None' };
+      if (population.equipmentProperties !== undefined) population.equipmentProperties = room.monsters.equippedProperties;
       room.monsters.consoleBlock = room.monsters.inRoom;
     }
     state.setRoomNameDatabase(JSON.stringify(db));
@@ -212,12 +214,22 @@ function createPopulationService(state) {
     }
     const focused = population.dialogueFocus?.until > Date.now();
     if (!dialogue.length && !focused && Date.now() - (population.lastCannedSpeechAt || 0) >= 30000) {
+      const party = roster.filter(a => a.type==='npc' && (a.hp ?? 1)>0 && Inhabitants.state(a)!=='Dead');
+      const partyNames = new Set(party.map(actor => actor.name));
+      population.dialogueQueue = Inhabitants.sanitizeExchanges(population.dialogueQueue, [...partyNames]);
+      // An exchange is atomic: don't deliver an answer if its other speaker cannot be heard.
+      const exchangeIndex = population.dialogueQueue.findIndex(exchange => exchange.lines.every(row =>
+        Inhabitants.dialogueReach(dungeon, party.find(actor => actor.name===row.speaker), player).canSpeak));
+      if (exchangeIndex >= 0) {
+        const [exchange] = population.dialogueQueue.splice(exchangeIndex, 1);
+        dialogue.push(...exchange.lines.map(row => ({ ...row, kind:'canned' })));
+      }
       const companions = roster.filter(a => a.type==='npc' && (a.hp ?? 1)>0 &&
-        population.companions?.[a.name]?.dialogueIndex < population.companions[a.name].dialogue.length &&
+        population.companions?.[a.name]?.dialogueIndex < (population.companions?.[a.name]?.dialogue?.length || 0) &&
         Inhabitants.dialogueReach(dungeon, a, player).canSpeak);
       candidates.push(...companions.map(a=>population.companions[a.name]));
       const cache=candidates.sort((a,b)=>(a.lastSpokeAt || 0)-(b.lastSpokeAt || 0) || a.name.localeCompare(b.name))[0];
-      if (cache) {
+      if (cache && !dialogue.length) {
         dialogue.push({speaker:cache.name,line:cache.dialogue[cache.dialogueIndex++],kind:'canned'});
       }
     }

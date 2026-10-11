@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const progress = require('../retort/questProgress');
 const bossGate = require('../retort/bossGate');
+const PuzzleRewards = require('../retort/puzzleRewards');
 const { parseSheets } = require('../assets/partyRoster');
 
 const filename = path.join(__dirname, '..', 'retort', 'retortWithUserInput.js');
@@ -33,6 +34,7 @@ const roomHelpers = extract('function coordinatesToString(coordinates)', '// Upd
   extract('function ensureRoom(db, key, defaults = {})', '// Read a single-line value');
 const actualRoomHelpers = compile(`${roomHelpers}\nconst helpers = { canonicalizeRoomDb, ensureRoom };`, {}, 'helpers');
 const seedSource = extract('async function seedAndManageQuest(', 'async function generateQuest(');
+const generationSource = extract('async function generateQuest(', 'function allocateXP(');
 const resolveSource = extract('async function resolveActionWithSimulation(', 'async function adjudicateActionWithPythonSimulation(');
 const additionalSource = extract('async function generateAdditionalOutcomes(', '// LLM-only gate');
 
@@ -44,7 +46,9 @@ function consoleText({ roomKey = '0,0,0', inventory = 'None', monsters = 'None',
     Inventory: inventory, 'Inventory Properties': 'None', Score: '17', Turns: '8',
     PC: `\n${sheet('Hero', 20)}`, 'NPCs in Party': `\n${sheet('Ally', 10)}`, 'Monsters in Room': `\n${monsters}`,
     'Monsters Equipped Properties': 'None', 'Monsters State': 'Neutral', 'Objects in Room': 'None',
-    'Objects in Room Properties': 'None', 'Rooms Visited': '3', ...fields }).map(([k, v]) => `${k}: ${v}`).join('\n');
+    'Objects in Room Properties': 'None', 'Rooms Visited': '3',
+    'Puzzle in Room': 'Speak the oath carved into the tablet.', 'Puzzle Solution': 'Speak the old oath.',
+    ...fields }).map(([k, v]) => `${k}: ${v}`).join('\n');
 }
 function database() {
   return { '0,0,0': { name: 'Entry', objects: [], exits: {
@@ -74,15 +78,17 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   const assistant = Object.assign(tagged, { generation: async request => {
     state.requests.push(request);
     assert.ok(queue.length, `Unexpected model call: ${state.prompts.at(-1)}`);
-    if (request.parameters.updatedStatus) assert.ok(Object.hasOwn(queue[0], 'updatedStatus'),
+    if (request.parameters?.updatedStatus) assert.ok(Object.hasOwn(queue[0], 'updatedStatus'),
       'Unexpected second task evaluation: this turn should only seed the next step');
-    return { content: JSON.stringify(queue.shift()) };
+    const response = queue.shift();
+    return { content: typeof response === 'string' ? response : JSON.stringify(response) };
   } });
   const agent = { user: tagged, assistant };
   const sharedState = {
     getCurrentQuest: () => state.quest, getCurrentTasks: () => state.tasks, getCurrentTaskIndex: () => state.index,
     getQuestSeeded: () => state.seeded, getRoomNameDatabase: () => state.database, getUpdatedGameConsole: () => state.text,
     getLastAdjudication: () => state.lastAdjudication,
+    setCurrentQuest: value => { state.quest = value; },
     setLastAdjudication: value => { state.lastAdjudication = value; },
     setCurrentTasks: value => { state.tasks = value; state.setters.push(['tasks', value.length]); },
     setCurrentTaskIndex: value => { state.index = value; state.setters.push(['index', value]); },
@@ -91,7 +97,7 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
     setLastQuestUpdate: value => { state.updates.push(value); }, appendQuestLog: value => { state.logs.push(clone(value)); }
   };
   const sync = name => async (_agent, _coords, _db, text) => { state.synchronizers.push(name); return text; };
-  const dependencies = { console: quiet, sharedState, ...progress, ...bossGate, ...actualRoomHelpers,
+  const dependencies = { console: quiet, sharedState, PuzzleRewards, ...progress, ...bossGate, ...actualRoomHelpers,
     seedBossKey: (db, gate, placement, options) => {
       state.seedAttempts.push(placement);
       return bossGate.seedBossKey(db, gate, placement, options);
@@ -108,6 +114,16 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   const seed = compile(seedSource, dependencies, 'seedAndManageQuest');
   return { state, sharedState, agent, dependencies,
     db: () => JSON.parse(state.database),
+    generate: async (responses = []) => {
+      assert.equal(queue.length, 0, 'Previous turn left unused model responses');
+      queue.push(...clone(responses));
+      const generate = compile(`let updatedGameConsole = sharedState.getUpdatedGameConsole();
+        let roomNameDatabaseString = sharedState.getRoomNameDatabase();
+        let bossRoom = '';
+        ${generationSource}`, dependencies, 'generateQuest');
+      await generate(agent);
+      assert.equal(queue.length, 0, 'Quest generation left unused model responses');
+    },
     turn: async ({ text, input = 'wait', responses = [PENDING] } = {}) => {
       assert.equal(queue.length, 0, 'Previous turn left unused model responses');
       if (text !== undefined) state.text = text;
@@ -130,6 +146,70 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
       return result;
     } };
 }
+
+test('entrance never generates a quest even when Rooms Visited has already reached two or more', async () => {
+  for (const visited of ['1', '2', '12']) {
+    const text = consoleText({ 'Room Name': 'Ruined Temple Entrance', 'Current Quest': 'None',
+      'Next Artifact': 'None', 'Rooms Visited': visited });
+    const h = harness({ text, quest: 'None', tasks: [], seeded: false });
+    const original = clone(h.state);
+    await h.generate();
+    assert.deepEqual(h.state, original);
+  }
+});
+
+test('missing coordinates cannot trigger an unbound quest from the entrance boilerplate', async () => {
+  const text = consoleText({ 'Current Quest': 'None', 'Next Artifact': 'None' }).replace(/^Coordinates:.*\n/m, '');
+  const h = harness({ text, quest: 'None', tasks: [], seeded: false });
+  const original = clone(h.state);
+  await h.generate();
+  assert.deepEqual(h.state, original);
+});
+
+test('None is not a quest and never seeds fake tasks in either the entrance or a later room', async () => {
+  for (const roomKey of ['0,0,0', '0,1,0']) {
+    for (const quest of ['None', ' none ', '', null]) {
+      const h = harness({ text: consoleText({ roomKey, 'Current Quest': quest || 'None' }), quest, tasks: [], seeded: false });
+      const original = clone(h.state);
+      const result = await h.turn({ responses: [] });
+      assert.deepEqual(result, { questJustSeeded: false, questUpdate: '', activeTask: null });
+      assert.deepEqual(h.state, original);
+    }
+  }
+});
+
+test('an unstarted real quest defers its first task at the entrance without altering saved state', async () => {
+  const h = harness({ tasks: [], seeded: false });
+  const original = clone(h.state);
+  const result = await h.turn({ responses: [] });
+  assert.deepEqual(result, { questJustSeeded: false, questUpdate: '', activeTask: null });
+  assert.deepEqual(h.state, original);
+});
+
+test('second room still generates the original artifact boss and quest once the visited gate is met', async () => {
+  const h = harness({ text: consoleText({ roomKey: '0,1,0', 'Current Quest': 'None', 'Next Artifact': 'None',
+    'Rooms Visited': '2' }), quest: 'None', tasks: [], seeded: false });
+  await h.generate(['Test Chalice', 'Test Guardian', 'Test Sanctuary', 'Retrieve the Test Chalice.']);
+  assert.equal(h.state.requests.length, 4);
+  assert.equal(h.state.quest, 'Retrieve the Test Chalice.');
+  assert.match(h.state.text, /^Coordinates: X: 0, Y: 1, Z: 0$/m);
+  assert.match(h.state.text, /^Next Artifact: Test Chalice$/m);
+  assert.match(h.state.text, /^Next Boss: Test Guardian$/m);
+  assert.match(h.state.text, /^Next Boss Room: Test Sanctuary$/m);
+  assert.match(h.state.text, /^Current Quest: Retrieve the Test Chalice\.$/m);
+  assert.deepEqual(h.state.tasks, []);
+  assert.equal(h.state.index, 0);
+  assert.equal(h.state.seeded, false);
+});
+
+test('quest generation retains its original visited and artifact guards outside the entrance', async () => {
+  for (const fields of [{ 'Next Artifact': 'None', 'Rooms Visited': '1' }, { 'Next Artifact': 'Existing Chalice', 'Rooms Visited': '2' }]) {
+    const h = harness({ text: consoleText({ roomKey: '0,1,0', ...fields }) });
+    const original = clone(h.state);
+    await h.generate();
+    assert.deepEqual(h.state, original);
+  }
+});
 
 test('real quest manager stores partial progress, blocks model completion/reward, and advances only after action completion', async () => {
   const h = harness();
@@ -571,7 +651,7 @@ test('stage 2 invalid or missing boss binding never creates a substitute actor o
 });
 
 test('stage 0 actual seeding restricts the placement enum to non-boss rooms and preserves boss actor bindings', async () => {
-  const h = harness({ tasks: [], index: 0, seeded: false });
+  const h = harness({ tasks: [], index: 0, seeded: false, text: consoleText({ roomKey: '0,1,0' }) });
   const originalBoss = clone(h.db()[BOSS_KEY].monsters);
   const result = await h.turn({ responses: [{ count: 1 }, { type: 'object' }, { placement: '0,1,0' },
     { type: 'fetch' }, { actionKind: 'other' }, { desc: 'Retrieve the sigil from Key Hall.' },
@@ -584,7 +664,7 @@ test('stage 0 actual seeding restricts the placement enum to non-boss rooms and 
   assert.equal(h.state.seeded, true);
   assert.equal(result.questJustSeeded, true);
   assert.equal(result.activeTask.progress.total, 2);
-  assert.equal(result.activeTask.progress.satisfied, 0);
+  assert.equal(result.activeTask.progress.satisfied, 1);
   assert.deepEqual(h.db()[BOSS_KEY].monsters, originalBoss);
 });
 
@@ -619,9 +699,9 @@ test('finishing a quest preserves generateQuest fresh console/boss/quest binding
   assert.equal(h.state.requests.length, 1);
 });
 
-const PLANNER_RESPONSES = [{ questAttempted: 'true' }, { engagedInDialogue: true, justLooking: false,
+const PLANNER_RESPONSES = [{ questAttempted: 'true' }, { engagedInDialogue: false, justLooking: false,
   searchAttempted: true, searchSuccessful: true, objectDiscovered: false, exitDiscovered: false,
-  puzzleRequiresObject: false, puzzleRequiresExit: false }];
+  puzzleRequiresObject: false, puzzleRequiresExit: false }, { Hero: 250 }];
 
 test('real planner, resolver and manager agree on failed hard prerequisites, including room-bound HP and unknown checks', async () => {
   for (const overrides of [{ hardRequirements: [{ check: 'inventory_contains', value: 'Iron Sigil' }] },

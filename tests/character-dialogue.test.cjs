@@ -13,7 +13,7 @@ const {createPopulationService,prepareEntryQuestContact}=require('../retort/room
 const {formatStartingCharacterSheet}=require('../retort/initialGameState');
 const zharok = require('./fixtures/zharok-dialogue.cjs');
 const source = fs.readFileSync(path.join(__dirname,'../retort/retortWithUserInput.js'),'utf8').replace(/\r\n/g,'\n');
-const entryCode = source.slice(source.indexOf('// Narration runs only after placement'),source.indexOf('// Include musicArrangement here',source.indexOf('// Narration runs only after placement')));
+const entryCode = 'const physicalPuzzleResult = null;\n' + source.slice(source.indexOf('// Narration runs only after placement'),source.indexOf('// Include musicArrangement here',source.indexOf('// Narration runs only after placement')));
 function fixture() {
   const d={geoKey:'1,0,0',classification:{indoor:true},layout:{width:64,height:64},start:{x:4,y:4},cells:{}};
   for(let y=0;y<64;y++)for(let x=0;x<64;x++)d.cells[`${x},${y}`]={tile:'floor',floorHeight:0,ceilHeight:6};

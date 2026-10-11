@@ -41,6 +41,16 @@
   });
   const biomeShapes = Object.freeze(Object.keys(biomeProps));
   const architecture = {
+    puzzle_button_0: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_button_1: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_dial_0: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_dial_1: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_dial_2: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_lever_0: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_lever_1: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_plaque: { drawer: 'tomb', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_cabinet_closed: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
+    puzzle_cabinet_open: { drawer: 'altar', material: 'metal', heightRatio: .4, baseWidth: .7 },
     boulder: { drawer: 'boulder', material: 'stone', heightRatio: 1.1, baseWidth: 1.1 },
     rock_face: { drawer: 'boulder', material: 'stone', heightRatio: 2.2, baseWidth: 1.5 },
     portcullis: { drawer: 'gate', material: 'metal', heightRatio: 1.1, baseWidth: 0.9 },
@@ -87,6 +97,29 @@
     sarcophagus: { drawer: 'sarcophagus', material: 'marble', heightRatio: 0.5, baseWidth: 0.95 }
   };
   const shapes = new Set([...treeShapes, ...Object.keys(vegetation), ...Object.keys(architecture), ...biomeShapes, 'exit_marker', 'tomb', 'furnace', 'arch', 'brazier', 'rubble', 'broken_masonry', 'fallen_arch', 'scree', 'pool', 'roots', 'altar', 'crystal', 'stump', 'stalagmite']);
+  const puzzleGlyphs = {
+    sun: '10101/01110/11111/01110/10101', moon: '00110/01100/11100/01100/00110',
+    wave: '00000/01010/10101/01010/10101', crown: '10101/10101/11111/01110/11111',
+    eye: '00000/01110/10101/01110/00000', star: '00100/10101/01110/10101/00100',
+    flame: '00100/01100/01110/11111/01110', skull: '01110/10101/11111/01110/01010',
+    leaf: '00010/00111/01110/11100/01000', mountain: '00100/01010/10101/10001/11111',
+    serpent: '01110/10000/01110/00001/11110', key: '11000/11000/00100/00110/00101'
+  };
+  const puzzleGlyphCache = new Map();
+  function puzzleGlyph(label) {
+    const name = String(label || '').trim().toLowerCase(), known = puzzleGlyphs[name];
+    if (puzzleGlyphCache.has(name)) return puzzleGlyphCache.get(name);
+    const rnd = random('puzzle-mark:' + name), glyph = Object.freeze(known ? known.split('/') :
+      Array.from({ length: 5 }, (_, y) => Array.from({ length: 5 }, (_, x) =>
+        x === 2 && y === 2 || rnd() > .52 ? '1' : '0').join('')));
+    if (puzzleGlyphCache.size >= 128) puzzleGlyphCache.delete(puzzleGlyphCache.keys().next().value);
+    puzzleGlyphCache.set(name, glyph);
+    return glyph;
+  }
+  function puzzleInk(label, u, z, bottom = .44, top = .83) {
+    const x = Math.floor((u - .3) / .4 * 5), y = Math.floor((top - z) / (top - bottom) * 5);
+    return x >= 0 && x < 5 && y >= 0 && y < 5 && puzzleGlyph(label)[y][x] === '1';
+  }
 
   function random(seed) {
     let state = 2166136261;
@@ -136,7 +169,7 @@
   }
 
   // Unit-volume shapes: the existing renderer applies world width and height once.
-  function build(shape, size = 16, seed = 0) {
+  function build(shape, size = 16, seed = 0, appearance = {}) {
     if (!shapes.has(shape)) return null;
     if (!Number.isInteger(size) || size < 8 || size > 64) throw new RangeError('Voxel size must be 8..64.');
     if (shape.startsWith('corbel_') && shape !== 'corbel_east') {
@@ -193,7 +226,61 @@
         if (x >= 0 && y >= 0 && z >= 0 && x < size && y < size && z < size) grid[x + y * size + z * size * size] = 1;
       }
     };
-    if (biomeProps[shape]) {
+    if (shape.startsWith('puzzle_')) {
+      // Upright, double-sided controls: their working faces are at eye level, not hidden on a tabletop.
+      const wheel = (radius, x0, x1, centerZ = .65) => {
+        for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) {
+          if (Math.hypot((y + .5) / size - .5, (z + .5) / size - centerZ) <= radius)
+            box(x0, y / size, z / size, x1, (y + 1) / size, (z + 1) / size);
+        }
+      };
+      box(.16, .16, 0, .84, .84, .1);
+      if (shape.startsWith('puzzle_cabinet')) {
+        box(.1, .1, .12, .9, .21, .9); box(.1, .79, .12, .9, .9, .9);
+        for (const z of [.12, .41, .87]) box(.1, .1, z, .9, .9, z + .09);
+        box(.4, .28, .52, .6, .72, .79);
+        box(.3, .3, .23, .7, .7, .34);
+        if (shape.endsWith('closed')) {
+          for (const x of [.06, .83]) {
+            box(x, .2, .21, x + .11, .47, .86); box(x, .53, .21, x + .11, .8, .86);
+            box(x - .025, .43, .49, x + .14, .57, .6);
+          }
+        } else {
+          for (const y of [.08, .81]) box(0, y, .21, 1, y + .11, .86);
+        }
+      } else if (shape === 'puzzle_plaque') {
+        box(.42, .42, .1, .58, .58, .4);
+        box(.37, .12, .35, .63, .88, .96);
+        for (const z of [.45, .6, .75, .88]) {
+          box(.3, .24, z, .37, .76, z + .035); box(.63, .24, z, .7, .76, z + .035);
+        }
+      } else {
+        box(.39, .34, .1, .61, .66, .45);
+        box(.31, .3, .14, .69, .7, .31);
+        if (shape.startsWith('puzzle_lever')) {
+          const on = shape.endsWith('_1');
+          box(.26, .33, .35, .4, .67, .54); box(.6, .33, .35, .74, .67, .54);
+          box(.22, .45, .42, .78, .55, .51);
+          branch([.5, .5, .48], [.5, on ? .22 : .78, .91], .028);
+          box(.25, on ? .16 : .72, .86, .75, on ? .28 : .84, .98);
+        } else if (shape.startsWith('puzzle_dial')) {
+          const a = Number(shape.slice(-1)) * Math.PI * 2 / 3;
+          wheel(.32, .35, .65);
+          for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) {
+            const r = Math.hypot((y + .5) / size - .5, (z + .5) / size - .65);
+            if (r > .23 && r <= .32) {
+              box(.29, y / size, z / size, .71, (y + 1) / size, (z + 1) / size);
+            }
+          }
+          const y = .5 + Math.sin(a) * .28, z = .65 + Math.cos(a) * .28;
+          for (const x of [.24, .76]) branch([x, .5 + Math.sin(a) * .18, .65 + Math.cos(a) * .18], [x, y, z], .032);
+        } else {
+          wheel(.3, .34, .66);
+          const extension = shape.endsWith('_1') ? .22 : .36;
+          wheel(.2, .5 - extension, .5 + extension);
+        }
+      }
+    } else if (biomeProps[shape]) {
       buildNaturalProp(shape, size, seed, grid, box, woodyCurve);
     } else if (deadTrees.includes(shape) || ['dead_tree', 'bone_tree', 'charred_tree'].includes(shape)) {
       const rnd = random(`${shape}:${seed}`);
@@ -594,6 +681,12 @@
         box(0.5 - r, 0.5 - r, z / size, 0.5 + r, 0.5 + r, (z + 1) / size);
       }
     }
+    if (shape.startsWith('puzzle_') && appearance.axis === 'y') {
+      const rotated = new Uint8Array(grid.length);
+      for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++)
+        rotated[size - 1 - y + x * size + z * size * size] = grid[x + y * size + z * size * size];
+      return rotated;
+    }
     return grid;
   }
 
@@ -749,6 +842,38 @@
     const textures = options.textures !== false;
     const h = textures ? Math.abs(Math.sin(x * 12.9898 + y * 78.233 + z * 37.719)) : 0.5;
     const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+    if (shape.startsWith('puzzle_')) {
+      const face = options.puzzleFace || {}, value = Number(shape.slice(-1)) || 0;
+      if (face.axis === 'y') { [x, y] = [y, 1 - x]; normal = [normal[1], -normal[0], normal[2]]; }
+      const side = Math.abs(normal[0]) > .5, u = normal[0] > 0 ? 1 - y : y;
+      const body = options.palette?.primary || rgb('#42555d'), brass = rgb('#d3a55b'), ivory = rgb('#f3e5ba'), ink = rgb('#18343e');
+      if (shape.startsWith('puzzle_dial')) {
+        const r = Math.hypot(y - .5, z - .65);
+        const a = value * Math.PI * 2 / 3, along = (y - .5) * Math.sin(a) + (z - .65) * Math.cos(a);
+        const across = (y - .5) * Math.cos(a) - (z - .65) * Math.sin(a);
+        if ((x < .29 || x > .71) && along > .13 && Math.abs(across) < .085) return rgb('#c74435');
+        if (z > .33 && r <= .235 && side) return puzzleInk(face.option || ['Sun','Moon','Wave'][value], u, z) ? ink : ivory;
+        if (z > .33) return brass;
+      } else if (shape.startsWith('puzzle_button')) {
+        if (z > .36 && Math.hypot(y - .5, z - .65) < .23) {
+          if (side && puzzleInk(face.mark || 'Crown', u, z)) return ivory;
+          return rgb(value ? '#428c6b' : '#be4639');
+        }
+        if (z > .36) return brass;
+      } else if (shape.startsWith('puzzle_lever')) {
+        if (z > .84) return rgb(value ? '#428c6b' : '#be4639');
+        if (z > .48 || x < .4 || x > .6) return ivory;
+      } else if (shape === 'puzzle_plaque') {
+        if (side && (x < .3 || x > .66) && z > .4 && y > .2 && y < .8) return ink;
+        if (z > .34) return y < .22 || y > .78 || z < .42 || z > .9 ? brass : ivory;
+      } else {
+        if (shape.endsWith('open') && z > .51 && z < .8 && x > .38 && x < .62) return ivory;
+        if (shape.endsWith('closed') && side && z > .22 && z < .86 && Math.abs(y - .5) < .055) return ink;
+        if (z < .22 || z > .86 || y < .22 || y > .78 || z > .48 && z < .61 && y > .42 && y < .58) return brass;
+      }
+      if (side && z > .14 && z < .32 && face.mark) return puzzleInk(face.mark, u, z, .14, .32) ? ink : brass;
+      return body;
+    }
     if (usesRoomPalette(shape)) {
       if (!textures) return base.slice();
       const palette = options.palette || {};
@@ -823,7 +948,7 @@
     if (!hex) return base;
     return rgb(hex).map(v => Math.max(0, Math.min(1, v * (0.83 + h * 0.17))));
   }
-  const api = { build, select, color, usesRoomPalette, random, vegetation, deadTrees, scrubShapes, architecture,
+  const api = { build, select, color, usesRoomPalette, random, puzzleGlyph, vegetation, deadTrees, scrubShapes, architecture,
     biomeProps, biomeShapes, shapes: [...shapes] };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.ScenePropVoxels = api;

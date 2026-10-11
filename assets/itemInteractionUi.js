@@ -4,8 +4,10 @@
   else root.ItemInteractionUi = api;
 })(typeof window === 'undefined' ? globalThis : window, function(root) {
   'use strict';
-  function reachable(dungeon, player, item, radius) {
-    if (!player || !item || !Number.isFinite(player.x) || !Number.isFinite(player.y) || !Number.isFinite(item.x) || !Number.isFinite(item.y)) return false;
+  const TAKE_RANGE = 2.5;
+  function reachable(dungeon, player, item, radius = TAKE_RANGE) {
+    if (!dungeon || !player || !item || !Number.isFinite(player.x) || !Number.isFinite(player.y) || !Number.isFinite(item.x) || !Number.isFinite(item.y) ||
+        (item.geoKey ?? item.roomKey) && (item.geoKey ?? item.roomKey) !== dungeon.geoKey) return false;
     const dx = item.x + 0.5 - player.x, dy = item.y + 0.5 - player.y, distance = Math.hypot(dx, dy);
     if (distance > radius) return false;
     const floor = dungeon.cells?.[`${Math.floor(player.x)},${Math.floor(player.y)}`]?.floorHeight || 0;
@@ -31,7 +33,7 @@
     if (prompted && !(items || []).some(item => item === prompted && reachable(dungeon, player, item, 1.5))) {
       prompted = null; document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove();
     }
-    if (document.hidden || root.InventoryUi?.isOpen() || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
+    if (document.hidden || root.GameCommandGate?.busy() || root.InventoryUi?.isOpen() || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
         root._combatRoundActiveUntil > Date.now() || document.activeElement?.id === 'chatuserinput' || document.querySelector('.popup-container')) return;
     const near = nearby(dungeon, items, player);
     if (!near || near === prompted) return;
@@ -43,5 +45,5 @@
     if (popup) { popup.dataset.dungeonItemProximity = 'true'; prompted = near; }
   }
   function reset() { room = prompted = null; if (typeof document !== 'undefined') document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove(); }
-  return { nearby, reachable, update, reset };
+  return { TAKE_RANGE, nearby, reachable, update, reset };
 });

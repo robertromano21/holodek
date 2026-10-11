@@ -170,6 +170,19 @@
     words.textContent = line;
     subtitleReport('displayed', { ...active, line }, { ...speechCheck(actor, ctx), part: active.part + 1, parts: active.chunks.length });
   }
+  function dismissSubtitle() {
+    if (!active) return;
+    subtitleReport('dismissed', active, { reason: 'player-dismissed', part: active.part + 1, parts: active.chunks.length });
+    panel.hidden = true;
+    if (active.part + 1 < active.chunks.length) {
+      // Advance unread sentences on the next UI tick without discarding the speech.
+      active.until = time();
+    } else {
+      const actor = context()?.actors?.find(a => a.name === active.speaker);
+      if (actor) actor._conversationUntil = Date.now();
+      active = null;
+    }
+  }
   async function post(url, body) {
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!response.ok) {
@@ -304,6 +317,9 @@
     const style = document.createElement('style');
     style.textContent = '#dungeon-dialogue{position:fixed;z-index:2100;background:rgba(10,10,10,.9);border:1px solid #888;border-radius:8px;padding:10px 14px;color:#eee;display:flex;gap:12px;align-items:center;pointer-events:none;font-family:Georgia,serif;box-sizing:border-box}#dungeon-dialogue[hidden],#dungeon-pause-status[hidden]{display:none}#dungeon-dialogue img{width:48px;height:72px;object-fit:contain;image-rendering:pixelated}#dungeon-dialogue-caption{color:#dfc687;font-size:13px;margin-bottom:5px}#dungeon-dialogue-words{font-size:17px;line-height:1.3}#dungeon-pause-status{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:3200;background:rgba(0,0,0,.8);color:#dfc687;border:1px solid #888;border-radius:6px;padding:8px 16px;font:16px Georgia,serif}';
     document.head.appendChild(style);
+    const dismissStyle = document.createElement('style');
+    dismissStyle.textContent = '#dungeon-dialogue{padding-right:44px}#dungeon-dialogue .dungeon-message-close{position:absolute;top:4px;right:4px;width:32px;height:32px;padding:0;margin:0;border:0;border-radius:4px;background:transparent;color:#dfc687;font:16px Georgia,serif;cursor:pointer;pointer-events:auto}#dungeon-dialogue .dungeon-message-close:hover{background:#ffffff1c}#dungeon-dialogue .dungeon-message-close:focus-visible{outline:1px solid #dfc687;outline-offset:1px}';
+    document.head.appendChild(dismissStyle);
     panel = document.createElement('div'); panel.id = 'dungeon-dialogue'; panel.hidden = true;
     panel.setAttribute('role', 'status'); panel.setAttribute('aria-live', 'polite');
     portrait = document.createElement('img'); portrait.alt = ''; portrait.hidden = true;
@@ -311,6 +327,14 @@
     caption = document.createElement('div'); caption.id = 'dungeon-dialogue-caption';
     words = document.createElement('div'); words.id = 'dungeon-dialogue-words';
     body.append(caption, words); panel.append(portrait, body); document.body.appendChild(panel);
+    const close = document.createElement('button'); close.id = 'dungeon-dialogue-close'; close.type = 'button';
+    close.className = 'dungeon-message-close'; close.textContent = 'X';
+    close.setAttribute('aria-label', 'Dismiss subtitle'); close.title = 'Dismiss this subtitle';
+    for (const type of ['pointerdown', 'pointerup', 'keydown']) close.addEventListener(type, event => {
+      if (type !== 'keydown' || event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+    });
+    close.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); dismissSubtitle(); close.blur(); });
+    panel.appendChild(close);
     status = document.createElement('div'); status.id = 'dungeon-pause-status'; status.textContent = 'Paused. Press P to resume.'; status.hidden = true;
     document.body.appendChild(status);
     pauseButton = document.createElement('button'); pauseButton.className = 'game-menu-button'; pauseButton.id = 'pause-game-button';
@@ -331,7 +355,7 @@
     root.addEventListener('pagehide', flushSubtitleReports);
     setInterval(tick, 500);
   }
-  root.DungeonLife = { population, receivePopulation, receiveDialogue, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak,
+  root.DungeonLife = { population, receivePopulation, receiveDialogue, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
     subtitleDiagnostics: () => subtitleHistory.map(report => ({ ...report })),
     actorAllegiance: actor => I.allegiance(population()?.actors?.[actor.name || actor.Name] || actor, root.latestUpdatedData?.monstersState) };
   document.addEventListener('DOMContentLoaded', init);

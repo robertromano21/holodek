@@ -2666,19 +2666,24 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         container.innerHTML = '';
         container.appendChild(this.legacyRenderer.canvas);
       }
+      window.WorldInteractionUi?.setPresentationCanvas?.(this.legacyRenderer.canvas, this.legacyRenderer.canvas);
       console.warn('[WebGPU] Falling back to legacy WebGL viewport.', reason || '');
     },
 
     _attachWebGPUViewport() {
       const container = this._container || document.getElementById('dungeon-container');
       if (!container || !this.canvas) return false;
-      if (this.canvas.parentNode === container) return true;
+      if (this.canvas.parentNode === container) {
+        window.WorldInteractionUi?.setPresentationCanvas?.(this.legacyRenderer.canvas, this.canvas);
+        return true;
+      }
       const host = this._ensureHiddenHost();
       if (this.legacyRenderer.canvas && this.legacyRenderer.canvas.parentNode === container) {
         host.appendChild(this.legacyRenderer.canvas);
       }
       container.innerHTML = '';
       container.appendChild(this.canvas);
+      window.WorldInteractionUi?.setPresentationCanvas?.(this.legacyRenderer.canvas, this.canvas);
       return true;
     },
 
@@ -4062,6 +4067,9 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
       this.legacyRenderer.renderScene();
       this._sourceCanvas = this.legacyRenderer.canvas || this._sourceCanvas;
       this._presentSourceToWebGPU();
+      if (this.mode === 'webgpu' && this._presentedAtLeastOnce) {
+        window.WorldInteractionUi?.setPresentationCanvas?.(this._sourceCanvas, this.canvas);
+      }
     },
 
     render(rasterCanvas) {
@@ -4072,6 +4080,9 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         this._sourceCanvas = this.legacyRenderer.canvas || this._sourceCanvas;
       }
       this._presentSourceToWebGPU();
+      if (this.mode === 'webgpu' && this._presentedAtLeastOnce) {
+        window.WorldInteractionUi?.setPresentationCanvas?.(this._sourceCanvas, this.canvas);
+      }
     },
 
     shouldDriveSpriteVoxelTorch() {

@@ -867,8 +867,9 @@
     },
 
     buildVoxelGrid(tileName, dungeon, size = 16) {
-      const shape = dungeon.tiles?.[tileName]?.spriteSpec?.voxelShape;
-      const shaped = shape && window.ScenePropVoxels?.build(shape, size, dungeon.tiles?.[tileName]?.spriteSpec?.voxelSeed || 0);
+      const spec = window.PhysicalPuzzles?.visualSpec(dungeon, tileName) || dungeon.tiles?.[tileName]?.spriteSpec;
+      const shape = spec?.voxelShape;
+      const shaped = shape && window.ScenePropVoxels?.build(shape, size, spec.voxelSeed || 0, spec.puzzleFace);
       if (shaped) return shaped;
       const voxels = new Uint8Array(size * size * size);
       const setVoxel = (x, y, z) => {
@@ -1382,7 +1383,8 @@
       const debugSolid = (tileName === 'pillar' && !!window.DEBUG_SOLID_PILLAR);
       const meshRev = Number.isFinite(window.VOXEL_MESH_REV) ? window.VOXEL_MESH_REV : 0;
       const voxelTextures = window.VOXEL_MATERIAL_TEXTURES !== false;
-      const debugKey = `${meshRev}|appearance:2|solid:${debugSolid ? 1 : 0}|textures:${voxelTextures ? 1 : 0}`;
+      const spec = window.PhysicalPuzzles?.visualSpec(dungeon, tileName) || dungeon.tiles[tileName]?.spriteSpec || {};
+      const debugKey = `${meshRev}|appearance:3|face:${JSON.stringify(spec.puzzleFace || null)}|solid:${debugSolid ? 1 : 0}|textures:${voxelTextures ? 1 : 0}`;
 
       const cached = this.voxelMeshes[tileName];
       if (cached && cached._debugKey === debugKey) return cached;
@@ -1390,7 +1392,6 @@
       // If debug key changed, drop the old cached mesh so we actually rebuild it.
       if (cached) delete this.voxelMeshes[tileName];
 
-      const spec = dungeon.tiles[tileName]?.spriteSpec || {};
       const detail = spec.detail || {};
       const tileMeta = this.getCustomTileMeta(tileName, dungeon);
       const material = (spec.voxelShape && spec.material) || tileMeta?.procedure?.material || spec.material || null;
@@ -1475,7 +1476,7 @@
         if (debugSolid) return [1.0, 0.0, 1.0];
         if (spec.voxelShape && window.ScenePropVoxels?.color) {
           return window.ScenePropVoxels.color(spec.voxelShape, x / 16, y / 16, z / 16, normal, primary, material,
-            { textures: voxelTextures, palette: shapePalette });
+            { textures: voxelTextures, palette: shapePalette, puzzleFace: spec.puzzleFace });
         }
 
       const n = isColumn
@@ -1752,7 +1753,10 @@
           _debugKey: debugKey
         };
       } else {
-        const mesh = this.greedyMesh(voxels, 16, colorFn, { seamPad });
+        // Small engraved control faces need per-voxel colors; greedy quads erase their symbols.
+        const mesh = spec.voxelShape?.startsWith('puzzle_')
+          ? this.meshVoxelsSimple(voxels, 16, colorFn, { seamPad })
+          : this.greedyMesh(voxels, 16, colorFn, { seamPad });
         const gpu = createGpuMesh(mesh, {
           unlit: debugSolid ? 1 : 0,
           toonSteps: 3
@@ -4177,6 +4181,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const viewShift = Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
       const horizon = height * (.5 + viewShift);
       const voxelCamera = { x: camX, y: camY, eyeZ, dirX, dirY, planeScale, viewShift, verticalScale: 2 * focalLength / height };
+      window.WorldInteractionUi?.updateFrame(dungeon, voxelCamera, this.canvas, { x: playerWorldX, y: playerWorldY });
 
       if (window.DEBUG_WEBGL_POS) {
         const now = performance.now();
