@@ -52,7 +52,7 @@
     return valid(name) ? name : null;
   }
 
-  let panel, groups, detail, equip, open = false, selected = null, dragged = null, replacement = null;
+  let panel, groups, detail, equip, read, open = false, selected = null, dragged = null, replacement = null;
   let items = [], state = {}, signature = '';
   function busy() { return !!(root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active); }
   function party() {
@@ -80,6 +80,7 @@
     }
     document.getElementById('party-icon-dock')?.classList.toggle('inventory-targeting', !!selected);
     if (equip) equip.disabled = !selected;
+    if(read){read.hidden=!selected||!['book','scroll','map'].includes(root.SceneItems?.itemKind(selected));read.disabled=!selected||busy()||root.GameCommandGate?.busy();}
     if (!selected) { message('Drag an item onto a party icon, or select it and click a character.'); return; }
     const stats = [['Attack', 'attack_modifier'], ['Damage', 'damage_modifier'], ['Armor', 'ac'], ['Magic', 'magic']]
       .filter(([, field]) => Number.isFinite(Number(selected[field])) && Number(selected[field]) !== 0)
@@ -207,6 +208,11 @@
     panel = document.getElementById('inventory-popup'); groups = document.getElementById('inventory-groups');
     detail = document.getElementById('inventory-detail'); equip = document.getElementById('inventory-equip');
     if (!panel || !groups || !detail || !equip) return;
+    read=document.createElement('button');read.id='inventory-read';read.type='button';read.textContent='Read';read.hidden=true;
+    read.addEventListener('click',()=>{
+      if(!selected||busy()||root.GameCommandGate?.busy()||root.gamePaused)return;
+      const name=selected.name;toggle(false);root.WorldInteractionUi?.requestRead(name);
+    });equip.parentElement.appendChild(read);
     document.getElementById('dungeon-inventory-shortcut')?.addEventListener('click', () => toggle());
     document.getElementById('inventory-close').addEventListener('click', () => toggle(false));
     equip.addEventListener('click', () => { if (selected) requestEquip(selected.name); });

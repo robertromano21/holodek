@@ -27,7 +27,7 @@ const monsterSection = game.slice(monsterSectionStart, game.indexOf('Puzzle: ${p
 const consoleStateRefresh = game.slice(game.indexOf('window.refreshDungeonConsoleStates ='), game.indexOf('window.onDungeonPause ='));
 const recentHistoryFunctions = game.slice(game.indexOf('function getRecentPromptsAndResponsesForConversation('), game.indexOf('var previousResponse ='));
 const travelDetection = game.slice(game.indexOf('async function chatbotprocessinput(')).match(/^\s*let validDirection = ([^;]+);/m)[1];
-const scripts = ['physicalPuzzles', 'commandIntent', 'worldInteractionUi', 'renderSceneItems', 'sceneObjectSync', 'partyRoster', 'dungeonCartography', 'landmarkCatalog', 'areaTitleUi', 'compassUi', 'explorationMapUi', 'inventoryUi', 'itemInteractionUi', 'mapShortcutUi', 'gameMenuUi', 'characterProfiles', 'dialogueAudience', 'dungeonInhabitants', 'campaignMemory', 'campaignMemoryUi', 'dialogueHistory', 'dungeonLifeUi', 'actionNoticeUi', 'commandGate', 'outdoorDiscovery'];
+const scripts = ['renderCharacterProcedural', 'puzzleModules', 'puzzleMotion', 'shrineIconography', 'artCharacters', 'sculptureForms', 'frescoDesigns', 'frescoFigures', 'surfaceArt', 'readableItems', 'physicalPuzzles', 'commandIntent', 'worldInteractionUi', 'renderSceneItems', 'sceneObjectSync', 'partyRoster', 'dungeonCartography', 'landmarkCatalog', 'areaTitleUi', 'compassUi', 'explorationMapUi', 'inventoryUi', 'itemInteractionUi', 'mapShortcutUi', 'gameMenuUi', 'characterProfiles', 'dialogueAudience', 'dungeonInhabitants', 'campaignMemory', 'campaignMemoryUi', 'dialogueHistory', 'dungeonLifeUi', 'actionNoticeUi', 'commandGate', 'outdoorDiscovery'];
 const page = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
 ${scripts.map(name => `<script src="/assets/${name}.js"></script>`).join('')}
 </head><body>${menu}<button id="play-music-btn" style="display:none">Play Music</button>
@@ -98,7 +98,7 @@ async function chatbotprocessinput() {
     const d = window.currentDungeon, e = d.physicalPuzzle, action = PhysicalPuzzles.intent(input, e.definition);
     if (action && !action.inspect) {
       const state = PhysicalPuzzles.step(e.definition, e.state, action.controlId, action.value);
-      const delta = PhysicalPuzzles.applyVisualState(d, state); Object.assign(d.cells, delta.cells); d.physicalPuzzle = delta.physicalPuzzle;
+      const delta = PhysicalPuzzles.applyVisualState(d, state); PhysicalPuzzles.beginMotion(d,e,delta.physicalPuzzle); Object.assign(d.cells, delta.cells); d.physicalPuzzle = delta.physicalPuzzle;
     }
     document.getElementById('chatuserinput').value = '';
   }
@@ -643,6 +643,21 @@ window.addEventListener('DOMContentLoaded', async () => {
     checks.takeRemovesOnlyItem = commands.at(-1) === 'take silver dagger' && inventory.includes('silver dagger') && pickupDungeon.sceneObjects.length === 0 &&
       JSON.stringify(pickupDungeon.cells) === cellsBefore && pickupDungeon._geometryStamp === 'fixture';
     await new Promise(resolve => setTimeout(resolve, 20));
+    const testBook={name:'chronicle of the pale court',type:'other',attack_modifier:0,damage_modifier:0,ac:1,magic:2};
+    document.getElementById('chatuserinput').value='';const equippedBeforeRead=JSON.stringify(characters[0].Equipped);
+    inventory.push(testBook.name);inventoryProperties.push(JSON.stringify(testBook));refreshFixture();
+    InventoryUi.toggle(true);document.querySelector('[data-inventory-item="'+testBook.name+'"]').click();
+    const readBook=document.getElementById('inventory-read');
+    checks.readableOtherHasReadAction=!readBook.hidden&&!readBook.disabled;
+    const beforeReadCommands=commands.length;readBook.click();await new Promise(resolve=>setTimeout(resolve,5));
+    checks.inventoryReadUsesLiteralCommand=commands.at(-1)==='read '+testBook.name&&commands.length===beforeReadCommands+1&&!InventoryUi.isOpen();
+    checks.readingDoesNotConsumeOrEquipBook=inventory.includes(testBook.name)&&JSON.stringify(characters[0].Equipped)===equippedBeforeRead;
+    document.getElementById('chatuserinput').value='unfinished dialogue';
+    checks.readKeepsUnsubmittedDraft=await WorldInteractionUi.requestRead(testBook.name)===false&&document.getElementById('chatuserinput').value==='unfinished dialogue';
+    document.getElementById('chatuserinput').value='';GameCommandGate.transportStarted('/processInput7');
+    checks.readingBlockedWhileLoading=await WorldInteractionUi.requestRead(testBook.name)===false&&commands.length===beforeReadCommands+1;
+    GameCommandGate.transportFinished('/processInput7',{completedStartResult:{}});
+    inventory=inventory.filter(n=>n!==testBook.name);inventoryProperties=inventoryProperties.filter(p=>InventoryUi.parseProperties([p])[0]?.name!==testBook.name);refreshFixture();
     checkpoint('physical-world-interactions');
     InventoryUi.toggle(false);
     const pd = { ...d, tiles: {}, cells: JSON.parse(JSON.stringify(d.cells)), sceneObjects: [], sceneLandmarks: [] };
@@ -713,6 +728,27 @@ window.addEventListener('DOMContentLoaded', async () => {
     const caption=document.getElementById('world-interaction-caption'), labelRect=caption.getBoundingClientRect();
     checks.worldLabelStaysOnScreenAtPageZoom=!caption.hidden && labelRect.left>=0 && labelRect.top>=0 && labelRect.right<=innerWidth && labelRect.bottom<=innerHeight;
     checks.worldLabelFollowsPointerAtPageZoom=Math.abs(labelRect.top-(at.clientY+18))<3;
+    pd.surfaceArt=[{key:pf.key,label:'Mortacia shrine inscription',description:'The White Lady remembers the departed.',text:'Memory endures.',
+      surface:'wall',position:{x:xy[0]+.84,y:xy[1]+.18,z:.4},size:{x:.02,y:.64,z:.5}}];
+    WorldInteractionUi.updateFrame(pd,camera,view,eye);view.dispatchEvent(new PointerEvent('pointermove',at));
+    checks.artworkShowsHandAndMeaning=view.style.cursor==='pointer'&&caption.textContent.includes('The White Lady remembers');
+    const beforeArtCommands=commands.length;view.dispatchEvent(new MouseEvent('click',at));
+    checks.artworkReadsWithoutApi=commands.length===beforeArtCommands&&!noticePanel.hidden&&noticePanel.textContent.includes('Memory endures.');
+    noticeClose.click();checks.artworkReadCanBeDismissed=noticePanel.hidden;
+    GameCommandGate.transportStarted('/processInput7');view.dispatchEvent(new MouseEvent('click',at));
+    checks.loadingBlocksArtworkRead=noticePanel.hidden&&commands.length===beforeArtCommands;
+    GameCommandGate.transportFinished('/processInput7',{completedStartResult:{}});pd.surfaceArt=[];
+    pd.tiles.custom_probe_prop.spriteSpec.inscription={id:'inscription_0',name:'tablet of the departed'};
+    pd._geometryStamp='inscription-probe';document.getElementById('chatuserinput').value='';
+    WorldInteractionUi.updateFrame(pd,camera,view,eye);view.dispatchEvent(new PointerEvent('pointermove',at));
+    checks.inscriptionShowsHandAndReadHint=view.style.cursor==='pointer'&&caption.textContent.includes('read inscription');
+    view.dispatchEvent(new MouseEvent('click',at));await new Promise(resolve=>setTimeout(resolve,5));
+    checks.inscriptionClickUsesLiteralRead=commands.at(-1)==='read tablet of the departed';
+    const inscriptionCommands=commands.length;document.getElementById('chatuserinput').value='';
+    GameCommandGate.transportStarted('/processInput7');view.dispatchEvent(new MouseEvent('click',at));
+    checks.loadingBlocksInscriptionRead=commands.length===inscriptionCommands;
+    GameCommandGate.transportFinished('/processInput7',{completedStartResult:{}});
+    delete pd.tiles.custom_probe_prop.spriteSpec.inscription;
     for (const cell of Object.values(pd.cells)) if (cell.puzzleFixture) { cell.tile='floor'; delete cell.puzzleFixture; }
     pd.cells[pf.key].tile='floor'; pd._geometryStamp='item-probe'; roomItems=['silver dagger']; refreshFixture(); bindOriginalActions();
     window.getVisibleSceneObjects=()=>[{name:'silver dagger',x:xy[0],y:xy[1]}];
@@ -778,6 +814,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     checks.longerPickupReachAllowsBackpackDrag = !!document.getElementById('take-button'); document.getElementById('cancel-button')?.click();
     WorldInteractionUi.updateFrame(pd,camera,view,eye);
     checkpoint('webgpu-world-interactions');
+    roomItems=['chronicle of the pale court'];refreshFixture();bindOriginalActions();document.getElementById('chatuserinput').value='';
+    window.getVisibleSceneObjects=()=>[{name:roomItems[0],type:'other',x:xy[0],y:xy[1]}];
+    WorldInteractionUi.updateFrame(pd,camera,view,eye);view.dispatchEvent(new PointerEvent('pointermove',itemAt));
+    view.dispatchEvent(new MouseEvent('click',itemAt));await new Promise(resolve=>setTimeout(resolve,5));
+    checks.groundBookHasReadAndTake=!!document.getElementById('read-item-button')&&!!document.getElementById('take-button');
+    document.getElementById('read-item-button')?.click();await new Promise(resolve=>setTimeout(resolve,5));
+    checks.groundBookReadDoesNotTakeIt=commands.at(-1)==='read chronicle of the pale court'&&roomItems.length===1&&!document.getElementById('take-button');
+    roomItems=['silver dagger'];refreshFixture();bindOriginalActions();document.getElementById('chatuserinput').value='';
+    window.getVisibleSceneObjects=()=>[{name:'silver dagger',x:xy[0],y:xy[1]}];
     const viewport=document.createElement('div'); viewport.id='dungeon-container';
     viewport.style.cssText='position:fixed;left:80px;top:100px;width:240px;height:180px;z-index:12000';
     document.body.appendChild(viewport); view.style.cssText=''; viewport.appendChild(view);
@@ -848,7 +893,7 @@ for (const [, script] of page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) 
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'holodek-ui-probe-'));
   const customSize=process.argv.find(arg=>/^--size=\d+,\d+$/.test(arg))?.slice(7);
   const size = customSize || (process.argv.includes('--narrow') ? '540,900' : '1680,950');
-  const child = spawn(browser, ['--headless=new', '--disable-gpu', '--no-first-run', '--window-size=' + size,
+  const child = spawn(browser, ['--headless=new', '--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-first-run', '--window-size=' + size,
     '--user-data-dir=' + profile, 'http://127.0.0.1:' + server.address().port], { windowsHide: true });
   let stderr = '', timeout;
   child.stdout.on('data', () => {}); child.stderr.on('data', data => { stderr += data; });

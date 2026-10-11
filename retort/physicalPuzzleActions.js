@@ -17,10 +17,10 @@ function prepare({ input, dungeon, actor, consoleText, room }) {
   if (action.inspect) {
     const c = e.definition.controls.find(c => c.id === f.id);
     return { allowed: true, inspect: true, message: f.id === 'plaque' ? Puzzles.clue(e.definition) : f.id === 'receiver' ?
-      e.state.status === 'complete' ? e.definition.lore : 'A closed reading cabinet. Its lamps and linked controls show that it can be opened. Read the adjacent plaque.' :
+      e.state.status === 'complete' ? e.definition.lore : `The ${Puzzles.receiverLabel(e.definition)} is dormant. Its linked controls respond to the adjacent reference diagram.` :
       `${c.label} bears the ${c.mark} crest and is set to ${c.options[e.state.values[c.index]]}. ${Puzzles.command(e.definition, f)} operates it.`, metadata: { mechanismId: stored.id, controlId: f.id, result: 'observed' } };
   }
-  if (stored.state.status === 'complete') return deny('The mechanism is already solved. The cabinet remains open and its reward has already been recorded.');
+  if (stored.state.status === 'complete') return deny('The mechanism is already solved. Its revealed record and reward have already been recorded.');
   const nextState = Puzzles.step(stored, stored.state, action.controlId, action.value);
   const complete = nextState.status === 'complete', puzzleId = Rewards.identity(consoleText);
   if (complete && !puzzleId) return deny('The mechanism has no matching console puzzle. No state or reward was changed.');

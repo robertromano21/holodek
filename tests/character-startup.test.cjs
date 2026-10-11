@@ -277,7 +277,7 @@ test('real room/puzzle helper accepts missing monsters using Retort template val
   const tag = (strings, ...values) => { const text = templateContent(strings, ...values); prompts.push(text); return text; };
   let lastGeneration = '';
   const assistant = (strings, ...values) => { lastGeneration = tag(strings, ...values); return lastGeneration; };
-  assistant.generation = async ({ maxTokens }) => ({ content: maxTokens === 1500 ? JSON.stringify(require('../assets/physicalPuzzles').fallback('startup', 'Desolate Court')) : maxTokens === 40 ? 'Desolate Court' : 'A carved stone hall.' });
+  assistant.generation = async ({ maxTokens }) => ({ content: maxTokens === 4200 ? JSON.stringify(require('../assets/physicalPuzzles').fallback('startup', 'Desolate Court')) : maxTokens === 40 ? 'Desolate Court' : 'A carved stone hall.' });
   const agent = { user: tag, assistant, run: callback => callback(agent) };
   const room = buildInitialWorldConsole().console.replace(/^Monsters in Room:.*\n?/m, '');
   const context = {
@@ -286,7 +286,7 @@ test('real room/puzzle helper accepts missing monsters using Retort template val
     ...require('../retort/worldContext'),
     ...require('../retort/environmentIntents'),
     ...require('../retort/bossGate'),
-    LivingEnvironments: require('../assets/physicalPuzzles'), generatePhysicalPuzzleDesign: require('../retort/physicalPuzzleDesign').generateDesign,
+    ReadableItems:require('../assets/readableItems'),LivingEnvironments: require('../assets/physicalPuzzles'), generatePhysicalPuzzleDesign: require('../retort/physicalPuzzleDesign').generateDesign,
     coordinatesToString: c => `${c.x},${c.y},${c.z}`,
     generateDefaultClassification: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
     classifyDungeon: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
@@ -298,7 +298,7 @@ test('real room/puzzle helper accepts missing monsters using Retort template val
   assert.equal(await context.generateMissingRoomDetails(agent), true);
   assert.ok(prompts.some(p => p.includes('physically built in the 3D maze')));
   assert.ok(prompts.some(p => p.includes('Both description AND exact solution')));
-  assert.match(context.updatedGameConsole, /^Puzzle Solution: (Set|Press)/m);
+  assert.match(context.updatedGameConsole, /^Puzzle Solution: (Set|Press|Strike|Pull)/m);
 });
 
 function roomPopulationHarness(room, database = {}, options = {}) {
@@ -313,7 +313,7 @@ function roomPopulationHarness(room, database = {}, options = {}) {
   const assistant = tag;
   assistant.generation = async ({ maxTokens }) => {
     calls.push(`text:${maxTokens}`);
-    return { content: maxTokens === 1500 ? JSON.stringify(require('../assets/physicalPuzzles').fallback('startup', 'Ashen Court')) : maxTokens === 40 ? 'Ashen Court' : 'An ancient stone hall with a carved rune puzzle.' };
+    return { content: maxTokens === 4200 ? JSON.stringify(require('../assets/physicalPuzzles').fallback('startup', 'Ashen Court')) : maxTokens === 40 ? 'Ashen Court' : 'An ancient stone hall with a carved rune puzzle.' };
   };
   const agent = { user: tag, assistant, run: callback => callback(agent) };
   const context = {
@@ -321,7 +321,7 @@ function roomPopulationHarness(room, database = {}, options = {}) {
     gameConsoleForPerception: () => Inhabitants.perceivedConsole(context.updatedGameConsole, []),
     parseSheets, Math: Object.assign(Object.create(Math), { random: options.random || Math.random }),
     ...require('../retort/worldContext'), ...require('../retort/environmentIntents'), ...require('../retort/bossGate'),
-    LivingEnvironments: require('../assets/physicalPuzzles'), generatePhysicalPuzzleDesign: require('../retort/physicalPuzzleDesign').generateDesign,
+    ReadableItems:require('../assets/readableItems'),LivingEnvironments: require('../assets/physicalPuzzles'), generatePhysicalPuzzleDesign: require('../retort/physicalPuzzleDesign').generateDesign,
     coordinatesToString: c => `${c.x},${c.y},${c.z}`,
     generateDefaultClassification: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
     classifyDungeon: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
@@ -348,8 +348,8 @@ test('one-exit startup with Adjacent Rooms: None runs the complete existing popu
   assert.match(context.committedConsole, /name: "ashen sword", type: "weapon", attack_modifier: 2, damage_modifier: 3/);
   assert.match(context.committedConsole, /^Monsters in Room: Ash Sentinel$/m);
   assert.match(context.committedConsole, /^Adjacent Rooms: east: Ashen Court$/m);
-  assert.match(context.committedConsole, /^Puzzle in Room: A weathered mechanism/m);
-  assert.match(context.committedConsole, /^Puzzle Solution: (Set|Press)/m);
+  assert.match(context.committedConsole, /^Puzzle in Room: An ancient /m);
+  assert.match(context.committedConsole, /^Puzzle Solution: (Set|Press|Strike|Pull)/m);
   assert.equal(JSON.parse(context.roomNameDatabaseString)['1,0,0'].name, 'Ashen Court');
   assert.equal(JSON.parse(context.committedRooms)['0,0,0'].populationComplete, true);
   assert.ok(prompts.some(prompt => prompt.includes('You must store the following words into memory:')));
@@ -392,7 +392,7 @@ for (const blankSeparators of [false, true]) {
     const { context, calls, run } = roomPopulationHarness(room, {}, { random: () => 0.5 });
     assert.equal(await run(), true);
     assert.ok(calls.includes('monsters'));
-    assert.match(context.committedConsole, /^Puzzle Solution: (Set|Press)/m);
+    assert.match(context.committedConsole, /^Puzzle Solution: (Set|Press|Strike|Pull)/m);
     const sheetSection = text => text.match(/PC:[\s\S]*?(?=Monsters in Room:)/)[0];
     const withoutXp = text => sheetSection(text).replace(/(^[ \t]*XP:)[ \t]*\d+/gm, '$1');
     assert.equal(withoutXp(context.committedConsole), withoutXp(room));

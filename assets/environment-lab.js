@@ -119,6 +119,7 @@
     if (intent.inspect) $('status').textContent = fixture.id === 'plaque' ? PhysicalPuzzles.clue(e.definition) : e.definition.lore;
     else if (e.state.status !== 'complete') {
       const state = PhysicalPuzzles.step(e.definition, e.state, fixture.id, intent.value), delta = PhysicalPuzzles.applyVisualState(d, state);
+      PhysicalPuzzles.beginMotion(d,e,delta.physicalPuzzle);
       Object.assign(d.cells, delta.cells); d.physicalPuzzle = delta.physicalPuzzle; d._geometryStamp += ':puzzle';
       $('status').textContent = PhysicalPuzzles.feedback(e.definition, state, fixture.id);
     }
@@ -143,7 +144,7 @@
         vx: dt > 0 ? (window.playerPosX - oldX) / dt : 0, vy: dt > 0 ? (window.playerPosY - oldY) / dt : 0
       }, dt, $('terrain-assist').checked) ?? 0;
       if (Math.abs(shift - window.dungeonViewShift) > .00001) { window.dungeonViewShift = shift; dirty = true; }
-      if (dirty) try { draw(); } catch (error) { loaded = false; $('status').textContent = error.message; }
+      if (dirty || PhysicalPuzzles.motionActive(window.currentDungeon)) try { draw(); } catch (error) { loaded = false; $('status').textContent = error.message; }
     }
     requestAnimationFrame(frame);
   }

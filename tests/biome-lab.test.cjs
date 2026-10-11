@@ -76,7 +76,7 @@ test('six additional selectors retain every original exhibit and use constructor
     'temple', 'gothic', 'rotunda', 'obelisks', 'byzantine', 'squinch', 'fan', 'groin', 'hammerbeam', 'boarded',
     'gold', 'motte', 'shellkeep', 'stonekeep', 'concentric', 'amphitheater', 'theater', 'circus', 'forum',
     'warehouse', 'domus', 'villa', 'insula', 'aqueduct', 'forge', 'graves', 'grove'];
-  assert.deepEqual(options, [...legacy, 'puzzle_buttons', 'puzzle_dials', 'puzzle_channels', ...kinds]);
+  assert.deepEqual(options, [...legacy, 'puzzle_buttons', 'puzzle_dials', 'puzzle_channels', 'puzzle_interlock', 'puzzle_sliding', 'puzzle_balance', 'puzzle_harmonics', 'shrine_art', ...kinds]);
   for (const kind of options) assert.ok(Object.hasOwn(descriptions, kind), kind);
   assert.throws(() => buildEnvironmentLab('constructor'), /Unknown/);
   assert.throws(() => buildEnvironmentLab('unknown'), /Unknown/);

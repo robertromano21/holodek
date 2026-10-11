@@ -621,6 +621,7 @@ window.applyLivingEnvironmentDelta = function(data) {
     console.error('[DungeonAction] Geometry revision mismatch; ignoring stale update.', data);
     return;
   }
+  if (data.physicalPuzzle) window.PhysicalPuzzles?.beginMotion(currentDungeon, currentDungeon.physicalPuzzle, data.physicalPuzzle);
   Object.assign(currentDungeon.cells, data.cells);
   if (data.actionAttempts) currentDungeon.actionAttempts = data.actionAttempts;
   if (data.livingEncounter) currentDungeon.livingEncounter = data.livingEncounter;
@@ -15119,7 +15120,7 @@ if (!hit) continue;
     renderPerfStats.spritePixels = 0;
   }
 
-  if ((needsAnimation || torchLights.length) && popup.style.display === 'block') {
+  if ((needsAnimation || torchLights.length || window.PhysicalPuzzles?.motionActive(currentDungeon)) && popup.style.display === 'block') {
     if (!window._dungeonAnimPending) {
       window._dungeonAnimPending = true;
       window.requestAnimationFrame(() => {

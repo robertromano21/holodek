@@ -15,6 +15,9 @@ const { drawLandmarkSprite, resolveLandmarkDrawer, landmarkSpriteSpec } = requir
 const { drawSceneSurface, drawRoofSurface, hasMaterial } = require('../assets/renderSceneTextures.js');
 const { select: selectVoxelShape, architecture, vegetation, biomeProps } = require('../assets/scenePropVoxels.js');
 const Masonry = require('../assets/masonryPatterns');
+const SculptureForms = require('../assets/sculptureForms');
+const SurfaceArt = require('../assets/surfaceArt');
+const {wallFaces,mountWall}=require('./surfaceArtPlacement');
 const { roofStyle } = require('./sceneRoofs');
 
 const SPRITE_DIR = process.env.HOLODEK_SPRITE_DIR || path.join(__dirname, '../sid/sprites');
@@ -154,7 +157,7 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     }
     const tile = tiles[idx];
     tile.name = `custom_${tile.type}_${idx}`;
-    tile.sceneLandmark = { type: lm.type, count: lm.count, condition: lm.condition || [], label: lm.label, prim: lm.prim || null, assembly: lm.assembly || (lm.prim && lm.prim.assembly) || null };
+    tile.sceneLandmark = { type: lm.type, count: lm.count, condition: lm.condition || [], label: lm.label, prim: lm.prim || null, assembly: lm.assembly || (lm.prim && lm.prim.assembly) || null, sculpture:lm.sculpture || null,shrine:lm.shrine || null,inscription:lm.inscription || null };
   }
   tiles.forEach((tile, idx) => {
     if (!tile || !tile.type) return;
@@ -169,13 +172,18 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const name = `custom_${tile.type}_${idx}`;
     tile.name = name;
     const assembly = (tile.sceneLandmark && tile.sceneLandmark.assembly) || (prim && prim.assembly) || null;
-    const descriptor = { kind: 'landmark', drawer, material, condition: condition.slice().sort(), light: lightColor || null, accent: pal.highlight || null, prim: prim || null, assembly };
+    const descriptor = { kind: 'landmark', drawer, material, condition: condition.slice().sort(), light: lightColor || null, accent: pal.highlight || null, prim: prim || null, assembly,sculpture:lm.sculpture || null,
+      ...(lm.inscription?{inscriptionMotif:lm.inscription.motif}: {}) };
     const r = librarySprite(descriptor, `custom_${assembly ? 'asm_' + assembly.kit + '_' + assembly.state : (prim ? 'prim_' + prim.shape : drawer)}`, ctx => drawLandmarkSprite(ctx, createCanvas, prim ? tile.type : drawer, {
-      material: material || undefined, condition, light: lightColor, accent: drawer === 'portal' || drawer === 'obelisk' ? lightColor : undefined, seed: drawer, prim: prim || undefined, assembly: assembly || undefined
+      material: material || undefined, condition, light: lightColor, accent: drawer === 'portal' || drawer === 'obelisk' ? lightColor : undefined, seed: drawer, prim: prim || undefined, assembly: assembly || undefined,inscription:lm.inscription
     }));
+    const sculpted = shape==='statue' ? librarySprite({...descriptor,sculptureVersion:1},'custom_effigy',ctx=>{
+      ctx.fillStyle=pal.secondary||'#b6a58c';ctx.fillRect(OUT_SIZE*.25,OUT_SIZE*.89,OUT_SIZE*.5,OUT_SIZE*.08);
+      SculptureForms.paintFigure(ctx,lm.sculpture || {label:lm.label||'Ancient statue',form:'human'},pal,{x:0,y:0,width:OUT_SIZE,height:OUT_SIZE*.9});
+    }) : null;
     const prevSpec = dungeon.tiles[name] && dungeon.tiles[name].spriteSpec;
     dungeon.tiles[name] = {
-      url: r.url,
+      url: sculpted?.url || r.url,
       // Retain sprites for the map/Canvas fallback; solid props use the GPU voxel pass.
       spriteSpec: { ...landmarkSpriteSpec(drawer, prim),
         ...(piece ? { heightRatio: piece.heightRatio, baseWidth: piece.baseWidth, gridWidth: piece.baseWidth } : {}),
@@ -183,6 +191,9 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
         ...(shape ? {
           voxelShape: shape, material: material || (/tree|oak|pine|willow|cypress|roots|stump/.test(shape) ? 'wood' : 'stone')
         } : {}),
+        ...(shape==='statue'?{sculpture:lm.sculpture || {label:lm.label||'Ancient statue',form:'human'},voxelSeed:hash(lm.label||tile.type)}:{}),
+        ...(lm.shrine?{shrine:lm.shrine}:{}),
+        ...(lm.inscription?{inscription:lm.inscription}:{}),
         ...(typeof prim?.blocking === 'boolean' ? { collisionBlocking: prim.blocking } : {}),
         ...(prevSpec && prevSpec.collisionRadius ? { collisionRadius: prevSpec.collisionRadius } : {}) },
       landmark: { type: lm.type, drawer, material, condition, shape: prim ? prim.shape : null, label: lm.label || null }
@@ -500,4 +511,59 @@ function loadStoredRoom(geoKey, spec) {
   return null;
 }
 
-module.exports = { applySceneGraphics, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom, layoutKey, SCENE_GFX_VERSION };
+function applySurfaceArt(dungeon,spec) {
+  if(!dungeon.readables)dungeon.readables=(spec.puzzleMechanism?.readables||[]).map(r=>({...r,mechanismId:spec.puzzleMechanism.id}));
+  if(!dungeon.inscriptions)dungeon.inscriptions=(spec.puzzleMechanism?.inscriptions||[]).map(r=>({...r,mechanismId:spec.puzzleMechanism.id}));
+  if (dungeon.surfaceArt) return {status:'existing',count:dungeon.surfaceArt.length};
+  const art=SurfaceArt.plan(spec).sort((a,b)=>Number(!!b.puzzleClue)-Number(!!a.puzzleClue)),placed=[],{width:w,height:h}=dungeon.layout;
+  const reach=bfsCount(dungeon.cells,w,h,dungeon.start.x,dungeon.start.y),used=new Set();
+  const anchor=dungeon.physicalPuzzle?.fixtures.find(f=>f.id==='plaque')?.key.split(',').map(Number) || [dungeon.start.x,dungeon.start.y];
+  const candidates=[];
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
+    const key=`${x},${y}`,c=dungeon.cells[key];
+    if(!reach.seen[x+y*w]||c?.tile!=='floor'||c.feature||c.navigationReserved||c.exit||c.interactable)continue;
+    candidates.push({x,y,key,d:Math.hypot(x-anchor[0],y-anchor[1])});
+  }
+  candidates.sort((a,b)=>a.d-b.d);
+  const walls=wallFaces(dungeon,candidates),groups=new Map(),centers=[];
+  for(const row of art){
+    let mount=null;
+    if(row.surface==='object')for(const [key,cell] of Object.entries(dungeon.cells)){
+      const tile=dungeon.tiles[cell.tile],s=tile?.spriteSpec;
+      const altar=s?.voxelShape==='altar'||SculptureForms.altarTypes.includes(s?.voxelShape);
+      if(s?.voxelShape!=='statue'&&!altar||used.has(key))continue;
+      const[x,y]=key.split(',').map(Number),width=s.baseWidth||.85,base=cell.floorHeight||0;
+      const height=cell.structureHeight??Math.max(.5,((cell.ceilHeight??base+2)-base)*(s.heightRatio||1));
+      mount={key,axis:'y',sign:-1,surface:'object',position:{x:x+.5-width*(altar?.2:.35),y:y+.5-width*(altar?.24:.325),z:base+(altar?height*.26:.02)},
+        size:{x:width*(altar?.4:.7),y:.02,z:height*(altar?.16:.14)}};break;
+    }
+    if(row.surface==='wall')mount=mountWall(walls,row,used,groups,centers);
+    for(const c of (row.surface==='floor'?candidates:[])){
+      if(mount||row.surface==='object')break;
+      if(used.has(c.key))continue;
+      const z=dungeon.cells[c.key].floorHeight||0;
+      if(row.surface==='floor'){
+        if(c.d>12)continue;
+        mount={key:c.key,axis:'y',sign:-1,surface:'floor',position:{x:c.x+.05,y:c.y+.05,z:z+.01},size:{x:.9,y:.9,z:.02}};break;
+      }
+    }
+    // A physical clue always has a readable freestanding plaque even without a suitable wall.
+    if(!mount&&row.puzzleClue){
+      const f=dungeon.physicalPuzzle?.fixtures.find(f=>f.id==='plaque');
+      if(f){const[x,y]=f.key.split(',').map(Number),z=dungeon.cells[f.key].floorHeight||0;
+        mount={key:f.key,axis:f.axis,sign:-1,surface:'object',position:{x:x+.5-(f.axis==='x'?.24:.22),y:y+.5-(f.axis==='y'?.24:.22),z:z+.42},
+          size:{x:f.axis==='x'?.02:.44,y:f.axis==='y'?.02:.44,z:.47}};
+      }
+    }
+    if(!mount)continue;
+    const glyphs=spec.puzzleMechanism?.glyphs || [],palette=row.kind==='fresco'?SurfaceArt.frescoPalette(row):dungeon.visualStyle?.palette || spec.palette || {};
+    const r=librarySprite({kind:'surface-art',artVersion:4,art:row,palette,glyphs},'scene_art',ctx=>SurfaceArt.paint(ctx,createCanvas,row,palette,glyphs));
+    const tile=`surface_art_${hash(r.url)}`;dungeon.tiles[tile]={url:r.url};
+    placed.push({...row,...mount,tile,description:row.puzzleClue?require('../assets/physicalPuzzles').clue(spec.puzzleMechanism):row.description});
+    for(const key of mount.keys||[mount.key])used.add(key);
+  }
+  dungeon.surfaceArt=placed;
+  return {status:'built',count:placed.length,requested:art.length,frescoes:placed.filter(a=>a.kind==='fresco').length,
+    murals:placed.filter(a=>a.kind==='fresco'&&Math.max(a.size.x,a.size.y)>1).length};
+}
+module.exports = { applySceneGraphics, applySurfaceArt, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom, layoutKey, SCENE_GFX_VERSION };

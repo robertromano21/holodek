@@ -5,7 +5,7 @@
 'use strict';
 
 // ---------- architectural kit (structures / landmarks) ----------
-const ARCH_KITS = ['arch', 'pillar', 'broken_pillar', 'altar', 'statue', 'obelisk', 'sarcophagus', 'brazier', 'fountain', 'pool', 'tree', 'dead_tree', 'fungi', 'vines', 'banner', 'tapestry', 'rubble', 'bones', 'crystal', 'stalagmite', 'bookshelf', 'table', 'barrel', 'chest', 'generic'];
+const ARCH_KITS = ['arch', 'pillar', 'broken_pillar', 'altar', 'statue', 'obelisk', 'sarcophagus', 'stone_tablet', 'gravestone', 'chest_tomb', 'brazier', 'fountain', 'pool', 'tree', 'dead_tree', 'fungi', 'vines', 'banner', 'tapestry', 'rubble', 'bones', 'crystal', 'stalagmite', 'bookshelf', 'table', 'barrel', 'chest', 'generic'];
 const WALL_STYLES = ['ashlar', 'cyclopean', 'brick', 'timber', 'adobe', 'ice_block', 'root_woven', 'crystal_facet', 'bone_stack', 'metal_plate', 'sandstone_block', 'rough_hewn'];
 const FLOOR_TREAT = ['flagstone', 'packed_earth', 'sand', 'mosaic', 'planks', 'ice', 'mud', 'marble_tile', 'bone_dust', 'ash', 'leaf_litter', 'cobble'];
 const PILLAR_STATES = ['intact', 'cracked', 'collapsed', 'toppled', 'half', 'banded'];
@@ -16,7 +16,7 @@ const MATERIALS = ['stone', 'sandstone', 'marble', 'brick', 'wood', 'bone', 'obs
 const SIZES = ['small', 'medium', 'large', 'huge'];
 
 // ---------- item assembly (Objects in Room) ----------
-const ITEM_KINDS = ['sword', 'dagger', 'axe', 'hammer', 'spear', 'staff', 'bow', 'shield', 'amulet', 'ring', 'book', 'scroll', 'potion', 'gem', 'orb', 'key', 'coins', 'skull', 'lantern', 'chest', 'boots', 'helm', 'armor', 'bundle'];
+const ITEM_KINDS = ['sword', 'dagger', 'axe', 'hammer', 'spear', 'staff', 'bow', 'shield', 'amulet', 'ring', 'book', 'scroll', 'map', 'potion', 'gem', 'orb', 'key', 'coins', 'skull', 'lantern', 'chest', 'boots', 'helm', 'armor', 'bundle'];
 const SHAFTS = ['none', 'wood', 'bone', 'iron', 'steel', 'bronze', 'crystal', 'shadow', 'vine', 'gold'];
 const HEADS = ['none', 'blade', 'curved_blade', 'axe_head', 'hammer_head', 'spear_point', 'orb', 'crystal', 'skull', 'gem', 'cross', 'flame', 'horn', 'book_cover', 'vial', 'key_bit', 'coin_pile', 'lantern_cage'];
 const ITEM_ORNAMENTS = ['none', 'runes', 'wrap', 'chain', 'feathers', 'spikes', 'gems', 'ribbon', 'rust', 'holy_sigil', 'shadow_wisp'];
@@ -62,7 +62,11 @@ function normalizeStructureAssembly(raw, shapeHint, name) {
   const n = String(name || '').toLowerCase();
   let kit = pick(ARCH_KITS, a.kit, null);
   if (!kit) {
-    if (/arch/.test(n) || shapeHint === 'arch') kit = 'arch';
+    if (/sarcophag|coffin|casket/.test(n)) kit='sarcophagus';
+    else if (/stone.?tablet|inscribed.?tablet|stele/.test(n)) kit='stone_tablet';
+    else if (/grave|headstone/.test(n)) kit='gravestone';
+    else if (/tomb/.test(n)) kit='chest_tomb';
+    else if (/arch/.test(n) || shapeHint === 'arch') kit = 'arch';
     else if (/collapsed|broken.?column|broken.?pillar|toppled/.test(n) || shapeHint === 'broken_column') kit = 'broken_pillar';
     else if (/pillar|column|colonnade/.test(n) || shapeHint === 'column') kit = 'pillar';
     else if (/altar|shrine/.test(n) || shapeHint === 'slab') kit = 'altar';
@@ -138,6 +142,7 @@ function normalizeItemAssembly(raw, item) {
   const n = String(item && item.name || '').toLowerCase();
   const t = String(item && item.type || '').toLowerCase();
   let kind = pick(ITEM_KINDS, a.kind, null);
+  if(!kind&&t==='other')kind=/\b(book|spellbook|tome|grimoire|codex|ledger|journal|chronicle)\b/.test(n)?'book':/\b(map|chart|atlas)\b/.test(n)?'map':/\b(scroll|parchment)\b/.test(n)?'scroll':null;
   if (!kind) {
     const map = [
       ['sword', /sword|blade|sabre|scimitar|katana|claymore|rapier/], ['dagger', /dagger|knife|dirk|stiletto/],
@@ -239,7 +244,7 @@ function normalizeItemAssembly(raw, item) {
 function kitToShape(kit) {
   const m = {
     arch: 'arch', pillar: 'column', broken_pillar: 'broken_column', altar: 'slab', statue: 'statue', obelisk: 'spire',
-    sarcophagus: 'slab', brazier: 'bowl', fountain: 'bowl', pool: 'pool', tree: 'tree', dead_tree: 'tree', fungi: 'cluster',
+    sarcophagus: 'slab', stone_tablet:'slab', gravestone:'slab', chest_tomb:'block', brazier: 'bowl', fountain: 'bowl', pool: 'pool', tree: 'tree', dead_tree: 'tree', fungi: 'cluster',
     vines: 'hanging', banner: 'banner', tapestry: 'banner', rubble: 'mound', bones: 'pile', crystal: 'crystal',
     stalagmite: 'stalagmite', bookshelf: 'frame', table: 'table', barrel: 'barrel', chest: 'block', generic: 'block'
   };

@@ -35,7 +35,7 @@ const {
 
 // Save the room's scene spec in the room-name database under its coordinates so
 // prose checks and later visits read the same structured scene.
-const { applySceneGraphics, placeSceneLandmarks, placeSceneObjects } = require('./sceneRoomBuilder.js');
+const { applySceneGraphics, applySurfaceArt, placeSceneLandmarks, placeSceneObjects } = require('./sceneRoomBuilder.js');
 const { applySceneArchitecture } = require('./sceneArchitecture.js');
 const { applySceneRoofs } = require('./sceneRoofs.js');
 const { prepareSceneGeography, applySceneGeography } = require('./sceneGeography.js');
@@ -63,6 +63,8 @@ const { buildEnvironment } = require('../assets/dungeonEnvironment');
 const LivingEnvironments = require('../assets/livingEnvironments');
 const { generateDesign: generatePhysicalPuzzleDesign } = require('./physicalPuzzleDesign');
 const { prepare: preparePhysicalPuzzleAction, bindTask: bindPhysicalPuzzleTask } = require('./physicalPuzzleActions');
+const ReadableItems = require('../assets/readableItems');
+const {prepare:prepareReadableAction} = require('./readableActions');
 const Inhabitants = require('../assets/dungeonInhabitants');
 const { createPopulationService, prepareEntryQuestContact } = require('./roomPopulation');
 const { generateInhabitants, needsQuestIntroduction } = require('./inhabitantGeneration');
@@ -115,6 +117,7 @@ function computeDungeonGeometryStamp(dungeon, geoKey) {
     if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
   }
   mix(JSON.stringify(dungeon.sceneStructures || []));
+  if(dungeon.surfaceArt?.length)mix(JSON.stringify(dungeon.surfaceArt));
   return `${keys.length}:${(hash >>> 0).toString(16)}`;
 }
 
@@ -948,6 +951,8 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   }
 
   // Mechanical puzzle commands never enter a model session unless this action just solved it.
+  const readableResult=options.realtimeEncounter?null:await tryReadableItemAction(userInput);
+  if(readableResult)return readableResult;
   const physicalPuzzleResult = options.realtimeEncounter ? null : await tryPhysicalPuzzleAction(userInput);
   options.onPhysicalPuzzlePrepared?.(physicalPuzzleResult);
   if (physicalPuzzleResult && !physicalPuzzleResult.completed) return physicalPuzzleResponse(physicalPuzzleResult);
@@ -4460,6 +4465,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     }
 
     dungeon.puzzleBuildReport = LivingEnvironments.install(dungeon, sceneSpec);
+    dungeon.surfaceArtReport = applySurfaceArt(dungeon,sceneSpec);
     console.info('[PuzzleConstruction]', geoKey, JSON.stringify(dungeon.puzzleBuildReport));
     logDungeonConstruction('landmarks-and-objects', dungeon);
     dungeon.sceneSpec = sceneSpec;
@@ -6188,6 +6194,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       seed: `${sharedState.getDungeonRunId()}:${coordKey}:${diversitySeed}`, recentKinds
     });
     const puzzleText = LivingEnvironments.prose(definition);
+    updatedGameConsole=ReadableItems.spawn(definition,currentRoomData,updatedGameConsole);
     puzzleInRoom = puzzleText.description;
     puzzleSolution = puzzleText.solution;
     environmentDescription = puzzleInRoom;
@@ -7552,6 +7559,31 @@ function dropMonsterItemsToRoom(targetMonster) {
         sharedState.setRoomNameDatabase(JSON.stringify(db));
     }
     console.info?.('[MonsterLoot]', JSON.stringify({ monster: targetMonster.name, dropped: [...dropped.keys()] }));
+}
+
+async function tryReadableItemAction(userInput) {
+    if(!ReadableItems.intent(userInput))return null;
+    const coords=sharedState.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`;
+    if(Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:[ \t]*(.*)$/m)?.[1])!==geoKey)return null;
+    const database=JSON.parse(sharedState.getRoomNameDatabase()||'{}'),dungeon=sharedState.getRoomDungeon(coords);
+    const actor=JSON.parse(sharedState.getCombatCharactersString()||'[]').find(c=>c.type==='pc');
+    const plan=prepareReadableAction({input:userInput,consoleText:updatedGameConsole,database,dungeon,actor,geoKey});
+    if(!plan)return null;
+    if(plan.allowed){
+        const room=database[geoKey];
+        if(room){room.readableFocus||={};room.readableFocus[actor.name]=plan.record.mechanismId+':'+plan.record.id;sharedState.setRoomNameDatabase(JSON.stringify(database));}
+        CampaignMemory.add(sharedState,Inhabitants.splitSpeech(plan.message,600,100).map((text,i)=>({id:`read:${plan.record.mechanismId}:${plan.record.id}:${actor.name}:${plan.inspect?'cover':plan.chapter}:${i}`,
+          runId:sharedState.getDungeonRunId(),at:Date.now(),
+          kind:'activity',authority:'state',source:'stored-readable-metadata',roomKey:geoKey,roomName:database[geoKey]?.name,
+          actors:[actor.name],witnesses:[actor.name],turn:Number(updatedGameConsole.match(/^Turns:[ \t]*(\d+)/m)?.[1])||0,
+          text:`Read "${plan.record.title}": ${text}`})),broadcast);
+    }
+    const chunks=Inhabitants.splitSpeech(plan.message,600,100);
+    for(const [i,message]of chunks.entries())ActionFeedback.publish(broadcast,sharedState,{id:`read:${Date.now()}:${i}`,
+      kind:'document-read',title:plan.record?.title||'Reading',message,result:plan.allowed?'observed':'blocked',actor:actor?.name});
+    console.info('[ReadableRead]',JSON.stringify({geoKey,name:plan.record?.name,chapter:plan.chapter,allowed:plan.allowed,source:'stored-metadata',apiCall:false}));
+    return {content:plan.message,updatedGameConsole:sharedState.getUpdatedGameConsole(),combatCharactersString:sharedState.getCombatCharactersString(),
+      roomNameDatabaseString:sharedState.getRoomNameDatabase(),actionOnly:true,readableItem:true};
 }
 
 async function tryPhysicalPuzzleAction(userInput) {
@@ -11969,6 +12001,7 @@ try {
     console.error('[SceneGfx] landmark placement failed:', e);
   }
   dungeon.puzzleBuildReport = LivingEnvironments.install(dungeon, sceneSpec);
+  dungeon.surfaceArtReport = applySurfaceArt(dungeon,sceneSpec);
   console.info('[PuzzleConstruction]', geoKey, JSON.stringify(dungeon.puzzleBuildReport));
   logDungeonConstruction('landmarks-and-objects', dungeon);
   // UPDATED: Pass customTiles to sharedState

@@ -658,6 +658,20 @@
       };
     },
 
+    getSurfaceArtMesh(art,textures) {
+      const img=textures[art.tile];
+      if(!window.SurfaceArt||!isTextureReady(img))return null;
+      this.surfaceArtMeshes ||= new Map();
+      const key=[art.tile,art.axis,art.surface,art.sign].join('|');
+      if(this.surfaceArtMeshes.has(key))return this.surfaceArtMeshes.get(key);
+      const canvas=document.createElement('canvas');canvas.width=144;canvas.height=96;
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.imageSmoothingEnabled=false;
+      ctx.drawImage(img,0,0,144,96);
+      const mesh=window.SurfaceArt.mesh(ctx.getImageData(0,0,144,96),art.axis,art.surface,art.sign);
+      const record=this._createCharacterGpuMeshRecord(mesh,[.2,.18,.15],[.6,.5,.4],[1,.9,.7],{toonSteps:5});
+      this.surfaceArtMeshes.set(key,record);return record;
+    },
+
     getCharacterVoxelMesh(character, frameIndex = 0, facing = 'left', opts = {}) {
       const worldSpec = this._getActorWorldSpec(character);
       if (!character || !character.sprite || !worldSpec || !this.gl) return null;
@@ -869,7 +883,7 @@
     buildVoxelGrid(tileName, dungeon, size = 16) {
       const spec = window.PhysicalPuzzles?.visualSpec(dungeon, tileName) || dungeon.tiles?.[tileName]?.spriteSpec;
       const shape = spec?.voxelShape;
-      const shaped = shape && window.ScenePropVoxels?.build(shape, size, spec.voxelSeed || 0, spec.puzzleFace);
+      const shaped = shape && window.ScenePropVoxels?.build(shape, size, spec.voxelSeed || 0, {...spec.puzzleFace,sculpture:spec.sculpture || spec.puzzleFace?.sculpture,shrine:spec.shrine});
       if (shaped) return shaped;
       const voxels = new Uint8Array(size * size * size);
       const setVoxel = (x, y, z) => {
@@ -1390,7 +1404,10 @@
       if (cached && cached._debugKey === debugKey) return cached;
 
       // If debug key changed, drop the old cached mesh so we actually rebuild it.
-      if (cached) delete this.voxelMeshes[tileName];
+      if (cached) {
+        for (const part of cached.passes || [cached]) { this.gl.deleteBuffer(part.vbo); this.gl.deleteBuffer(part.ibo); }
+        delete this.voxelMeshes[tileName];
+      }
 
       const detail = spec.detail || {};
       const tileMeta = this.getCustomTileMeta(tileName, dungeon);
@@ -1476,7 +1493,7 @@
         if (debugSolid) return [1.0, 0.0, 1.0];
         if (spec.voxelShape && window.ScenePropVoxels?.color) {
           return window.ScenePropVoxels.color(spec.voxelShape, x / 16, y / 16, z / 16, normal, primary, material,
-            { textures: voxelTextures, palette: shapePalette, puzzleFace: spec.puzzleFace });
+            { textures: voxelTextures, palette: shapePalette, puzzleFace: spec.puzzleFace,sculpture:spec.sculpture,shrine:spec.shrine,inscription:spec.inscription });
         }
 
       const n = isColumn
@@ -3538,6 +3555,13 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const geometryChanged = this.dungeonGeometryStamp !== geometryStamp;
       const needsVoxelReset = (dungeonObjectChanged || geometryChanged || this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
       if (needsVoxelReset) {
+        for(const record of Object.values(this.voxelMeshes))for(const part of record.passes||[record]){
+          this.gl.deleteBuffer(part.vbo);this.gl.deleteBuffer(part.ibo);
+        }
+        if(dungeonObjectChanged) {
+          for(const record of this.surfaceArtMeshes?.values()||[]){this.gl.deleteBuffer(record.vbo);this.gl.deleteBuffer(record.ibo);}
+          this.surfaceArtMeshes=new Map();
+        }
         this.voxelMeshes = {};
         this.voxelPaletteKey = paletteKey;
         this._cancelVoxelPrewarmJob();
@@ -4470,7 +4494,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const wx = playerX + dx;
           const wy = playerY + dy;
           const cell = dungeon.cells?.[`${wx},${wy}`];
-          if (!cell || cell.tile !== 'torch') continue;
+          if (!cell)continue;
+          if(cell.tile!=='torch'){
+            const spec=dungeon.tiles[cell.tile]?.spriteSpec,sites=window.ScenePropVoxels?.candleSites(spec?.voxelShape,spec?.shrine)||[];
+            if(sites.length){
+              const width=spec.baseWidth||.7,base=cell.floorHeight||0,height=cell.structureHeight??Math.max(.5,((cell.ceilHeight??base+2)-base)*(spec.heightRatio||1));
+              for(const site of sites){const x=wx+.5+(site.x-.5)*width,y=wy+.5+(site.y-.5)*width;
+                torchLights.push({x,y,z:base+site.z*height,radius:Math.min(TORCH_LIGHT_RADIUS_FLOOR,2.6),intensity:.38*torchFlicker((wx+wy)%7,now),dist2:(x-camX)**2+(y-camY)**2});}
+            }
+            continue;
+          }
 
           const placement = getTorchPlacement(wx, wy, cell);
           const worldX = placement.lightX;
@@ -5093,6 +5126,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             p.y + s.y < playerY - partRange || p.y > playerY + partRange + 1) continue;
         const mesh = this.getVoxelMesh(part.tile, dungeon);
         if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: p, modelScale: s });
+      }
+      for(const art of dungeon.surfaceArt || []){
+        const p=art.position,s=art.size,x=Math.max(p.x,Math.min(p.x+s.x,playerX)),y=Math.max(p.y,Math.min(p.y+s.y,playerY));
+        if(Math.hypot(x-playerX,y-playerY)>VOXEL_VIS_RADIUS)continue;
+        const mesh=this.getSurfaceArtMesh(art,textures);
+        if(mesh)voxelInstances.push({tileName:art.tile,mesh,modelPos:art.position,modelScale:art.size});
       }
       voxelInstances.push(...actorVoxelInstances);
       let visibleVoxelCount = 0;
@@ -6081,7 +6120,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       gl.disable(gl.BLEND);
 
-      const wantsAnimation = torchLights.length > 0 || sprites.some((spr) => spr.type === 'torch');
+      const puzzleMoving = window.PhysicalPuzzles?.motionActive(dungeon);
+      const wantsAnimation = puzzleMoving || torchLights.length > 0 || sprites.some((spr) => spr.type === 'torch');
       if (wantsAnimation && popup.style.display === 'block') {
         if (!window._dungeonAnimPending) {
           window._dungeonAnimPending = true;
@@ -6090,7 +6130,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             if (popup.style.display === 'block' && typeof window.renderDungeonView === 'function') {
               window.renderDungeonView();
             }
-          }, 90);
+          }, puzzleMoving ? 16 : 90);
         }
       }
 

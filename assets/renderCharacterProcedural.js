@@ -3085,11 +3085,11 @@
   // alpha, binary alpha and a posterized palette. Torch lighting is applied by the voxel shader.
   // world === 'billboard': 3D camera-facing billboards (rendererWebGL.js). Like 'world' (binary alpha, no soft
   // halos) but full colour depth (the sprite shader does torch + distance shading) and optional back view.
-  function renderProceduralPixels(spec, frame, world, view) {
+  function renderProceduralPixels(spec, frame, world, view, assembly) {
     const f = Math.max(0, Math.min(3, frame | 0));
     const bb = world === 'billboard';
     const back = view === 'back' && supportsBackView(spec);
-    const key = (spec.key || '') + '|' + f + (world ? (bb ? '|b' : '|w') : '') + (back ? '|back' : '');
+    const key = (spec.key || '') + '|' + f + (world ? (bb ? '|b' : '|w') : '') + (back ? '|back' : '') + (assembly ? '|assembly' : '');
     if (spec.key && pixelCache.has(key)) return pixelCache.get(key);
     const D = buildContext(spec, f);
     if (back) D.view = 'back';
@@ -3146,6 +3146,7 @@
     }
     // Weapon-hand lock: do not mirror back bitmaps (would move the sword to the other hand).
     const result = { w: GRID, h: GRID, data: out };
+    if(assembly)result.parts=new Uint8Array(px.part);
     if (spec.key) {
       if (pixelCache.size > PIXEL_CACHE_MAX) pixelCache.delete(pixelCache.keys().next().value);
       pixelCache.set(key, result);
@@ -3661,7 +3662,8 @@
     parseConsoleCharacterSheets, parseSheetBlock, parseEquippedLine, normalizeSheet,
     deriveFallbackTraits, normalizeTraitSpec, validateTraitSpec, traitSchemaDescription,
     buildProceduralSpriteSpec, withVariant, isProceduralSpec,
-    renderProceduralPixels, createProceduralCharacterCanvas, createProceduralSheetCanvas, proceduralDataUrl,
+    renderProceduralPixels, renderAssemblyPixels:spec=>renderProceduralPixels(spec,0,false,undefined,true), assemblyParts: Object.freeze({...PART}),
+    createProceduralCharacterCanvas, createProceduralSheetCanvas, proceduralDataUrl,
     createProceduralCharacterSprite,
     spriteFingerprint, fingerprintDistance, traitSignature, traitSignatureDistance, ensureDistinctSpriteSpec,
     PRESET_TRAITS, getPresetProceduralSpec, isPresetName: (n) => !!presetKeyOf(n),

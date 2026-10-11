@@ -11,8 +11,9 @@ const clone = a => JSON.parse(JSON.stringify(a));
 function definition(kind = 'alignment') {
   return P.compile({ kind, title: 'The Survey Archive', context: 'A brass survey instrument records the old routes.',
     lore: 'The survey records an old stair beneath the temple, not a newly created exit.',
-    controls: ['West', 'Middle', 'East'].map((s, i) => ({ id: s.toLowerCase(), label: `${s} ${kind === 'sequence' ? 'button' : kind === 'alignment' ? 'dial' : 'lever'}`,
-      mark: ['Crown', 'Eye', 'Star'][i], options: ['Sun', 'Moon', 'Wave'], initial: 0, goal: kind === 'channels' ? (i + 1) % 2 : i })),
+    controls: ['West', 'Middle', 'East'].map((s, i) => ({ id: s.toLowerCase(), label: `${s} ${P.toolbox().mechanics[kind].suffix}`,
+      mark: ['Crown', 'Eye', 'Star'][i], options: ['Sun', 'Moon', 'Wave'], initial: 0, goal: ['channels','interlock'].includes(kind) ? (i + 1) % 2 : i })),
+    ...(kind==='interlock'?{couplings:[['west'],['middle'],['east']]}:{}),
     order: ['east', 'west', 'middle'], exhaustionLimit: 4 });
 }
 function room(size = 32) {
@@ -57,7 +58,7 @@ for (const kind of P.KINDS) test(`${kind}: matching description, solution, contr
 });
 for (const kind of P.KINDS) test(`${kind}: correct manipulations commit XP once, even after search exhaustion, and preserve locks`, () => {
   const f = fixture(kind); let result;
-  if (kind === 'sequence') for (const id of f.p.order) result = f.act(id);
+  if (['sequence','harmonics'].includes(kind)) for (const id of f.p.order) result = f.act(id);
   else for (const c of f.p.controls) if (c.initial !== c.goal) result = f.act(c.id, c.goal);
   assert.equal(result.metadata.source, 'verified-physical-mechanism'); assert.equal(result.metadata.result, 'success');
   assert.equal(f.db()['0,0,0'].puzzleMechanism.state.status, 'complete'); assert.match(f.console(), /XP: 350/);
@@ -134,12 +135,12 @@ for (const patch of [{ controls: [] }, { order: ['absent'] }, { kind: 'riddle' }
   test(`invalid design cannot become an invisible puzzle: ${JSON.stringify(patch)}`, () => assert.throws(() => P.compile({ ...definition('sequence'), ...patch })));
 test('the retired ash/ember/bone design is rejected; seeded fallback varies its mechanism', () => {
   const p = definition('sequence'); p.controls.forEach((c, i) => { c.mark = ['Ash', 'Ember', 'Bone'][i]; }); assert.throws(() => P.compile(p), /retired/);
-  assert.equal(new Set(Array.from({ length: 20 }, (_, i) => P.fallback(`seed-${i}`).kind)).size, 3);
+  assert.equal(new Set(Array.from({ length: 40 }, (_, i) => P.fallback(`seed-${i}`).kind)).size, 7);
 });
 test('one generated metadata response supplies both description and solution; malformed designs retry then fall back', async () => {
   let calls = 0; const prompts = [];
   const agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); }, assistant: { generation: async ({ maxTokens }) => {
-    assert.equal(maxTokens, 1500); calls++; return { content: JSON.stringify(definition()) };
+    assert.equal(maxTokens, 4200); calls++; return { content: JSON.stringify(definition()) };
   } } };
   const context = { roomName: 'Archive', seed: 'test', quest: 'Recover the existing artifact.' };
   assert.equal((await generateDesign(agent, context)).id, definition().id); assert.equal(calls, 1);
@@ -165,7 +166,10 @@ test('normal narrative and quest processing remain after physical actions; no se
   assert.match(source, /physicalPuzzleResult \? \{ runSimulation: false \}/);
   assert.match(source, /seedAndManageQuest\(\$, updatedGameConsole, userInput\)/);
   assert.doesNotMatch(fs.readFileSync('assets/index.html', 'utf8'), /livingEnvironmentUi\.js/);
-  assert.doesNotMatch(fs.readFileSync('assets/worldInteractionUi.js', 'utf8'), /createElement\('button'\)|living-environment\/interact/);
+  const interactions=fs.readFileSync('assets/worldInteractionUi.js','utf8');
+  assert.doesNotMatch(interactions,/living-environment\/interact/);
+  assert.equal((interactions.match(/createElement\('button'\)/g)||[]).length,1);
+  assert.match(interactions,/read\.textContent='Read'/); // The only added button belongs to the existing item Take popup.
 });
 
 test('retiring the separate seal puzzle retains existing environmental prop dressing', () => {

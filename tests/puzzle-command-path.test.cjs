@@ -8,6 +8,7 @@ const { buildInitialGameConsole, buildInitialWorldConsole } = require('../retort
 const source = fs.readFileSync('retort/retortWithUserInput.js', 'utf8').replace(/\r\n/g, '\n');
 const slice = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 const helpers = slice('async function tryPhysicalPuzzleAction(', 'async function tryDungeonDoorAction(');
+const readableHelpers=slice('async function tryReadableItemAction(', 'async function tryPhysicalPuzzleAction(');
 const commit = slice('function processGameUpdate(', 'async function adjudicateActionWithCodeInterpreter(');
 const dispatch = slice('  // Mechanical puzzle commands never enter a model session', "  let dialogueParts = personalNarrative.split");
 const quiet = { log() {}, info() {}, warn() {}, error() {} };
@@ -34,11 +35,12 @@ function fixture(kind = 'alignment') {
     getCombatCharactersString: () => JSON.stringify(state.roster), setCombatCharactersString: value => state.roster = JSON.parse(value),
     getUpdatedGameConsole: () => state.text, setUpdatedGameConsole: value => state.text = value };
   const context = { sharedState, Inhabitants: I, PhysicalPuzzles: P, ActionFeedback: Feedback, preparePhysicalPuzzleAction: Actions.prepare,
+    ReadableItems:require('../assets/readableItems'),prepareReadableAction:require('../retort/readableActions').prepare,
     bindPhysicalPuzzleTask: Actions.bindTask, ...Progress, applyAdditionalOutcomes: State.applyAdditionalOutcomes, parseSheets,
     console: quiet, broadcast: event => state.events.push(event),
     finalizeRoomDungeon: (_key, d) => ({ ...d, _geometryStamp: `revision-${d.physicalPuzzle.state.revision}` }) };
   const build = vm.compileFunction(`let updatedGameConsole = sharedState.getUpdatedGameConsole(); let roomNameDatabaseString = '';
-    ${commit}\n${helpers}
+    ${commit}\n${readableHelpers}\n${helpers}
     return async function(userInput, options = {}) { ${dispatch}
       state.narrationCalls++; return { newlyCompleted: physicalPuzzleResult }; };`, [...Object.keys(context), 'state']);
   const command = build(...Object.values(context), state);

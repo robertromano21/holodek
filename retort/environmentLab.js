@@ -1,5 +1,5 @@
 'use strict';
-const { applySceneGraphics, placeSceneLandmarks } = require('./sceneRoomBuilder');
+const { applySceneGraphics, applySurfaceArt, placeSceneLandmarks } = require('./sceneRoomBuilder');
 const { applySceneArchitecture } = require('./sceneArchitecture');
 const { applySceneRoofs } = require('./sceneRoofs');
 const { prepareSceneGeography, applySceneGeography } = require('./sceneGeography');
@@ -21,6 +21,11 @@ const descriptions = {
   puzzle_buttons: 'A stone archive has a readable procession plaque, marked push buttons and a closed reading cabinet.',
   puzzle_dials: 'A surveyor workshop has three-position rotating dials, an engraved reference relief and a reading cabinet.',
   puzzle_channels: 'A sluice workshop has channel levers, an engraved water diagram and a reading cabinet.',
+  puzzle_interlock: 'A stone shrine of Atinus has linked bronze levers, a carving of their rods and a counterweight gate.',
+  puzzle_sliding: 'A draconic archive has heavy stone blocks moving on three-position tracks and a carved mosaic receiver.',
+  puzzle_balance: 'A shrine of Atricles has reusable stone weights and a counterweighted ancestral effigy.',
+  puzzle_harmonics: 'A shrine of Musydius has bronze chimes, a carved score and an echo beacon.',
+  shrine_art: 'A shrine gallery of Mortacia, Atinus, Poena and the Earthdragon contains selective frescoes, draconic carvings and marble effigies, beside an open walkway.',
   exteriors: 'The crossroads has no roof. Beneath a yellow sky, flat ash flagstones lead north to Ruined Temple Entrance and east to Basalt Gatehouse. Each known destination has stone shell walls, paired towers, one physical entrance and a clear walking perimeter. The green floor markers identify the only entrances; the rear and side walls remain closed.',
   deadwood: 'An open grove of Tartarus contains pale hollow trees, lightning-split snags, wind-bent dead trees, dead willows, skeletal pines, twisted yews and rootbound trees. Thorn bushes, bramble patches and ash reeds surround clear walking trails.',
   geography: 'An open mountain pass of Tartarus rises into craggy peaks above a deep canyon and a rocky escarpment. Boulders and rock faces stand beside a traversable mountain approach. A canyon descent leads toward a crypt entrance below.',
@@ -53,7 +58,7 @@ const descriptions = {
   bathhouse: 'Inside a Roman bathhouse, thin-brick walls surround a barrel-vaulted bathing hall and an open courtyard. Fluted columns, a pool, marble sarcophagi and fallen arch fragments stand beside the hall.',
   rubble: 'An open ruined quarry of broken masonry, fallen arch fragments, scree, rubble heaps and stalagmites, surrounded by rough-stone masonry walls.',
   forge: 'An abandoned foundry of brick walls and ash flagstones. A furnace, iron braziers, broken arches and heaps of slag flank a stone working court.',
-  graves: 'A ruined burial temple with marble arches, engraved gravestones, a stone altar, fallen masonry and a dead tree beside the sanctuary.',
+  graves: 'A ruined burial temple with marble arches, engraved gravestones, upright inscribed stone tablets, raised chest tombs and closed effigy sarcophagi. A stone altar and a dead tree stand beside the sanctuary.',
   grove: 'An open dead grove with calcified roots, a bone tree, a charred tree, cypresses and willows. Pools collect among the gravestones.',
   gallery: 'An open garden of Tartarus: oaks, pines, willows, cypresses, dead trees, bone trees, charred trees and giant mushroom trees surround furnaces, altars, gravestones, braziers, pools, crystal clusters, rubble and roots.'
 };
@@ -75,7 +80,7 @@ const props = {
   bathhouse: ['fluted_column', 'pool', 'sarcophagus', 'fallen_arch', 'archway'],
   rubble: ['broken_masonry', 'fallen_arch', 'scree', 'rubble', 'stalagmite', 'stump'],
   forge: ['furnace', 'brazier', 'archway', 'rubble', 'furnace', 'brazier'],
-  graves: ['tomb', 'altar', 'archway', 'dead_tree', 'tomb', 'crystal_cluster'],
+  graves: ['gravestone', 'stone_tablet', 'chest_tomb', 'sarcophagus', 'altar', 'archway', 'dead_tree'],
   grove: ['dead_tree', 'bone_tree', 'charred_tree', 'cypress', 'willow', 'roots', 'pool', 'tomb'],
   gallery: ['oak', 'pine', 'willow', 'cypress', 'dead_tree', 'bone_tree', 'charred_tree', 'mushroom_tree', 'furnace', 'tomb', 'brazier', 'pool', 'altar', 'archway', 'crystal_cluster', 'rubble', 'roots', 'stump']
 };
@@ -361,6 +366,8 @@ function buildEnvironmentLab(kind, options = {}) {
   spec.indoor = !['exteriors', 'deadwood', 'geography', 'grove', 'gallery', 'rubble', 'amphitheater', 'theater', 'circus', 'forum', 'aqueduct'].includes(kind);
   spec.livingTheme = kind === 'gallery' ? 'grove' : kind;
   spec.landmarks = [...new Set(props[kind] || [])].map(type => ({ type, label: type, count: 1, condition: [], placement: 'scattered' }));
+  if(kind==='shrine_art')spec.landmarks=['Mortacia','Atinus','Poena','Dyanetzia'].map((deity,i)=>({type:'carved_statue_'+i,label:deity+' shrine',count:1,condition:[],
+    sculpture:{deity,label:deity+' shrine',pose:['offering','guardian','invocation','contemplative'][i],head:'bare',robe:'pleated',attribute:'none',motif:'Eye'}}));
   if (kind === 'geography') spec.exits = spec.source.exits = ['up', 'down'];
   prepareSceneGeography(spec, kind === 'geography' ? {
     '0,0,1': { name: 'Mountain Summit', indoor: false, classification: { indoor: false, biome: 'mountain' } },
@@ -409,15 +416,22 @@ function buildEnvironmentLab(kind, options = {}) {
   if (kind === 'deadwood') { DungeonExits.install(dungeon); applySceneVegetation(dungeon, spec); }
   if (kind.startsWith('puzzle_')) {
     const design = Living.fallback(kind, 'the workshop');
-    design.kind = { puzzle_buttons: 'sequence', puzzle_dials: 'alignment', puzzle_channels: 'channels' }[kind];
-    const suffix = { sequence: 'button', alignment: 'dial', channels: 'lever' }[design.kind];
+    design.kind = { puzzle_buttons:'sequence',puzzle_dials:'alignment',puzzle_channels:'channels',puzzle_interlock:'interlock',puzzle_sliding:'sliding',puzzle_balance:'balance',puzzle_harmonics:'harmonics' }[kind];
+    design.moduleKit = {sequence:'procession_altar',alignment:'lunar_orrery',channels:'forgotten_sluice',interlock:'counterweight_gate',sliding:'sliding_relief',balance:'oath_scales',harmonics:'echo_chimes'}[design.kind];
+    delete design.couplings;
+    const suffix = Living.toolbox().mechanics[design.kind].suffix;
     design.controls.forEach((c, i) => Object.assign(c, { label: `${c.mark} ${suffix}`, options: ['Sun', 'Wave', 'Moon'],
-      goal: design.kind === 'channels' ? (i + 1) % 2 : (i + 1) % 3, initial: 0 }));
+      goal: ['channels','interlock'].includes(design.kind) ? (i + 1) % 2 : (i + 1) % 3, initial: 0 }));
+    if(design.kind==='interlock')design.couplings=design.controls.map((c,i)=>[c.id,...(i===1?[design.controls[0].id]:[])]);
     design.order = design.controls.map(c => c.id);
     spec.puzzleMechanism = Living.compile(design);
     spec.source.puzzle = Living.prose(spec.puzzleMechanism).description;
     dungeon.puzzleBuildReport = Living.install(dungeon, spec);
   }
+  if(kind==='shrine_art')spec.puzzleMechanism={roomArt:[
+    {kind:'fresco',surface:'wall',label:'The White Lady receives the departed',description:'Mortacia shelters souls beneath skeletal dragon wings.',motifs:['Mortacia','skeleton','wraith'],text:'Memory endures.',composition:'judgment'},
+    {kind:'fresco',surface:'wall',label:'Wind over the Earthdragon',description:'Poena coils above Dyanetzia\'s mountains.',motifs:['Poena','Dyanetzia'],text:'The mountain remembers the wind.',composition:'cosmogony'}]};
+  if(kind.startsWith('puzzle_')||kind==='shrine_art')dungeon.surfaceArtReport=applySurfaceArt(dungeon,spec);
   dungeon.environment = buildEnvironment(dungeon);
   dungeon._geometryStamp = `lab-${kind}-v6`;
   return dungeon;

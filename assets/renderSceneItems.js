@@ -29,7 +29,8 @@
     ['armor', /\b(armou?r|mail|breastplate|cuirass|robe|cloak|mantle|tunic|vest)\b/],
     ['amulet', /\b(amulet|necklace|pendant|talisman|locket|medallion|torc|charm)\b/],
     ['ring', /\b(ring|band|signet)\b/],
-    ['book', /\b(book|tome|ledger|grimoire|codex|journal|diary|manual|bible|chronicle|almanac)\b/],
+    ['book', /\b(book|spellbook|tome|ledger|grimoire|codex|journal|diary|manual|bible|chronicle|almanac)\b/],
+    ['map', /\b(map|chart|atlas)\b/],
     ['scroll', /\b(scroll|parchment|map|letter|note|page|deed|charter|missive)\b/],
     ['potion', /\b(potion|vial|flask|elixir|philter|phial|tonic|draught|bottle|brew)\b/],
     ['gem', /\b(gem|jewel|shard|crystal|stone|diamond|ruby|emerald|sapphire|opal|pearl|eye|heart)\b/],
@@ -44,6 +45,7 @@
   ];
   function itemKind(item) {
     const n = String(item && item.name || '').toLowerCase();
+    const readable=readableKind(item);if(readable)return readable;
     for (const [k, re] of KINDS) if (re.test(n)) return k;
     const t = String(item && item.type || '').toLowerCase();
     if (/weapon/.test(t)) return 'sword';
@@ -54,6 +56,12 @@
     if (/amulet|jewel/.test(t)) return 'amulet';
     if (/book|scroll/.test(t)) return 'book';
     return 'bundle';
+  }
+  function readableKind(item){
+    if(String(item?.type||'').toLowerCase()!=='other')return null;
+    const name=String(item.name||'').toLowerCase();
+    return /\b(book|spellbook|tome|grimoire|codex|ledger|journal|chronicle)\b/.test(name)?'book':
+      /\b(map|chart|atlas)\b/.test(name)?'map':/\b(scroll|parchment)\b/.test(name)?'scroll':null;
   }
   // material tint from words in the name
   const MATS = [
@@ -72,7 +80,7 @@
     const a = item && item.assembly;
     if (a && a.kind) {
       return {
-        kind: a.kind, shaft: a.shaft, head: a.head, material: a.material, size: a.size, ornament: a.ornament,
+        kind: readableKind(item)||a.kind, shaft: a.shaft, head: a.head, material: a.material, size: a.size, ornament: a.ornament,
         mat: a.color || null, accent: a.accent || null,
         glow: a.glow || null, magic: Math.max(0, Number(item.magic) || 0), seed: h, assembled: true
       };
@@ -196,6 +204,13 @@
         break;
       }
       case 'scroll': b.rect(9, 9, 14, 14, [222, 206, 168]); b.rect(7, 8, 18, 3, [196, 176, 136]); b.rect(7, 22, 18, 3, [196, 176, 136]); for (let y = 13; y < 21; y += 2) b.rect(11, y, 6 + (y * 7 % 5), 1, [120, 96, 70]); b.put(16, 24, [160, 30, 30]); break;
+      case 'map': {
+        b.rect(6,8,21,18,[221,205,166]);b.rect(7,9,19,16,[238,223,186]);
+        b.line(10,13,15,11,[107,114,78],1);b.line(15,11,20,15,[107,114,78],1);b.line(20,15,18,22,[107,114,78],1);
+        b.line(11,21,18,15,[108,128,143],1);b.line(18,15,23,19,[108,128,143],1);
+        b.line(21,10,21,14,[130,76,63],1);b.line(19,12,23,12,[130,76,63],1);
+        for(const x of [13,18,24])b.line(x,8,x,25,[183,165,127],1);break;
+      }
       case 'potion': {
         const liq = look.glow ? rgb(look.glow) : accent; b.rect(14, 5, 4, 2, [140, 100, 60]); b.rect(14, 7, 4, 4, [200, 220, 230]);
         b.disc(16, 19, 7, [200, 220, 230]); b.disc(16, 20, 6, liq, true); b.put(13, 16, [255, 255, 255]); b.put(13, 17, [255, 255, 255]);

@@ -43,6 +43,14 @@
   }
   function candidates(dungeon, player) {
     const result = [], e = dungeon.physicalPuzzle, P = root.PhysicalPuzzles;
+    for(const art of dungeon.surfaceArt || []){
+      const p=art.position,s=art.size,x=Math.max(p.x,Math.min(p.x+s.x,player.x)),y=Math.max(p.y,Math.min(p.y+s.y,player.y)),distance=Math.hypot(x-player.x,y-player.y);
+      if(distance>18)continue;
+      const near=distance<2.25;
+      result.push({type:'art',key:art.key,x,y,width:Math.max(s.x,s.y),height:s.z,label:art.label,enabled:near,
+        box:{...p,sx:Math.max(.03,s.x),sy:Math.max(.03,s.y),sz:Math.max(.03,s.z)},
+        command:'examine',detail:near?art.description:'',art,hint:near?'':'Walk closer to examine'});
+    }
     for (const f of e?.fixtures || []) {
       const [x, y] = f.key.split(',').map(Number), i = e.definition.controls.findIndex(c => c.id === f.id);
       if (Math.hypot(x + .5 - player.x, y + .5 - player.y) > 18) continue;
@@ -80,11 +88,12 @@
         const label = placed?.label || tile?.landmark?.label || placed?.type || tile?.landmark?.type || spec.voxelShape || (cell.tile === 'pillar' ? 'Pillar' : 'Stonework');
         props.push({ type: 'prop', key, x: x + dx + .5, y: y + dy + .5, width: spec.baseWidth || .7,
           height: cell.structureHeight ?? Math.max(.5, ((cell.ceilHeight ?? 2) - (cell.floorHeight || 0)) * (spec.heightRatio || 1)),
-          label: String(label).replace(/_/g, ' '), enabled: false });
+          label: String(label).replace(/_/g, ' '), inscription:spec.inscription, enabled: false });
       }
       propCache = { dungeon, stamp, props };
     }
-    result.push(...propCache.props);
+    result.push(...propCache.props.map(p=>p.inscription?{...p,enabled:Math.hypot(p.x-player.x,p.y-player.y)<=2.5,
+      command:'read '+p.inscription.name,hint:'Walk closer to read'}:p));
     return result;
   }
   function pick(dungeon, camera, player, u, v) {
@@ -92,9 +101,11 @@
         u < 0 || u > 1 || v < 0 || v > 1) return null;
     const dir = ray(camera, u, v), hits = [];
     for (const target of candidates(dungeon, player)) {
+      if(target.type==='art'&&target.art.surface==='wall'&&['x','y'].includes(target.art.axis)&&
+        (camera[target.art.axis]-target.art.position[target.art.axis])*(target.art.sign||-1)<0)continue;
       const z = dungeon.cells[target.key]?.floorHeight || 0;
       const distance = intersect({ x: camera.x, y: camera.y, z: camera.eyeZ }, dir,
-        { x: target.x - target.width / 2, y: target.y - target.width / 2, z, sx: target.width, sy: target.width, sz: target.height });
+        target.box || { x: target.x - target.width / 2, y: target.y - target.width / 2, z, sx: target.width, sy: target.width, sz: target.height });
       if (distance !== null && visible(dungeon, camera, dir, distance, target)) hits.push({ ...target, distance });
     }
     return hits.sort((a, b) => a.distance - b.distance)[0] || null;
@@ -131,7 +142,7 @@
     frame.canvas.draggable = false;
     if (caption) {
       caption.hidden = !target;
-      const text = target ? `${target.label}${target.detail ? ' - ' + target.detail : target.enabled ? ' - Click to ' + (target.type === 'item' ? 'take' : target.command) : target.hint ? ' - ' + target.hint : ''}` : '';
+      const text = target ? `${target.label}${target.detail ? ' - ' + target.detail : target.enabled ? ' - Click to ' + (target.type === 'item' ? 'take' : target.inscription?'read inscription':target.command) : target.hint ? ' - ' + target.hint : ''}` : '';
       if (caption.textContent !== text) caption.textContent = text;
       if (target) positionCaption(text);
     }
@@ -145,9 +156,22 @@
   }
   async function activate(target) {
     if (!target?.enabled || blocked()) return;
+    if(target.type==='art'){
+      root.DungeonActionNotices?.receive?.({id:'art:'+Date.now(),runId:root.dungeonRunId,geoKey:frame.dungeon.geoKey,
+        kind:'art-examined',result:'observed',title:target.label,message:target.art.description+(target.art.text?' '+target.art.text:'')});
+      return;
+    }
     if (target.type === 'item') {
       [...document.querySelectorAll('#phaser-container .clickable-object')].find(e =>
         e.getAttribute('data-object')?.trim().toLowerCase() === target.label.toLowerCase())?.click();
+      const take=document.getElementById('take-button');
+      if(take&&['book','scroll','map'].includes(root.SceneItems?.itemKind(target.item))){
+        const read=document.createElement('button');read.id='read-item-button';read.type='button';read.textContent='Read';
+        read.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();
+          if(root.GameCommandGate?.busy()||root.gamePaused)return;
+          take.closest('.popup-container')?.remove();requestRead(target.label);
+        });take.parentElement.appendChild(read);
+      }
       return;
     }
     const input = document.getElementById('chatuserinput');
@@ -156,6 +180,14 @@
     try { await root.chatbotprocessinput(); }
     catch (error) { console.error('[WorldInteraction]', error); }
     finally { busy = false; }
+  }
+  async function requestRead(name){
+    const input=document.getElementById('chatuserinput');
+    if(busy||root.GameCommandGate?.busy()||root.gamePaused||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
+    busy=true;input.value='read '+String(name).trim();clear();
+    try{await root.chatbotprocessinput();return true;}
+    catch(error){console.error('[ReadableItem]',error);return false;}
+    finally{busy=false;}
   }
   function backpackAt(x, y) {
     return document.elementFromPoint(x, y)?.closest?.('#dungeon-inventory-shortcut') || null;
@@ -266,5 +298,5 @@
     root.addEventListener('blur', cancelDrag);
     document.addEventListener('visibilitychange', () => { if (document.hidden) { pointer = null; cancelDrag(); } });
   }
-  return { ray, intersect, pick, updateFrame, setPresentationCanvas, activate, bind };
+  return { ray, intersect, pick, updateFrame, setPresentationCanvas, activate, requestRead, bind };
 });

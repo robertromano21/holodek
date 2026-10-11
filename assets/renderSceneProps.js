@@ -486,6 +486,24 @@ DRAW.tomb = (P, pal, o, rng) => {
   P.rect(15, 14, 2, 8, pal.dark); P.rect(12, 16, 8, 2, pal.dark);
   if (o.broken) crackLine(P, rng, 18, 9, 12, pal.edge);
 };
+DRAW.gravestone = (P, pal, o, rng) => {
+  DRAW.tomb(P,pal,o,rng);
+  P.rect(12,14,8,11,pal.base);
+  P.ellipse(16,17,3,3,pal.dark);P.rect(13,22,6,1,pal.dark);P.rect(14,25,4,1,pal.dark);
+};
+DRAW.stone_tablet = (P,pal,o,rng) => {
+  P.groundShadow(16,28);P.block(8,5,16,24,pal);P.block(6,28,20,3,pal);
+  P.rect(11,8,10,17,pal.light);
+  for(const y of [11,15,19,23])P.hline(12,19,y,pal.dark);
+  if(o.broken)crackLine(P,rng,20,5,14,pal.edge);
+};
+DRAW.chest_tomb = (P,pal,o,rng) => {
+  P.groundShadow(16,29);P.block(4,15,24,13,pal);P.block(2,12,28,4,pal);
+  for(const x of [7,22])P.block(x,28,3,3,pal);
+  for(const x of [8,21])P.vline(x,18,25,pal.light);
+  P.rect(12,19,8,4,pal.dark);
+  if(o.broken)crackLine(P,rng,23,14,9,pal.edge);
+};
 DRAW.mirror = (P, pal, o) => {
   const g = MATERIAL_PALETTES.gold;
   P.groundShadow(16, 14);
@@ -783,6 +801,12 @@ function drawLandmarkSprite(ctx, createCanvas, type, opts = {}) {
   }
   const usePrim = (opts.prim || opts.assembly) && ((opts.prim && opts.prim.shape) || opts.assembly) && (!key || (opts.prim && opts.prim.color) || opts.assembly || opts.preferPrimitive);
   (usePrim ? DRAW._primitive : (DRAW[key] || DRAW._generic))(P, pal, o, rng);
+  if(opts.inscription){
+    const glyph=require('./puzzleModules').bitmap(opts.inscription.motif||'Skull');
+    const y0=key==='sarcophagus'||key==='chest_tomb'?18:10;
+    P.rect(12,y0,8,9,pal.base);
+    glyph.forEach((row,y)=>[...row].forEach((bit,x)=>{if(bit==='1')P.px(12+x,y0+y,pal.dark);}));
+  }
   // Surface effects only paint on the sprite itself, never on the transparent background.
   sctx.globalCompositeOperation = 'source-atop';
   if (o.overgrown) speckle(P, rng, 4, 14, 24, 17, [MATERIAL_PALETTES.moss.base, MATERIAL_PALETTES.moss.light], 22);
@@ -832,6 +856,9 @@ function landmarkSpriteSpec(type, prim) {
     pillar: { profile: 'cylinder', heightRatio: 1.0, baseWidth: 0.4, gridWidth: 0.4, depth: 0.8, collisionRadius: 0.12 },
     broken_columns: { profile: 'flat', heightRatio: 0.7, baseWidth: 0.8, gridWidth: 0.8, depth: 0.5 },
     sarcophagus: { profile: 'slab', heightRatio: 0.5, baseWidth: 0.9, gridWidth: 0.9, depth: 0.6 },
+    stone_tablet: { profile: 'slab', heightRatio: .55, baseWidth: .8, gridWidth: .8, depth: .4 },
+    gravestone: { profile: 'slab', heightRatio: .65, baseWidth: .8, gridWidth: .8, depth: .4 },
+    chest_tomb: { profile: 'slab', heightRatio: .45, baseWidth: .95, gridWidth: .95, depth: .7 },
     obelisk: { profile: 'block', heightRatio: 1.15, baseWidth: 0.4, gridWidth: 0.4, depth: 0.6, collisionRadius: 0.15 },
     archway: { profile: 'arch', heightRatio: 1.1, baseWidth: 0.9, gridWidth: 0.9, depth: 0.4 },
     throne: { profile: 'flat', heightRatio: 0.9, baseWidth: 0.6, gridWidth: 0.6, depth: 0.5 },

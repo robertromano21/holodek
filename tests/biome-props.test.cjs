@@ -117,6 +117,7 @@ test('real meshes are grounded, non-box, repeatable and distinct across shapes a
 
 test('browser export includes exactly the same catalog and meshes', () => {
   const context = { window: {} };
+  for(const file of ['puzzleModules','shrineIconography','artCharacters','sculptureForms'])vm.runInNewContext(fs.readFileSync(require.resolve('../assets/'+file),'utf8'),context);
   vm.runInNewContext(fs.readFileSync(require.resolve('../assets/scenePropVoxels'), 'utf8'), context);
   const browser = context.window.ScenePropVoxels;
   assert.deepEqual(Array.from(browser.biomeShapes), V.biomeShapes);

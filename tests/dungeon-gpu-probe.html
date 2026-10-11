@@ -7,10 +7,19 @@
 <pre id="results">Running...</pre>
 <script src="../assets/masonryPatterns.js"></script>
 <script src="../assets/voxelMaterials.js"></script>
+<script src="../assets/puzzleModules.js"></script>
+<script src="../assets/puzzleMotion.js"></script>
+<script src="../assets/renderCharacterProcedural.js"></script>
+<script src="../assets/shrineIconography.js"></script>
+<script src="../assets/artCharacters.js"></script>
+<script src="../assets/sculptureForms.js"></script>
+<script src="../assets/frescoDesigns.js"></script>
+<script src="../assets/frescoFigures.js"></script>
+<script src="../assets/surfaceArt.js"></script>
 <script src="../assets/scenePropVoxels.js"></script>
+<script src="../assets/readableItems.js"></script>
 <script src="../assets/physicalPuzzles.js"></script>
 <script src="../assets/sceneExteriorDetails.js"></script>
-<script src="../assets/renderCharacterProcedural.js"></script>
 <script src="../assets/characterMotion3d.js"></script>
 <script src="../assets/rendererWebGL.js"></script>
 <script>
@@ -327,18 +336,56 @@ try {
       card.append(canvas,label); cards.push(card);
     }
   }
-  const puzzleMeshesPass=puzzleMeshes.length===10 && puzzleMeshes.every(m=>m.vertices>0&&m.pixels>100&&m.error===gl.NO_ERROR) &&
+  const puzzleMeshesPass=puzzleMeshes.length===Object.keys(ScenePropVoxels.architecture).filter(s=>s.startsWith('puzzle_')).length && puzzleMeshes.every(m=>m.vertices>0&&m.pixels>100&&m.error===gl.NO_ERROR) &&
     puzzleMeshes.filter(m=>m.shape.includes('dial')).every(m=>m.inkPixels>12 && m.ivoryPixels>12) &&
     ['dial','button','lever','cabinet'].every(type=>{
       const family=puzzleMeshes.filter(m=>m.shape.startsWith('puzzle_'+type+'_'));
       return new Set(family.map(m=>m.hash)).size===family.length;
     });
+  const createCanvas=(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c;};
+  const artImage=createCanvas(144,96);
+  SurfaceArt.paint(artImage.getContext('2d'),createCanvas,{kind:'fresco',label:'The White Lady',motifs:['Mortacia','skeleton'],composition:'apotheosis',text:'Memory endures.'});
+  artImage.complete=true;artImage.naturalWidth=144;artImage.naturalHeight=96;
+  const art={tile:'art-probe',axis:'x',surface:'wall',sign:-1};
+  const artMesh=renderer.getSurfaceArtMesh(art,{'art-probe':artImage});
+  gl.bindBuffer(gl.ARRAY_BUFFER,artMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,artMesh.ibo);
+  for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]){
+    gl.enableVertexAttribArray(attribute);gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+  }
+  gl.uniform3f(pu.modelPos,1,-.4,.15);gl.uniform3f(pu.modelScale,.02,.8,.8);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,artMesh.count,gl.UNSIGNED_SHORT,0);
+  gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
+  let artPixels=0;for(let i=0;i<characterPixels.length;i+=4)if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2])artPixels++;
+  const artPass=artPixels>100&&gl.getError()===gl.NO_ERROR&&renderer.getSurfaceArtMesh(art,{'art-probe':artImage})===artMesh;
+  const motionDungeon={tiles:{motion_dial:{spriteSpec:{voxelShape:'puzzle_dial_1',material:'metal',puzzleFace:{axis:'x',mark:'Crown',option:'Moon',pose:0}}}},visualStyle:{palette:{}}};
+  let oldMesh=null,buffersFreed=true;const motionCounts=new Set();
+  for(let i=0;i<=18;i++){
+    motionDungeon.tiles.motion_dial.spriteSpec.puzzleFace.pose=i/18;
+    const mesh=renderer.getVoxelMesh('motion_dial',motionDungeon);motionCounts.add(mesh.count);
+    if(oldMesh)buffersFreed&&=!gl.isBuffer(oldMesh.vbo)&&!gl.isBuffer(oldMesh.ibo);oldMesh=mesh;
+  }
+  const mechanismMotionPass=buffersFreed&&motionCounts.size>2&&gl.getError()===gl.NO_ERROR;
+  const funeraryMeshes=[];
+  for(const shape of ReadableItems.fixtureTypes){
+    const d={tiles:{[shape]:{spriteSpec:{voxelShape:shape,material:'stone',inscription:{motif:'Dragon'}}}},visualStyle:{palette:{}}};
+    const mesh=renderer.getVoxelMesh(shape,d);
+    gl.bindBuffer(gl.ARRAY_BUFFER,mesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mesh.ibo);
+    for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]){
+      gl.enableVertexAttribArray(attribute);gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+    }
+    gl.uniform3f(pu.modelPos,1,-.4,0);gl.uniform3f(pu.modelScale,.8,.8,.85);
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,mesh.count,gl.UNSIGNED_SHORT,0);
+    gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
+    let pixels=0;for(let i=0;i<characterPixels.length;i+=4)if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2])pixels++;
+    funeraryMeshes.push({shape,vertices:mesh.count,pixels,error:gl.getError()});
+  }
+  const funeraryPass=funeraryMeshes.length===4&&funeraryMeshes.every(m=>m.vertices>0&&m.pixels>100&&m.error===gl.NO_ERROR);
   document.getElementById('results').textContent = JSON.stringify({
     shadersCompiled: true,
     initializationMs, adapter, startupEvents: renderer.startupEvents,
     pass: results.every(result => result.gpuUploadByteMismatches === 0 && result.glError === gl.NO_ERROR) &&
-      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && gatePass && characterMotionPass && puzzleMeshesPass,
-      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass
+      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && mechanismMotionPass && funeraryPass,
+      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass,artPass,artPixels,mechanismMotionPass,funeraryMeshes,funeraryPass
   });
   if (preview) {
     for(const node of document.querySelectorAll('body > canvas, #dungeon-popup, #results')) node.style.display='none';
