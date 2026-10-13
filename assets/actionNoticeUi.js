@@ -62,6 +62,8 @@
       const labels = { success: 'Success', partial: 'Partial Progress', failure: 'Failed', blocked: 'Cannot Do That',
         observed: 'Examined', defeated: 'Defeated', resolved: 'Action Resolved' };
       status.textContent = row.kind === 'puzzle-complete' ? 'Puzzle Solved' : row.kind === 'item-taken' ? 'Item Taken' :
+        row.kind === 'object-discovered' ? 'Object Discovered' :
+        row.kind === 'pursuit' ? 'Pursuit' :
         [clean(row.activity).replace(/([a-z])([A-Z])/g, '$1 $2'), labels[row.result], Number.isFinite(row.roll) ? `d20 ${row.roll}` : ''].filter(Boolean).join(' / ');
       message.textContent = row.message;
       portrait.src = iconFor(row); panel.dataset.kind = row.kind; panel.hidden = false;

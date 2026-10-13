@@ -4,9 +4,12 @@
     typeof module==='object'&&module.exports?require('./shrineIconography'):root.ShrineIconography,
     typeof module==='object'&&module.exports?require('./frescoDesigns'):root.FrescoDesigns,
     typeof module==='object'&&module.exports?require('./frescoFigures'):root.FrescoFigures,
-    typeof module==='object'&&module.exports?require('./artCharacters'):root.ArtCharacters);
+    typeof module==='object'&&module.exports?require('./artCharacters'):root.ArtCharacters,
+    typeof module==='object'&&module.exports?require('./stoneCarvings'):root.StoneCarvings,
+    typeof module==='object'&&module.exports?require('./ancientScripts'):root.AncientScripts,
+    typeof module==='object'&&module.exports?require('./mosaicDesigns'):root.MosaicDesigns);
   if(typeof module==='object'&&module.exports)module.exports=api;else root.SurfaceArt=api;
-})(typeof window==='undefined'?globalThis:window,function(Symbols,Sculptures,Iconography,Designs,Figures,People){
+})(typeof window==='undefined'?globalThis:window,function(Symbols,Sculptures,Iconography,Designs,Figures,People,Carvings,Scripts,Mosaics){
   'use strict';
   const kinds=['fresco','relief','inscription','mosaic'];
   const compositions=['procession','apotheosis','judgment','lamentation','constellation','cosmogony'];
@@ -16,7 +19,35 @@
     verdigris:{primary:'#405f54',secondary:'#b89467',highlight:'#e8d5ac',shadow:'#282d2a'},
     ochre:{primary:'#8c613d',secondary:'#bb995e',highlight:'#eee0b5',shadow:'#352d31'}
   };
-  function frescoPalette(art){return{...(pigmentPalettes[art.pigments]||pigmentPalettes.vermilion)};}
+  function frescoPalette(art){return art.kind==='mosaic'&&art.style==='byzantine'?
+    {primary:'#a78639',secondary:'#dec16d',highlight:'#f3e3ad',shadow:'#233b52'}:
+    {...(pigmentPalettes[art.pigments]||pigmentPalettes.vermilion)};}
+  function rasterSize(art){
+    if(art.kind==='mosaic'&&!art.puzzleClue&&(art.surface==='floor'||Mosaics.shape(art)!=='rectangle'))return{width:120,height:120};
+    const ratio=art.aspectRatio||1.5;
+    return art.kind==='fresco'&&ratio!==1.5?{width:Math.round(80*ratio),height:80}:{width:144,height:96};
+  }
+  function presentation(art,{verticalCompensation=1,dungeon}={}){
+    if(!['fresco','mosaic'].includes(art.kind)||art.surface!=='wall'||art.puzzleClue)return art;
+    const along=art.axis==='x'?'y':'x',ratio=art.kind==='mosaic'?Mosaics.aspectRatio(art):art.aspectRatio||1.5,width=art.size[along],height=art.size.z;
+    const compensation=Number.isFinite(verticalCompensation)&&verticalCompensation>0?verticalCompensation:1;
+    let available=height;
+    if(dungeon){
+      const tops=[];
+      for(const key of art.keys||[art.key]){
+        const cell=dungeon.cells?.[key];if(!cell)continue;
+        tops.push((cell.floorHeight||0)+(cell.structureHeight??((cell.ceilHeight??2)-(cell.floorHeight||0))));
+        const [x,y]=key.split(',').map(Number),floor=dungeon.cells[`${x+(art.axis==='x'?art.sign:0)},${y+(art.axis==='y'?art.sign:0)}`];
+        if(floor)tops.push(floor.roof?.height??floor.ceilHeight??Infinity);
+      }
+      if(tops.length)available=Math.max(0,Math.min(...tops)-art.position.z-.12);
+    }
+    // This raycaster uses different horizontal/vertical pixel scales. Compensate only art,
+    // growing upward into real masonry; narrow it if the ceiling leaves insufficient height.
+    const h=Math.min(available,width/ratio*compensation),w=Math.min(width,h*ratio/compensation);
+    return{...art,position:{...art.position,[along]:art.position[along]+(width-w)/2,z:art.position.z+Math.max(0,(Math.min(height,available)-h)/2)},
+      size:{...art.size,[along]:w,z:h}};
+  }
   function validate(rows){
     if(rows===undefined)return[];
     if(!Array.isArray(rows)||rows.length>6)throw Error('At most six room artworks, plus the permanent puzzle diagram.');
@@ -27,10 +58,12 @@
         a.text!==undefined&&(typeof a.text!=='string'||a.text.length>120||/[<>\r\n]/.test(a.text))||
         a.composition!==undefined&&!compositions.includes(a.composition)||
         a.format!==undefined&&!['panel','mural'].includes(a.format)||
-        a.pigments!==undefined&&!Object.hasOwn(pigmentPalettes,a.pigments))throw Error('Invalid selective artwork.');
+        a.pigments!==undefined&&!Object.hasOwn(pigmentPalettes,a.pigments)||
+        a.aspectRatio!==undefined&&(![1.5,2,2.5].includes(a.aspectRatio)||a.kind!=='fresco'))throw Error('Invalid selective artwork.');
       return{kind:a.kind,surface:a.surface,label:a.label,description:a.description,motifs:[...a.motifs],text:a.text||'',composition:a.composition||'procession',
         format:a.format||(a.kind==='fresco'&&a.surface==='wall'?'mural':'panel'),pigments:a.pigments||'vermilion',
-        ...(a.kind==='fresco'&&(a.style!==undefined||a.scene!==undefined||a.figures!==undefined)?Designs.validate(a):{})};
+        ...(a.aspectRatio!==undefined?{aspectRatio:a.aspectRatio}:{}),
+        ...Carvings.validate(a),...Mosaics.validate(a),...(['fresco','mosaic'].includes(a.kind)&&(a.style!==undefined||a.scene!==undefined||a.figures!==undefined)?Designs.validate(a):{})};
     });
   }
   function plan(spec){
@@ -49,28 +82,68 @@
     const target=indoors&&building?(/cathedral|basilica|palace|grand hall/i.test(room+' '+description)?6:4):0;
     const themes=['The Departed','The Vigil','The Procession','The Celestial Court','The Lament','The Heavens'];
     while(art.length<target){const i=art.length;
+      if(patron==='Mortacia'&&i===target-1&&!art.some(a=>/sepulchra/i.test(a.label+' '+a.description))){
+        art.push({kind:'fresco',surface:'wall',label:'The Sepulchra and the Throne of Hades',
+          description:'A historical image of the great green emerald holding Mortacia\'s power, set into the throne of Hades; a depiction, not the relic itself.',
+          motifs:['Mortacia','Sepulchra','skeleton','wraith'],scene:'throne_of_hades',composition:'judgment',format:'mural',pigments:'vermilion',text:''});
+        continue;
+      }
       art.push({kind:'fresco',surface:'wall',label:(patron?patron+': ':'')+themes[i],
         description:`A solemn ${compositions[(i+2)%6]} of ${patron||'the departed'}, with draped souls, stone arcades and celestial imagery.`,
         motifs:[...figures],composition:compositions[(i+2)%6],format:'mural',pigments:Object.keys(pigmentPalettes)[i%4],text:''});
     }
     const style=Designs.tradition(room+' '+description),scene=Designs.sceneFor(room+' '+description);
-    for(const [i,row]of art.entries())if(row.kind==='fresco'){
+    const patterns=Carvings.forTradition(style);
+    let seed=0;for(const c of room+' '+description)seed=(Math.imul(seed,31)+c.charCodeAt(0))>>>0;
+    // Architectural ornament is additional to the six authored paintings, never a replacement.
+    if(indoors&&building){
+      if(!art.some(a=>a.carvingStyle&&a.surface==='wall'))for(let i=0;i<3;i++)art.push({kind:'relief',surface:'wall',format:'mural',
+        label:'The '+(patron||'Ancestors')+' stonework band '+(i+1),description:'A continuous carved frieze of '+(patron||'the ancestors')+' emblems, interwoven scrolls and chiseled borders.',
+        motifs:[patron||'Dragon','Moon','Serpent'],text:'',carvingStyle:patterns[seed%patterns.length],stoneworkRole:/crypt|tomb/i.test(room)?'skirting':/palace|basilica/i.test(room)?'cornice':'dado',
+        carvingBorder:Carvings.borders[seed%Carvings.borders.length],carvingDepth:'incised'});
+      if(!art.some(a=>a.surface==='floor'&&!a.puzzleClue))art.push(style==='byzantine'?{
+        kind:'mosaic',surface:'floor',format:'mural',style:'byzantine',label:'The '+(patron||'Ancestors')+' tessellated threshold',
+        description:'Gold, lapis and ivory tesserae form interwoven medallions at the entrance.',motifs:[...figures],text:'',composition:'judgment',pigments:'lapis'
+      }:{kind:'relief',surface:'floor',format:'mural',label:'The '+(patron||'Ancestors')+' carved threshold',
+        description:'Incised stone paving frames the approach with sacred emblems and interlocking ornament.',motifs:[patron||'Dragon','Moon','Serpent'],text:'',
+        carvingStyle:patterns[(seed+1)%patterns.length],carvingBorder:'meander',carvingDepth:'incised'});
+    }
+    if(indoors&&building&&!art.some(a=>a.mosaicPattern)){
+      const mosaicPatterns=Mosaics.forTradition(style),pattern=mosaicPatterns[seed%mosaicPatterns.length];
+      art.push({kind:'mosaic',surface:'floor',format:'mural',style,mosaicPattern:pattern,
+        label:(patron||'The Departed')+': tessellated sanctuary',description:'A bordered pavement of mineral tesserae, sacred emblems and '+pattern.replace(/_/g,' ')+'.',
+        motifs:[...figures],text:'',composition:'judgment',pigments:'lapis'});
+      if(target===6)art.push({kind:'mosaic',surface:'wall',format:'mural',style:'byzantine',mosaicPattern:'pantheon_rosette',
+        label:(patron||'The Ancestors')+': golden rosette',description:'A gold and lapis rosette of sacred emblems surrounding a central medallion.',
+        motifs:[...figures],text:'',composition:'judgment',pigments:'lapis'});
+    }
+    for(const [i,row]of art.entries())if(row.kind==='fresco'||row.kind==='mosaic'&&!row.puzzleClue){
+      if(row.kind==='fresco'&&row.format==='mural'&&row.aspectRatio===undefined)row.aspectRatio=2;
       if(!row.style)row.style=style;
-      if(!row.scene)row.scene=i===0?scene:Designs.scenes[(Designs.scenes.indexOf(scene)+i)%Designs.scenes.length];
-      if(!row.figures?.length)row.figures=Designs.figures(row);
+      if(row.kind==='mosaic'){
+        row.mosaicPattern=Mosaics.resolvePattern(row);
+        if(!row.mosaicShape)row.mosaicShape=Mosaics.suggestedShape(row);
+        if(!row.figures?.length)row.figures=Mosaics.figures(row);
+      }else{
+        if(!row.scene)row.scene=i===0?scene:Designs.scenes[(seed+i*5)%Designs.scenes.length];
+        if(!row.figures?.length)row.figures=Designs.figures(row);
+      }
     }
     if(p?.moduleKit)art.push({kind:p.clueStyle==='floor_mosaic'?'mosaic':'relief',surface:p.clueStyle==='floor_mosaic'?'floor':'wall',
       label:p.title+' diagram',description:'The apparatus reference diagram.',text:'',motifs:p.kind==='harmonics'||p.kind==='sequence'?
         p.order.map(id=>p.controls.find(c=>c.id===id).mark):p.controls.map(c=>c.options[c.goal]),puzzleClue:true,
         clueStyle:p.clueStyle,pairs:['sequence','harmonics'].includes(p.kind)?[]:p.controls.map(c=>({mark:c.mark,option:c.options[c.goal]}))});
-    return art.slice(0,7);
+    return art.slice(0,13);
   }
   function paint(ctx,createCanvas,art,palette={},glyphs=[]){
-    const cv=createCanvas(144,96),c=cv.getContext('2d');c.scale(1.5,1.5);
+    const native=rasterSize(art),cv=createCanvas(native.width,native.height),c=cv.getContext('2d'),canvasWidth=native.width/(native.height/64);
+    c.scale(native.height/64,native.height/64);
     // Pigment belongs to the painting, not the beige stone behind it; room lighting still applies in 3D.
-    if(art.kind==='fresco')palette=frescoPalette(art);
+    if(art.kind==='fresco'||art.kind==='mosaic'&&art.style)palette=frescoPalette(art);
     const primary=palette.primary||'#67564a',trim=palette.secondary||'#c99d65',light=palette.highlight||'#efe0ae',dark=palette.shadow||'#28272a';
-    c.fillStyle=primary;c.fillRect(0,0,96,64);c.strokeStyle=trim;c.lineWidth=3;c.strokeRect(2,2,92,60);
+    c.fillStyle=primary;c.fillRect(0,0,canvasWidth,64);c.strokeStyle=trim;c.lineWidth=3;
+    const shapedMosaic=art.kind==='mosaic'&&!art.puzzleClue&&Mosaics.shape(art)!=='rectangle';
+    if(!shapedMosaic&&(!art.carvingStyle||art.surface!=='wall'||art.format!=='mural'||art.puzzleClue))c.strokeRect(2,2,canvasWidth-4,60);
     if(art.clueStyle==='star_chart'){
       c.fillStyle=dark;c.fillRect(6,6,84,52);c.strokeStyle=trim;c.lineWidth=.5;
       for(const radius of [12,20,28]){c.beginPath();c.arc(48,32,radius,0,Math.PI*2);c.stroke();}
@@ -85,7 +158,8 @@
       c.strokeStyle=dark;c.lineWidth=1;c.beginPath();c.moveTo(5,5);c.lineTo(17,12);c.lineTo(13,24);c.moveTo(89,60);c.lineTo(80,45);c.stroke();
     }
     const ink=(name,x,y,size,color)=>{
-      if(!art.puzzleClue&&Iconography.paint(c,name,x,y,size,color))return;
+      if(!art.puzzleClue&&/^sepulchra$/i.test(name)){Iconography.paintSepulchra(c,x,y,size,size,['relief','inscription'].includes(art.kind)?color:undefined);return;}
+      if(!art.puzzleClue&&Iconography.paint(c,name,x,y,size,color,['fresco','mosaic'].includes(art.kind)?'painted':undefined))return;
       c.fillStyle=color;const grid=Symbols.bitmap(name,glyphs);grid.forEach((row,yy)=>[...row].forEach((v,xx)=>{if(v==='1')c.fillRect(Math.round(x+xx*size/7),Math.round(y+yy*size/7),Math.ceil(size/7),Math.ceil(size/7));}));
     };
     if(art.pairs?.length){
@@ -93,7 +167,14 @@
         if(art.clueStyle==='wall_relief'){ink(pair.mark,14,y+1,10,dark);ink(pair.option,70,y+1,10,dark);}
         ink(pair.mark,13,y,10,light);ink(pair.option,69,y,10,light);
         c.fillStyle=trim;c.fillRect(34,y+4,22,1);c.fillRect(53,y+2,1,5);});
+    }else if(art.kind==='mosaic'&&!art.puzzleClue){
+      const rows=Mosaics.figures(art);
+      Mosaics.paint(c,art,{primary,secondary:trim,highlight:light,shadow:dark},ink,(index,box,override)=>{
+        Figures.paint(c,{...rows[index%rows.length],...override},palette,box,art.style||'byzantine',createCanvas);
+      },canvasWidth);
     }else if(art.kind==='fresco'){
+      // Expand architectural space, not the figures' anatomy. Classic 3:2 templates remain available.
+      const spread=canvasWidth/96;c.save();c.scale(spread,1);
       const composition=art.composition||compositions[art.label.length%compositions.length];
       // Original compositions borrow spatial hierarchy and gesture, not a museum painting.
       const fill=(color,points)=>{c.fillStyle=color;c.beginPath();points.forEach(([x,y],i)=>i?c.lineTo(x,y):c.moveTo(x,y));c.closePath();c.fill();};
@@ -110,7 +191,7 @@
       }
       const traditional=art.style&&art.style!=='renaissance';
       if(traditional)Designs.background(c,art,palette,ink);
-      else{c.fillStyle=light;c.beginPath();c.arc(48,18,composition==='cosmogony'?12:9,0,Math.PI*2);c.fill();}
+      else{const r=composition==='cosmogony'?12:9;c.fillStyle=light;c.beginPath();c.ellipse(48,18,r/spread,r,0,0,Math.PI*2);c.fill();}
       if(!traditional&&(composition==='constellation'||composition==='cosmogony'))for(let i=0;i<7;i++){
         const x=17+(i*17+art.label.length)%65,y=8+(i*11)%25;c.fillStyle=light;c.fillRect(x,y,1,2);c.fillRect(x-1,y+1,3,1);
       }
@@ -118,8 +199,9 @@
         c.fillStyle=light;for(let i=0;i<9;i++){c.beginPath();c.ellipse(17+i*7,35+(i%3),8,2,0,0,Math.PI*2);c.fill();}
       }
       Designs.details(c,art,palette,ink);
+      c.restore();
       if(art.style||art.figures?.length){
-        const rows=Designs.layout(art,Designs.figures(art));
+        const rows=Designs.layout(art,Designs.figures(art),canvasWidth);
         for(const row of rows){
           if(art.style==='byzantine'){c.strokeStyle=light;c.lineWidth=1;c.beginPath();c.arc(row.box.x+row.box.width/2,row.box.y+5,5,0,Math.PI*2);c.stroke();}
           Figures.paint(c,row,palette,row.box,art.style||'renaissance',createCanvas);
@@ -131,23 +213,50 @@
         const central=subjects.length===1||composition!=='procession'&&i===0;
         const box=central?{x:27,y:composition==='apotheosis'?3:8,width:43,height:46}:
           {x:subjects.length===2?5+i*46:4+i*29,y:composition==='lamentation'?24:15,width:subjects.length===3?29:39,height:composition==='lamentation'?29:39};
+        box.x=(box.x+box.width/2)*spread-box.width/2;
         Sculptures.paintFigure(c,{label:art.label+' '+m,form,deity},{...palette,primary,secondary:trim,highlight:light,shadow:dark},
           {...box,pigment:true});});
-      const deity=Iconography.name(subjects[0]);ink(deity||art.motifs[0],43,7,9,light);
+      const deity=Iconography.name(subjects[0]);ink(deity||art.motifs[0],canvasWidth/2-5,7,9,light);
       }
       // Broken plaster and restrained pigment hatching retain the voxel/pixel vocabulary.
-      c.globalAlpha=.2;c.fillStyle=light;for(let y=8;y<56;y+=3)for(let x=8+(y%4);x<87;x+=7)c.fillRect(x,y,1,1);c.globalAlpha=1;
-    }else art.motifs.forEach((name,i)=>{
+      c.globalAlpha=.2;c.fillStyle=light;for(let y=8;y<56;y+=3)for(let x=8+(y%4);x<canvasWidth-9;x+=7)c.fillRect(x,y,1,1);c.globalAlpha=1;
+    }else if(art.carvingStyle&&!art.puzzleClue)Carvings.paint(c,art,palette,ink);
+    else art.motifs.forEach((name,i)=>{
       const size=Math.min(23,70/art.motifs.length),x=10+i*76/art.motifs.length;
       if(art.kind==='relief')ink(name,x+1,20+1,size,dark);
       ink(name,x,20,size,light);
     });
-    if(art.text){c.fillStyle=light;c.font='5px Georgia';c.fillText(art.text.slice(0,34),7,56,82);}
+    if(art.text&&art.kind==='inscription'&&!art.puzzleClue){
+      const script=Scripts.describe({text:art.text,seed:art.label}),letters=art.text.normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+      for(let row=0;row<2;row++)for(let j=0;j<18;j++){
+        const glyph=Scripts.glyph(letters[row*18+j]||' ',script.style);
+        glyph.forEach((bits,y)=>[...bits].forEach((bit,x)=>{if(bit==='1'){
+          c.fillStyle=dark;c.fillRect(7+j*4.5+x*.5,43+row*7+y*.5,.7,.7);
+          c.fillStyle=light;c.fillRect(7.4+j*4.5+x*.5,43.4+row*7+y*.5,.4,.4);
+        }}));
+      }
+    }else if(art.text){
+      c.fillStyle=light;c.font='4px Georgia';const lines=[];let line='';
+      for(const word of art.text.split(/\s+/)){if((line+' '+word).length>40){lines.push(line);line=word;}else line+=(line?' ':'')+word;}if(line)lines.push(line);
+      lines.slice(0,4).forEach((text,i)=>c.fillText(text,7,49+i*4,82));
+    }
     // Local abrasion leaves this artwork distinctive without repeating it as a wall texture.
     c.fillStyle=dark;for(let i=0;i<12;i++){const x=(i*31+art.label.length*7)%92,y=(i*17+13)%60;c.fillRect(x,y,2,1);}
+    if(art.kind==='mosaic'&&!art.puzzleClue){
+      Mosaics.finishShape(c,art,{secondary:trim,highlight:light},canvasWidth);
+      const pixels=c.getImageData(0,0,native.width,native.height);
+      // Individual tesserae retain the figures' colors; offset grout and facets break the painted surface.
+      for(let y=0;y<native.height;y++)for(let x=0;x<native.width;x++){
+        const tx=Math.floor((x+(Math.floor(y/3)%2))/3),ty=Math.floor(y/3),i=(x+y*native.width)*4;
+        const grout=y%3===0||(x+ty%2)%3===0,factor=grout?.58:.9+((tx*13+ty*7)%9)*.025;
+        for(let channel=0;channel<3;channel++)pixels.data[i+channel]=Math.min(255,pixels.data[i+channel]*factor);
+      }c.putImageData(pixels,0,0);
+    }
     ctx.imageSmoothingEnabled=false;ctx.drawImage(cv,0,0,ctx.canvas.width,ctx.canvas.height);
   }
-  function mesh(image,axis='y',surface='wall',sign=-1){
+  function mesh(image,axis='y',surface='wall',sign=-1,carving){
+    if(carving?.kind==='inscription'&&!carving.puzzleClue)return Carvings.mesh(image,axis,surface,sign,'raised');
+    if(carving?.carvingStyle&&!carving.puzzleClue)return Carvings.mesh(image,axis,surface,sign,carving.carvingDepth);
     const{width:w,height:h,data}=image,vertices=[],indices=[];
     if(!(w>0&&h>0&&w*h<=16384))throw Error('Artwork raster exceeds its bounded mesh budget.');
     // Merge equal-color horizontal runs: detailed frescoes do not need a quad per pixel.
@@ -167,5 +276,6 @@
     }
     return{vertices:new Float32Array(vertices),indices:new Uint16Array(indices)};
   }
-  return{kinds,compositions,pigmentPalettes,frescoPalette,validate,plan,paint,mesh,toolbox:Designs.toolbox};
+  return{kinds,compositions,pigmentPalettes,frescoPalette,rasterSize,presentation,validate,plan,paint,mesh,
+    toolbox:()=>({...Designs.toolbox(),frescoAspectRatio:[1.5,2,2.5],mosaicPattern:Mosaics.patterns,mosaicShape:Mosaics.shapes,stonework:Carvings.toolbox()})};
 });

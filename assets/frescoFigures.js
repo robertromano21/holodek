@@ -2,15 +2,18 @@
   const api=factory(typeof module==='object'&&module.exports?require('./renderCharacterProcedural'):root.ProceduralCharacters,
     typeof module==='object'&&module.exports?require('./sculptureForms'):root.SculptureForms,
     typeof module==='object'&&module.exports?require('./shrineIconography'):root.ShrineIconography,
-    typeof module==='object'&&module.exports?require('./artCharacters'):root.ArtCharacters);
+    typeof module==='object'&&module.exports?require('./artCharacters'):root.ArtCharacters,
+    typeof module==='object'&&module.exports?require('./frescoSerpents'):root.FrescoSerpents);
   if(typeof module==='object'&&module.exports)module.exports=api;else root.FrescoFigures=api;
-})(typeof window==='undefined'?globalThis:window,function(Characters,Sculptures,Icons,People){
+})(typeof window==='undefined'?globalThis:window,function(Characters,Sculptures,Icons,People,Serpents){
   'use strict';
   const cache=new Map();
   const gestures={standing:[[0,0],[0,0]],contrapposto:[[.18,-.12],[-.12,.35]],offering:[[.5,-1.4],[-.5,1.4]],
     invocation:[[2.3,-.25],[-2.3,.25]],mourning:[[-.5,-1.35],[-.1,.15]],pointing:[[0,0],[-1.5,.05]],
     reading:[[.55,-1.4],[-.55,1.4]],kneeling:[[.5,-1.25],[-.5,1.25]],seated:[[.4,-1.15],[-.4,1.15]],
-    reclining:[[.25,-.6],[-.8,.45]],guarding:[[-.2,-.9],[-.1,.8]],striding:[[.4,0],[-.4,0]]};
+    reclining:[[.25,-.6],[-.8,.45]],guarding:[[-.2,-.9],[-.1,.8]],striding:[[.4,0],[-.4,0]],
+    orator:[[-1.15,-.3],[.25,.3]],benediction:[[.1,-.1],[-2,.7]],bowing:[[.35,-.3],[-.35,.3]],
+    embracing:[[.75,-1.1],[-.75,1.1]],flying:[[1.3,.2],[-1.3,-.2]],ascending:[[2.5,.1],[-2.5,-.1]]};
   function bbox(pixels,accept){
     let x0=pixels.w,y0=pixels.h,x1=-1,y1=-1;
     for(let y=0;y<pixels.h;y++)for(let x=0;x<pixels.w;x++){
@@ -24,6 +27,13 @@
       const i=x+y*pixels.w;if(accept(pixels.parts[i],x,y))image.data.set(pixels.data.subarray(i*4,i*4+4),i*4);
     }
     ctx.putImageData(image,0,0);return c;
+  }
+  function proportions(raw,traits={},form){
+    if(raw.proportions!=='classical')return{head:1,body:1,arm:1,hand:1,leg:1,seatedLeg:.5};
+    const compact=traits.size==='small'||traits.size==='tiny'||traits.build==='heavy';
+    // Keep the original part silhouettes, armor and racial stature, not a new drawing style.
+    return{head:form==='skeleton'?.72:compact?.86:.8,body:compact||raw.robe==='armor'||raw.robe==='class'?1:.94,
+      arm:compact?1:.94,hand:compact?.94:.86,leg:compact?1.03:1.1,seatedLeg:.56};
   }
   function attribute(ctx,name,hand,palette){
     if(!hand||!name||name==='none')return;
@@ -62,7 +72,7 @@
     }
   }
   function assemble(raw,palette,style,createCanvas){
-    const deity=Icons.name(raw.subject),person=!deity&&(raw.race||raw.className||raw.subject==='mortal'||People.race(raw.subject)),
+    const deity=Icons.name(raw.subject),hero=People.hero(raw.subject),person=!deity&&(hero||raw.race||raw.className||raw.subject==='mortal'||People.race(raw.subject)),
       figure={...raw,...(!raw.race&&People.race(raw.subject)?{race:People.race(raw.subject)}:{})},
       form=deity?Icons.pantheon[deity].form:person?People.form(figure):raw.subject,
       original=person?People.characterSpec(figure,palette):Sculptures.characterSpec({label:'Painted '+raw.subject,form,deity},palette),traits=JSON.parse(JSON.stringify(original.traits));
@@ -74,6 +84,14 @@
       if(raw.head!=='class'){traits.outfit.hood=raw.head==='hood';traits.outfit.helm=raw.head==='helmet'?'open':raw.head==='crown'?'crown':'none';}
     }
     const spec=Characters.buildProceduralSpriteSpec({name:original.name,race:original.race,sex:original.sex,class:figure.className||'Painted ancestor',level:1},traits,{signature:false,source:'fresco-figure',salt:original.seed});
+    if(form==='dragon'&&(raw.anatomy==='serpentine'||['Turthus','Dantuea'].includes(deity))){
+      const c=createCanvas(96,96),ctx=c.getContext('2d');
+      if(raw.facing==='left'){ctx.translate(96,0);ctx.scale(-1,1);}
+      Serpents.paint(ctx,raw,traits,palette);
+      ctx.setTransform(1,0,0,1,0,0);attribute(ctx,raw.attribute,{x:81,y:62},palette);
+      if(deity)Icons.paint(ctx,deity,80,3,13,Icons.pantheon[deity].color,'painted');
+      return c;
+    }
     const source=Characters.renderAssemblyPixels(spec),p={...source,parts:new Uint8Array(source.parts)},parts=p.parts;
     // Outline pixels inherit the adjacent body part, so repositioning a limb also moves its ink edge.
     for(let y=0;y<p.h;y++)for(let x=0;x<p.w;x++){
@@ -87,27 +105,43 @@
       attribute(ctx,raw.attribute,{x:p.w*.35,y:p.h*.63},palette);
     }else{
       const armIds=new Set([11,12,13,14,26,27]),headIds=new Set([15,16,17,18,19,24,28,40]),lowerIds=new Set([7,8,10,38,39]);
-      const lower=bbox(p,id=>lowerIds.has(id)),sitting=['kneeling','seated'].includes(raw.pose),lowerScale=sitting?.5:1,shift=sitting&&lower?lower.h*.5:0;
-      ctx.drawImage(layer(p,id=>!armIds.has(id)&&!headIds.has(id)&&!lowerIds.has(id),createCanvas),0,shift);
+      const proportion=proportions(raw,traits,form),bodyIds=new Set([9,25,29,30,31,34,41,45]);
+      const lower=bbox(p,id=>lowerIds.has(id)),sitting=['kneeling','seated'].includes(raw.pose),lowerScale=sitting?proportion.seatedLeg:proportion.leg,shift=sitting&&lower?lower.h*(1-lowerScale):0;
+      const fixed=id=>!armIds.has(id)&&!headIds.has(id)&&!lowerIds.has(id);
+      ctx.drawImage(layer(p,id=>fixed(id)&&!bodyIds.has(id),createCanvas),0,shift);
+      ctx.save();ctx.translate(p.w/2,shift);ctx.scale(proportion.body,1);ctx.translate(-p.w/2,0);
+      ctx.drawImage(layer(p,id=>fixed(id)&&bodyIds.has(id),createCanvas),0,0);ctx.restore();
       if(lower){ctx.save();ctx.translate(0,lower.y+shift);ctx.scale(1,lowerScale);ctx.translate(0,-lower.y);
         if(raw.pose==='striding')ctx.transform(1,0,.18,1,-lower.y*.18,0);ctx.drawImage(layer(p,id=>lowerIds.has(id),createCanvas),0,0);ctx.restore();}
       const head=bbox(p,id=>headIds.has(id));
-      if(head){const tilt=['mourning','reading','kneeling'].includes(raw.pose)?.2:raw.pose==='contrapposto'?-.08:0;
-        ctx.save();ctx.translate(head.x+head.w/2,head.y+head.h+shift);ctx.rotate(tilt);ctx.translate(-head.x-head.w/2,-head.y-head.h);ctx.drawImage(layer(p,id=>headIds.has(id),createCanvas),0,0);ctx.restore();}
+      if(head){const tilt=['mourning','reading','kneeling','bowing'].includes(raw.pose)?.2:raw.pose==='contrapposto'?-.08:0;
+        ctx.save();ctx.translate(head.x+head.w/2,head.y+head.h+shift);ctx.rotate(tilt);
+        if(raw.proportions==='classical')ctx.scale(proportion.head,proportion.head);
+        ctx.translate(-head.x-head.w/2,-head.y-head.h);
+        if(hero==='Suzerain'&&['class','helmet'].includes(raw.head)){
+          const w=Math.min(head.w,head.h*.8),h=w/.8;Icons.paintSuzerainHelmet(ctx,head.x+(head.w-w)/2,head.y+head.h-h,w,h);
+        }
+        else ctx.drawImage(layer(p,id=>headIds.has(id),createCanvas),0,0);
+        if(raw.head==='laurel'){ctx.fillStyle=palette.secondary;for(let i=0;i<5;i++)ctx.fillRect(head.x+i*head.w/5,head.y,1,2);}
+        ctx.restore();}
       const hands=[];
       for(const [i,ids]of [[11,13,26],[12,14,27]].entries()){
         const b=bbox(p,id=>ids.includes(id));if(!b)continue;
-        const split=b.y+b.h*.52,sx=b.x+b.w/2,sy=b.y,upper=split-sy,angles=(gestures[raw.pose]||gestures.standing)[i];
-        ctx.save();ctx.translate(sx,sy+shift);ctx.rotate(angles[0]);ctx.translate(-sx,-sy);ctx.drawImage(layer(p,(id,x,y)=>ids.includes(id)&&y<split,createCanvas),0,0);ctx.restore();
+        const split=b.y+b.h*.52,sourceX=b.x+b.w/2,sx=p.w/2+(sourceX-p.w/2)*proportion.body,sy=b.y,upper=split-sy,angles=(gestures[raw.pose]||gestures.standing)[i];
+        ctx.save();ctx.translate(sx,sy+shift);ctx.rotate(angles[0]);ctx.scale(proportion.arm,1);ctx.translate(-sourceX,-sy);ctx.drawImage(layer(p,(id,x,y)=>ids.includes(id)&&y<split,createCanvas),0,0);ctx.restore();
         const elbow={x:sx-Math.sin(angles[0])*upper,y:sy+shift+Math.cos(angles[0])*upper},a=angles[0]+angles[1];
-        ctx.save();ctx.translate(elbow.x,elbow.y);ctx.rotate(a);ctx.translate(-sx,-split);ctx.drawImage(layer(p,(id,x,y)=>ids.includes(id)&&y>=split,createCanvas),0,0);ctx.restore();
+        ctx.save();ctx.translate(elbow.x,elbow.y);ctx.rotate(a);ctx.scale(proportion.arm,1);ctx.translate(-sourceX,-split);
+        const handId=i?14:13,hand=bbox(p,id=>id===handId);
+        ctx.drawImage(layer(p,(id,x,y)=>ids.includes(id)&&id!==handId&&y>=split,createCanvas),0,0);
+        if(hand){ctx.save();ctx.translate(hand.x+hand.w/2,hand.y);ctx.scale(proportion.hand,proportion.hand);ctx.translate(-hand.x-hand.w/2,-hand.y);
+          ctx.drawImage(layer(p,(id,x,y)=>id===handId&&y>=split,createCanvas),0,0);ctx.restore();}
+        ctx.restore();
         hands.push({x:elbow.x-Math.sin(a)*(b.h-upper),y:elbow.y+Math.cos(a)*(b.h-upper)});
       }
       attribute(ctx,raw.attribute,hands[raw.pose==='pointing'?1:0],palette);
-      if(raw.head==='laurel'&&head){ctx.fillStyle=palette.secondary;for(let i=0;i<5;i++)ctx.fillRect(head.x+i*head.w/5,head.y+shift,1,2);}
     }
-    const patron=deity||People.defaults(figure).patron;
-    if(patron)Icons.paint(ctx,patron,p.w-14,2,13,Icons.pantheon[patron].color);
+    const patron=hero||deity||People.defaults(figure).patron;
+    if(patron)Icons.paint(ctx,patron,p.w-14,2,13,Icons.pantheon[patron]?.color,'painted');
     let image=c.getContext('2d').getImageData(0,0,c.width,c.height);
     if(raw.facing!=='front'){
       const view=Characters.deriveViewFromFront(image.data,c.width,c.height,'threeQuarter',raw.facing==='left'?-1:1);image.data.set(view);
@@ -134,5 +168,5 @@
       ctx.imageSmoothingEnabled=false;ctx.drawImage(image,bounds.x,bounds.y,bounds.w,bounds.h,box.x+(box.width-w)/2,box.y+box.height-h,w,h);
     }
   }
-  return{paint,assemble};
+  return{paint,assemble,proportions};
 });

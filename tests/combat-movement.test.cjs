@@ -64,6 +64,7 @@ for (const holdDamage of [false, true]) test(`existing map combat pursues and ${
   const source = read('retort/retortWithUserInput.js');
   const helpers = source.slice(source.indexOf('let combatSpace = null;'), source.indexOf('async function resolveCombatRound('));
   const map = source.slice(source.indexOf('async function handleCombatRoundWithMap('), source.indexOf('// Patch live HP'));
+  const healthPatch = source.slice(source.indexOf('function patchLiveHPToConsole('), source.indexOf('// Update the combat map in Phaser'));
   const pc = actor('Mortacia', 1, 2, 'pc'), monster = actor('Pyraxus', 6, 2);
   const dungeon = room();
   let roster = JSON.stringify([pc, monster]), consoleText = '';
@@ -86,14 +87,15 @@ for (const holdDamage of [false, true]) test(`existing map combat pursues and ${
   const context = {
     console: quiet, updatedGameConsole: consoleText, Inhabitants: require('../assets/dungeonInhabitants'), createCombatSpace, actionDice: dice, broadcast,
     characterClasses: [{ name: 'Fighter', baseHP: 10 }], roll1d20: (() => { let i = 0; return () => ++i === 1 ? 20 : 10; })(),
-    ensureSelectedPCSprite() {}, patchLiveHPToConsole: value => value, allocateXP() {}, dropMonsterItemsToRoom() {},
+    ensureSelectedPCSprite() {}, allocateXP() {}, dropMonsterItemsToRoom() {},
     setTimeout: fn => { setImmediate(fn); }, getRandomInt: () => { throw Error('Damage must use the dice request.'); },
     sharedState: { getLastCoords: () => ({ x: 0, y: 0, z: 0 }), getRoomDungeon: () => dungeon,
       getCombatCharactersString: () => roster, setCombatCharactersString: value => { roster = value; },
+      getUpdatedGameConsole: () => consoleText, getDungeonRunId: () => 'run',
       setUpdatedGameConsole: value => { consoleText = value; } },
     resolveCombatRound: (agent, input) => context.handleCombatRoundWithMap(agent, broadcast, input)
   };
-  vm.runInNewContext(helpers + '\n' + map, context);
+  vm.runInNewContext(helpers + '\n' + map + '\n' + healthPatch, context);
   const result = await context.handleCombatRound({}, 'attack Pyraxus', 'Combat Map-Based');
   assert.match(result.combatLog, /Mortacia advances/);
   assert.doesNotMatch(result.combatLog, /cannot reach|cannot find/);
@@ -123,6 +125,7 @@ test('client applies combat steps to both the camera and maze actors without amb
     getCurrentCombatRoomKey: () => 'X: 0, Y: 0, Z: 0', projectMazePointToCombatGrid: (x, y) => ({ x, y }),
     refreshPartyCombatProjection: () => context.syncPartyMazeToCombatPositions(false)
   };
+  vm.runInNewContext(source.slice(source.indexOf('function rememberCombatMovementFacing('), source.indexOf('function advanceWalkFrame(')), context);
   vm.runInNewContext(`${control}\n${sync}`, context);
   context.applyCombatMazeStep({ character: 'Mortacia', geoKey: '0,0,0', actionId: 'round-1', x: 2, y: 2, duration: 200 });
   assert.equal(context.playerDungeonX, 2);
@@ -199,7 +202,7 @@ test('interactive targeting uses the existing PC/NPC selection request and holdi
   const foe = { name: 'Pyraxus', hp: 40, x: 5, y: 6 };
   const events = [];
   const context = { initiativeOrder: [foe], alreadyKilled: new Set(), sharedState: { emitter },
-    actionDice: { active: { id: 'round-1' } }, combatSpace: { distance: () => 3 }, setTimeout, clearTimeout, setInterval, clearInterval,
+    actionDice: { active: { id: 'round-1' } }, combatTurnFlow: null, combatSpace: { distance: () => 3 }, setTimeout, clearTimeout, setInterval, clearInterval,
     broadcast: event => {
       events.push(event);
       setImmediate(() => emitter.emit(`target_response_${event.combatant}`,

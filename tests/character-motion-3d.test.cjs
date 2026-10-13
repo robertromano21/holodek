@@ -166,6 +166,66 @@ test('walking uses the same existing sprite poses with a stable sole inset and u
   close(inset, .04);
 });
 
+test('party membership and startup flags cannot change cached 3D character dimensions', () => {
+  const f = rendererHarness(), spec = f.actor.sprite.spec;
+  f.actor.type = 'monster';
+  const resident = f.renderer._getCharacterBillboard(f.actor, 0, 0, 5, 0, 0);
+  close(resident.worldHeight, 1.22);
+  f.actor.type = 'npc';
+  close(f.renderer._getCharacterBillboard(f.actor, 0, 0, 5, 0, 0).worldHeight, 1.22);
+  f.actor.startingPartyCompanion = true;
+  for (let now = 0; now <= 600; now += 200) {
+    const companion = f.renderer._getCharacterBillboard(f.actor, 0, 0, 5, 0, now);
+    close(companion.worldHeight, resident.worldHeight);
+    assert.equal(companion.tex, resident.tex);
+    close(companion.footInset, resident.footInset);
+  }
+  f.actor.recruitedFromMonster = true;
+  close(f.renderer._getCharacterBillboard(f.actor, 0, 0, 5, 0, 600).worldHeight, 1.22);
+  for (const type of ['pc', 'monster']) {
+    f.actor.type = type;
+    const other = f.renderer._getCharacterBillboard(f.actor, 0, 0, 5, 0, 600);
+    close(other.worldHeight, resident.worldHeight);
+    assert.equal(other.tex, resident.tex);
+  }
+  assert.equal(f.calls.length, 1); assert.equal(f.uploads.length, 1);
+  assert.equal(f.actor.sprite.spec, spec); assert.equal(spec.worldScale, 1);
+  assert.equal(f.actor.walkFrame, 0); assert.equal(f.actor.mazeX, 0); assert.equal(f.actor.mazeY, 0);
+});
+
+test('recruiting nonhumanoid species preserves their dimensions without a second clamp', () => {
+  const f = rendererHarness();
+  for (const worldScale of [.55, 1, 1.5, 1.7]) {
+    const spec = Object.freeze({kind:'procedural',key:'size-'+worldScale,worldScale});
+    const resident = {...f.actor,type:'monster',sprite:{spec}};
+    const companion = {...resident,type:'npc',startingPartyCompanion:true};
+    const small = f.renderer._getCharacterBillboard(resident, 0, 0, 5, 0, 0);
+    const large = f.renderer._getCharacterBillboard(companion, 0, 0, 5, 0, 0);
+    close(large.worldHeight, 1.22 * worldScale);
+    assert.equal(large.tex, small.tex); assert.equal(spec.worldScale, worldScale);
+  }
+});
+
+test('real humanoid bodies have role-independent stature: short races 80 percent, Mortacia 120 percent', () => {
+  const C = require('../assets/renderCharacterProcedural'), f = rendererHarness();
+  f.root.ProceduralCharacters = C;
+  let frame = 0;
+  f.renderer._pickActorBillboardView = () => ({view:'front',facing:1,frame,heightScale:1,upperShift:0});
+  for (const [race, ratio] of [['Human',1],['Elf',1],['Dwarf',.8],['Gnome',.8],['Halfling',.8],['Mortacia',1.2]]) {
+    const spec = race === 'Mortacia' ? C.getPresetProceduralSpec(race) : C.buildProceduralSpriteSpec({name:'Height '+race,race,class:'Cleric',isMonster:true});
+    const before = JSON.stringify(spec), actor = {name:spec.name,type:'monster',sprite:{spec}};
+    const idle = C.renderBillboardPixels(spec,{frame:0,view:'front'});
+    let height;
+    for (frame = 0; frame < 4; frame++) for (const type of ['monster','npc','pc']) {
+      actor.type = type;
+      const bb = f.renderer._getCharacterBillboard(actor,0,0,5,0,frame);
+      height ??= bb.worldHeight;close(bb.worldHeight,height);
+      close(bb.worldHeight * idle.bodyHeight / idle.h,1.65 * ratio);
+    }
+    assert.equal(JSON.stringify(spec),before,'Sizing does not alter the approved artwork or trait metadata');
+  }
+});
+
 test('texture/foot caches remain bounded when many character designs have appeared', () => {
   const f = rendererHarness();
   for (let i = 0; i < 300; i++) {

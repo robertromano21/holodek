@@ -92,7 +92,7 @@ test('sculptures support race and class anatomy, without confusing a knight with
   assert.ok(images.size>=6);assert.throws(()=>S.validate([{...rows[0],deity:'Atinus'}]),/Invalid/);
 });
 test('room-derived artwork includes relevant peoples and guilds rather than generic repeats',()=>{
-  const rows=Art.plan({indoor:true,source:{roomName:'Mordicar Hall',description:'Mordicar guards a hall of dwarf masons and the forge.'}});
+  const rows=Art.plan({indoor:true,source:{roomName:'Mordicar Hall',description:'Mordicar guards a hall of dwarf masons and the forge.'}}).filter(r=>r.kind==='fresco');
   assert.equal(rows.length,4);assert.ok(rows.every(r=>r.figures.some(f=>f.subject==='Mordicar')));
   assert.ok(rows.some(r=>r.figures.some(f=>f.race==='Dwarf')));assert.ok(rows.some(r=>r.figures.some(f=>f.className==='Mason')));
   const spec=P.compile({...P.fallback('art-meta','Hall'),roomArt:[art([raw({race:'High Elf',className:'Wizard',sex:'Female',patron:'Eredine'})])],

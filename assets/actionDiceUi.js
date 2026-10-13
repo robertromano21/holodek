@@ -34,9 +34,16 @@
         (next.epoch === state.epoch && next.revision < state.revision)) return;
     state = next;
     window.actionDiceState = state;
+    window.CombatTurnUi?.receive(state.active?.turn || null);
+    const turn = state.active?.turn;
+    if (turn && !turn.allowRetreat) {
+      if (targetPrompt?.turnId !== turn.turnId) { targetSubmitting = false; targetError = ''; }
+      targetPrompt = turn;
+    } else if (turn?.allowRetreat || targetPrompt?.turnId) targetPrompt = null;
     for (const result of state.results || []) {
       if (seenRolls.has(result.id)) continue;
       seenRolls.add(result.id);
+      if (seenRolls.size > 512) seenRolls.delete(seenRolls.values().next().value);
       if (submitting !== result.id) animateRoll(result);
     }
     if (!state.active) { targetPrompt = null; targetSubmitting = false; targetError = ''; }
@@ -45,6 +52,7 @@
   };
 
   window.showCombatTargetPrompt = function(prompt) {
+    if (prompt.allowRetreat) { targetPrompt = null; window.CombatTurnUi?.receive(prompt); return; }
     targetPrompt = prompt;
     targetSubmitting = false;
     targetError = '';
@@ -76,7 +84,8 @@
       window.renderPartyIconDock?.();
       try {
         const response = await fetch('/submit-target2', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ combatant: prompt.combatant, target, cancelled, actionId: prompt.actionId }) });
+          body: JSON.stringify({ combatant: prompt.combatant, target, cancelled, action: cancelled ? 'hold' : 'attack',
+            actionId: prompt.actionId, turnId: prompt.turnId }) });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || 'Target selection failed.');
         if (targetPrompt === prompt) targetPrompt = null;

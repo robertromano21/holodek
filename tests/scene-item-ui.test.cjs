@@ -53,7 +53,7 @@ test('original locked-exit travel still hints the exact key and never unlocks ju
   room.exits.east.status = 'open';
   assert.equal(context.isExitTraversable({}, 'east').traversable, true);
   assert.equal(context.isExitTraversable({}, 'north').traversable, false);
-  assert.match(source, /<p>Go \$\{exitDirection\}\?<\/p>\s*\$\{requiredKeyHint\}/);
+  assert.match(source, /<p>Go \$\{escapedText\(exitDirection\)\}[\s\S]*?destinationName[\s\S]*?<\/p>\s*\$\{requiredKeyHint\}/);
 });
 
 test('item sync loads before game, and current console exposes quest progress without changing popup styles', () => {

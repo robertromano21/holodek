@@ -42,6 +42,19 @@ function getProceduralApi() {
   }
   return null;
 }
+function isMortaciaPortrait(character,spriteSpec=null) {
+  const name=String(character?.name||character?.Name||spriteSpec?.name||'').replace(/^Name:\s*/i,'').trim();
+  return /^mortacia\b/i.test(name);
+}
+function refreshMortaciaSpriteArt(character) {
+  if(!isMortaciaPortrait(character))return false;
+  const revision='mortacia-reference-walk-6',sprite=character.sprite;
+  if(!sprite?.dataUrl||sprite.artRevision===revision)return false;
+  const spec=sprite.spec,seed=character._rerollSeed||spec?.seed||.5;
+  const canvas=createCharacterSpriteCanvas({...character,_rerollSeed:seed},spec);
+  character.sprite={...sprite,dataUrl:canvas.toDataURL('image/png'),artRevision:revision};
+  return true;
+}
 function getProceduralSpec(character, spriteSpec) {
   const spec = spriteSpec || (character && character.sprite && character.sprite.spec) || null;
   return spec && ((spec.kind === 'procedural' && spec.traits) || spec.kind === 'placeholder') ? spec : null;
@@ -649,6 +662,84 @@ function getSuzerainStarterFamily(variant = 0) {
 // This bypasses the general prefab/draw* for Mortacia to guarantee pixel-perfect match to the ref (while other characters use the catalog system).
 // Draw order: wing (back), legs, torso (costume), head, arm+hand, sword (front), details/outlines.
 // All positions in base pixels; *u at draw time. Center chosen so the figure sits plumb and centered like the ref.
+// Approved 2D reference pose. Kept independent of the detailed 3D preset.
+function createMortaciaReferenceCanvas(frame=0) {
+  const canvas=createCanvas(BASE_SIZE*UPSCALE,BASE_SIZE*UPSCALE),ctx=canvas.getContext('2d');
+  const unit=3;
+  canvas._combatBodyHeight=24*unit;
+  const phase=Number.isFinite(frame)?Math.abs(Math.floor(frame))%4:0;
+  // Frame 1's horizontal alignment keeps the blade visibly two pixels wide on the map.
+  const gripX=-1,gripY=[1,2,1,0][phase];
+  const rect=(x,y,w,h,color)=>{
+    const left=Math.round(x*unit),top=Math.round(y*unit);
+    ctx.fillStyle=color;ctx.fillRect(left,top,Math.round((x+w)*unit)-left,Math.round((y+h)*unit)-top);
+  };
+  ctx.imageSmoothingEnabled=false;
+  const api=getProceduralApi();
+  for(const wing of[{x:16,y:5,w:7,h:25,color:'#85868b'},
+    {x:17,y:2,w:10,h:29,color:'#96979c'}]){
+    const p=api.renderMortaciaWingPixels(wing.w,wing.h,wing.color),c=createCanvas(p.w,p.h),g=c.getContext('2d');
+    const peak=Math.round((p.w-1)*.57);
+    // Trace the edited narrow upper fingers without changing the lower membranes.
+    for(let y=0;y<7;y++)for(let x=0;x<p.w;x++){
+      const i=(x+y*p.w)*4;
+      if(x<peak-Math.floor(y/3)||x>peak+Math.floor(y/7))p.data[i+3]=0;
+      else if(y<2&&x===peak){p.data.set([173,174,179,255],i);}
+    }
+    const im=g.createImageData(p.w,p.h);im.data.set(p.data);g.putImageData(im,0,0);
+    if(!phase)ctx.drawImage(c,wing.x*unit,wing.y*unit,p.w*unit,p.h*unit);
+    else for(let y=0;y<p.h;y++){
+      // Flex the lower membranes by one pixel; keep the pointed upper fingers anchored.
+      const sway=phase===1?1:phase===3?-1:0,shift=Math.round(sway*Math.max(0,(y-7)/(p.h-8)));
+      ctx.drawImage(c,0,y,p.w,1,(wing.x+shift)*unit,(wing.y+y)*unit,p.w*unit,unit);
+    }
+  }
+  // Long legs and high boots, behind the one-piece fitted outfit.
+  if(!phase){
+    rect(13,20,1,6,'#cfb395');rect(14,20,1,6,'#aa947e');rect(15,20,2,6,'#d8bda1');
+    rect(13,26,1,5,'#666867');rect(15,26,2,5,'#666867');
+    rect(12,30,2,1,'#666867');
+  }else{
+    const legs=[null,
+      [{hip:15,knee:16,ankle:17,lift:0},{hip:13,knee:12,ankle:11,lift:0}],
+      [{hip:15,knee:15,ankle:14,lift:2},{hip:13,knee:13,ankle:14,lift:0}],
+      [{hip:15,knee:13,ankle:12,lift:0},{hip:13,knee:15,ankle:16,lift:1}]
+    ][phase];
+    legs.forEach((leg,i)=>{
+      const thigh=6-leg.lift;
+      for(let y=0;y<thigh;y++){
+        const x=Math.round(leg.hip+(leg.knee-leg.hip)*y/(thigh-1));
+        rect(x,20+y,2,1,i?'#cfb395':'#d8bda1');
+        if(i)rect(x+1,20+y,1,1,'#aa947e');
+      }
+      for(let y=0;y<5;y++){
+        const x=Math.round(leg.knee+(leg.ankle-leg.knee)*y/4);
+        rect(x,26-leg.lift+y,2,1,'#666867');
+      }
+      rect(leg.ankle-1,30-leg.lift,3,1,'#666867');
+    });
+  }
+  rect(13,13,4,3,'#303331');rect(14,13,2,2,'#424643');
+  rect(14,16,3,2,'#303331');rect(13,18,4,1,'#303331');
+  rect(16,13,1,3,'#717372');rect(16,16,1,3,'#717372');
+  rect(14,16,2,1,'#5b5e58');rect(14,17,2,2,'#282a29');
+  rect(13,19,4,1,'#222423');
+  // Blonde fringe reaches the forehead instead of leaving a dark cap or eye band.
+  rect(12.5,9,2.5,3,'#d5b79c');
+  rect(12.5,8,3.5,1,'#f4cd8b');
+  rect(15,9,2,4,'#efc780');rect(16,12,1,1,'#d3ad69');
+  rect(14,12,1,2,'#d5b79c');rect(15,13,2,1,'#717372');
+  // The sleeved arm joins a bare hand below the hilt, wholly outside the bodice.
+  const reach=Math.max(Math.abs(gripX-1),gripY);
+  for(let step=0;step<=reach;step++)rect(13+Math.round((gripX-1)*step/reach),14+Math.round(gripY*step/reach),1,1,'#717372');
+  // Translate the whole grip/weapon assembly together; lowering avoids clipping the tip.
+  const heldRect=(x,y,w,h,color)=>rect(x+gripX,y+gripY,w,h,color);
+  heldRect(10,14,1.75,1.75,'#d5b79c');heldRect(11.5,14,.5,.75,'#d5b79c');
+  heldRect(10,0,1,11,'#f4ce8e');heldRect(10,11,1,2,'#757672');
+  heldRect(9,13,3,1,'#6b6d69');heldRect(9,16,2,1,'#6b6d69');
+  return canvas;
+}
+
 function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   // Pixel-mock silhouette (user attachment): left-facing blocky profile, sword vertical tip-UP in front of torso,
   // wing/cape mass on the back, tan skin, dark grey garments, tall boots. Tip-up fighting-ready grip.
@@ -678,28 +769,18 @@ function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   const greyDark = ['#1e1e22', '#242428', '#1a1a1e', '#2a2a2e', '#16161a'][v];
   const swordTan = ['#d8c898', '#cfc090', '#e0d0a0', '#c4b488', '#d0c090'][v];
   const skinTone = ['#e8c4a8', '#f0d0b0', '#e0b890', '#ecc8a0', '#d8b088'][v];
-  const hairPale = ['#e8e4dc', '#f0ebe2', '#ddd8d0', '#f5f0e8', '#d8d4cc'][v];
+  const hairBlonde = ['#f2cf91', '#f6d99c', '#e8c17e', '#f5d58f', '#e7c485'][v];
+  const hairShade = '#b88d50';
   const blackDetail = '#111114';
 
-  // === WING / CAPE MASS (back right): tall vertical + jagged trailing mass per mock ===
-  ctx.fillStyle = greyDark;
-  ctx.fillRect((wingX + 0) * u, (wingY + 0) * u, 2 * u, 3 * u); // top spike past head
-  ctx.fillRect((wingX + 1) * u, (wingY + 1) * u, 2 * u, 2 * u);
-  ctx.fillStyle = greyMid;
-  ctx.fillRect((wingX + 2) * u, (wingY + 0) * u, 2 * u, 4 * u);
-  ctx.fillRect((wingX + 1) * u, (wingY + 3) * u, 3 * u, 6 * u); // main mass
-  ctx.fillStyle = greyLight;
-  ctx.fillRect((wingX + 3) * u, (wingY + 2) * u, 2 * u, 4 * u);
-  ctx.fillRect((wingX + 4) * u, (wingY + 1) * u, 1 * u, 3 * u); // thin up protrusion
-  ctx.fillStyle = greyMid;
-  ctx.fillRect((wingX + 4) * u, (wingY + 3) * u, 2 * u, (12 + cfg.wingExtraReach) * u); // tall trailing blade
-  ctx.fillStyle = greyLight;
-  ctx.fillRect((wingX + 3) * u, (wingY + 7) * u, 2 * u, 3 * u);
-  ctx.fillRect((wingX + 3) * u, (wingY + 10) * u, 2 * u, 3 * u);
-  ctx.fillRect((wingX + 2) * u, (wingY + 12) * u, 3 * u, 2 * u); // lower jagged cape flap
-  ctx.fillStyle = greyDark;
-  ctx.fillRect((wingX + 1) * u, (wingY + 14) * u, 3 * u, 4 * u);
-  ctx.fillRect((wingX + 3) * u, (wingY + 16) * u, 2 * u, 2 * u);
+  // Profile view: a smaller far wing, then the near wing, both behind the shoulder.
+  const wingApi=getProceduralApi();
+  for(const far of[true,false]){
+    const pixels=wingApi.renderMortaciaWingPixels(far?7:9,far?18:21,far?greyMid:greyLight);
+    const wing=createCanvas(pixels.w,pixels.h),wc=wing.getContext('2d'),im=wc.createImageData(pixels.w,pixels.h);
+    im.data.set(pixels.data);wc.putImageData(im,0,0);ctx.imageSmoothingEnabled=false;
+    ctx.drawImage(wing,(far?baseX+2:wingX-1)*u,(Math.max(0,wingY-2)+(far?1:0))*u,pixels.w*u,pixels.h*u);
+  }
 
   // === LEGS: tan thighs, tall dark boots (slight fighting stance offset) ===
   ctx.fillStyle = skinTone;
@@ -723,21 +804,23 @@ function drawMortaciaExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
   ctx.fillStyle = greyLight;
   ctx.fillRect((baseX + 3) * u, torsoY * u, 1 * u, 3 * u);
 
-  // === HEAD: tan face, dark/pale hair mass on top+back ===
-  ctx.fillStyle = greyDark;
-  ctx.fillRect((baseX) * u, (baseY + 1) * u, 4 * u, 2 * u); // dark hair/cap top (mock)
-  ctx.fillStyle = hairPale;
-  ctx.fillRect((baseX + 1) * u, (baseY + 1) * u, 2 * u, 1 * u); // pale highlight
+  // Blonde crown and long back strands remain distinct from the grey wings at map scale.
+  ctx.fillStyle = hairBlonde;
+  ctx.fillRect((baseX) * u, (baseY + 1) * u, 4 * u, 2 * u);
+  ctx.fillStyle = '#ffe4b1';
+  ctx.fillRect((baseX + 1) * u, (baseY + 1) * u, 2 * u, 1 * u);
   ctx.fillStyle = skinTone;
   ctx.fillRect((baseX + 1) * u, (baseY + 3) * u, 3 * u, 3 * u);
   ctx.fillStyle = blackDetail;
-  ctx.fillRect((baseX + 1) * u, (baseY + 4) * u, 2 * u, 1 * u);
+  ctx.fillRect((baseX + 1) * u, (baseY + 4) * u, 1 * u, 1 * u);
   ctx.fillStyle = bodyDark;
   ctx.fillRect((baseX + 1) * u, (baseY + 6) * u, 2 * u, 1 * u);
-  ctx.fillStyle = hairPale;
+  ctx.fillStyle = hairBlonde;
   ctx.fillRect((baseX + 3) * u, (baseY + 2) * u, 1 * u, cfg.hairLen * u);
   ctx.fillRect((baseX + 4) * u, (baseY + 3) * u, 1 * u, Math.max(2, cfg.hairLen - 1) * u);
   if (cfg.hairFront) ctx.fillRect((baseX + 0) * u, (baseY + 2) * u, 1 * u, 3 * u);
+  ctx.fillStyle = hairShade;
+  ctx.fillRect((baseX + 4) * u, (baseY + 4) * u, 1 * u, Math.max(1, cfg.hairLen - 2) * u);
 
   // === ARM + HAND: skin, grip at mid-torso holding tip-UP sword in front ===
   ctx.fillStyle = skinTone;
@@ -854,6 +937,7 @@ function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
 // Returns the raw canvas (96x96). This is the best form for Phaser (addCanvas + NEAREST).
 // generateCharacterSprite (below) wraps it for dataUrl compat (review menu, server, <img> tags).
 function createCharacterSpriteCanvas(character, spriteSpec = null) {
+  if(isMortaciaPortrait(character,spriteSpec))return createMortaciaReferenceCanvas();
   const traitSpec = getProceduralSpec(character, spriteSpec);
   if (traitSpec) return createTraitSpriteCanvas(traitSpec, 0);
   const canvas = createCanvas(BASE_SIZE * UPSCALE, BASE_SIZE * UPSCALE);
@@ -1588,6 +1672,14 @@ function createCharacterSpriteSpec(character) {
  * Also useful for review previews (draw frames in a <canvas> and cycle with requestAnimationFrame).
  */
 function createCharacterSpriteSheetCanvas(character, spriteSpec = null, frameCount = 4) {
+  if(isMortaciaPortrait(character,spriteSpec)){
+    const frame=createMortaciaReferenceCanvas(),count=Math.max(1,Math.min(8,Math.floor(frameCount||4)));
+    const sheet=createCanvas(frame.width*count,frame.height),ctx=sheet.getContext('2d');
+    sheet._combatBodyHeight=frame._combatBodyHeight;
+    ctx.imageSmoothingEnabled=false;
+    for(let i=0;i<count;i++)ctx.drawImage(i?createMortaciaReferenceCanvas(i):frame,i*frame.width,0);
+    return sheet;
+  }
   const traitSpec = getProceduralSpec(character, spriteSpec);
   if (traitSpec) return createTraitSpriteSheetCanvas(traitSpec, frameCount);
   const frameCanvas = createCharacterSpriteCanvas(character, spriteSpec); // one frame to get size
@@ -1947,7 +2039,7 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
     : (isMortacia ? hexToVoxelColor('#6e6e76', '#6e6e76') : mixVoxelColor(secondary, shadow, 0.2));
   const darkMetal = mixVoxelColor(shadow, secondary, 0.28);
   const hairColor = isMortacia
-    ? hexToVoxelColor('#f0ebe0', '#f0ebe0')
+    ? hexToVoxelColor(spec.traits?.palette?.hair, '#f2cf91')
     : mixVoxelColor(highlight, skin, 0.32);
   const bootCol = spec.bootColor
     ? hexToVoxelColor(spec.bootColor, '#3e3e46')
@@ -2038,14 +2130,14 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
 
   // --- TORSO ---
   if (corsetLike && !armorLike) {
-    // Hourglass: wider chest, cinched waist, slight hips; bikini/sports-bra coverage
+    // Preserve the fitted silhouette; Mortacia's bodice continues down over her waist.
     const chestZ1 = torsoZ1;
     const chestZ0 = torsoZ0 + Math.floor(torsoH * 0.45);
     const waistZ1 = chestZ0;
     const waistZ0 = torsoZ0 + Math.floor(torsoH * 0.15);
     const hipZ1 = waistZ0;
     fillBox(torsoX0, torsoX1, torsoY0, torsoY1, chestZ0, chestZ1, cloth); // top / bra band
-    fillBox(centerX - 1, centerX + 1, torsoY0, torsoY1, waistZ0, waistZ1, skin); // bare midriff
+    fillBox(centerX - 1, centerX + 1, torsoY0, torsoY1, waistZ0, waistZ1, isMortacia || garment?.coverMidriff ? cloth : skin);
     // cups / coverage
     fillBox(torsoX0, centerX - 1, torsoY0, torsoY1, chestZ0 + 1, chestZ1, mixVoxelColor(cloth, shadow, 0.1));
     fillBox(centerX + 1, torsoX1, torsoY0, torsoY1, chestZ0 + 1, chestZ1, mixVoxelColor(cloth, shadow, 0.1));
@@ -2150,7 +2242,15 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
   }
 
   // --- WINGS (Mortacia: triangular pointy tops; hang to ankles then angle UP toward hands; 3 bones from peak) ---
-  if (wingLike) {
+  if (wingLike && isMortacia) {
+    const shape=getProceduralApi().mortaciaWingProfile(),top=Math.min(size-2,headZ1+2),bottom=legZ0+1;
+    for(const side of[-1,1]){
+      const rootX=centerX+backDir*Math.floor(torsoW/2),span=Math.min(3+wingLen,backDir>0?size-2-rootX:rootX-1);
+      const planeY=centerY+side*2,map=p=>[Math.round(rootX+backDir*p[0]*span),Math.round(top-p[1]*(top-bottom))];
+      fillMembrane(shape.outline.map(map),planeY,wingMem);
+      for(const [a,b]of shape.ribs){const [x,z]=map(a),[xx,zz]=map(b);drawLine(x,planeY,z,xx,planeY,zz,1,wingBone);}
+    }
+  } else if (wingLike) {
     const peakX = centerX + backDir * (Math.floor(torsoW / 2) + 1);
     const peakZ = Math.min(size - 2, headZ1 + 1);
     const peakY = centerY - 1;
@@ -2622,19 +2722,44 @@ function c64PaletteFromTraits(t, rng) {
 }
 
 // --- cell-unit drawing helpers (1 cell = 4 canvas px) ----------------------------------------------
+function c64NativeRect(ctx,x,y,w,h,color){
+  const left=Math.round(x)*C64_U,top=Math.round(y)*C64_U,right=Math.round(x+w)*C64_U,bottom=Math.round(y+h)*C64_U;
+  if(!color)ctx.clearRect(left,top,right-left,bottom-top);
+  else{ctx.fillStyle=color;ctx.fillRect(left,top,right-left,bottom-top);}
+}
+function c64NativePrefab(ctx,draw){
+  const geometry=ctx._c64Geometry;if(!geometry)return draw();
+  ctx.save();ctx.translate(geometry.pad*C64_U,geometry.pad*C64_U);ctx.scale(geometry.scale,geometry.scale);draw();ctx.restore();
+}
 function c64R(ctx, x, y, w, h, color) {
   if (w <= 0 || h <= 0) return;
+  const geometry=ctx._c64Geometry;
+  if(geometry)return c64NativeRect(ctx,x*geometry.scale+geometry.pad,y*geometry.scale+geometry.pad,w*geometry.scale,h*geometry.scale,color);
   if (!color) { ctx.clearRect(Math.round(x * C64_U), Math.round(y * C64_U), Math.round(w * C64_U), Math.round(h * C64_U)); return; }
   ctx.fillStyle = color;
   ctx.fillRect(Math.round(x * C64_U), Math.round(y * C64_U), Math.round(w * C64_U), Math.round(h * C64_U));
 }
 function c64Dither(ctx, x, y, w, h, color, phase = 0) {
+  const geometry=ctx._c64Geometry;
+  if(geometry){
+    const left=Math.round(x*geometry.scale+geometry.pad),top=Math.round(y*geometry.scale+geometry.pad);
+    for(let yy=0;yy<Math.round(h*geometry.scale);yy++)for(let xx=0;xx<Math.round(w*geometry.scale);xx++)
+      if(((xx+yy+phase)&1)===0)c64NativeRect(ctx,left+xx,top+yy,1,1,color);
+    return;
+  }
   ctx.fillStyle = color;
   for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
     if (((xx + yy + phase) & 1) === 0) ctx.fillRect((x + xx) * C64_U, (y + yy) * C64_U, C64_U, C64_U);
   }
 }
 function c64Line(ctx, x0, y0, x1, y1, color, w = 1) {
+  const geometry=ctx._c64Geometry;
+  if(geometry){
+    x0=x0*geometry.scale+geometry.pad;y0=y0*geometry.scale+geometry.pad;x1=x1*geometry.scale+geometry.pad;y1=y1*geometry.scale+geometry.pad;
+    const count=Math.ceil(Math.max(Math.abs(x1-x0),Math.abs(y1-y0),1)),width=Math.max(1,Math.round(w*geometry.scale*.7));
+    for(let i=0;i<=count;i++)c64NativeRect(ctx,x0+(x1-x0)*i/count,y0+(y1-y0)*i/count,width,width,color);
+    return;
+  }
   const n = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
   for (let i = 0; i <= n; i++) {
     const x = Math.round(x0 + (x1 - x0) * i / n);
@@ -2643,11 +2768,19 @@ function c64Line(ctx, x0, y0, x1, y1, color, w = 1) {
   }
 }
 function c64Disc(ctx, cx, cy, r, color) {
+  if(ctx._c64Geometry)return c64Oval(ctx,cx,cy,r,r,color);
   for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) {
     if (x * x + y * y <= r * r + r * 0.6) c64R(ctx, cx + x, cy + y, 1, 1, color);
   }
 }
 function c64Oval(ctx, cx, cy, rx, ry, color) {
+  const geometry=ctx._c64Geometry;
+  if(geometry){
+    cx=cx*geometry.scale+geometry.pad;cy=cy*geometry.scale+geometry.pad;rx*=geometry.scale;ry*=geometry.scale;
+    for(let y=Math.floor(cy-ry);y<=Math.ceil(cy+ry);y++)for(let x=Math.floor(cx-rx);x<=Math.ceil(cx+rx);x++)
+      if((x-cx)**2/(rx*rx+.3)+(y-cy)**2/(ry*ry+.3)<=1)c64NativeRect(ctx,x,y,1,1,color);
+    return;
+  }
   for (let y = -ry; y <= ry; y++) for (let x = -rx; x <= rx; x++) {
     if ((x * x) / (rx * rx + 0.3) + (y * y) / (ry * ry + 0.3) <= 1.0) c64R(ctx, cx + x, cy + y, 1, 1, color);
   }
@@ -2655,6 +2788,8 @@ function c64Oval(ctx, cx, cy, rx, ry, color) {
 
 // --- add-on prefabs ---------------------------------------------------------------------------------
 function c64Poly(ctx, pts, color) {
+  const geometry=ctx._c64Geometry;
+  if(geometry)pts=pts.map(([x,y])=>[x*geometry.scale+geometry.pad,y*geometry.scale+geometry.pad]);
   let minY = Infinity, maxY = -Infinity;
   pts.forEach(([, y]) => { minY = Math.min(minY, y); maxY = Math.max(maxY, y); });
   for (let y = Math.floor(minY); y <= Math.ceil(maxY); y++) {
@@ -2666,7 +2801,7 @@ function c64Poly(ctx, pts, color) {
     xs.sort((a, b) => a - b);
     for (let k = 0; k + 1 < xs.length; k += 2) {
       const a = Math.round(xs[k]), b = Math.round(xs[k + 1]);
-      if (b > a) c64R(ctx, a, y, b - a, 1, color);
+      if (b > a)(geometry?c64NativeRect:c64R)(ctx, a, y, b - a, 1, color);
     }
   }
 }
@@ -2676,7 +2811,7 @@ function c64Wings(ctx, kind, sx, sy, span, pal, frame) {
   if (!kind || kind === 'none') return;
   const flap = (frame === 1 || frame === 3) ? 1 : 0;
   if (kind === 'bone') {
-    drawSkeletalWings(ctx, sx - 2, sy - 3, C64_U, { ...pal }, 6, 4, 1.2, -1);
+    c64NativePrefab(ctx,()=>drawSkeletalWings(ctx, sx - 2, sy - 3, C64_U, { ...pal }, 6, 4, 1.2, -1));
     return;
   }
   const base = pal.wing || pal.secondary;
@@ -2825,7 +2960,7 @@ function c64HeldItem(ctx, item, hx, hy, pal, frame, facing = 1) {
     const len = type === 'greatsword' || type === 'scythe' || type === 'staff' || type === 'spear' || type === 'trident' || type === 'banner' ? 12
       : (type === 'dagger' || type === 'wand' || type === 'sickle' ? 5 : 8);
     const wy = hy + 1 - len;
-    drawWeapon(ctx, (hx + 1) * C64_U, wy * C64_U, C64_U, ip, len, C64_WEAPON_MAP[type], type === 'greatsword' ? 5 : 4, facing);
+    c64NativePrefab(ctx,()=>drawWeapon(ctx, (hx + 1) * C64_U, wy * C64_U, C64_U, ip, len, C64_WEAPON_MAP[type], type === 'greatsword' ? 5 : 4, facing));
     if (type === 'trident') { c64R(ctx, hx, wy, 1, 2, ip.highlight); c64R(ctx, hx + 2, wy, 1, 2, ip.highlight); c64R(ctx, hx, wy + 2, 3, 1, ip.highlight); }
     if (type === 'hammer') c64R(ctx, hx, wy, 3, 2, ip.highlight);
     if (type === 'banner') { c64R(ctx, hx + 2, wy, 3, 4, ip.accent); c64R(ctx, hx + 3, wy + 1, 1, 1, ip.highlight); }
@@ -2946,6 +3081,7 @@ function c64Humanoid(ctx, spec, t, pal, frame, rng) {
   const torsoBottom = naga ? 16 : ground - legH + 1;
   const torsoY = torsoBottom - p.torsoH + bob + lift;
   const headY = torsoY - hh;
+  if(frame===0)ctx.canvas._combatBodyHeight=(ground-headY+1)*C64_U;
   const tx = cx - Math.floor(tw / 2);
   const hx = cx - Math.floor(hw / 2) + 1;
 
@@ -3365,20 +3501,20 @@ function drawPlaceholderShimmer(ctx, frame, seed) {
 // coloured outline instead of black (C64-style glow).
 function c64OutlinePass(ctx, color, fill) {
   if (typeof ctx.getImageData !== 'function') return;
-  const S = C64_GRID * C64_U;
+  const grid=ctx.canvas.width/C64_U,S=ctx.canvas.width;
   const img = ctx.getImageData(0, 0, S, S);
   const d = img.data;
-  const occ = new Uint8Array(C64_GRID * C64_GRID);
-  for (let cy = 0; cy < C64_GRID; cy++) for (let cx = 0; cx < C64_GRID; cx++) {
+  const occ = new Uint8Array(grid * grid);
+  for (let cy = 0; cy < grid; cy++) for (let cx = 0; cx < grid; cx++) {
     let n = 0;
     for (let y = 0; y < C64_U; y++) for (let x = 0; x < C64_U; x++) if (d[((cy * C64_U + y) * S + cx * C64_U + x) * 4 + 3] > 40) n++;
-    occ[cy * C64_GRID + cx] = n >= 3 ? 1 : 0;
+    occ[cy * grid + cx] = n >= 3 ? 1 : 0;
   }
   const rgb = c64Rgb(color);
-  for (let cy = 0; cy < C64_GRID; cy++) for (let cx = 0; cx < C64_GRID; cx++) {
-    if (occ[cy * C64_GRID + cx]) continue;
-    const nb = (cx > 0 && occ[cy * C64_GRID + cx - 1]) || (cx < C64_GRID - 1 && occ[cy * C64_GRID + cx + 1])
-      || (cy > 0 && occ[(cy - 1) * C64_GRID + cx]) || (cy < C64_GRID - 1 && occ[(cy + 1) * C64_GRID + cx]);
+  for (let cy = 0; cy < grid; cy++) for (let cx = 0; cx < grid; cx++) {
+    if (occ[cy * grid + cx]) continue;
+    const nb = (cx > 0 && occ[cy * grid + cx - 1]) || (cx < grid - 1 && occ[cy * grid + cx + 1])
+      || (cy > 0 && occ[(cy - 1) * grid + cx]) || (cy < grid - 1 && occ[(cy + 1) * grid + cx]);
     if (!nb) continue;
     for (let y = 0; y < C64_U; y++) for (let x = 0; x < C64_U; x++) {
       const i = ((cy * C64_U + y) * S + cx * C64_U + x) * 4;
@@ -3393,7 +3529,7 @@ function c64OutlinePass(ctx, color, fill) {
 // even where prefabs mix shades) - max ~12 colours.
 function c64LimitColours(ctx, pal) {
   if (typeof ctx.getImageData !== 'function') return;
-  const S = C64_GRID * C64_U;
+  const S = ctx.canvas.width;
   const img = ctx.getImageData(0, 0, S, S);
   const d = img.data;
   const counts = new Map();
@@ -3460,10 +3596,30 @@ function c64VaryPalette(pal, rng, signature) {
   return { ...pal, outfit: nudge(pal.outfit, 0.35), primary: nudge(pal.primary, 0.3), trim: nudge(pal.trim, 0.3), highlight: nudge(pal.highlight, 0.25) };
 }
 
+function c64NativeDetails(ctx,t,pal){
+  const geometry=ctx._c64Geometry;if(!geometry||geometry.scale<=1.05)return;
+  const size=ctx.canvas.width,grid=size/C64_U,data=ctx.getImageData(0,0,size,size).data;
+  const filled=(x,y)=>x>=0&&y>=0&&x<grid&&y<grid&&data[(x*C64_U+y*C64_U*size)*4+3]>0;
+  const robe=['robe','dress','cloak','rags'].includes(t.outfit?.style),armor=['plate','mail'].includes(t.outfit?.style)||['stone','metal','crystal'].includes(t.covering);
+  // Fine native-cell folds, seams and scales supplement the same silhouette and palette.
+  for(let y=1;y<grid-1;y++){
+    if((y-geometry.pad)/geometry.scale<11)continue;
+    let left=grid,right=-1;for(let x=1;x<grid-1;x++)if(filled(x,y)){left=Math.min(left,x);right=x;}
+    for(let x=left+1;x<right;x++){
+      if(!filled(x,y)||!filled(x-1,y)||!filled(x+1,y)||!filled(x,y-1)||!filled(x,y+1))continue;
+      const fold=robe&&(x===left+Math.round((right-left)*.33)||x===left+Math.round((right-left)*.66));
+      const seam=armor&&y%7===3&&x%4!==0,scale=t.covering==='scales'&&(x+(y%2)*2)%5===0&&y%3===1;
+      if(fold||seam||scale)c64NativeRect(ctx,x,y,1,1,armor?c64Dark(pal.metal,.3):c64Dark(robe?pal.outfit:pal.skin,.28));
+    }
+  }
+}
 function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
-  const canvas = createCanvas(C64_GRID * C64_U, C64_GRID * C64_U);
+  const native=Number.isFinite(options.nativeScale)?Math.max(1,Math.min(2.4,options.nativeScale)):null;
+  const grid=native?Math.min(96,Math.ceil((C64_GRID+16)*native)):C64_GRID;
+  const canvas = createCanvas(grid * C64_U, grid * C64_U);
   const ctx = canvas.getContext('2d');
   if (!ctx || typeof ctx.fillRect !== 'function') return canvas;
+  if(native)ctx._c64Geometry={scale:native,pad:Math.floor(8*native)};
   if (isPlaceholderSpriteSpec(spec)) {
     drawPlaceholderShimmer(ctx, frame, spec.seed || 1);
     return canvas;
@@ -3480,9 +3636,36 @@ function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
   else if (plan === 'ooze') c64Ooze(ctx, spec, t, pal, fr, rng);
   else if (plan === 'elemental') c64Elemental(ctx, spec, t, pal, fr, rng);
   else c64Humanoid(ctx, spec, t, pal, fr, rng);
+  c64NativeDetails(ctx,t,pal);
   if (options.outline !== false) c64OutlinePass(ctx, pal.outline, true);
   c64LimitColours(ctx, pal);
+  if(fr===0&&!options.measureBody&&(Number.isFinite(canvas._combatBodyHeight)||native)){
+    // Combat sizing must measure the drawn body (including headgear/outline), not
+    // the nominal limb layout. Weapons, wings and glow must not shrink the body.
+    const bodyTraits={...t,wings:'none',tail:'none',horns:'none',spikes:false,halo:false,extraArms:0,
+      handGlow:false,items:[],outfit:{...t.outfit,cape:false},aura:{...t.aura,strength:0}};
+    const body=createTraitSpriteCanvas({...spec,traits:bodyTraits},0,{...options,measureBody:true});
+    const pixels=body.getContext('2d').getImageData(0,0,body.width,body.height).data;
+    let top=body.height,bottom=-1;
+    for(let y=0;y<body.height;y++)for(let x=0;x<body.width;x++)if(pixels[(x+y*body.width)*4+3]){
+      top=Math.min(top,y);bottom=Math.max(bottom,y);
+    }
+    if(bottom>=top)canvas._combatBodyHeight=bottom-top+1;
+  }
   return canvas;
+}
+
+function createCombatSpriteSheetCanvas(character,spriteSpec=null,frameCount=4){
+  const spec=getProceduralSpec(character,spriteSpec),stature=spec?.traits&&getProceduralApi()?.characterStature(spec);
+  if(isMortaciaPortrait(character,spriteSpec)||!stature||stature.scale<=1.1)return createCharacterSpriteSheetCanvas(character,spriteSpec,frameCount);
+  const baseline=createTraitSpriteCanvas(spec,0,{nativeScale:1});
+  const nativeScale=Math.max(1.2,Math.min(2.4,C64_GRID*C64_U*stature.scale/baseline._combatBodyHeight));
+  const count=Math.max(1,Math.min(8,Math.floor(frameCount||4))),frames=[];
+  for(let frame=0;frame<count;frame++)frames.push(createTraitSpriteCanvas(spec,frame%4,{nativeScale}));
+  const size=frames[0].height,sheet=createCanvas(size*count,size),ctx=sheet.getContext('2d');
+  sheet._combatBodyHeight=frames[0]._combatBodyHeight;sheet._combatNativeScale=nativeScale;
+  ctx.imageSmoothingEnabled=false;frames.forEach((pose,i)=>ctx.drawImage(pose,i*size,0));
+  return sheet;
 }
 
 function createTraitSpriteSheetCanvas(spec, frameCount = 4) {
@@ -3490,7 +3673,10 @@ function createTraitSpriteSheetCanvas(spec, frameCount = 4) {
   const S = C64_GRID * C64_U;
   const sheet = createCanvas(S * n, S);
   const ctx = sheet.getContext('2d');
-  for (let f = 0; f < n; f++) ctx.drawImage(createTraitSpriteCanvas(spec, f % 4), f * S, 0);
+  for (let f = 0; f < n; f++) {
+    const pose=createTraitSpriteCanvas(spec,f%4);if(f===0)sheet._combatBodyHeight=pose._combatBodyHeight;
+    ctx.drawImage(pose,f*S,0);
+  }
   return sheet;
 }
 
@@ -3520,9 +3706,12 @@ function traitSpriteFingerprint(spec) {
 // Safe export
 if (typeof module !== 'undefined' && module && module.exports) {
   module.exports = {
+    createMortaciaReferenceCanvas,
+    refreshMortaciaSpriteArt,
     generateCharacterSprite,
     createCharacterSpriteCanvas,
     createCharacterSpriteSheetCanvas,
+    createCombatSpriteSheetCanvas,
     extractCharacterFrameCanvases,
     createCharacterVoxelFrames,
     createSemanticCharacterVoxelFrame,
@@ -3540,9 +3729,11 @@ if (typeof module !== 'undefined' && module && module.exports) {
 }
 
 if (typeof window !== 'undefined') {
+  window.refreshMortaciaSpriteArt = refreshMortaciaSpriteArt;
   window.generateCharacterSprite = generateCharacterSprite;
   window.createCharacterSpriteCanvas = createCharacterSpriteCanvas;
   window.createCharacterSpriteSheetCanvas = createCharacterSpriteSheetCanvas;
+  window.createCombatSpriteSheetCanvas = createCombatSpriteSheetCanvas;
   window.extractCharacterFrameCanvases = extractCharacterFrameCanvases;
   window.createCharacterVoxelFrames = createCharacterVoxelFrames;
   window.createSemanticCharacterVoxelFrame = createSemanticCharacterVoxelFrame;

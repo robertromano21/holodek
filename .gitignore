@@ -128,3 +128,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Piper voice model for SID speech (downloaded, ~114 MB; see docs/SID-VOICE-RESEARCH.md)
+models/

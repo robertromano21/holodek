@@ -52,6 +52,25 @@
     return valid(name) ? name : null;
   }
 
+  function describeItem(item, readable) {
+    if (readable?.backstory) return `${readable.title || item.name}. ${readable.backstory} Read its stored chapters to explore its contents.`;
+    if (item.description || item.purpose) return String(item.description || item.purpose);
+    const name = key(item.name);
+    if (item.readable_kind === 'spellbook' || /\b(spellbook|grimoire)\b/.test(name)) return 'A spell-reference volume. Read its stored notes; reading does not cast or teach spells yet.';
+    if (item.readable_kind === 'book' || /\b(book|tome|codex|ledger|journal|chronicle)\b/.test(name)) return 'A readable volume of history, lore or recorded instructions. Use Read to open its stored chapters.';
+    if (item.readable_kind === 'scroll' || /\bscroll\b/.test(name)) return 'A portable written record. Use Read to examine its stored text and any recorded clues.';
+    if (item.readable_kind === 'map' || /\bmap\b/.test(name)) return 'A readable geographic or historical document, not a guarantee of current dungeon exits.';
+    if (item.type === 'weapon') return 'Equip as a weapon for combat. Its listed modifiers affect attacks and damage.';
+    if (item.type === 'armor') return 'Equip as armor for protection. Its listed armor modifier contributes to defense.';
+    if (item.type === 'shield') return 'Equip as a shield for defense. Its listed modifiers apply while equipped.';
+    if (item.type === 'key' || /\bkey\b/.test(name)) return 'Use with its matching locked door or mechanism; it does not open every lock.';
+    return 'An Other-slot item. Inspect it for its role in the story; any listed modifiers apply when equipped.';
+  }
+  function itemDescription(item) {
+    const readable = root.getReadableItemMetadata?.(item.name) || root.currentDungeon?.readables?.find(r => key(r.name) === key(item.name));
+    return describeItem(item, readable);
+  }
+
   let panel, groups, detail, equip, read, open = false, selected = null, dragged = null, replacement = null;
   let items = [], state = {}, signature = '';
   function busy() { return !!(root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active); }
@@ -80,12 +99,33 @@
     }
     document.getElementById('party-icon-dock')?.classList.toggle('inventory-targeting', !!selected);
     if (equip) equip.disabled = !selected;
-    if(read){read.hidden=!selected||!['book','scroll','map'].includes(root.SceneItems?.itemKind(selected));read.disabled=!selected||busy()||root.GameCommandGate?.busy();}
+    if(read){read.hidden=!selected||!root.WorldInteractionUi?.hasReadableContent(selected.name);read.disabled=!selected||busy()||root.GameCommandGate?.busy()||root.gamePaused;}
     if (!selected) { message('Drag an item onto a party icon, or select it and click a character.'); return; }
     const stats = [['Attack', 'attack_modifier'], ['Damage', 'damage_modifier'], ['Armor', 'ac'], ['Magic', 'magic']]
       .filter(([, field]) => Number.isFinite(Number(selected[field])) && Number(selected[field]) !== 0)
       .map(([label, field]) => `${label} ${Number(selected[field]) > 0 ? '+' : ''}${selected[field]}`);
-    message(`${selected.name}${stats.length ? ' | ' + stats.join(' | ') : ''}`);
+    message(`${selected.name}${stats.length ? ' | ' + stats.join(' | ') : ''}\n${itemDescription(selected)}`);
+  }
+
+  function showItemActions(item) {
+    selectItem(item.name);
+    if (busy() || root.GameCommandGate?.busy() || root.gamePaused) return;
+    inventoryLink(item.name)?.click();
+    const popup = document.getElementById('equip-button')?.closest('.popup-container');
+    if (!popup) return;
+    popup.dataset.inventoryDetails = 'true';
+    popup.style.cssText = 'position:static;transform:none;width:auto;margin:8px 0;padding:8px';
+    const description = document.createElement('p'); description.textContent = itemDescription(item);
+    popup.querySelector('p')?.after(description);
+    panel.querySelector('.inventory-header')?.after(popup);
+    panel.scrollTop = 0;
+    for (const id of ['drop-button', 'equip-button']) popup.querySelector('#' + id)?.addEventListener('click', event => {
+      if (busy() || root.GameCommandGate?.busy() || root.gamePaused || id === 'drop-button' && document.getElementById('chatuserinput')?.value.trim()) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
+      toggle(false);
+    }, { capture: true });
+    fit();
   }
 
   function requestEquip(name, targetName) {
@@ -148,7 +188,7 @@
         name.className = 'inventory-item-name'; name.textContent = item.name;
         button.append(canvas, name);
         if (item.quantity > 1) { const count = document.createElement('span'); count.className = 'inventory-quantity'; count.textContent = item.quantity; button.appendChild(count); }
-        button.addEventListener('click', () => selectItem(item.name));
+        button.addEventListener('click', () => showItemActions(item));
         button.addEventListener('dragstart', event => {
           if (busy()) { event.preventDefault(); return; }
           dragged = item.name; selectItem(item.name);
@@ -183,7 +223,7 @@
     panel.hidden = !open;
     document.getElementById('dungeon-inventory-shortcut')?.setAttribute('aria-expanded', String(open));
     if (open) { root.DungeonExplorationMap?.toggle(false); render(); fit(); }
-    else { selected = dragged = null; clearTargetHighlights(); }
+    else { selected = dragged = null; clearTargetHighlights(); document.querySelectorAll('.popup-container[data-inventory-details]').forEach(p => p.remove()); }
   }
   function update(data) {
     state = data || {};
@@ -210,7 +250,7 @@
     if (!panel || !groups || !detail || !equip) return;
     read=document.createElement('button');read.id='inventory-read';read.type='button';read.textContent='Read';read.hidden=true;
     read.addEventListener('click',()=>{
-      if(!selected||busy()||root.GameCommandGate?.busy()||root.gamePaused)return;
+      if(!selected||busy()||root.GameCommandGate?.busy()||root.gamePaused||!root.WorldInteractionUi?.hasReadableContent(selected.name)||document.getElementById('chatuserinput')?.value.trim())return;
       const name=selected.name;toggle(false);root.WorldInteractionUi?.requestRead(name);
     });equip.parentElement.appendChild(read);
     document.getElementById('dungeon-inventory-shortcut')?.addEventListener('click', () => toggle());
@@ -247,5 +287,5 @@
     }, true);
     root.addEventListener('resize', fit);
   }
-  return { CATEGORIES, parseProperties, inventoryItems, equippedName, init, update, toggle, reset, requestEquip, isOpen: () => open };
+  return { CATEGORIES, parseProperties, inventoryItems, equippedName, describeItem, init, update, toggle, reset, requestEquip, isOpen: () => open };
 });

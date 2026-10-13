@@ -26,6 +26,7 @@
   let room = null, prompted = null;
   function update(dungeon, items, player) {
     if (!dungeon) return;
+    if(root.ObjectDiscovery)items=(items||[]).filter(item=>root.ObjectDiscovery.isVisible(dungeon,item.name));
     if (room !== dungeon) {
       room = dungeon; prompted = null;
       document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove();

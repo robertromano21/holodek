@@ -4,7 +4,9 @@
     "canvas": "^3.2.0",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "onnxruntime-node": "^1.30.0",
     "phaser": "^3.87.0",
+    "phonemizer": "^1.2.1",
     "retort-js": "^0.0.4",
     "ws": "^8.18.1"
   },

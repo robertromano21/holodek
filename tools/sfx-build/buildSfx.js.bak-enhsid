@@ -1,0 +1,112 @@
+// Holodek-1 SID sound-effect + ambience builder.
+// Each effect is a frame-by-frame (50 Hz PAL) dump of all 25 SID registers ($D400-$D418), exactly like a C64 game
+// SFX driver. The table is assembled with xa into a tiny PSID, recorded with sidplayfp (reSIDfp, 6581), and encoded
+// to small mono OGG files. Run on the build box only: node buildSfx.js <outDir>
+'use strict';
+const fs = require('fs'), path = require('path'), { execFileSync } = require('child_process');
+const OUT = path.resolve(process.argv[2] || 'out'); fs.mkdirSync(OUT, { recursive: true });
+const TMP = fs.mkdtempSync('/tmp/sfx-');
+const CLK = 985248, FPS = 50;
+const hz2reg = hz => Math.max(0, Math.min(65535, Math.round(hz * 16777216 / CLK)));
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+const W = { tri: 0x10, saw: 0x20, pulse: 0x40, noise: 0x80 };
+function rng(seed) { let s = seed >>> 0 || 1; return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296); }
+const ad = (a, d) => (a << 4) | d, sr = (s, r) => (s << 4) | r;
+
+// voice state per frame: {hz, wave, gate, pw(0-4095), ad, sr, sync, ring, test}
+// filt: {cut(0-2047), res(0-15), route(bits v1=1 v2=2 v3=4), mode('lp'|'bp'|'hp'|'lb'), vol}
+function frame(voices, filt) {
+  const r = new Array(25).fill(0);
+  voices.forEach((v, i) => {
+    if (!v) return; const b = i * 7, f = hz2reg(v.hz || 0), pw = Math.max(0, Math.min(4095, Math.round(v.pw ?? 2048)));
+    r[b] = f & 255; r[b + 1] = f >> 8; r[b + 2] = pw & 255; r[b + 3] = pw >> 8;
+    r[b + 4] = (W[v.wave] || 0) | (v.gate ? 1 : 0) | (v.sync ? 2 : 0) | (v.ring ? 4 : 0) | (v.test ? 8 : 0);
+    r[b + 5] = v.ad ?? 0; r[b + 6] = v.sr ?? 0;
+  });
+  const fl = filt || {}; const cut = Math.max(0, Math.min(2047, Math.round(fl.cut ?? 2047)));
+  r[21] = cut & 7; r[22] = cut >> 3; r[23] = ((fl.res ?? 0) << 4) | (fl.route ?? 0);
+  const mode = { lp: 1, bp: 2, hp: 4, lb: 3, notch: 5 }[fl.mode] || 0;
+  r[24] = (mode << 4) | (fl.vol ?? 15);
+  return r;
+}
+// An effect = function(t) -> {v:[v1,v2,v3], f:filt} for t=0..frames-1
+function render(name, frames, fn, opts = {}) {
+  const rows = [frame([{ gate: 0 }, { gate: 0 }, { gate: 0 }], { vol: 15 })]; // frame 0: everything released
+  for (let t = 0; t < frames; t++) { const s = fn(t); rows.push(frame(s.v, s.f)); }
+  for (let t = 0; t < 4; t++) rows.push(frame([{ gate: 0 }, { gate: 0 }, { gate: 0 }], { vol: 15 }));
+  const data = [];
+  rows.forEach(r => data.push('  .byt ' + r.join(',')));
+  const n = rows.length;
+  const asm = `; ${name} ${n} frames of SID register dumps
+  * = $1000
+init: lda #<tab
+  sta $fb
+  lda #>tab
+  sta $fc
+  lda #${n & 255}
+  sta $fd
+  lda #${n >> 8}
+  sta $fe
+  rts
+play: lda $fd
+  ora $fe
+  beq done
+  ldy #0
+cp: lda ($fb),y
+  sta $d400,y
+  iny
+  cpy #25
+  bne cp
+  clc
+  lda $fb
+  adc #25
+  sta $fb
+  bcc nc
+  inc $fc
+nc: lda $fd
+  bne nd
+  dec $fe
+nd: dec $fd
+done: rts
+tab:
+${data.join('\n')}
+`;
+  const a = path.join(TMP, name + '.s'), bin = path.join(TMP, name + '.bin'), sid = path.join(TMP, name + '.sid');
+  fs.writeFileSync(a, asm); execFileSync('xa', ['-o', bin, a]);
+  const code = fs.readFileSync(bin), h = Buffer.alloc(0x7c);
+  h.write('PSID', 0); h.writeUInt16BE(2, 4); h.writeUInt16BE(0x7c, 6); h.writeUInt16BE(0x1000, 8);
+  h.writeUInt16BE(0x1000, 10); h.writeUInt16BE(0x1000 + 9 + 4 * 2 + 1 + 0, 12); // placeholder, fixed below
+  h.writeUInt16BE(1, 14); h.writeUInt16BE(1, 16); h.writeUInt32BE(0, 18);
+  h.write(name.slice(0, 31), 0x16); h.write('Holodek-1 SFX', 0x36); h.write('2026', 0x56);
+  h.writeUInt16BE(0x0014, 0x76); // PAL, 6581
+  // play address = offset of label 'play' : init is lda/sta x4 + rts = 4*(2+2)+1 = 17 bytes
+  h.writeUInt16BE(0x1000 + 17, 12);
+  fs.writeFileSync(sid, Buffer.concat([h, code]));
+  const secs = (n + 2) / FPS + (opts.tail ?? 0.6);
+  const wav = path.join(TMP, name + '.wav');
+  execFileSync('sidplayfp', ['-q', '-f22050', '-m', `-t${Math.ceil(secs + 1)}`, `-w${wav}`, sid], { stdio: 'ignore' });
+  return wav;
+}
+const enc = (wav, out, extra = []) => execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', wav, ...extra, '-ac', '1', '-ar', '22050', '-c:a', 'libvorbis', '-q:a', '2', out]);
+const peak = wav => { const m = String(require('child_process').spawnSync('ffmpeg', ['-i', wav, '-af', 'highpass=f=25,volumedetect', '-f', 'null', '-'], { encoding: 'utf8' }).stderr).match(/max_volume: (-?[\d.]+) dB/); return m ? +m[1] : 0; };
+const gainTo = (wav, target, g = 1) => (target + 20 * Math.log10(g) - peak(wav)).toFixed(1) + 'dB';
+function shot(name, frames, fn, opts = {}) {
+  const wav = render(name, frames, fn, opts), len = (frames + 1) / 50 + (opts.tail ?? 0.6);
+  // drop the silent first frame, cut at the designed length with a short fade, remove the 6581 DC offset,
+  // and normalise every effect to the same peak (-4 dB) times its designed gain so the library sits level.
+  enc(wav, path.join(OUT, name + '.ogg'), ['-af', `highpass=f=25,atrim=1.02:${(len + 1).toFixed(3)},asetpts=N/SR/TB,afade=t=out:st=${(len - 0.2).toFixed(3)}:d=0.18,volume=${gainTo(wav, -4, opts.gain)}`]);
+}
+function loop(name, seconds, fn, opts = {}) {
+  const xf = 1.5, frames = Math.round((seconds + xf + 1.1) * FPS);
+  const wav = render(name, frames, t => fn(t, frames), { tail: 0 });
+  // seamless loop: crossfade the extra tail over the head, keep exactly `seconds`
+  const mid = path.join(TMP, name + '.loop.wav');
+  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-i', wav, '-filter_complex',
+    `[0:a]atrim=start=1.02,asetpts=N/SR/TB,asplit=2[a][b];` +
+    `[a]atrim=0:${seconds},asetpts=N/SR/TB,afade=t=in:d=${xf}:curve=qsin[body];` +
+    `[b]atrim=${seconds}:${seconds + xf - 0.02},asetpts=N/SR/TB,afade=t=out:d=${xf - 0.02}:curve=qsin,apad=whole_dur=${seconds}[tail];` +
+    `[body][tail]amix=inputs=2:normalize=0,highpass=f=25,volume=${gainTo(wav, -9, opts.gain)}`, '-ac', '1', '-ar', '22050', mid]);
+  enc(mid, path.join(OUT, name + '.ogg'));
+}
+module.exports = { shot, loop, midi, ad, sr, rng, FPS };
+if (require.main === module) require('./effects.js')(module.exports), console.log('done ->', OUT);

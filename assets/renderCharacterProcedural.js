@@ -1324,6 +1324,32 @@
   }
 
   // ---------------------------------------------------------------- shared appendages
+  function mortaciaWingProfile() {
+    // Shoulder root, raised wrist and three long fingers with scalloped membrane between them.
+    const outline=[[0,.36],[.57,0],[.8,.33],[1,1],[.88,.88],[.78,.79],[.66,.81],
+      [.58,.92],[.49,.73],[.38,.61],[.29,.62],[.23,.75],[.16,.55],[.04,.45]];
+    return {outline,ribs:[0,3,7,11].map(i=>[outline[1],outline[i]])};
+  }
+  function rasterMortaciaWing(px,map,mem,part) {
+    const shape=mortaciaWingProfile(),pts=shape.outline.map(map),ink=rampDark(mem,.72);
+    px.poly(pts,mem,part,F_NOSHADE);
+    px.poly([pts[1],...pts.slice(3,8)],rampLight(mem,.13),part,F_NOSHADE);
+    px.poly([pts[1],...pts.slice(7,12)],rampDark(mem,.12),part,F_NOSHADE);
+    for(let i=0;i<pts.length;i++){
+      const a=pts[i],b=pts[(i+1)%pts.length];px.line(...a,...b,ink,part,F_NOSHADE);
+    }
+    for(const [a,b] of shape.ribs){const from=map(a),to=map(b);
+      px.line(...from,...to,ink,part,F_NOSHADE);
+      px.line(from[0],from[1]+1,to[0],to[1]-1,rampLight(mem,.25),part,F_NOSHADE);
+    }
+  }
+  function renderMortaciaWingPixels(width,height,color='#6e6e76') {
+    const w=Math.max(4,Math.min(64,Math.round(width))),h=Math.max(4,Math.min(64,Math.round(height))),px=new Pix(w,h);
+    rasterMortaciaWing(px,p=>[Math.round(p[0]*(w-1)),Math.round(p[1]*(h-1))],hexToRgb(color),PART.WING_R);
+    const data=new Uint8ClampedArray(w*h*4);
+    for(let i=0;i<w*h;i++){data.set(px.c.subarray(i*4,i*4+3),i*4);data[i*4+3]=px.c[i*4+3]*255;}
+    return {w,h,data};
+  }
   // Torn membrane: notch the trailing edge and punch a few holes (presets, e.g. Mortacia's dragon wings).
   function raggedWingEdges(D) {
     const px = D.px, w = px.w, h = px.h;
@@ -1344,6 +1370,13 @@
   }
   function drawWings(D, ax, ay, span, height, kind) {
     const px = D.px, P = D.P, fr = D.fr;
+    if(D.t.wingShape==='mortacia'){
+      const bottom=D.ankleY??GRID-3,top=Math.max(2,Math.round(ay-height));
+      for(const side of[-1,1])rasterMortaciaWing(px,p=>[
+        Math.round(ax+side*(2+p[0]*(span-2))),Math.round(top+p[1]*(bottom-top))
+      ],P.wingC,side<0?PART.WING_L:PART.WING_R);
+      return;
+    }
     const flap = fr.flap ? -2 : 0;
     const mem = kind === 'feather' ? P.wingC : P.wingC;
     const bone = kind === 'feather' ? rampDark(P.wingC, 0.2) : rampDark(P.wingC, 0.35);
@@ -2598,8 +2631,7 @@
     }
   }
 
-  // Minimal garments (presets, e.g. Mortacia): bikini top that COVERS the belly, high-cut bottoms,
-  // optional butt cape (trails behind so the front view shows bare thighs).
+  // Fitted garments with optional full waist coverage, high-cut bottoms and trailing panels.
   function drawGarment(D, L) {
     const px = D.px, t = D.t;
     const g = t.garment;
@@ -2632,12 +2664,20 @@
     if (g.top !== false) {
       const bikini = !!(g.bikini || D.t.statuesque);
       if (bikini) {
-        // Ink ref: sports-bra / bikini top — thick V straps, cups, ribcage wrap; bare midriff below
+        // Fitted cups and straps; the optional bodice continues over the waist below.
         // Slightly narrower chest, a touch more vertical coverage (annotated tweak)
         const cupY = top + Math.max(1, Math.round(L.torsoH * 0.12));
         const cupH = Math.max(3, Math.round(L.torsoH * 0.28));
         const cupW = Math.max(2, Math.round(L.shoulderW / 2) - 2);
         const ribY = cupY + cupH;
+        if(g.coverMidriff){
+          for(let y=ribY;y<L.yLegTop;y++){
+            const w=Math.max(2,torsoWidthAt(L,y-top)),left=CX-Math.floor(w/2);
+            px.span(CX,y,w,col,PART.TORSO,0);
+            px.put(left,y,dk,PART.TORSO,0);
+            if(w>3)px.put(left+w-1,y,hi,PART.TORSO,0);
+          }
+        }
         // teardrop / rounded cups with cleavage gap — less wide
         [-1, 1].forEach((side) => {
           const x0 = side < 0 ? CX - cupW - 1 : CX + 1;
@@ -2671,7 +2711,7 @@
         px.span(CX, ribY + 1, Math.max(2, wrapW - 2), dk, PART.BELT, 0);
         // tiny extra coverage band under rib wrap
         px.span(CX, ribY + 2, Math.max(2, wrapW - 4), col, PART.BELT, 0);
-        // bare midriff intentionally left empty down to the bottoms
+        // Other garment designs can still leave the waist bare.
       } else {
         const cy = top + Math.max(1, Math.round(L.torsoH * 0.12));
         const bellyEnd = L.yLegTop - 2;
@@ -3093,7 +3133,7 @@
     if (spec.key && pixelCache.has(key)) return pixelCache.get(key);
     const D = buildContext(spec, f);
     if (back) D.view = 'back';
-    if (bb) D.t.gesture = true; // lean silhouette (naturalLimbs on presets overrides stick limbs)
+    if (bb) D.t = {...D.t,gesture:true}; // Render-only pose; never mutate the cached preset.
     const t = D.t;
     let L = null;
     switch (t.bodyPlan) {
@@ -3146,6 +3186,7 @@
     }
     // Weapon-hand lock: do not mirror back bitmaps (would move the sword to the other hand).
     const result = { w: GRID, h: GRID, data: out };
+    if (bb && L && Number.isFinite(L.yHeadTop)) result.bodyHeight = L.ground - L.yHeadTop + 1;
     if(assembly)result.parts=new Uint8Array(px.part);
     if (spec.key) {
       if (pixelCache.size > PIXEL_CACHE_MAX) pixelCache.delete(pixelCache.keys().next().value);
@@ -3454,6 +3495,7 @@
     let minX = S, minY = S, maxX = -1, maxY = -1;
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) if (data[(y * S + x) * 4 + 3]) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
     const res = { w: S, h: S, data, bounds: maxX < 0 ? null : { minX, minY, maxX, maxY }, view, facing };
+    if (Number.isFinite(frontPix.bodyHeight)) res.bodyHeight = frontPix.bodyHeight * 4;
     if (spec.key) {
       if (billboardCache.size > 256) billboardCache.delete(billboardCache.keys().next().value);
       billboardCache.set(key, res);
@@ -3495,6 +3537,35 @@
     const planMul = tr.bodyPlan === 'draconic' ? 1.3 : (tr.bodyPlan === 'giant' ? 1.12 : (tr.bodyPlan === 'spider' || tr.bodyPlan === 'beast' ? 1.05 : 1));
     return Math.round(clamp(base * planMul, 0.55, 1.7) * 100) / 100;
   }
+  function characterStature(spec) {
+    if (!spec?.traits) return null;
+    if (spec.stature?.version === 1 && Number.isFinite(spec.stature.scale)) return spec.stature;
+    const race = String(spec.race || '').toLowerCase();
+    const mortacia = spec.preset === 'mortacia' || /^mortacia\b/i.test(spec.name || '');
+    const smallRace = /\b(dwarf|dwarves|gnome|halfling)\b/.test(race);
+    const humanOrElf = /\b(human|elf|elves|half-elf)\b/.test(race);
+    if (mortacia || smallRace || humanOrElf) return {version:1,category:'humanoid',scale:mortacia ? 1.2 : smallRace ? .8 : 1};
+    const large = ['large','huge'].includes(spec.traits.size) || spec.traits.bodyPlan === 'giant';
+    const roll = hashString(String(spec.name || '').toLowerCase() + '|stature|' + spec.traits.bodyPlan) / 0xffffffff;
+    return {version:1,category:large?'large':'normal',scale:Math.round((large?1.5+roll*.5:.8+roll*.3)*100)/100};
+  }
+  function humanoidWorldStature(spec) {
+    const stature = characterStature(spec);
+    return stature ? 1.65 * stature.scale : null;
+  }
+  function frameBillboardHeight(height, eyeAboveFeet, depth, verticalScale, shift = 0, inset = 0) {
+    // Keep the top of close-up artwork within a five-percent camera margin.
+    const fit = (eyeAboveFeet + (.9 + 2 * shift) * depth / verticalScale) / (1 - inset);
+    return fit > 0 ? Math.min(height, fit) : height;
+  }
+  function characterViewingDistance(spec) {
+    const target = humanoidWorldStature(spec);
+    if (!(target > 0)) return 3;
+    const idle = renderBillboardPixels(spec,{frame:0,view:'front'});
+    const span = idle.bounds ? idle.bounds.maxY-idle.bounds.minY+1 : idle.h;
+    const visibleHeight = target * span / (idle.bodyHeight || span);
+    return Math.max(3, Math.ceil((visibleHeight-.65)*Math.sqrt(3)/.8*10)/10);
+  }
   function finalizeSpec(spec) {
     spec.seed = hashString(String(spec.name || '').toLowerCase() + '|' + spec.salt + '|' + spec.variant);
     spec.key = 'p' + SPEC_VERSION + '-' + hashString(JSON.stringify([spec.traits, spec.seed, spec.level, spec.sex])).toString(36);
@@ -3518,6 +3589,7 @@
       worldScale: ws, grid: GRID,
       design: { torso_width: Math.round(5 * ws), leg_height: Math.round(10 * ws), head_width: Math.round(5 * ws) }
     };
+    spec.stature = o.stature || characterStature(spec);
     return finalizeSpec(spec);
   }
   function withVariant(spec, variant) {
@@ -3596,7 +3668,7 @@
         extraArms: 0, tentacles: 0, spikes: false, mane: false, beard: false, tusks: false, fangs: false, claws: false,
         translucency: 0, tattered: false, floating: false, halo: false, nagaTorso: false, markings: 'none', element: 'shadow',
         palette: {
-          skin: '#e8c4a8', skin2: '#c49a7a', hair: '#f0ebe0', outfit: '#6a6a72', outfit2: '#4a4a52', trim: '#8a8a92',
+          skin: '#e8c4a8', skin2: '#c49a7a', hair: '#f2cf91', outfit: '#6a6a72', outfit2: '#4a4a52', trim: '#8a8a92',
           metal: '#9a9ca4', eye: '#2a2030', glow: '#a890c8', aura: '#a890c8'
         },
         outfit: { style: 'none', hood: false, cape: false, helm: 'none', symbol: 'none' },
@@ -3604,8 +3676,8 @@
           { slot: 'weapon', type: 'sword', name: 'sword', color: '#d4c8a0', accent: '#5a5a62', glow: false, shape: '' }
         ],
         aura: { color: '#a890c8', strength: 0.18 }, handGlow: false, planConfidence: 0, signature: true,
-        heroic: true, statuesque: true, naturalLimbs: true, longBlade: true, headroom: 12, worldScale: 1.5, wingColor: '#6e6e76', wingScale: 1.3, wingHang: 1.0, raggedWings: true, weaponPose: 'ready',
-        garment: { color: '#5a5a62', length: 0.28, highCut: true, buttCape: true, capeLength: 0.85, top: true, bottom: true, bikini: true },
+        heroic: true, statuesque: true, naturalLimbs: true, longBlade: true, headroom: 12, worldScale: 1.5, wingColor: '#6e6e76', wingShape: 'mortacia', wingScale: 1.3, wingHang: 1.0, raggedWings: true, weaponPose: 'ready',
+        garment: { color: '#5a5a62', length: 0.28, highCut: true, buttCape: true, capeLength: 0.85, top: true, bottom: true, bikini: true, coverMidriff: true },
         bootColor: '#3e3e46', bootHeight: 0.5, worldAura: 0.16
       }
     },
@@ -3657,7 +3729,7 @@
   }
 
   return {
-    GRID, SPEC_VERSION, DEFAULT_SCALE, BODY_PLANS,
+    GRID, SPEC_VERSION, DEFAULT_SCALE, BODY_PLANS, mortaciaWingProfile, renderMortaciaWingPixels,
     hashString, makeRng,
     parseConsoleCharacterSheets, parseSheetBlock, parseEquippedLine, normalizeSheet,
     deriveFallbackTraits, normalizeTraitSpec, validateTraitSpec, traitSchemaDescription,
@@ -3667,7 +3739,8 @@
     createProceduralCharacterSprite,
     spriteFingerprint, fingerprintDistance, traitSignature, traitSignatureDistance, ensureDistinctSpriteSpec,
     PRESET_TRAITS, getPresetProceduralSpec, isPresetName: (n) => !!presetKeyOf(n),
-    renderBillboardPixels, createBillboardCanvas, supportsBackView,
+    renderBillboardPixels, createBillboardCanvas, supportsBackView, humanoidWorldStature, characterWorldStature:humanoidWorldStature,
+    characterStature, frameBillboardHeight, characterViewingDistance,
     normalizeBillboardView, deriveViewFromFront
   };
 });

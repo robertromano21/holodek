@@ -506,10 +506,12 @@ test('legacy reach names display without IDs while unrelated names and coordinat
   assert.equal(displayName('Tower 7 (The Last Watch)'), 'Tower 7 (The Last Watch)');
   const game = fs.readFileSync(path.join(__dirname, '../assets/game.js'), 'utf8');
   const roomLine = game.match(/^\s*const roomName = window\.OutdoorRoutes[^\r\n]*/m)[0];
-  const adjacentLine = game.match(/^\s*const adjacentRooms = window\.OutdoorRoutes[^\r\n]*/m)[0];
+  const adjacentLine = game.match(/^\s*const adjacentRooms = consoleAdjacentRooms[\s\S]*?;/m)[0];
   const data = { roomName: 'Hollow Wasteland Reach a16fdb5d (1,-3,0)', adjacentRooms: input, coordinates: 'X: 1, Y: -3, Z: 0' };
   const original = structuredClone(data);
-  const context = { data, window: { OutdoorRoutes: { displayName } } };
+  const context = { data, coordinates: data.coordinates, roomNameDatabase: new Map(),
+    window: { OutdoorRoutes: { displayName }, DungeonInhabitants: require('../assets/dungeonInhabitants') } };
+  vm.runInNewContext(game.slice(game.indexOf('function consoleAdjacentRooms('), game.indexOf('function refreshConsoleExitStatus(')), context);
   vm.runInNewContext(`${roomLine}\n${adjacentLine}\nwindow.rendered = { roomName, adjacentRooms };`, context);
   assert.equal(context.window.rendered.roomName, 'Hollow Wasteland Reach');
   assert.equal(context.window.rendered.adjacentRooms, displayName(input));

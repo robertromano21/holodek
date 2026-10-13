@@ -35,6 +35,7 @@ function fixture(population = null) {
     syncPartyMazeToCombatPositions() {}, applyCombatVisualFrame() {}, moveCombatVisualTo() {}, refreshCombatVisualIfStale() {},
     createCombatVisual: (_scene, entry) => { created.push(entry.name); return visual(entry.name); } };
   vm.runInNewContext(extract('function copyCombatPersistentFields(', 'function seedPartyCombatRoster(') +
+    extract('function setCombatPlayerTokenOwner(', 'function ensureCombatTextureForCharacter(') +
     extract('function setCombatVisualOverlayVisible(', 'function syncCombatActorOverlayFromMaze(') +
     extract('class CombatScene extends Phaser.Scene', 'const gameConfig =') + '\nwindow.TestCombatScene = CombatScene;', context);
   const scene = new root.TestCombatScene();
@@ -73,7 +74,7 @@ test('pending outdoor residents stay in the canonical roster but never appear in
   I.attach(f.root.combatCharacters, population);
   f.scene.updatePositions(f.root.combatCharacters);
   assert.equal(f.scene.characters.Guard.sprite.visible, true);
-  assert.equal(f.scene.characters.Guard.label.visible, true);
+  assert.equal(f.scene.characters.Guard.label.visible, false);
 });
 
 test('actual room-console roster construction skips dead sheets without removing their saved evidence', () => {
@@ -138,4 +139,39 @@ test('presence metadata from another room cannot hide a living same-name actor i
   population.actors.Guard.status = 'dead';
   const f = fixture(population);
   assert.equal(f.root.isDungeonActorPresent(actor('Guard')), true);
+});
+
+test('room transitions never reanchor unrelated residents as companions on either map', () => {
+  const temple = I.createPopulation('0,0,0', [], { starting: true });
+  const f = fixture(temple), foreign = actor('Elyra Stoneshade');
+  const before = JSON.stringify(foreign);
+  f.root.currentCoordinates = 'X: 0, Y: 0, Z: 0';
+  f.root.combatCharacters = [actor('PC', 'Alive', 20, 'pc'), actor('Companion', 'Friendly', 20, 'npc'),
+    foreign, { ...actor('Unassigned'), mazeRoomKey: undefined }];
+  Object.assign(f.context, {
+    currentDungeon: { geoKey: '0,0,0', cells: { '0,0': { tile: 'floor' }, '3,0': { tile: 'floor' } } },
+    playerDungeonX: 0, playerDungeonY: 0, playerPosX: .5, playerPosY: .5, MAX_STEP: 1.5,
+    shouldUsePartyMazeAnchors: () => true, getCurrentCombatRoomKey: () => f.root.currentCoordinates,
+    collectNearbyWalkableTiles: () => [{ x: 3, y: 0, dist: 3 }],
+    preferPartyViewingTiles: tiles => tiles, ensureMonsterSpriteData() {}, hashCharacterName: () => 0,
+    isSpawnBlockedCell: cell => cell.tile !== 'floor'
+  });
+  vm.runInNewContext(extract('function ensurePartyMazeAnchors(', 'function syncPartyMazeToCombatPositions('), f.context);
+  f.context.ensurePartyMazeAnchors(true);
+  assert.deepEqual(Array.from(f.root.combatCharacters, a => a.name), ['PC', 'Companion']);
+  assert.equal(f.root.combatCharacters[1].mazeRoomKey, f.root.currentCoordinates);
+  assert.equal(JSON.stringify(foreign), before, 'The original resident is not teleported or rewritten');
+  f.scene.updateCharacters(f.root.combatCharacters);
+  assert.deepEqual(Object.keys(f.scene.characters), ['PC', 'Companion']);
+  vm.runInNewContext(renderer, f.context);
+  f.root.webglDungeonRenderer._getActorWorldSpec = () => ({ kind: 'procedural' });
+  assert.deepEqual(Array.from(f.root.webglDungeonRenderer._getVisibleCharacterVoxelActors(), a => a.name), ['Companion']);
+});
+
+test('legacy room transitions reject foreign anchors even before the destination population arrives', () => {
+  const f = fixture();
+  f.root.currentCoordinates = 'X: 0, Y: 0, Z: 0';
+  assert.equal(f.root.isDungeonActorPresent(actor('Foreign resident')), false);
+  assert.equal(f.root.isDungeonActorPresent(actor('Recruited resident', 'Friendly', 20, 'npc')), true);
+  assert.equal(I.isPresent(actor('Foreign resident'), I.createPopulation('0,0,0', [])), false);
 });

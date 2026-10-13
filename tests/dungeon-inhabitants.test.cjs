@@ -286,7 +286,7 @@ test('pausing target selection stops its deadline and ignores responses until re
   const helper=source.slice(source.indexOf('async function chooseDefenceTarget('),source.indexOf('function selectCombatTeams('));
   const emitter=new(require('node:events').EventEmitter)();let now=1000,tick,cleared=false;
   const actionDice={active:{id:'round'},paused:false};
-  const context={sharedState:{emitter},actionDice,combatSpace:null,broadcast(){},Date:{now:()=>now},
+  const context={sharedState:{emitter},actionDice,combatSpace:null,combatTurnFlow:null,broadcast(){},Date:{now:()=>now},
     setInterval:fn=>{tick=fn;return{};},clearInterval:()=>cleared=true};
   vm.runInNewContext(helper,context);
   let resolved=false;const waiting=context.chooseDefenceTarget({name:'PC',x:1,y:1},[{name:'Guard',hp:20,x:2,y:1}]).then(v=>{resolved=true;return v;});
@@ -375,7 +375,7 @@ for(const mode of ['Combat Map-Based','Interactive Map-Based','No Combat Map']) 
     getRoomDungeon:()=>d,getUpdatedGameConsole:()=>text,setUpdatedGameConsole:v=>text=v,
     getCombatCharactersString:()=>wire,setCombatCharactersString:v=>wire=v,getRoomPopulation:()=>p,getRoomNameDatabase:()=> '{}',getDungeonRunId:()=> 'run'};
   const fail=()=>{throw Error('Realtime combat must not call an LLM or regenerate a room.');};
-  const context={require,Inhabitants:I,MonsterConsoleSync:require('../retort/monsterConsoleSync'),createCombatSpace,actionDice:dice,sharedState:s,populationService:{get:()=>p,recordPositions(){},save(){}},
+  const context={require:require('node:module').createRequire(require.resolve('../retort/retortWithUserInput')),Inhabitants:I,MonsterConsoleSync:require('../retort/monsterConsoleSync'),createCombatSpace,actionDice:dice,sharedState:s,populationService:{get:()=>p,recordPositions(){},save(){}},
     console:{log(){},info(){},warn(){},error(){}},roll1d20:()=>10,characterClasses:[{name:'Fighter',baseHP:10}],
     ensureSelectedPCSprite(){},getDelayedPersonalNarrative:fail,getDelayedUpdatedGameConsole:async()=>text,getDelayedRoomNameDatabase:async()=> '{}',
     sanitizeLiveWorldStateForPrompt:()=>null,retort:fail,run:fail,setTimeout:(fn,ms)=>setTimeout(fn,ms===200?0:ms),clearTimeout,setInterval,clearInterval};

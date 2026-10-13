@@ -33,6 +33,11 @@
     subtitleReports.push(report); if (subtitleReports.length > 32) subtitleReports.shift();
     if (subtitleReportTimer === null) subtitleReportTimer = setTimeout(flushSubtitleReports, 250);
   }
+  // Player-initiated conversation (retort turn replies): the player is talking to this character, so show the subtitle
+  // even when the hearing/line-of-sight gate says out of range (it is 3 tiles for turns); only absent/dead/other-room blocks it.
+  function conversational(row, actor, ctx) {
+    return row?.source === 'retort-response' && !!actor && (actor.hp ?? 1) > 0 && I.state(actor) !== 'Dead' && I.roomKey(actor.mazeRoomKey) === ctx.dungeon.geoKey;
+  }
   function speechCheck(actor, ctx) {
     const reach = I.dialogueReach(ctx.dungeon, speakingActor(actor), ctx.player);
     const reason = !actor ? 'missing-actor' : (actor.hp ?? 1) <= 0 || I.state(actor) === 'Dead' ? 'dead' :
@@ -48,6 +53,15 @@
     room = geoKey; queue.length = 0; active = null;
     if (panel) panel.hidden = true;
     lastVisit = 0; lastAutonomy = time();
+    noticePursuers(populations.get(geoKey));
+  }
+  function noticePursuers(p) {
+    if (context()?.dungeon?.geoKey !== p?.geoKey) return;
+    for (const actor of Object.values(p.actors || {})) if (actor.status === 'present' && actor.pursuit?.noticeId && actor.pursuit.arrivedThrough) {
+      root.DungeonActionNotices?.receive?.({ id: actor.pursuit.noticeId, runId: root.dungeonRunId, geoKey: p.geoKey,
+        kind: 'pursuit', title: actor.name + ' followed you', subject: actor.name,
+        message: 'A hostile pursuer came through the threshold behind the party.' });
+    }
   }
   function receivePopulation(event) {
     if (!event.population || event.runId && event.runId !== root.dungeonRunId) return;
@@ -58,6 +72,7 @@
     const ctx = context();
     if (ctx?.dungeon?.geoKey === p.geoKey) {
       enterRoom(p.geoKey); I.attach(ctx.actors, p);
+      noticePursuers(p);
       root.applyOutdoorDiscoveries?.(p);
       if (p.lastDialogueRefreshAt && p.lastDialogueRefreshAt !== previous?.lastDialogueRefreshAt) lastAutonomy=time();
     }
@@ -87,6 +102,7 @@
   function receiveDialogue(event) {
     const ctx = context();
     if (event.runId && event.runId !== root.dungeonRunId) return;
+    prefetchSpeech(event);
     if (ctx?.dungeon?.geoKey === event.geoKey) enterRoom(event.geoKey);
     for (const row of event.dialogue || []) {
       if (typeof row.line !== 'string' || !row.line.trim()) continue;
@@ -101,7 +117,7 @@
         continue;
       }
       const reach = speechCheck(actor, ctx);
-      if (!reach.canSpeak) { subtitleReport('skipped', message, reach); continue; }
+      if ((row.kind || 'turn') !== 'turn' && !reach.canSpeak && !conversational(message, actor, ctx)) { subtitleReport('skipped', message, reach); continue; }
       const key = `${event.geoKey}|${row.speaker}|${row.line}`;
       if (seen.has(key) || queue.some(queued => queued.key === key)) {
         subtitleReport('duplicate', message, { reason: 'already-queued-or-displayed' }); continue;
@@ -113,6 +129,17 @@
         distance: Math.round(reach.distance * 100) / 100, range: reach.range });
     }
     if (panel && ctx?.dungeon && !root.gamePaused) showNext(ctx, time());
+  }
+  // SID speech: start server synthesis for every line the moment it arrives (before range checks, queueing or display)
+  const prefetched = new Set();
+  function prefetchSpeech(event) {
+    try {
+      const rows = (event.dialogue || []).filter(r => r && typeof r.speaker === 'string' && typeof r.line === 'string' && r.line.trim())
+        .flatMap(r => I.splitSpeech(r.line.trim()).map(c => ({ speaker: r.speaker, line: c.replace(/["\u201c\u201d]/g, '').trim() }))) // same chunks as showSpeechPart
+        .filter(r => { const k = r.speaker + '|' + r.line; if (prefetched.has(k)) return false; prefetched.add(k); if (prefetched.size > 200) prefetched.delete(prefetched.values().next().value); return true; });
+      if (rows.length && typeof fetch === 'function') fetch('/voice/prefetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows }) })
+        .catch(error => console.warn('[DialogueSpeech] prefetch failed:', error?.message));
+    } catch (error) { console.warn('[DialogueSpeech] prefetch', error?.message); }
   }
   function receiveTurnDialogue(content, event) {
     const names = [...I.parseSheets(event.consoleText), ...I.parseSheets(event.consoleText, 'NPCs in Party')].map(a => a.name);
@@ -148,11 +175,12 @@
     if (active || !queue.length) return;
     const row = queue.shift(), actor = ctx.actors.find(a => a.name === row.speaker);
     const reach = speechCheck(actor, ctx);
-    if (row.geoKey !== ctx.dungeon.geoKey || !reach.canSpeak) {
+    if (row.geoKey !== ctx.dungeon.geoKey || (row.kind !== 'turn' && !reach.canSpeak && !conversational(row, actor, ctx))) { // replies to the player always play
       subtitleReport('skipped', row, { ...reach, reason: row.geoKey !== ctx.dungeon.geoKey ? 'wrong-room' : reach.reason }); return;
     }
     const chunks = I.splitSpeech(row.line);
     active = { ...row, chunks, part: 0, until: now };
+    try { root.HolodekSfx?.voicePrefetch?.(row.speaker, chunks); } catch {} // SID speech: fetch every sentence of this line now
     if (actor.sprite?.dataUrl) { portrait.src = actor.sprite.dataUrl; portrait.hidden = false; }
     else { portrait.removeAttribute('src'); portrait.hidden = true; }
     panel.hidden = false; fit();
@@ -162,16 +190,39 @@
     root.focusDungeonSpeaker?.(actor.name, chunks.reduce((ms, line) => ms + speechDuration(line) + 500, 0));
   }
   const speechDuration = line => Math.min(18000, Math.max(3500, line.trim().split(/\s+/).length * 300 + 700));
+  const SPEECH_WAIT_MS = 10000;
   function showSpeechPart(ctx, now) {
     const actor = ctx.actors.find(a => a.name === active.speaker);
     const line = active.chunks[active.part].replace(/["\u201c\u201d]/g, '').trim();
-    active.until = now + speechDuration(line);
+    const row = active, part = active.part, same = () => active === row && active.part === part;
     caption.textContent = active.speaker;
-    words.textContent = line;
-    subtitleReport('displayed', { ...active, line }, { ...speechCheck(actor, ctx), part: active.part + 1, parts: active.chunks.length });
+    let revealed = false;
+    // Subtitle text and SID voice appear together: the text is held (speaker shown, "...") until the voice starts.
+    const reveal = (ms, why) => {
+      if (revealed || !same()) return; revealed = true;
+      words.textContent = line; row.revealedAt = time();
+      if (!(ms > 0)) row.until = time() + speechDuration(line);
+      subtitleReport('displayed', { ...row, line }, { ...speechCheck(actor, ctx), part: part + 1, parts: row.chunks.length, reason: why });
+    };
+    const say = root.HolodekSfx?.speakLine;
+    if (!say) { reveal(0, 'no-speech-engine'); return; }
+    words.textContent = '\u2026';
+    row.until = now + SPEECH_WAIT_MS + 1000; // never auto-advance while waiting for the voice
+    const t0 = Date.now();
+    const attempt = n => say(row.speaker, line, { stillWanted: same, onSchedule: (ms, more) => {
+        if (!same()) return; reveal(ms, 'speech-' + (Date.now() - t0) + 'ms');
+        row.until = time() + Math.round(ms) + (more ? 6000 : 450); } })
+      .catch(error => {
+        if (!same()) return; const msg = error?.message || String(error);
+        if (n === 0 && msg !== 'stale' && msg !== 'audio locked' && msg !== 'empty') { console.warn('[DialogueSpeech] synthesis failed, retrying once:', msg); return attempt(1); }
+        console.warn('[DialogueSpeech] speech unavailable, showing text with text timing:', msg); reveal(0, 'speech-failed:' + msg.slice(0, 40));
+      });
+    try { attempt(0); } catch (error) { console.warn('[DialogueSpeech]', error?.message); reveal(0, 'speech-error'); }
+    setTimeout(() => { if (!revealed && same()) { console.warn('[DialogueSpeech] voice not ready after', SPEECH_WAIT_MS, 'ms; showing text'); reveal(0, 'speech-timeout'); } }, SPEECH_WAIT_MS);
   }
   function dismissSubtitle() {
     if (!active) return;
+    try { root.HolodekSfx?.stopSpeech?.(); } catch {}
     subtitleReport('dismissed', active, { reason: 'player-dismissed', part: active.part + 1, parts: active.chunks.length });
     panel.hidden = true;
     if (active.part + 1 < active.chunks.length) {
@@ -246,12 +297,13 @@
     }
     flushPendingDialogue(ctx);
     if (active) {
-      const actor = ctx.actors.find(a => a.name === active.speaker), nearby = canSpeak(actor, ctx);
+      const actor = ctx.actors.find(a => a.name === active.speaker), nearby = active.kind === 'turn' || canSpeak(actor, ctx) || conversational(active, actor, ctx); // never cut off a reply to the player
       if (nearby && now >= active.until && active.part + 1 < active.chunks.length) {
         active.part++; showSpeechPart(ctx, now);
       } else if (!nearby || now >= active.until) {
         subtitleReport('dismissed', active, { reason: nearby ? 'duration-complete' : 'speaker-left-hearing-range' });
         if (!nearby && actor) actor._conversationUntil = Date.now();
+        if (!nearby) try { root.HolodekSfx?.stopSpeech?.(); } catch {}
         active = null; panel.hidden = true;
       }
     }
@@ -278,7 +330,7 @@
     const p = population();
     const threat = ctx.actors.find(a => a.type === 'monster' && I.allegiance(a) === 'Hostile' && actorVisible(a, ctx, 3.2) &&
       p?.groups.find(g => g.id === a.encounterId)?.status === 'discovered');
-    if (threat && now - lastTick > 6000 && !document.querySelector('.popup-container')) {
+    if (threat && Date.now() >= (p?.retreatUntil || 0) && now - lastTick > 6000 && !document.querySelector('.popup-container')) {
       lastTick = now;
       root.beginEncounterCombat?.(threat.name);
     }

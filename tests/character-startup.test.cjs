@@ -344,7 +344,7 @@ test('one-exit startup with Adjacent Rooms: None runs the complete existing popu
   const { context, calls, prompts, run } = roomPopulationHarness(room);
   assert.equal(await run(), true);
   assert.deepEqual(calls.filter(call => !call.startsWith('text:')), ['objects', 'modifiers', 'level', 'monsters', 'console']);
-  assert.match(context.committedConsole, /^Objects in Room: ashen sword$/m);
+  assert.match(context.committedConsole, /^Objects in Room: ashen sword, chronicle of ruined temple entrance, keepers scroll of ruined temple entrance$/m);
   assert.match(context.committedConsole, /name: "ashen sword", type: "weapon", attack_modifier: 2, damage_modifier: 3/);
   assert.match(context.committedConsole, /^Monsters in Room: Ash Sentinel$/m);
   assert.match(context.committedConsole, /^Adjacent Rooms: east: Ashen Court$/m);

@@ -78,8 +78,10 @@
     return definition;
   }
   function fallback(seed, roomName = 'the room', context = {}) {
-    const n = parseInt(hash(seed), 16), kind = KINDS[n % KINDS.length];
-    const marks = [['Sun', 'Wave', 'Moon'], ['Crown', 'Eye', 'Star'], ['Bell', 'Leaf', 'Tower']][(n >>> 4) % 3];
+    const n = parseInt(hash(seed), 16), recent=(context.recentKinds||[]).filter(k=>KINDS.includes(k)).slice(-2),
+      choices=KINDS.filter(k=>!recent.includes(k)),kind=(choices.length?choices:KINDS)[n%(choices.length||KINDS.length)];
+    const symbolSets=[['Sun', 'Wave', 'Moon'], ['Crown', 'Eye', 'Star'], ['Bell', 'Leaf', 'Tower'],['Dragon','Skull','Mountain'],['Key','Serpent','Flame']];
+    const marks = symbolSets[(n >>> 4) % symbolSets.length],images=symbolSets[(n>>>6)%symbolSets.length];
     const suffix = Modules.mechanics[kind].suffix;
     const kit = Object.entries(Modules.kits).filter(([,kit])=>kit.kinds.includes(kind))[(n >>> 8) % Object.values(Modules.kits).filter(kit=>kit.kinds.includes(kind)).length];
     return compile({ kind, title: ({sequence:'The Procession Lock',alignment:'The Surveyor\'s Instrument',channels:'The Sluice Regulator',
@@ -89,7 +91,7 @@
       moduleKit:kit[0],arrangement:Modules.arrangements[(n>>>10)%4],clueStyle:Modules.clueStyles[(n>>>13)%5],material:kit[1].material,
       ...(kind === 'interlock' ? { couplings: marks.map((_,i)=>[`control_${i}`]) } : {}),
       controls: marks.map((mark, i) => ({ id: `control_${i}`, label: `${mark} ${suffix}`, mark,
-        options: kind === 'sliding' ? ['Near','Middle','Far'] : ['Sun', 'Wave', 'Moon'], initial: 0, goal: ['channels','interlock'].includes(kind) ? (i + 1) % 2 : (i + 1) % 3 })),
+        options: kind === 'sliding' ? ['Near','Middle','Far'] : images, initial: 0, goal: ['channels','interlock'].includes(kind) ? (i + 1) % 2 : (i + 1) % 3 })),
       order: [1, 0, 2].map(i => `control_${i}`), exhaustionLimit: 4 });
   }
   function clue(p) {
@@ -217,7 +219,14 @@
     if (!f) return spec;
     const c = e.definition.controls.find(c => c.id === f.id), variant = f.tiles.indexOf(tileName);
     const value = f.id==='receiver' ? e.state.status==='complete' ? 1 : 0 : c ? e.state.values[c.index] : 0;
+    const sculpture=spec.voxelShape.startsWith('puzzle_statue')?{...spec.puzzleFace?.sculpture,
+      workmanship:spec.puzzleFace?.sculpture?.workmanship||'carved'}:null;
+    const engraving=f.id==='plaque'?{heading:e.definition.title,text:clue(e.definition),seed:e.definition.id}:null;
+    const engravingPairs=engraving?(ordered(e.definition)?e.definition.order.map(id=>({mark:e.definition.controls.find(c=>c.id===id).mark,option:''})):
+      e.definition.controls.map(c=>({mark:c.mark,option:c.options[c.goal]}))):null;
     return { ...spec, puzzleFace: { ...spec.puzzleFace, axis: f.axis || fixtureAxis(dungeon, f), mark: c?.mark || '', option: c?.options[variant] || '',
+      ...(sculpture?{sculpture}:{}),
+      ...(engraving?{engraving,engravingPairs}:{}),
       ...(Motion ? { pose:Motion.pose(dungeon,f.id,value) } : {}), glyphs:e.definition.glyphs || [] } };
   }
   function isReservedScenery(p, feature) {

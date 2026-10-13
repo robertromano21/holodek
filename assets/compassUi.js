@@ -23,12 +23,13 @@
     const bounds = panel.getBoundingClientRect();
     // Screen rectangles include the page's CSS zoom; fixed offsets do not.
     const scale = panel.offsetWidth ? bounds.width / panel.offsetWidth : 1;
-    const left = (r.left - bounds.width) / scale - 8;
+    const left = (r.left - bounds.width) / scale - 4;
     panel.style.right = 'auto';
     panel.style.left = Math.max(8, left) + 'px';
     panel.style.bottom = left >= 8
       ? Math.max(2, (root.innerHeight - r.bottom) / scale) + 'px'
       : Math.max(8, (root.innerHeight - r.top) / scale + 8) + 'px';
+    root.positionPartyIconDock?.();
   }
   function update(angle) {
     if (!panel || !Number.isFinite(angle)) return;

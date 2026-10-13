@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const {createCanvas}=require('canvas'),R=require('../assets/readableItems'),P=require('../assets/physicalPuzzles');
 const V=require('../assets/scenePropVoxels'),Props=require('../assets/renderSceneProps'),AV=require('../retort/assemblyVocab');
 const {prepare}=require('../retort/readableActions');
-const rows=()=>R.fixtureTypes.map((type,i)=>({type,name:['tablet of the departed','grave of the mason','tomb of the witnesses','sarcophagus of the keeper'][i],
+const rows=()=>R.fixtureTypes.slice(0,4).map((type,i)=>({type,name:['tablet of the departed','grave of the mason','tomb of the witnesses','sarcophagus of the keeper'][i],
   title:['The Law of Shelter','The Mason Remembered','The Witnesses','The Keeper'][i],backstory:'Erected by the departed beneath Mortacia\'s wings.',
   text:'The first refuge sheltered the dead when sand buried the old road.',role:i===0?'mechanism_clue':'lore',motif:i===0?'Dragon':'Skull'}));
 function definition(){return P.compile({...P.fallback('funerary','Mason Crypt'),inscriptions:rows()});}
@@ -20,7 +20,7 @@ test('funerary fixtures have distinct solid voxel and map profiles, not a generi
     const canvas=createCanvas(320,320);Props.drawLandmarkSprite(canvas.getContext('2d'),createCanvas,type,{inscription:{motif:'Dragon'}});
     sprites.add(canvas.toBuffer().toString('base64'));
   }
-  assert.equal(voxels.size,4);assert.equal(sprites.size,4);
+  assert.equal(voxels.size,R.fixtureTypes.length);assert.equal(sprites.size,R.fixtureTypes.length);
   assert.equal(V.select('inscribed stele'),'stone_tablet');assert.equal(V.select('weathered headstone'),'gravestone');
 });
 test('inscription records persist apart from item properties, without replacing or granting loot',()=>{
@@ -30,6 +30,25 @@ test('inscription records persist apart from item properties, without replacing 
   for(const patch of [{type:'unbuilt_tomb'},{name:'3'},{text:''},{motif:'unknown'},{text:'x'.repeat(651)}])assert.throws(()=>R.validateInscriptions([{...rows()[0],...patch}]));
   assert.throws(()=>R.validateInscriptions([...rows(),rows()[0]]),/four/);
   assert.throws(()=>P.compile({...p,readables:[{kind:'scroll',name:p.inscriptions[0].name,title:'Clashing Names'}]}));
+});
+
+test('inscribed obelisks have marks on all four faces, stable readings and real world interaction metadata',()=>{
+  const r=R.validateInscriptions([{type:'obelisk',name:'obelisk of the vigil',title:'The Vigil',backstory:'Raised by Mortacia\'s masons.',
+    text:'The refuge was built for the departed.',role:'lore',motif:'Mortacia',carvingStyle:'runic_lintel'}])[0];
+  const p=P.compile({...P.fallback('obelisk','Temple'),inscriptions:[r]}),spec={puzzleMechanism:p,landmarks:[]};P.enrichSceneSpec(spec);
+  assert.equal(spec.landmarks[0].type,'obelisk_inscription_0');assert.equal(V.select(spec.landmarks[0].type),'obelisk');
+  for(const normal of[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0]]){
+    let marked=0;
+    for(let iz=4;iz<34;iz++)for(let u=10;u<30;u++){
+      const c=V.color('obelisk',normal[0]?0:u/40,normal[0]?u/40:0,iz/40,normal,[.5,.5,.5],'stone',{inscription:r,textures:false});
+      if(c[0]===57/255)marked++;
+    }assert.ok(marked>15,JSON.stringify({normal,marked}));
+  }
+  assert.equal(R.passage(r,{inspect:false}),R.passage(JSON.parse(JSON.stringify(r)),{inspect:false}));
+  const d=dungeon();d.cells['12,13'].tile='custom_obelisk';d.cells['12,13'].structureHeight=4;
+  d.tiles.custom_obelisk={spriteSpec:{voxelShape:'obelisk',baseWidth:.8,inscription:r}};
+  const World=require('../assets/worldInteractionUi'),camera={x:12.5,y:12,eyeZ:1.3,dirX:0,dirY:1,planeScale:.577,verticalScale:1};
+  const target=World.pick(d,camera,camera,.5,.5);assert.equal(target.command,'read '+r.name);assert.equal(target.enabled,true);
 });
 test('new room construction places all four inscriptions and all nine portable objects on accessible separate cells',()=>{
   const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'holodek-inscriptions-')),prior=process.env.HOLODEK_SPRITE_DIR;

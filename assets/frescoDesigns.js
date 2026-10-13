@@ -16,8 +16,12 @@
     romanesque:'Round arches, almond-shaped glory, rhythmic compartments and strongly outlined figures.',
     baroque:'Sweeping curtains, diagonal groups, directional light and cloud-borne dramatic gestures.'
   };
-  const poses=['standing','contrapposto','offering','invocation','mourning','pointing','reading','kneeling','seated','reclining','guarding','striding'];
-  const scenes=['ancestral_court','burial_rites','dragon_war','scholars','star_map','forge','river_crossing','garden_of_souls','gatekeepers','pilgrimage'];
+  const poses=['standing','contrapposto','offering','invocation','mourning','pointing','reading','kneeling','seated','reclining','guarding','striding',
+    'orator','benediction','bowing','embracing','flying','ascending'];
+  const scenes=['ancestral_court','burial_rites','dragon_war','scholars','star_map','forge','river_crossing','garden_of_souls','gatekeepers','pilgrimage',
+    'oath_ceremony','healers','harvest','storm_voyage','dragon_flight','lament_of_cities',
+    'council_of_dragons','weaving_fates','descent_to_tartarus','sculptors_workshop','celestial_orbit','banquet_of_shades','covenant_of_races','vigil_of_angels',
+    'sepulchra_vigil','throne_of_hades'];
   const attributes=People.attributes;
   const robes=['pleated','toga','mantle','armor','shroud'],heads=['bare','helmet','hood','laurel','crown'];
   const forms=['human','dragon','skeleton','wraith','angel','demon','mortal'];
@@ -25,15 +29,17 @@
     const style=art.style||'renaissance',scene=art.scene||'ancestral_court';
     if(!Object.hasOwn(styles,style)||!scenes.includes(scene)||art.figures!==undefined&&(!Array.isArray(art.figures)||art.figures.length>6))throw Error('Invalid fresco tradition, scene or figure count.');
     const figures=(art.figures||[]).map(f=>{
-      const subject=Icons.name(f?.subject)||f?.subject;
-      if(!subject||!Icons.name(subject)&&!forms.includes(subject)&&!People.race(subject)||!poses.includes(f.pose)||
+      const subject=Icons.name(f?.subject)||People.hero(f?.subject)||f?.subject;
+      if(!subject||!Icons.name(subject)&&!People.hero(subject)&&!forms.includes(subject)&&!People.race(subject)||!poses.includes(f.pose)||
         f.facing!==undefined&&!['front','left','right'].includes(f.facing)||f.attribute!==undefined&&!attributes.includes(f.attribute)||
-        f.robe!==undefined&&!robes.includes(f.robe)&&f.robe!=='class'||f.head!==undefined&&!heads.includes(f.head)&&f.head!=='class')throw Error('Invalid fresco figure, pose or costume.');
+        f.robe!==undefined&&!robes.includes(f.robe)&&f.robe!=='class'||f.head!==undefined&&!heads.includes(f.head)&&f.head!=='class'||
+        f.anatomy!==undefined&&!['classic','serpentine'].includes(f.anatomy)||f.proportions!==undefined&&!['classic','classical'].includes(f.proportions))throw Error('Invalid fresco figure, pose or costume.');
       const person=People.validate({...f,...(People.race(subject)&&!f.race?{race:subject}:{})});
-      if(Icons.name(subject)&&Object.keys(person).length)throw Error('Invalid mortal overrides on a canonical deity.');
-      const defaults=People.defaults(person),deity=Icons.name(subject),classFigure=!!person.className;
-      return{subject,pose:f.pose,facing:f.facing||'front',attribute:f.attribute|| (deity?Icons.pantheon[deity].attribute:defaults.attribute),
-        robe:f.robe||(classFigure?'class':'pleated'),head:f.head||(classFigure?'class':'bare'),...person};
+      if((Icons.name(subject)||People.hero(subject))&&Object.keys(person).length)throw Error('Invalid mortal overrides on a canonical deity or hero.');
+      const defaults=People.defaults(person),deity=Icons.name(subject),classFigure=!!person.className||!!People.hero(subject);
+      return{subject,pose:f.pose,facing:f.facing||'front',attribute:f.attribute|| (People.hero(subject)?'sword':deity?Icons.pantheon[deity].attribute:defaults.attribute),
+        robe:f.robe||(classFigure?'class':'pleated'),head:f.head||(classFigure?'class':'bare'),...person,
+        ...(f.anatomy?{anatomy:f.anatomy}:{}),...(f.proportions?{proportions:f.proportions}:{})};
     });
     return{style,scene,figures};
   }
@@ -52,31 +58,57 @@
   }
   function sceneFor(text){
     const t=String(text||'').toLowerCase();
-    return /forge|smith|furnace/.test(t)?'forge':/librar|archive|book|scribe/.test(t)?'scholars':
+    return /sepulchra|emerald/.test(t)?(/throne|hades/.test(t)?'throne_of_hades':'sepulchra_vigil'):
+      /loom|weav|tapestry/.test(t)?'weaving_fates':/sculptor|atelier|workshop/.test(t)?'sculptors_workshop':
+      /banquet|feast|refectory/.test(t)?'banquet_of_shades':/council|conclave/.test(t)?'council_of_dragons':
+      /covenant|alliance/.test(t)?'covenant_of_races':/angel|watchtower/.test(t)?'vigil_of_angels':
+      /forge|smith|furnace/.test(t)?'forge':/librar|archive|book|scribe/.test(t)?'scholars':
       /battle|war|knight/.test(t)?'dragon_war':/burial|tomb|crypt|grave/.test(t)?'burial_rites':
       /star|constellation|observatory/.test(t)?'star_map':/river|water|bridge/.test(t)?'river_crossing':
       /garden|forest|root/.test(t)?'garden_of_souls':/gate|guard|entrance/.test(t)?'gatekeepers':'ancestral_court';
   }
   function figures(art){
     if(art.figures?.length)return art.figures;
-    const subjects=(art.motifs||[]).map(s=>Icons.name(s)||People.race(s)||People.role(s)||s.toLowerCase()).filter(s=>Icons.name(s)||forms.includes(s)||People.race(s)||People.role(s)).slice(0,6);
+    const subjects=(art.motifs||[]).map(s=>Icons.name(s)||People.hero(s)||People.race(s)||People.role(s)||s.toLowerCase()).filter(s=>Icons.name(s)||People.hero(s)||forms.includes(s)||People.race(s)||People.role(s)).slice(0,6);
     if(!subjects.length)subjects.push('human','skeleton','wraith');
     const scene=art.scene||'ancestral_court';
     const gestures={ancestral_court:['offering','kneeling','invocation'],burial_rites:['mourning','reclining','kneeling'],
       dragon_war:['guarding','striding','pointing'],scholars:['seated','reading','pointing'],star_map:['invocation','pointing','reading'],
       forge:['standing','kneeling','offering'],river_crossing:['pointing','striding','mourning'],garden_of_souls:['contrapposto','seated','offering'],
-      gatekeepers:['guarding','standing','kneeling'],pilgrimage:['striding','offering','standing']}[scene];
+      gatekeepers:['guarding','standing','kneeling'],pilgrimage:['striding','offering','standing'],oath_ceremony:['benediction','kneeling','orator'],
+      healers:['offering','embracing','seated'],harvest:['bowing','offering','striding'],storm_voyage:['pointing','invocation','mourning'],
+      dragon_flight:['flying','ascending','invocation'],lament_of_cities:['mourning','bowing','reclining'],
+      council_of_dragons:['orator','seated','bowing'],weaving_fates:['seated','offering','reading'],descent_to_tartarus:['striding','pointing','mourning'],
+      sculptors_workshop:['standing','kneeling','contrapposto'],celestial_orbit:['ascending','flying','invocation'],
+      banquet_of_shades:['seated','offering','reclining'],covenant_of_races:['orator','benediction','offering'],vigil_of_angels:['guarding','invocation','kneeling']}[scene]||['standing','offering','kneeling'];
     return subjects.map((subject,i)=>{
-      const role=People.role(subject),race=People.race(subject),deity=Icons.name(subject);
+      const role=People.role(subject),race=People.race(subject),deity=Icons.name(subject),hero=People.hero(subject);
       return{subject:role?'mortal':subject,...(race?{race}:{}),...(role?{className:role}:{}),pose:gestures[i%3],
         facing:['egyptian','classical_greek','mesopotamian'].includes(art.style)?(i%2?'left':'right'):'front',
-        attribute:deity?Icons.pantheon[deity].attribute:role?People.defaults({className:role}).attribute:
+        attribute:deity==='Mortacia'||hero?'sword':deity?Icons.pantheon[deity].attribute:role?People.defaults({className:role}).attribute:
           scene==='scholars'?'book':scene==='dragon_war'?'sword':scene==='forge'?'torch':scene==='ancestral_court'&&i===0?'scales':i===1?'scroll':'none',
-        robe:role?'class':art.style==='classical_roman'||art.style==='classical_greek'?'toga':scene==='dragon_war'?'armor':'pleated',head:role?'class':scene==='dragon_war'?'helmet':'bare'};
+        robe:role||hero?'class':art.style==='classical_roman'||art.style==='classical_greek'?'toga':scene==='dragon_war'?'armor':'pleated',head:role||hero?'class':scene==='dragon_war'?'helmet':'bare',
+        proportions:'classical',...(deity&&Icons.pantheon[deity].form==='dragon'||subject.toLowerCase()==='dragon'?{anatomy:'serpentine'}:{})};
     });
   }
-  function layout(art,rows){
+  function layout(art,rows,canvasWidth=96){
     const style=art.style||'renaissance',composition=art.composition||'judgment',count=rows.length;
+    if(['sepulchra_vigil','throne_of_hades'].includes(art.scene))return rows.map((f,i)=>{
+      const step=canvasWidth*.28/Math.max(1,count-1),width=i===0?Math.min(33,canvasWidth*.27):Math.min(24,step-1);
+      return{...f,box:{x:i===0?canvasWidth*.12:canvasWidth*.64+(i-1)*step,y:i===0?12:22,width,height:i===0?42:32}};
+    });
+    if(scenes.indexOf(art.scene)>=16)return rows.map((f,i)=>{
+      const central=!['descent_to_tartarus','banquet_of_shades'].includes(art.scene),slots=Array.from({length:count},(_,j)=>j),middle=Math.floor(count/2);
+      if(central){slots.splice(middle,1);slots.unshift(middle);}
+      const step=(canvasWidth-20)/count,width=Math.min(36,step-1),x=10+(slots[i]+.5)*step-width/2;
+      let height=38,y=14;
+      if(central&&i>0){height=32;y=20;}
+      if(art.scene==='descent_to_tartarus'){height=32;y=10+i*14/Math.max(1,count-1);}
+      if(art.scene==='celestial_orbit'){height=i===0?37:28;y=i%2?8:21;}
+      if(art.scene==='banquet_of_shades'){height=27;y=19;}
+      if(art.scene==='vigil_of_angels'){height=i%2?32:40;y=i%2?20:12;}
+      return{...f,box:{x,y,width,height}};
+    });
     const equal=['classical_greek','classical_roman','medieval_illuminated','mesopotamian','egyptian'].includes(style)||composition==='procession';
     return rows.map((f,i)=>{
       let width,height,x,y;
@@ -85,7 +117,7 @@
       if(f.pose==='kneeling'||f.pose==='seated'){height*=.75;y+=10;}
       if(f.pose==='reclining'){width=Math.max(width,35);height=22;y=31;}
       if(composition==='lamentation'&&f.pose!=='reclining'){height*=.85;y+=6;}
-      return{...f,box:{x,y,width,height}};
+      return{...f,box:{x:(x+width/2)*canvasWidth/96-width/2,y,width,height}};
     });
   }
   function background(c,art,pal,ink){
@@ -131,6 +163,59 @@
   }
   function details(c,art,pal,ink){
     const scene=art.scene,light=pal.highlight,dark=pal.shadow,trim=pal.secondary;
+    const line=(points,color=trim,width=1)=>{c.strokeStyle=color;c.lineWidth=width;c.beginPath();points.forEach(([x,y],i)=>i?c.lineTo(x,y):c.moveTo(x,y));c.stroke();};
+    if(['sepulchra_vigil','throne_of_hades'].includes(scene)){
+      c.fillStyle=dark;c.fillRect(38,42,23,9);c.fillStyle=trim;c.fillRect(36,41,27,2);c.fillRect(34,51,31,2);
+      if(scene==='throne_of_hades'){
+        c.fillStyle=trim;c.fillRect(37,16,25,26);c.fillStyle=dark;c.fillRect(40,18,19,20);
+        line([[35,42],[35,33],[42,33]],light,2);line([[64,42],[64,33],[57,33]],light,2);
+        line([[36,16],[42,10],[49,15],[56,10],[63,16]],trim,2);ink('Mortacia',43,23,12,trim);
+      }
+      // Keep the faceted emerald tall even when the surrounding architecture is spread wider.
+      const spread=c.getTransform().a/Math.max(.001,c.getTransform().d),w=12/spread;
+      Icons.paintSepulchra(c,49-w/2,scene==='throne_of_hades'?12:26,w,14);
+    }
+    if(scene==='council_of_dragons'){
+      for(let i=0;i<5;i++){const x=11+i*15;c.fillStyle=trim;c.fillRect(x,23,10,26);c.fillStyle=dark;c.fillRect(x+1,24,8,23);
+        line([[x-1,23],[x+5,15],[x+11,23]],light);ink('Dragon',x+2,18,6,light);}
+      c.fillStyle=trim;c.fillRect(12,52,72,2);c.fillRect(9,56,78,1);
+    }
+    if(scene==='weaving_fates'){
+      c.fillStyle=dark;c.fillRect(29,12,38,35);line([[28,49],[28,11],[68,11],[68,49]],trim,2);
+      for(let x=31;x<66;x+=3)line([[x,12],[x,44]],light,.4);
+      for(let y=22;y<42;y+=3)line([[30,y],[41,y-3],[53,y+2],[66,y-2]],y%2?trim:pal.primary,1.6);
+      ink('Moon',44,25,9,light);for(const x of[18,73]){c.fillStyle=trim;c.fillRect(x,48,5,3);}
+    }
+    if(scene==='descent_to_tartarus'){
+      c.fillStyle=dark;c.beginPath();c.moveTo(6,39);for(let i=0;i<8;i++){c.lineTo(8+i*10,28+i*3);c.lineTo(18+i*10,28+i*3);}c.lineTo(90,57);c.lineTo(6,57);c.fill();
+      for(let i=0;i<8;i++)line([[8+i*10,28+i*3],[18+i*10,28+i*3]],light);
+      line([[73,45],[73,26],[79,19],[86,26],[86,49]],trim,2);for(let x=76;x<85;x+=3)line([[x,28],[x,49]],trim);
+    }
+    if(scene==='sculptors_workshop'){
+      for(const x of[13,72]){c.fillStyle=trim;c.fillRect(x,39,10,13);c.fillRect(x-2,38,14,2);
+        c.fillStyle=light;c.beginPath();c.ellipse(x+5,28,4,6,0,0,Math.PI*2);c.fill();c.fillRect(x+1,33,8,4);}
+      line([[34,13],[63,13],[63,42],[34,42],[34,13]],trim);line([[38,39],[59,17]],light,.6);
+      ink('Star',44,22,9,trim);c.fillStyle=dark;c.fillRect(36,51,23,3);
+    }
+    if(scene==='celestial_orbit'){
+      c.strokeStyle=trim;c.lineWidth=.6;for(const r of[13,21,27]){c.beginPath();c.ellipse(48,31,r,r*.65,-.3,0,Math.PI*2);c.stroke();}
+      for(let i=0;i<12;i++){const a=i*Math.PI/6;ink(i%3?'Star':'Moon',46+32*Math.cos(a),29+20*Math.sin(a),4,light);}
+    }
+    if(scene==='banquet_of_shades'){
+      c.fillStyle=dark;c.fillRect(9,36,78,5);c.fillStyle=trim;c.fillRect(10,37,76,2);c.fillRect(12,42,2,12);c.fillRect(81,42,2,12);
+      for(let x=16;x<84;x+=13){ink('Bowl',x,32,5,light);line([[x+4,42],[x+7,51]],light,.5);}
+      for(const x of[18,74]){line([[x,9],[x,20]],trim);ink('Flame',x-2,17,5,light);}
+    }
+    if(scene==='covenant_of_races'){
+      line([[8,14],[48,6],[88,14]],light);for(const x of[9,85]){c.fillStyle=trim;c.fillRect(x,15,2,39);}
+      c.fillStyle=dark;c.fillRect(35,36,26,5);c.fillStyle=trim;c.fillRect(34,36,28,1);ink('Scroll',43,29,10,light);
+      for(let i=0;i<5;i++)ink(['Crown','Key','Leaf','Mountain','Moon'][i],16+i*14,9,5,light);
+    }
+    if(scene==='vigil_of_angels'){
+      c.fillStyle=dark;c.fillRect(8,43,80,10);for(let x=8;x<88;x+=9)c.fillRect(x,40,5,4);
+      for(const x of[13,78]){c.fillStyle=trim;c.fillRect(x,25,5,18);ink('Flame',x-1,18,7,light);}
+      for(let i=0;i<9;i++)ink('Star',11+i*8,8+i%3*3,3,light);
+    }
     if(scene==='river_crossing'){c.fillStyle=trim;for(let i=0;i<5;i++)c.fillRect(9+i*15,48+i%2,12,1);ink('Wave',40,43,12,light);}
     if(scene==='forge'){c.fillStyle=dark;c.fillRect(36,43,24,6);ink('Flame',42,33,12,light);}
     if(scene==='garden_of_souls')for(const x of[12,77]){c.fillStyle=trim;c.fillRect(x,35,1,18);ink('Leaf',x-3,28,9,light);}
@@ -138,7 +223,13 @@
     if(scene==='gatekeepers'){c.strokeStyle=trim;c.lineWidth=1;c.strokeRect(35,15,26,33);for(let x=39;x<59;x+=4)c.fillRect(x,16,1,30);}
     if(scene==='scholars'){c.fillStyle=trim;c.fillRect(28,46,38,2);c.fillRect(31,48,2,7);c.fillRect(62,48,2,7);}
     if(scene==='burial_rites'){c.fillStyle=trim;c.fillRect(29,49,39,5);c.fillStyle=light;c.fillRect(27,48,43,2);}
+    if(scene==='oath_ceremony'){c.fillStyle=trim;c.fillRect(37,42,22,3);ink('Flame',44,35,8,light);}
+    if(scene==='healers'){c.fillStyle=trim;c.fillRect(27,48,42,2);ink('Bowl',42,42,10,light);}
+    if(scene==='harvest')for(let x=14;x<85;x+=9){c.fillStyle=trim;c.fillRect(x,38,1,16);ink('Leaf',x-2,33,6,light);}
+    if(scene==='storm_voyage'){c.fillStyle=dark;c.fillRect(10,46,76,7);for(let x=14;x<85;x+=11)ink('Wave',x,47,9,trim);ink('Star',73,13,8,light);}
+    if(scene==='dragon_flight'){c.fillStyle=trim;for(let i=0;i<6;i++){c.beginPath();c.ellipse(13+i*14,50-i%3*2,10,2,0,0,Math.PI*2);c.fill();}}
+    if(scene==='lament_of_cities'){c.fillStyle=dark;for(let i=0;i<9;i++)c.fillRect(11+i*8,35+i%3*3,5,18-i%3*3);}
   }
   return{styles,poses,scenes,attributes,robes,heads,validate,tradition,sceneFor,figures,layout,background,details,
-    toolbox:()=>({styles,scenes,poses,attributes,robes:[...robes,'class'],heads:[...heads,'class'],subjects:[...Object.keys(Icons.pantheon),...forms],people:People.toolbox()})};
+    toolbox:()=>({styles,scenes,poses,attributes,robes:[...robes,'class'],heads:[...heads,'class'],anatomy:['classic','serpentine'],proportions:['classic','classical'],subjects:[...Object.keys(Icons.pantheon),...forms],people:People.toolbox()})};
 });

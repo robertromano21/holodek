@@ -49,7 +49,8 @@ const BlueprintDesign = require('./blueprintDesign.js');
 const { prepareSceneExteriors, buildSceneExteriorSites, applySceneExteriors } = require('./sceneExterior.js');
 const { buildRoomWorldContext, snapshotQuestContext, propagateComplexIdentity, supplementOutdoorRoutes, attachSceneWorldContext } = require('./worldContext.js');
 const { chooseEnvironmentIntents, describeEnvironmentIntent } = require('./environmentIntents.js');
-const { evaluateTaskRequirements, mergeTaskProgress, taskBinding, normalizeDefeatTask, refreshCombatQuestProgress } = require('./questProgress.js');
+const { evaluateTaskRequirements, mergeTaskProgress, taskBinding, verifiedTaskCompletion, normalizeDefeatTask,
+  normalizeDeliveryTask, compileGeneratedTask, generatedTaskTypes, selectGeneratedElements, writeQuestRequirements, refreshCombatQuestProgress } = require('./questProgress.js');
 const { ensureBossGate, seedBossKey, makeBossKeyTask, isReservedBossKeyName } = require('./bossGate.js');
 const DungeonExits = require('../assets/dungeonExits');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
@@ -72,6 +73,11 @@ const DialogueMemory = require('./dialogueMemory');
 const { generateCharacterDialogue, describeCharacters } = require('./characterDialogue');
 const MonsterConsoleSync = require('./monsterConsoleSync');
 const JourneyMemory = require('./journeyMemory');
+const QuestDirectionFacts = require('./questDirectionFacts');
+const HostilePursuit = require('./hostilePursuit');
+const CombatTurnFlow = require('./combatTurnFlow');
+const ItemTransfer = require('./itemTransfer');
+const QuestDeliverySuccessors = require('./questDeliverySuccessors');
 const CampaignMemory = require('./campaignMemory');
 const AdjudicationMetadata = require('./adjudicationMetadata');
 const PuzzleRewards = require('./puzzleRewards');
@@ -369,22 +375,32 @@ const characterClasses = [
 
 const { renderArrangementToWav } = require('./renderAudio');
 
-function writeLatestJsonAndRender(musicJson, lengthSec = 60) {
+function writeLatestJsonAndRender(musicJson, lengthSec = 60, coordsKeyStr = null) {
+  // Two-slot scheme (retort/musicSlots.js): never overwrite the WAV the browser is playing.
+  const MusicSlots = require('./musicSlots');
+  // Revisit: this room's song may still sit in a slot (e.g. pre-rendered when the move was synced). Reuse it.
+  const held = MusicSlots.find(coordsKeyStr);
+  if (held) {
+    console.log(`[music] ${coordsKeyStr} song already in slot ${held}; no render`);
+    return { wavUrl: MusicSlots.use(held), slot: held, jsonPath: null, sidOut: null, wavOut: MusicSlots.base(held) + '.wav', renderer: 'slot-reuse' };
+  }
+  const slot = MusicSlots.nextSlot();
   const jsonPath = path.join(RETORT_DIR, 'current_room.json');
-  const asmOut = path.join(SID_DIR, 'current_room.asm');
-  const sidOut = path.join(SID_DIR, 'current_room.sid');
+  const asmOut = path.join(SID_DIR, `room_${slot}.asm`);
+  const sidOut = path.join(SID_DIR, `room_${slot}.sid`);
   const { wavPath, renderer, sidOut: builtSidOut } = renderArrangementToWav(musicJson, {
     jsonPath,
     asmOut,
     sidOut,
-    outBaseNoExt: path.join(SID_DIR, 'current_room'),
+    outBaseNoExt: MusicSlots.base(slot),
     seconds: lengthSec,
     renderJsPath: RENDER_JS,
     cwd: ROOT,
   });
 
   return {
-    wavUrl: wavPath ? `/sid/current_room.wav?ts=${Date.now()}` : null,
+    wavUrl: wavPath ? MusicSlots.rendered(slot, coordsKeyStr) : null,
+    slot,
     jsonPath,
     sidOut: builtSidOut,
     wavOut: wavPath,
@@ -900,6 +916,7 @@ function mapToPlainObject(map) {
 // This function encapsulates your Retort-JS logic, now accepting dynamic input
 async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode(), options = {}) {
   console.log('Received combatMode in retortWithUserInput:', combatMode);
+  const pursuitTransition = typeof HostilePursuit !== 'undefined' ? HostilePursuit.plan(sharedState, userInput) : null;
 
   const isAutoSimAdvance = !userInput || String(userInput).trim() === '';
   if (isAutoSimAdvance) {
@@ -951,6 +968,8 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   }
 
   // Mechanical puzzle commands never enter a model session unless this action just solved it.
+  const giveResult = options.realtimeEncounter || typeof ItemTransfer === 'undefined' ? null : ItemTransfer.give(sharedState, populationService, userInput);
+  if (giveResult) return giveResult;
   const readableResult=options.realtimeEncounter?null:await tryReadableItemAction(userInput);
   if(readableResult)return readableResult;
   const physicalPuzzleResult = options.realtimeEncounter ? null : await tryPhysicalPuzzleAction(userInput);
@@ -1527,7 +1546,7 @@ async function getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom
     }
 
     // Always refresh "latest" outputs and WAV
-    const { wavUrl, renderer } = writeLatestJsonAndRender(musicJson);
+    const { wavUrl, renderer } = writeLatestJsonAndRender(musicJson, 60, key);
     console.log(`Room music rendered for ${key} via ${renderer}`);
 
     return { musicJson, wavUrl, isNew: !sharedState.getRoomMusicWasHit, key, coords: c };
@@ -1570,7 +1589,127 @@ function seedFrom(source) {
 // retortWithUserInput.js (or wherever you define this)
 // DROP-IN REPLACEMENT
 // retortWithUserInput.js (or wherever you define this)
-async function generateSidArrangement($, variationToken, roomContext = {}) {
+// === SID composer v2 (music-theory arranger; see CHANGES-SID.txt) ===
+// The LLM reads the room and writes a compact MUSICAL PLAN + a one-bar motif;
+// retort/sidMusicTheory.js turns it into chord-aware lead / bass / arpeggio voices in the
+// same arrangement JSON the SID renderer always used. Old note-by-note composer kept below
+// as generateSidArrangementLegacy.
+const SidMusicTheory = require('./sidMusicTheory.js');
+
+// SFX pass: ambient loop layers shipped in assets/sfx/amb_<tag>.ogg (see assets/sfx.js).
+const SID_AMBIENCE_TAGS = ['wind', 'sandstorm', 'drips', 'fire', 'howls', 'chant', 'rumble', 'water'];
+function normalizeSidAmbience(list, text) {
+  const out = [];
+  for (const x of Array.isArray(list) ? list : []) {
+    const tag = String((x && x.tag) || x || '').toLowerCase().trim();
+    if (SID_AMBIENCE_TAGS.includes(tag) && !out.some(o => o.tag === tag)) out.push({ tag, level: Math.max(0.2, Math.min(1, Number(x && x.level) || 0.6)) });
+  }
+  if (out.length) return out.slice(0, 3);
+  const t = String(text || '').toLowerCase(), add = (tag, level) => { if (!out.some(o => o.tag === tag)) out.push({ tag, level }); };
+  if (/sandstorm|sand|dust|desert|wasteland|tartarus/.test(t)) add('sandstorm', 0.6);
+  if (/wind|gust|mountain|cliff|peak/.test(t)) add('wind', 0.6);
+  if (/torch|fire|flame|brazier|hearth|forge|lava|ember/.test(t)) add('fire', 0.6);
+  if (/chant|choir|prayer|temple|shrine|altar|ritual/.test(t)) add('chant', 0.5);
+  if (/drip|cave|cavern|damp|grotto|sewer/.test(t)) add('drips', 0.7);
+  if (/river|stream|water|fountain|lake|styx/.test(t)) add('water', 0.6);
+  if (/wolf|hound|howl|beast|forest|undead|banshee/.test(t)) add('howls', 0.5);
+  if (/rumble|deep|abyss|chasm|throne|hades|crypt|tomb/.test(t)) add('rumble', 0.55);
+  if (!out.length) add('rumble', 0.4), add('drips', 0.4);
+  return out.slice(0, 3);
+}
+
+async function generateSidArrangement($, roomDescriptionOrToken, monstersOrContext = {}, roomKey = '') {
+  // Callers pass ($, roomDescription, monstersInRoom, key); older code passed ($, token, {roomDescription}).
+  const ctxObj = (monstersOrContext && !Array.isArray(monstersOrContext) && typeof monstersOrContext === 'object') ? monstersOrContext : {};
+  const description = String(ctxObj.roomDescription || (typeof roomDescriptionOrToken === 'string' ? roomDescriptionOrToken : JSON.stringify(roomDescriptionOrToken || '')) || '').slice(0, 2500);
+  const monsters = Array.isArray(monstersOrContext) ? monstersOrContext : (ctxObj.monstersInRoom || []);
+  const monsterText = (Array.isArray(monsters) ? monsters : []).map(m => (m && (m.name || m.type || m.Name)) || (typeof m === 'string' ? m : '')).filter(Boolean).slice(0, 8).join(', ');
+  const seedStr = `${roomKey}|${description}|${monsterText}`;
+  const spec = SidMusicTheory.planPromptSpec();
+  const guessMood = SidMusicTheory.detectMood(`${description} ${monsterText}`);
+
+  $.system(`You are a Commodore 64 SID composer of tightly structured, melodic 8-bit scores: contrapuntal baroque, modal medieval, syncopated groove and slow-building arpeggiated minor metal.
+You score rooms of "Children of the Grave", a dark-fantasy RPG. STORY: the player is Mortacia, the fallen goddess of death.
+She has lost the Sepulchra (her artifact of power), the undead rise because of Dantuea, and Hades has fallen to Arithus.
+She begins in Tartarus, an underworld wasteland with a yellowish sky, vast mountains and hellish sandstorms, and must
+reclaim the Sepulchra and her throne in Hades so she can judge the dead again. The music serves this arc: loss, exile,
+dread, dogged reclamation, and a regal but wounded majesty that grows nearer the throne.
+A recurring MORTACIA / SEPULCHRA LEITMOTIF exists (tonic, rising fifth, a minor-sixth sigh, falling back home). Choose
+"leitmotif": "main" in rooms tied to Mortacia, the Sepulchra, Hades or its throne; "quote" in key underworld,
+sacred or story rooms; "vary" for a distant echo; "none" for ordinary rooms, taverns and nature.
+Dark-fantasy film-score lessons: modal writing (Dorian, Aeolian, Phrygian),
+leitmotifs tied to characters and places, bold intervals (rising 4ths and 5ths, minor 6ths), ostinatos and pedal tones,
+martial rhythms, chant-like melodies in long notes over a moving bass, Picardy thirds (a minor piece ending on a major
+chord, for hope or holiness), call and answer.
+SID lessons: a solemn harmonic-minor lament style (about 100 BPM; the lead opens with a broken minor
+triad and leaps by octaves; the bass descends stepwise like a lament) and a stately harmonic-minor style (a tempo of
+about 76 BPM, neighbour-note ornaments in the lead, 4th and 5th leaps, a root/fourth bass ostinato): singable heroic
+melody, minor-mode gravitas, a driving bass, fast chord arpeggios.
+You think like a composer: mood -> mode -> harmony -> a memorable one-bar motif.
+Music-theory guidance:
+- Modes and moods: Aeolian/minor = epic, sorrowful; Dorian = noble, mystical, Celtic; Phrygian = dread, crypts, the alien; Lydian = wonder, magic, the divine; Mixolydian = folk, march, taverns; Major = triumph, royalty, cheer.
+- Tempo: 96-104 solemn/sacred/sorrowful, 112-128 exploration, 136-144 battle, chases and jigs.
+- A great SID motif is short (4-8 notes), rhythmically distinctive (mix of eighths and quarters, maybe a sixteenth pickup), mostly stepwise with ONE expressive leap, and singable. It will be repeated, sequenced and inverted, so make it simple and strong.
+- Bass drives the track (octave pumps or galloping roots for action, pedals for dread/sacred, walking lines for taverns). Arpeggios fake the chords (fast broken triads).
+Return only strict JSON. Never include commentary.`);
+
+  $.user(`ROOM DESCRIPTION:
+${description || '(none)'}
+${monsterText ? `CREATURES PRESENT: ${monsterText}` : ''}
+(Bass styles: lament = stepwise descending line, ostinato_fourth = root/fourth ostinato, pedal = drone, gallop = martial.)
+(Keyword mood hint: ${guessMood}. Room id: ${roomKey}. Make this room's theme distinct from other rooms: choose the key, mode and motif to fit THIS description.)
+
+Write a musical plan as JSON with exactly these fields:
+{
+ "title": "<evocative title, max 30 chars>",
+ "mood": one of ${JSON.stringify(spec.moods)},
+ "key": one of ${JSON.stringify(spec.keys)},
+ "scale": one of ${JSON.stringify(spec.scales)},
+ "bpm": one of ${JSON.stringify(spec.bpm)} (AVOID defaulting to 104; pick what this room's pulse really is: 96 solemn, 112-120 wandering, 128-144 urgent),
+ "progression": one of ${JSON.stringify(spec.progressions)} (must list your scale in its modes),
+ "leadPatch": one of ${JSON.stringify(spec.leadPatches)},
+ "bassPatch": one of ${JSON.stringify(spec.bassPatches)},
+ "arpPatch": one of ${JSON.stringify(spec.arpPatches)},
+ "bassStyle": one of ${JSON.stringify(spec.bassStyles)},
+ "arpStyle": one of ${JSON.stringify(spec.arpStyles)},
+ "leitmotif": one of ${JSON.stringify(spec.leitmotif)},
+ "picardy": true or false (end the middle cadence on a major tonic chord, for hope or holiness in minor rooms),
+ "frameArp": true or false (classic fast 50Hz chord arpeggios plus snare hits in battles, versus slower broken chords),
+ "motifRhythm": array of note durations filling ONE 4/4 bar exactly, using 16 (sixteenth=1 unit), 8 (eighth=2 units), 4 (quarter=4 units); units must total 16, 5-8 notes, at least two different lengths (NOT four plain quarters). Examples: [8,8,4,8,8,4] march, [4,8,8,4,4] hymn, [8,16,16,8,8,4,4] skipping, [8,4,8,4,4] syncopated, [16,16,8,4,8,8,4] gallop,
+ "motifContour": array of the same length: scale-step offsets from the starting note (0 = start, 1 = next scale note up, -1 = down, 4 = up a fifth), mostly steps with ONE leap of 3-5, e.g. [0,4,3,2,1,2] or [0,-1,0,2,4,3,2],
+ "themes": an array of 3 more themes for this room's ~10-minute score, one per role "danger", "reflective", "mortacia":
+   [{"role":"danger"|"reflective"|"mortacia", "mood": one of the moods, "scale": one of the scales,
+     "keyShift": semitones from the room key, -6..7 (e.g. danger +1 or +6 for menace, reflective +3 or +5 for warmth, mortacia 0 or -5),
+     "progression", "leadPatch", "bassPatch", "arpPatch", "bassStyle", "arpStyle", "motifRhythm", "motifContour" (same rules as above)}]
+   Make each theme a different character: different mode or progression, different motif shape, different instruments.
+   Do NOT use the progression dark_cadence (i-iv-i-V) for more than one theme.
+ "ambience": 1 to 3 background sound layers for this room, from ${JSON.stringify(SID_AMBIENCE_TAGS)}, as
+   [{"tag": "...", "level": 0.2-1.0}] (e.g. a Tartarus wasteland = sandstorm + wind, a crypt = drips + rumble, a temple = chant,
+   a forge = fire + rumble, a forest = wind + howls, a river cave = water + drips). Pick what the description really implies.
+}`);
+
+  let plan = null, lastErr = '';
+  for (let attempt = 0; attempt < 3 && !plan; attempt++) {
+    try {
+      if (lastErr) $.user(`That was not valid JSON (${lastErr}). Return ONLY the JSON object.`);
+      const reply = await $.assistant.generation({ maxTokens: 1200 });
+      const raw = String((reply && reply.content) || '').trim();
+      const m = raw.match(/\{[\s\S]*\}/);
+      plan = JSON.parse(m ? m[0] : raw);
+    } catch (e) {
+      lastErr = e.message; plan = null;
+    }
+  }
+  if (!plan) console.warn('[sid] LLM plan failed; arranging from description-derived seed + keyword mood');
+
+  // ~10-minute suite: room theme, danger, reflective, Mortacia motif, return (see sidMusicTheory.arrangeSuite)
+  const song = SidMusicTheory.arrangeSuite(plan || {}, `${description} ${monsterText}`, seedStr);
+  song.ambience = normalizeSidAmbience(plan && plan.ambience, `${description} ${monsterText}`);
+  console.log(`[sid] ${roomKey} "${song.title}" ${song.key} ${song.scale} ${song.bpm}bpm ${song.plan.progressionLabel} metrics=${JSON.stringify(song.analysis)}`);
+  return song;
+}
+
+async function generateSidArrangementLegacy($, variationToken, roomContext = {}) {
   // ---------- CONFIG ----------
   const BPM_ALLOWED      = [96, 104, 112, 120, 128, 136, 144];
   const SCALES_ALLOWED   = ["dorian", "phrygian", "minor"]; // lower-case only
@@ -1754,19 +1893,19 @@ Return only strict JSON when asked. Never include commentary.`);
   // ---------- STYLE PRESETS (classic C64-ish) ----------
   // We avoid NOISE entirely. Pulse for musicality, Tri for glassy arps.
   const STYLE_BANK = {
-    // brooding / dungeon (Hillsfar-like)
+    // brooding / dungeon (stately minor)
     "dungeon_pulse": {
       LEAD: { waveform:"PULSE", PW:2048, AD:[0,9], SR:[10,3], FILT:{type:"LP+BP", cut:1024, res:6} },
       BASS: { waveform:"PULSE", PW:1536, AD:[0,9], SR:[8,2],  FILT:{type:"LP",   cut:896,  res:4} },
       ARP:  { waveform:"TRI",   PW:0,    AD:[0,6], SR:[4,3],  FILT:{type:"BP",   cut:1024, res:6} }
     },
-    // action / comic (Batman-like)
+    // action / comic (syncopated groove)
     "heroic_driver": {
       LEAD: { waveform:"PULSE", PW:2304, AD:[1,8], SR:[10,3], FILT:{type:"LP+BP", cut:1280, res:8} },
       BASS: { waveform:"PULSE", PW:1280, AD:[0,9], SR:[7,2],  FILT:{type:"LP",    cut:1024, res:6} },
       ARP:  { waveform:"PULSE", PW:1792, AD:[0,5], SR:[3,3],  FILT:{type:"NONE",  cut:512,  res:0} }
     },
-    // epic fantasy (Azure Bonds-like)
+    // epic fantasy (epic minor)
     "epic_minor": {
       LEAD: { waveform:"PULSE", PW:2048, AD:[0,9], SR:[11,2], FILT:{type:"LP+BP", cut:1024, res:6} },
       BASS: { waveform:"TRI",   PW:0,    AD:[0,8], SR:[6,2],  FILT:{type:"LP",    cut:768,  res:4} },
@@ -6655,6 +6794,15 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
   }
   let currentTasks = sharedState.getCurrentTasks() || [];
   let currentTaskIndex = sharedState.getCurrentTaskIndex() || 0;
+  let successorUpdate = '';
+  if (typeof QuestDeliverySuccessors !== 'undefined') {
+    const recovery = QuestDeliverySuccessors.ensure(sharedState, updatedGameConsole);
+    if (recovery.changed) {
+      updatedGameConsole = recovery.consoleText;
+      roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase());
+      successorUpdate = recovery.notices.join('\n');
+    }
+  }
   if (currentTaskIndex < 2 && currentTasks[currentTaskIndex]) {
     const task = normalizeDefeatTask(currentTasks[currentTaskIndex]);
     if (task !== currentTasks[currentTaskIndex]) { currentTasks[currentTaskIndex] = task; sharedState.setCurrentTasks(currentTasks); }
@@ -6682,7 +6830,9 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
     if (t === 'fetch') {
       if (firstObj) {
         reqs.push({ check: 'at_coords', value: firstObj.placement });
-        reqs.push({ check: 'inventory_contains', value: firstObj.name });
+        for (const item of elements.filter(e => e?.type && e.type !== 'monster')) {
+          reqs.push({ check: 'inventory_contains', value: item.name });
+        }
       }
     } else if (t === 'defeat') {
       for (const monster of elements.filter(e => e?.type === 'monster')) reqs.push({ check: 'monster_hp_zero', value: monster.name });
@@ -7009,7 +7159,7 @@ Use the existing quest and characters for context. Do not place it inside the bo
     sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
     sharedState.setUpdatedGameConsole(updatedGameConsole || '');
     // Build the actual elements (these EXIST now) — REQUIRED TO COMPLETE the task
-    const actualElements = requiredElementsStrings.map(s => {
+    const placedElements = requiredElementsStrings.map(s => {
       const [type, name, placement] = s.split("|");
       const el = { type, name, placement };
       const room = roomNameDatabasePlain[placement];
@@ -7022,32 +7172,43 @@ Use the existing quest and characters for context. Do not place it inside the bo
       return el;
     });
     // 3) NOW choose task type & actionKind based on the elements that already exist
+    const actualElements = selectGeneratedElements(placedElements, roomNameDatabasePlain, currentRoomKey,
+      [bossGateReport.gate?.targetKey || readLine(updatedGameConsole, 'Boss Room Coordinates')]);
+    const taskTypes = generatedTaskTypes(actualElements, roomNameDatabasePlain, currentRoomKey);
+    if (!taskTypes.length) {
+      console.warn('[QuestObjective] No mechanically supported objective for these existing elements.');
+      return null;
+    }
     await $.user`Given these ALREADY-EXISTING elements REQUIRED TO COMPLETE the next step (not merely to begin it):
 elementsJson=${JSON.stringify(actualElements)}
 NEVER select party NPCs as targets or monsters. Party NPCs: ${getNpcPartyNames(updatedGameConsole).join(', ') || '(none)'}.
 Individual allegiances are authoritative: friendly residents are allies and neutrals have their own work. Do not make killing a friendly or neutral a routine prerequisite; use their dialogue or assistance when fitting. Only hostile inhabitants are normal combat objectives. Existing boss, key and active task bindings are unchanged.
-Pick the best task type from: "fetch","defeat","deliver","investigate","negotiate","puzzle","protect","hybrid".
+Pick the best task type from: ${JSON.stringify(taskTypes)}. Delivery is available only when all items have one unambiguous non-hostile recipient.
 Respond ONLY {"type":"X"}.`;
     const typeResp = await $.assistant.generation({ maxTokens: 50,
-      parameters: { type: { type: String, enum: ["fetch","defeat","deliver","investigate","negotiate","puzzle","protect","hybrid"] } }
+      parameters: { type: { type: String, enum: taskTypes } }
     });
     const pickedTypeRaw = (parseOnlyJson(typeResp.content, { type: "hybrid" }).type || "hybrid").toLowerCase();
+    if (!taskTypes.includes(pickedTypeRaw)) return null;
     const pickedType = titleCase(pickedTypeRaw);
+    const actionKinds = pickedTypeRaw === 'fetch' ? ['take_item', 'fetch_object', 'other',
+      ...(compileGeneratedTask({ id: 'candidate', type: 'Fetch', actionKind: 'unlock_exit', requiredElements: actualElements },
+        roomNameDatabasePlain, currentRoomKey) ? ['unlock_exit'] : [])] :
+      pickedTypeRaw === 'defeat' ? ['defeat_monster'] : pickedTypeRaw === 'deliver' ? ['deliver_item'] : ['solve_puzzle'];
     await $.user`Pick the primary action the player must perform to COMPLETE the step (beyond prerequisites), given those elements.
-Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} with X ∈ {"unlock_exit","defeat_monster","deliver_item","solve_puzzle","investigate","negotiate","protect","other"}.`;
+Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} using one of ${JSON.stringify(actionKinds)}. Deliver means actually handing each required item to its recipient.`;
     const actResp = await $.assistant.generation({ maxTokens: 50,
-      parameters: { actionKind: { type: String, enum: ["unlock_exit","defeat_monster","deliver_item","solve_puzzle","investigate","negotiate","protect","other"] } }
+      parameters: { actionKind: { type: String, enum: actionKinds } }
     });
     let actionKind = (parseOnlyJson(actResp.content, { actionKind: "other" }).actionKind || "other").toString();
-    // If any key has unlocks -> force unlock_exit
-    if (actualElements.some(e => e.type === 'key' && e.unlocks && e.unlocks.coordinates && e.unlocks.direction)) {
-      actionKind = "unlock_exit";
-    }
+    if (!actionKinds.includes(actionKind)) return null;
     // 4) Write desc/metrics referencing COMPLETE and these elements
     await $.user`Write a concise ONE-SENTENCE "desc" (<=200 chars) for a unique quest step of type "${pickedType}" that the player can COMPLETE using ONLY these elements:
 elementsJson=${JSON.stringify(actualElements)}
 Party NPCs remain allies; do not cast them as enemies.
+Primary completion action: ${actionKind}.
 Placements are authoritative. If targets occupy different rooms, describe a journey between those rooms; never claim all of them inhabit the same room or entrance.
+Use the full exact item and recipient names. Do not abbreviate an item to "the shroud" or replace a bound room with an invented "northern hall". A delivery means giving each item to its bound recipient, not dropping it or just meeting them.
 Respond ONLY {"desc":"..."}.
 `;
     const descResp = await $.assistant.generation({ maxTokens: 80, parameters: { desc: String } });
@@ -7075,11 +7236,17 @@ Respond ONLY {"metrics":"..."}.
       actionRequirements,
       status: "Pending",
     };
-    currentTasks.push(newTask);
+    const preparedTask = taskTypes.includes(pickedTypeRaw) && actionKinds.includes(actionKind) &&
+      compileGeneratedTask(newTask, roomNameDatabasePlain, currentRoomKey);
+    if (!preparedTask) {
+      console.warn('[QuestObjective] Rejected an objective without existing world bindings and complete engine-verifiable actions.');
+      return null;
+    }
+    currentTasks.push(preparedTask);
     sharedState.setCurrentTasks(currentTasks);
     sharedState.setCurrentTaskIndex(currentTaskIndex);
     sharedState.setQuestSeeded(true);
-    return newTask;
+    return preparedTask;
   };
   // ---------------- end seeding helper ----------------
   // ---------- seed if not seeded yet ----------
@@ -7088,6 +7255,13 @@ Respond ONLY {"metrics":"..."}.
   let completedTaskThisTurn = false;
   let attemptedSeedIndex = null;
   let activeTask = currentTasks[sharedState.getCurrentTaskIndex() || 0] || null;
+  if (typeof normalizeDeliveryTask === 'function' && activeTask) {
+    const normalized = normalizeDeliveryTask(activeTask);
+    if (normalized !== activeTask) {
+      activeTask = normalized; currentTasks[sharedState.getCurrentTaskIndex() || 0] = normalized;
+      sharedState.setCurrentTasks(currentTasks);
+    }
+  }
   if (!sharedState.getQuestSeeded()) {
     attemptedSeedIndex = currentTaskIndex;
     const seeded = await seedNextTaskForCurrentIndex();
@@ -7100,7 +7274,9 @@ Respond ONLY {"metrics":"..."}.
     const sameRoom = adjud.roomKey === currentRoomKey;
     const isPuzzleTask = (activeTask.actionKind === 'solve_puzzle' || (activeTask.type || '').toLowerCase() === 'puzzle');
     if (sameRoom && adjud.questAttempted && adjud.prereqsMet) {
-      if (isPuzzleTask && adjud.questSucceeded && gateWithRequirements(activeTask, updatedGameConsole).progress.eligible) {
+      const assessment = gateWithRequirements(activeTask, updatedGameConsole);
+      if (isPuzzleTask && adjud.questSucceeded && verifiedTaskCompletion(activeTask, assessment)) {
+        activeTask.progress = mergeTaskProgress(activeTask.progress, assessment);
         activeTask.status = "Completed";
         questUpdate = `Quest puzzle completed: ${activeTask.desc}`;
         const oldIdx = sharedState.getCurrentTaskIndex() || 0;
@@ -7118,9 +7294,11 @@ Respond ONLY {"metrics":"..."}.
     const idx = sharedState.getCurrentTaskIndex() || 0;
     if (!activeTask && currentTasks.length > idx) activeTask = currentTasks[idx];
     if (activeTask) {
+      const assessment = gateWithRequirements(activeTask, updatedGameConsole);
+      const mayComplete = verifiedTaskCompletion(activeTask, assessment);
       await $.assistant`Evaluate if input "${userInput}" advances task: ${JSON.stringify(activeTask)} based on game state: ${updatedGameConsole || ''}.
 Use metrics: ${activeTask.metrics}.
-IMPORTANT: Hard requirements are NECESSARY but NOT SUFFICIENT. Only mark Completed if the intended ACTION for this task clearly occurred (e.g., exit actually opened, item delivered, monster HP reached 0), not merely because the item exists in inventory or because you're in the right room.
+The engine has already verified completion=${mayComplete}, checks=${JSON.stringify(assessment.checks)}. This is authoritative. Describe only these verified facts; your status suggestion cannot change quest state. Hard requirements alone do not prove an action occurred.
 XP is committed by the existing action adjudication, not this progress evaluator. Do not invent an XP award; leave reward empty.
 Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote":".","narrative":".","reward":"XP gained: X"}.`;
       const updateResult = await $.assistant.generation({ maxTokens: 200,
@@ -7137,11 +7315,8 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
         narrative: "",
         reward: ""
       });
-      const assessment = gateWithRequirements(activeTask, updatedGameConsole);
       const { hardFails, actionFails } = assessment;
       activeTask.progress = mergeTaskProgress(activeTask.progress, assessment);
-      const keyRetrieved = activeTask.bossGateId === bossGateReport.gate?.id && bossGateReport.gate?.keySeeded && assessment.progress.eligible;
-      const mayComplete = !hardFails.length && !actionFails.length && (updateJson.updatedStatus === 'Completed' || keyRetrieved);
       const computedUpdate = updateJson.updatedStatus === 'Completed' && !mayComplete ? '' :
         (updateJson.narrative || '') + (updateJson.progressNote ? ` (${updateJson.progressNote})` : '');
       if (hardFails.length) {
@@ -7153,8 +7328,8 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
         const note = `Action pending: ${actionFails.join('; ')}`;
         questUpdate = (computedUpdate ? `${computedUpdate} ${note}` : note);
       } else {
-        activeTask.status = keyRetrieved ? 'Completed' : updateJson.updatedStatus || activeTask.status || "Pending";
-        questUpdate = computedUpdate;
+        activeTask.status = mayComplete ? 'Completed' : 'In Progress';
+        questUpdate = mayComplete ? computedUpdate : 'Action pending: this task needs a bound, programmatically verified completion condition.';
       }
       if (activeTask.status === 'Completed') {
         questUpdate = (questUpdate && questUpdate.trim())
@@ -7196,10 +7371,12 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
   }
   const questProgress = visibleTask ? `Step ${visibleTaskIndex + 1}/3: ${visibleTask.status || 'Pending'}; ` +
     `${visibleTask.progress?.satisfied || 0}/${visibleTask.progress?.total || 0} requirements verified. ${visibleTask.desc || ''}` :
-    `Step ${visibleTaskIndex + 1}/3: waiting for a reachable route to the bound quest destination.`;
+    `Step ${visibleTaskIndex + 1}/3: waiting for verified requirements bound to existing world records.`;
   if (/^Quest Progress:/m.test(updatedGameConsole)) updatedGameConsole = updatedGameConsole.replace(/^Quest Progress:[^\r\n]*/m, `Quest Progress: ${questProgress}`);
   else updatedGameConsole = updatedGameConsole.replace(/^Current Quest:[^\r\n]*/m, match => `${match}\nQuest Progress: ${questProgress}`);
+  updatedGameConsole = writeQuestRequirements(updatedGameConsole, visibleTask, roomNameDatabasePlain);
   sharedState.setUpdatedGameConsole(updatedGameConsole);
+  if (successorUpdate) questUpdate = [successorUpdate, questUpdate].filter(Boolean).join('\n');
   console.info('[QuestProgress]', JSON.stringify({ taskIndex: visibleTaskIndex, task: visibleTask?.desc || null,
     status: visibleTask?.status || null, progress: visibleTask?.progress || null }));
   if (typeof sharedState.setLastQuestUpdate === 'function') {
@@ -7679,12 +7856,18 @@ async function tryDungeonDoorAction(userInput) {
 
 let combatSpace = null;
 let combatPopulation = null;
-async function chooseDefenceTarget(combatant, targets) {
+let combatTurnFlow = null;
+async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
   return new Promise(resolve => {
     let remaining = 180000, previous = Date.now();
-    const finish = target => { clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond); resolve(target); };
+    let prompt;
+    const finish = target => { clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond);
+      if (typeof combatTurnFlow !== 'undefined') combatTurnFlow?.clearPrompt(prompt?.turnId); resolve(target); };
     const respond = message => {
       if (message.actionId !== actionDice.active?.id || actionDice.paused) return;
+      if (prompt?.turnId && message.turnId !== prompt.turnId) return;
+      if (allowRetreat && message.action === 'retreat') return finish({ retreat: true });
+      if (allowRetreat && message.cancelled) return;
       if (message.cancelled) return finish(null);
       const target = targets.find(t => t.name.toLowerCase() === String(message.target).toLowerCase() && t.hp > 0);
       if (target) finish(target);
@@ -7697,9 +7880,11 @@ async function chooseDefenceTarget(combatant, targets) {
     }, 1000);
     timer.unref?.();
     sharedState.emitter.on(`target_response_${combatant.name}`, respond);
-    broadcast({ type: 'target_prompt', actionId: actionDice.active.id, combatant: combatant.name,
-      targets: targets.map(t => t.name), positions: targets.map(t => ({ name: t.name, x: t.x, y: t.y,
-        distance: combatSpace ? combatSpace.distance(combatant,t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) })) });
+    const positions = targets.map(t => ({ name: t.name, x: t.x, y: t.y,
+      distance: combatSpace ? combatSpace.distance(combatant,t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) }));
+    prompt = combatTurnFlow ? combatTurnFlow.prompt(combatant, targets, positions, allowRetreat) :
+      { type: 'target_prompt', actionId: actionDice.active.id, combatant: combatant.name, targets: targets.map(t => t.name), positions };
+    broadcast(prompt);
   });
 }
 function selectCombatTeams(pc, npcs, monsters, userInput, fallback, combatLog) {
@@ -7710,6 +7895,7 @@ function selectCombatTeams(pc, npcs, monsters, userInput, fallback, combatLog) {
   const states = new Map(Inhabitants.parseSheets(updatedGameConsole).map(a => [a.name, a.state]));
   for (const actor of monsters) if (states.get(actor.name)) actor.state = states.get(actor.name);
   const teams = Inhabitants.teams(all, combatPopulation, combatSpace, userInput, fallback);
+  if (combatTurnFlow) { combatTurnFlow.teams = teams; combatTurnFlow.pc = pc; }
   if (!teams.hostiles.length) combatLog.push('There are no hostile opponents within this encounter. Neutral inhabitants stand aside.');
   const neutral = teams.spectators.filter(a => Inhabitants.allegiance(a) === 'Neutral');
   if (teams.hostiles.length && neutral.length) combatLog.push(`${neutral.map(a => a.name).join(', ')} stand aside and watch.`);
@@ -7743,8 +7929,22 @@ async function handleCombatRound($, userInput, combatMode) {
     combatSpace = dungeon ? createCombatSpace(dungeon, roster, geoKey) : null;
     combatPopulation = sharedState.getRoomPopulation ? populationService.get(geoKey, updatedGameConsole, dungeon) : null;
     actionDice.begin('combat', geoKey, broadcast);
+    combatTurnFlow = typeof CombatTurnFlow !== 'undefined' ? CombatTurnFlow.create(actionDice, sharedState) : null;
     try {
-        return await resolveCombatRound($, userInput, combatMode);
+        if (!combatTurnFlow) return await resolveCombatRound($, userInput, combatMode);
+        const logs = []; let result;
+        do {
+            await actionDice.waitUntilResumed();
+            combatTurnFlow.startRound();
+            updatedGameConsole = sharedState.getUpdatedGameConsole() || updatedGameConsole;
+            result = await resolveCombatRound($, userInput, combatMode);
+            logs.push(`Round ${combatTurnFlow.round}\n${result.combatLog}`);
+            if (logs.length > 20) logs.shift();
+            broadcast({ type: 'combat_log', log: logs.at(-1) });
+            // Keep the same action lock between rounds: walking away must use the Retreat choice.
+            if (combatTurnFlow.canContinue()) userInput = '__ENCOUNTER_DEFENCE__';
+        } while (combatTurnFlow.canContinue());
+        return { ...result, combatLog: logs.join('\n\n'), retreated: combatTurnFlow.retreated };
     } finally {
         try {
             if (combatSpace) {
@@ -7757,7 +7957,13 @@ async function handleCombatRound($, userInput, combatMode) {
             if (combatPopulation) {
                 Inhabitants.sync(combatPopulation, Inhabitants.parseSheets(sharedState.getUpdatedGameConsole()),
                     Inhabitants.parseSheets(sharedState.getUpdatedGameConsole(), 'NPCs in Party'));
-                populationService.recordPositions(combatPopulation, JSON.parse(sharedState.getCombatCharactersString() || '[]'));
+                const finalRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+                populationService.recordPositions(combatPopulation, finalRoster);
+                const player = finalRoster.find(a => a.type === 'pc' && a.hp > 0);
+                const point = player && (player.mazePoint || { x: player.mazeX + .5, y: player.mazeY + .5 });
+                if (typeof HostilePursuit !== 'undefined' && dungeon && point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+                    HostilePursuit.observe(combatPopulation, dungeon, point, HostilePursuit.protectedNames(sharedState));
+                }
                 populationService.save(combatPopulation);
                 broadcast({ type: 'room_population', population: combatPopulation, runId: sharedState.getDungeonRunId() });
             }
@@ -7767,11 +7973,64 @@ async function handleCombatRound($, userInput, combatMode) {
                     console.info('[QuestCombatProgress]', updatedGameConsole.match(/^Quest Progress:[^\r\n]*/m)?.[0] || 'No active task');
                 } catch (error) { console.warn('[QuestCombatProgress]', error.message); }
             }
+            broadcastCombatHealth();
             combatPopulation = null;
             combatSpace = null;
+            combatTurnFlow = null;
             actionDice.end();
         }
     }
+}
+
+async function rollCombatInitiative(combatant, pc) {
+    return combatTurnFlow ? combatTurnFlow.initiative(combatant, pc) : roll1d20();
+}
+async function choosePlayerCombatAction(combatant, targets) {
+    let target;
+    do { target = await chooseDefenceTarget(combatant, targets, true); }
+    while (!target && combatTurnFlow && actionDice.active && combatant.hp > 0);
+    return target;
+}
+async function retreatCombatParty(pc, npcs, monsters, combatLog) {
+    const party = [pc, ...npcs].filter(a => a?.hp > 0), hostiles = monsters.filter(a => a.hp > 0 && Inhabitants.allegiance(a) === 'Hostile');
+    const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+    const paths = CombatTurnFlow.escapePaths(combatSpace, party, hostiles, [...party, ...monsters]);
+    if (!paths) { combatLog.push('The party has no clear route to retreat together.'); return false; }
+    for (const enemy of hostiles) {
+        const targets = CombatTurnFlow.opportunityTargets(enemy, party, combatSpace);
+        if (!targets.length) continue;
+        const target = targets[Math.floor(Math.random() * targets.length)];
+        combatLog.push(`${enemy.name} takes a free attack at ${target.name} as the party retreats.`);
+        // Do not call rollCombatAttack: it includes pursuit movement, forbidden for an opportunity attack.
+        const hit = await actionDice.roll({ actor: enemy.name, label: 'Retreat Attack', target: target.name,
+            modifier: enemy.attack, difficulty: target.ac });
+        if (!hit || hit.total < target.ac) { combatLog.push(`${enemy.name} misses ${target.name}.`); continue; }
+        const damage = await rollCombatDamage(enemy, target, pc, combatLog);
+        if (damage === null) continue;
+        target.hp -= damage; combatSpace?.setHealth([target]);
+        combatLog.push(`${target.name} takes ${damage} damage and has ${target.hp} HP left.`);
+        commitCombatHealth(pc, npcs, monsters);
+        if (target.hp <= 0) ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, enemy));
+    }
+    if (pc.hp <= 0) { combatLog.push(`${pc.name} falls before the party can escape.`); return false; }
+    for (const plan of paths) for (const step of plan.path) {
+        if (plan.actor.hp <= 0) break;
+        await actionDice.waitUntilResumed();
+        combatSpace.move(plan.actor, step);
+        broadcast({ type: 'combat_maze_step', geoKey: actionDice.active.geoKey, actionId: actionDice.active.id,
+            character: plan.actor.name, ...step, duration: 200 });
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(roster)));
+    updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monsters);
+    sharedState.setUpdatedGameConsole(updatedGameConsole);
+    if (combatPopulation) {
+        combatPopulation.retreatUntil = Date.now() + 8000;
+        for (const group of combatPopulation.groups) if (group.status === 'engaged') group.status = 'discovered';
+    }
+    combatTurnFlow.retreated = true;
+    combatLog.push('The living party retreats together. Hostiles may still pursue.');
+    return true;
 }
 
 async function rollCombatAttack(combatant, target, pc, combatLog) {
@@ -7910,12 +8169,12 @@ async function resolveCombatRound($, userInput, combatMode) {
     ];
     combatSpace?.setHealth(allCombatants);
 
-    allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a)).forEach(combatant => {
-        const initiativeRoll = roll1d20();
+    for (const combatant of allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a))) {
+        const initiativeRoll = await rollCombatInitiative(combatant, pc);
         // Initiative orders the live combatants; copying them forks HP during successive hits.
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
-    });
+    }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
@@ -7931,11 +8190,12 @@ async function resolveCombatRound($, userInput, combatMode) {
         }
 
         let target;
-        if (combatant.name === pc?.name && (userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
-            target = await chooseDefenceTarget(combatant, targets);
+        if (combatant.name === pc?.name && (combatTurnFlow || userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
+            target = combatTurnFlow ? await choosePlayerCombatAction(combatant, targets) : await chooseDefenceTarget(combatant, targets);
+            if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
         }
-        if (combatant.name === pc.name && specifiedTargetName) {
+        if (!target && combatant.name === pc.name && specifiedTargetName) {
             const matchingMonsters = targets.filter(monster => 
                 monster.name.toLowerCase().startsWith(specifiedTargetName.toLowerCase())
             );
@@ -7968,18 +8228,8 @@ async function resolveCombatRound($, userInput, combatMode) {
             combatSpace?.setHealth([target]);
             combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
-            // Live patch after every damage so the console text (and thus Game Console panel after round) has the intermediate HP.
-            const monstersForPatchMid = aliveMonsters || [];
-            updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monstersForPatchMid);
+            commitCombatHealth(pc, npcs, aliveMonsters);
             needsUpdate = true;
-
-            const updateHPInConsole = (entity, sectionHeader) => {
-                const entitySectionRegex = new RegExp(`(${sectionHeader}:)([\\s\\S]*?${entity.name}[\\s\\S]*?\\n\\s*HP:)\\s*\\d+`, 'g');
-                updatedGameConsole = updatedGameConsole.replace(
-                    entitySectionRegex,
-                    `$1$2 ${entity.hp}`
-                );
-            };
 
             if (target.hp <= 0) {
                 alreadyKilled.add(target.name);
@@ -7987,14 +8237,11 @@ async function resolveCombatRound($, userInput, combatMode) {
 
                 if (pc && target.name === pc.name) {
                     combatLog.push(`${target.name} is killed by ${combatant.name}.`);
-                    updateHPInConsole(pc, 'PC');
                 } else if (npcs.some(npcItem => npcItem.name.trim() === target.name.trim())) {
                     combatLog.push(`${target.name} is killed by ${combatant.name}.`);
-                    updateHPInConsole(target, 'NPCs in Party');
                 } else if (aliveMonsters.some(monster => monster.name.trim() === target.name.trim())) {
                     const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
                     combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
-                    updateHPInConsole(target, 'Monsters in Room');
 
                     if (xpEarned) allocateXP(pc, npcs, xpEarned);
                     dropMonsterItemsToRoom(target);
@@ -8002,14 +8249,6 @@ async function resolveCombatRound($, userInput, combatMode) {
                 }
 
                 needsUpdate = true;
-            } else {
-                if (pc && target.name === pc.name) {
-                    updateHPInConsole(pc, 'PC');
-                } else if (npcs.some(npcItem => npcItem.name.trim() === target.name.trim())) {
-                    updateHPInConsole(target, 'NPCs in Party');
-                } else if (aliveMonsters.some(monster => monster.name.trim() === target.name.trim())) {
-                    updateHPInConsole(target, 'Monsters in Room');
-                }
             }
 
             needsUpdate = true;
@@ -8194,12 +8433,12 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
 
-    allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a)).forEach(combatant => {
-        const initiativeRoll = roll1d20();
+    for (const combatant of allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a))) {
+        const initiativeRoll = await rollCombatInitiative(combatant, pc);
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
         // combatLog.push(`${combatant.name} starts at position (${combatant.x}, ${combatant.y}) with initiative ${initiativeRoll}.`);
-    });
+    }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
@@ -8282,11 +8521,12 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
         }
 
         let target;
-        if (combatant.name === pc?.name && (userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
-            target = await chooseDefenceTarget(combatant, targets);
+        if (combatant.name === pc?.name && (combatTurnFlow || userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
+            target = combatTurnFlow ? await choosePlayerCombatAction(combatant, targets) : await chooseDefenceTarget(combatant, targets);
+            if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
         }
-        if (combatant.name === pc.name && specifiedTargetName) {
+        if (!target && combatant.name === pc.name && specifiedTargetName) {
             // Try to find the specified monster among living, valid targets
             const matchingMonsters = targets.filter(monster => 
                 monster.name.toLowerCase().startsWith(specifiedTargetName.toLowerCase())
@@ -8386,11 +8626,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                 target.hp -= damageRoll;
                 combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
-
-                const updateHPInConsole = (entity, sectionHeader) => {
-                    const entitySectionRegex = new RegExp(`(${sectionHeader}:)([\\s\\S]*?${entity.name}[\\s\\S]*?\\n\\s*HP:)\\s*\\d+`, 'g');
-                    updatedGameConsole = updatedGameConsole.replace(entitySectionRegex, `$1$2 ${entity.hp}`);
-                };
+                commitCombatHealth(pc, npcs, aliveMonsters);
 
                 if (pc && target.name === pc.name) {
                     pc.hp = target.hp;
@@ -8410,14 +8646,12 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
                     if (pc && target.name === pc.name) {
                         combatLog.push(`${target.name} is killed by ${combatant.name}.`);
-                        updateHPInConsole(pc, 'PC');
                     } else if (npcs.some(n => n.name === target.name)) {
                         combatLog.push(`${target.name} is killed by ${combatant.name}.`);
-                        updateHPInConsole(npcs.find(n => n.name === target.name), 'NPCs in Party');
                     } else if (aliveMonsters.some(m => m.name === target.name)) {
+                        killedThisRound.push(target);
                         const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
                         combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
-                        updateHPInConsole(aliveMonsters.find(m => m.name === target.name), 'Monsters in Room');
                         if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
                         aliveMonsters = aliveMonsters.filter(m => m.hp > 0);
@@ -8426,9 +8660,6 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                     // Remove dead character from combatCharacters
                     combatCharacters = combatCharacters.filter(c => c.name !== target.name || (c.hp && c.hp > 0));
                 } else {
-                    if (pc && target.name === pc.name) updateHPInConsole(pc, 'PC');
-                    else if (npcs.some(n => n.name === target.name)) updateHPInConsole(npcs.find(n => n.name === target.name), 'NPCs in Party');
-                    else if (aliveMonsters.some(m => m.name === target.name)) updateHPInConsole(aliveMonsters.find(m => m.name === target.name), 'Monsters in Room');
                     needsUpdate = true;
                 }
             } else {
@@ -8465,6 +8696,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     combatSpace?.syncRoster(combatCharacters);
     if (needsUpdate) {
         sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
+        updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, aliveMonsters);
         updatedGameConsole = Inhabitants.withStates(updatedGameConsole, combatPopulation);
         sharedState.setUpdatedGameConsole(updatedGameConsole);
     }
@@ -8478,26 +8710,68 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     return { combatLog: formattedCombatLog, needsUpdate };
 }
 
+function broadcastCombatHealth() {
+  const action = actionDice.active;
+  if (!action || action.kind !== 'combat') return;
+  action.healthRevision = (action.healthRevision || 0) + 1;
+  broadcast({ type: 'combat_health', actionId: action.id, revision: action.healthRevision,
+    geoKey: action.geoKey, runId: sharedState.getDungeonRunId?.(),
+    updatedGameConsole: sharedState.getUpdatedGameConsole(),
+    combatCharactersString: sharedState.getCombatCharactersString(), population: combatPopulation });
+}
+
+function commitCombatHealth(pc, npcs, monsters) {
+  const actors = [...(pc ? [pc] : []), ...npcs, ...monsters];
+  const live = new Map(actors.map(actor => [actor.name, actor]));
+  const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+  for (const actor of roster) {
+    const current = live.get(actor.name);
+    if (!current) continue;
+    actor.hp = current.hp;
+    actor.maxHp = current.maxHp;
+    actor.state = Inhabitants.state(current);
+  }
+  combatSpace?.setHealth(actors);
+  combatSpace?.syncRoster(roster);
+  sharedState.setCombatCharactersString(JSON.stringify(roster));
+  // Commit before the next awaited turn; continuous combat no longer returns after each round.
+  updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monsters);
+  sharedState.setUpdatedGameConsole(updatedGameConsole);
+  if (combatPopulation) populationService.save(combatPopulation);
+  broadcastCombatHealth();
+}
+
 // Patch live HP (and MaxHP) from the post-round simulated characters back into the
 // updatedGameConsole text blocks. This makes the "Game Console" panel (detailed stats)
 // reflect current HP after every programmatic combat round, without waiting for the
 // end-of-battle LLM narrative turn.
 function patchLiveHPToConsole(consoleText, pcData, npcList, monsterList) {
   let text = String(consoleText || '');
-  const updateStatBlock = (liveObj) => {
-    if (!liveObj || !liveObj.name) return;
-    const nm = liveObj.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // HP line
-    const reHP = new RegExp(`(Name:\\s*${nm}[\\s\\S]{0,500}?\\nHP:\\s*)-?\\d+`, 'i');
-    text = text.replace(reHP, `$1${liveObj.hp}`);
-    // MaxHP line
-    const maxv = (liveObj.maxHp != null ? liveObj.maxHp : (liveObj.MaxHP != null ? liveObj.MaxHP : liveObj.hp));
-    const reMax = new RegExp(`(Name:\\s*${nm}[\\s\\S]{0,500}?\\nMaxHP:\\s*)-?\\d+`, 'i');
-    text = text.replace(reMax, `$1${maxv}`);
-  };
-  if (pcData) updateStatBlock(pcData);
-  (npcList || []).forEach(n => updateStatBlock(n));
-  (monsterList || []).forEach(m => updateStatBlock(m));
+  for (const [label, actors] of [['PC', pcData ? [pcData] : []], ['NPCs in Party', npcList || []], ['Monsters in Room', monsterList || []]]) {
+    const live = new Map(actors.filter(a => a?.name && Number.isFinite(a.hp)).map(a => [a.name.trim().toLowerCase(), a]));
+    text = text.replace(Inhabitants.sectionPattern(label), (whole, header, body) => {
+      let block = body;
+      for (const record of Inhabitants.parseBlocks(body)) {
+        const actor = live.get(record.name.toLowerCase());
+        if (!actor) continue;
+        let sheet = record.rawSheet.replace(/^([ \t]*HP:[ \t]*)-?\d+/im, (_, prefix) => prefix + actor.hp);
+        const maxHP = actor.maxHp ?? actor.MaxHP;
+        if (Number.isFinite(maxHP)) sheet = sheet.replace(/^([ \t]*MaxHP:[ \t]*)-?\d+/im, (_, prefix) => prefix + maxHP);
+        block = block.replace(record.rawSheet, () => sheet);
+      }
+      return header + block;
+    });
+  }
+  // Publish injuries before a background population/console refresh can reuse old HP.
+  if (combatPopulation) for (const actor of monsterList || []) {
+    const record = combatPopulation.actors[actor.name];
+    if (!record || !Number.isFinite(actor.hp)) continue;
+    if (record.status !== 'dead') record.hp = actor.hp;
+    if (record.hp <= 0) record.status = 'dead';
+    record.state = Inhabitants.state(record);
+    const sheet = Inhabitants.parseSheets(text).find(row => row.name === actor.name);
+    if (sheet) record.sheet = sheet.rawSheet || sheet.sheet;
+  }
   return Inhabitants.withStates(text, combatPopulation);
 }
 
@@ -8536,7 +8810,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     combatLog.push("Interactive map-based combat round started.");
 
     // Extract details for PC, NPCs, and Monsters
-    let updatedGameConsole = await getDelayedUpdatedGameConsole();
+    updatedGameConsole = await getDelayedUpdatedGameConsole();
     const pcDetails = updatedGameConsole.match(/PC:([\s\S]*?)(?=(NPCs in Party|Rooms Visited))/)?.[1]?.trim();
     const npcsInPartyDetails = updatedGameConsole.match(/NPCs in Party:([\s\S]*?)(?=(Monsters in Room|Rooms Visited))/)?.[1]?.trim();
     const monstersInRoomDetails = updatedGameConsole.match(/Monsters in Room:([\s\S]*?)(?=(Monsters Equipped Properties|$))/)?.[1]?.trim();
@@ -8659,11 +8933,11 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     combatLog.push(`Combatants positioned: ${combatCharacters.map(c => `${c.name} at (${c.x}, ${c.y})`).join(', ')}`);
 
     // Roll initiative
-    allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a)).forEach(combatant => {
-        const initiativeRoll = roll1d20();
+    for (const combatant of allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a))) {
+        const initiativeRoll = await rollCombatInitiative(combatant, pc);
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
-    });
+    }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
@@ -8756,7 +9030,11 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
         }
 
         let target;
-        if (combatant.name === pc?.name || npcs.some(n => n.name === combatant.name)) {
+        if (combatTurnFlow && combatant.name === pc?.name) {
+            target = await choosePlayerCombatAction(combatant, targets);
+            if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
+            if (!target) continue;
+        } else if (combatant.name === pc?.name || npcs.some(n => n.name === combatant.name)) {
             combatLog.push(`Waiting for player to select a target for ${combatant.name}.`);
             target = await promptForTarget(combatant, targets);
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
@@ -8829,27 +9107,19 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                 target.hp -= damageRoll;
                 combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
-
-                const updateHPInConsole = (entity, sectionHeader) => {
-                    const escapedName = entity.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const entitySectionRegex = new RegExp(`(${sectionHeader}:[\\s\\S]*?${escapedName}[\\s\\S]*?\\n\\s*HP:)\\s*\\d+`, 'g');
-                    updatedGameConsole = updatedGameConsole.replace(entitySectionRegex, `$1 ${entity.hp}`);
-                };
+                commitCombatHealth(pc, npcs, aliveMonsters);
 
                 if (pc && target.name === pc.name) {
                     pc.hp = target.hp;
-                    updateHPInConsole(pc, 'PC');
                 } else if (npcs.some(n => n.name === target.name)) {
                     const npc = npcs.find(n => n.name === target.name);
                     if (npc) {
                         npc.hp = target.hp;
-                        updateHPInConsole(npc, 'NPCs in Party');
                     }
                 } else if (aliveMonsters.some(m => m.name === target.name)) {
                     const monster = aliveMonsters.find(m => m.name === target.name);
                     if (monster) {
                         monster.hp = target.hp;
-                        updateHPInConsole(monster, 'Monsters in Room');
                     }
                 }
 
@@ -8873,9 +9143,6 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                     needsUpdate = true;
                     combatCharacters = combatCharacters.filter(c => c.name !== target.name);
                 } else {
-                    if (pc && target.name === pc.name) updateHPInConsole(pc, 'PC');
-                    else if (npcs.some(n => n.name === target.name)) updateHPInConsole(npcs.find(n => n.name === target.name), 'NPCs in Party');
-                    else if (aliveMonsters.some(m => m.name === target.name)) updateHPInConsole(aliveMonsters.find(m => m.name === target.name), 'Monsters in Room');
                     needsUpdate = true;
                 }
             } else {
@@ -8911,6 +9178,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     combatSpace?.syncRoster(combatCharacters);
     if (needsUpdate) {
         sharedState.setCombatCharactersString(JSON.stringify(combatCharacters));
+        updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, aliveMonsters);
         updatedGameConsole = Inhabitants.withStates(updatedGameConsole, combatPopulation);
         sharedState.setUpdatedGameConsole(updatedGameConsole);
     }
@@ -10936,14 +11204,14 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       });
     }
     
-    let musicArrangement = null;
+    let musicArrangement = null, musicWavUrl = null;
 
     if (isNewRoom) {
       try {
         const { musicJson, wavUrl, isNew, key, coords: c } =
           await $.run($ => getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom));
         
-        musicArrangement = musicJson;
+        musicArrangement = musicJson; musicWavUrl = wavUrl || null;
         console.log(`Music updated for room at ${coordsKey(coords)}${wavUrl ? ` (${wavUrl})` : ''}`);
       } catch (musicErr) {
         console.error('Music generation failed:', musicErr);
@@ -10955,7 +11223,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     }
     
     // Broadcast to clients to reload audio (SSE)
-    broadcast({ type: 'roomMusicUpdated', coords: coordsKey(coords), isNew: isNewRoom });
+    broadcast({ type: 'roomMusicUpdated', coords: coordsKey(coords), isNew: isNewRoom, wav: musicWavUrl, ambience: (musicArrangement && Array.isArray(musicArrangement.ambience)) ? musicArrangement.ambience : null });
     
     // Parse and initialize roomNameDatabase
     // Parse and initialize roomNameDatabase
@@ -12019,6 +12287,15 @@ try {
 
 // Narration runs only after placement, so a room-wide console list cannot become an entrance mob.
 const activeDungeonForPopulation = sharedState.getRoomDungeonForSimulation(geoCoords);
+if (typeof pursuitTransition !== 'undefined' && pursuitTransition && activeDungeonForPopulation) {
+  const destination = populationService.get(geoKey, updatedGameConsole, activeDungeonForPopulation);
+  const arrivals = HostilePursuit.transfer(pursuitTransition, sharedState, populationService, destination, activeDungeonForPopulation);
+  if (arrivals.length) {
+    updatedGameConsole = Inhabitants.withStates(updatedGameConsole, destination);
+    console.info('[HostilePursuit]', JSON.stringify({ from: pursuitTransition.from, to: geoKey, arrivals }));
+    broadcast({ type: 'room_population', population: sharedState.getRoomPopulation(pursuitTransition.from), runId: sharedState.getDungeonRunId() });
+  }
+}
 const population = populationService.prepare(updatedGameConsole, activeDungeonForPopulation);
 if (population) population.journey = JourneyMemory.progressSynopsis(sharedState);
 updatedGameConsole = Inhabitants.withStates(updatedGameConsole, population);
@@ -12050,6 +12327,8 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
     console.info('[DialogueGrounding]', JSON.stringify({ geoKey, mode: 'turn-cache', characters: cacheMemories.map(row => ({
       name: row.name, partyMember: row.partyMember, heard: row.heardCurrentConversation, evidenceIds: row.memories.map(item => item.id) })) }));
   }
+  const directions = typeof QuestDirectionFacts !== 'undefined' ? QuestDirectionFacts.facts(sharedState,userInput) : [];
+  if(directions.length)await $.user(QuestDirectionFacts.prompt(directions));
   await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${Inhabitants.MONSTER_DIALOGUE_RANGE} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
   await $.user`Preserve the existing flowing narrative: prose, actions, quotation marks and paragraph breaks stay natural, not a screenplay or JSON document. Mark EVERY actual spoken passage inside its normal quotation marks with invisible backend labels: [[SPEECH:"exact nearby name"]]all words spoken in this quote[[/SPEECH]]. Use the JSON-quoted exact name from ${JSON.stringify(audibleNames)}. Label every continuation and later paragraph, even when the prose uses he, she, their voice, an epithet, or omits the name. Do not summarize, truncate, omit later sentences or repeat the speech elsewhere. Never label narration, thoughts, inscriptions, the PC's words or distant characters. At most ${initialArrival ? 6 : 4} nearby speakers; allow complete natural monologues, not a 40-word metadata excerpt. The server removes only these labels before displaying the unchanged narrative in the Game Log.
 After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}],"exchanges":[]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh the planned batch of 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Base the batch on this turn's actual conversation as well as the witnessed recap, without assuming these future lines were already said. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;

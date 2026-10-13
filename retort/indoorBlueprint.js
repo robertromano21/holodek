@@ -72,7 +72,8 @@ function build(dungeon, plan = {}, base = {}) {
     }
     const a = cells[`${from.x},${from.y}`].floorHeight, b = cells[`${to.x},${to.y}`].floorHeight;
     const passage = points.map((p, i) => cells[`${p.x},${p.y}`].tile !== 'floor' ? i : -1).filter(i => i >= 0);
-    const begin = passage.length ? passage[0] - 1 : 0, end = passage.length ? passage[passage.length - 1] + 1 : points.length - 1;
+    const begin = repaired ? 0 : passage.length ? passage[0] - 1 : 0;
+    const end = repaired ? points.length - 1 : passage.length ? passage[passage.length - 1] + 1 : points.length - 1;
     const span = clamp(Math.round(finite(request.width, 2)), 1, 4);
     points.forEach((p, i) => {
       const z = a + (b - a) * clamp((i - begin) / Math.max(1, end - begin), 0, 1);
@@ -81,8 +82,12 @@ function build(dungeon, plan = {}, base = {}) {
           const px = p.x + dx, py = p.y + dy;
           if (px < 1 || py < 1 || px >= width - 1 || py >= height - 1) continue;
           const c = cells[`${px},${py}`];
-          // Room interiors keep their designed elevation; only the linking passage ramps.
-          if (c.tile !== 'floor') Object.assign(c, { tile: 'floor', floorHeight: z, ceilHeight: z + clearance });
+          // A repaired link may cross existing floors at incompatible heights, especially
+          // overlapping chambers. Ramp that narrow path too, retaining its headroom.
+          if (c.tile !== 'floor' || repaired) {
+            const headroom=c.tile==='floor'?finite(c.ceilHeight-c.floorHeight,clearance):clearance;
+            Object.assign(c,{tile:'floor',floorHeight:z,ceilHeight:z+headroom});
+          }
           c.navigationReserved = true;
         }
       }

@@ -15,6 +15,8 @@ DialogueTurns.install(sharedState, Inhabitants);
 const fs = require('fs');
 const path = require('path');
 const { renderArrangementToWav } = require('./retort/renderAudio');
+const MusicSlots = require('./retort/musicSlots');
+const SidVoice = require('./retort/sidVoice'); // 64-SID speech (Piper analysis -> SID vocoder), pre-synthesized at dialogue creation
 const characterTraits = require('./retort/characterTraitSpec');
 const { summarizeDungeon } = require('./dungeonDiagnostics');
 const { actionDice } = require('./retort/actionDice');
@@ -28,6 +30,14 @@ const roomDatabaseReceiver = createRoomDatabaseReceiver();
 // Middleware
 app.use(createGameJsonParser());
 app.use(cors());
+SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
+// Stock / Enhanced SID switch (♫ panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
+const SidMode = require('./retort/sidMode');
+app.get('/sid-mode', (req, res) => res.json({ mode: SidMode.get() }));
+app.post('/sid-mode', express.json({ limit: '1kb' }), (req, res) => {
+  const want = SidMode.norm(req.body && req.body.mode); if (!want) return res.status(400).json({ error: 'mode must be 1x, 2x or 4x' });
+  res.json({ mode: SidMode.set(want), music: 'next room song renders in this mode' });
+});
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
 app.use('/node_modules', express.static(path.join(__dirname, 'node_modules')));
 app.use('/sid', express.static(path.join(__dirname, 'sid'), {
@@ -72,6 +82,11 @@ app.get('/combat-updates2', (req, res) => {
     const coords = sharedState.getLastCoords();
     const population = coords && sharedState.getRoomPopulation(`${coords.x},${coords.y},${coords.z}`);
     if (population) client.send({ type: 'room_population', population, runId: sharedState.getDungeonRunId() });
+    if (actionDice.active?.kind === 'combat') client.send({ type: 'combat_health',
+      actionId: actionDice.active.id, revision: actionDice.active.healthRevision || 0,
+      geoKey: actionDice.active.geoKey, runId: sharedState.getDungeonRunId(),
+      updatedGameConsole: sharedState.getUpdatedGameConsole(),
+      combatCharactersString: sharedState.getCombatCharactersString(), population });
 
     req.on('close', () => {
         clearInterval(keepAlive);
@@ -82,6 +97,7 @@ app.get('/combat-updates2', (req, res) => {
 
 // Function to broadcast to all connected clients
 function broadcast(data) {
+    if (data && data.type === 'character_dialogue') SidVoice.prefetch(data.dialogue);
     if (data.type === 'dungeonLoaded' && data.dungeon) {
         console.info('[DungeonDelivered]', JSON.stringify(summarizeDungeon(data.dungeon)));
     }
@@ -142,7 +158,8 @@ app.post('/debug/dialogue-subtitles', (req, res) => {
   for (const row of reports) console.info('[DialogueSubtitle]', JSON.stringify({
     runId, geoKey: row.geoKey, stage: row.stage, speaker: row.speaker, line: row.line, source: row.source, kind: row.kind,
     at: row.at, queueDepth: row.queueDepth, reason: row.reason, distance: row.distance, range: row.range,
-    lineOfSight: row.lineOfSight === true, canHear: row.canHear === true, part: row.part, parts: row.parts
+    lineOfSight: row.lineOfSight === true, canHear: row.canHear === true, part: row.part, parts: row.parts,
+    mood: SidVoice.moodOf(row.speaker, row.line), cadence: SidVoice.cadenceOf(row.line), confidence: SidVoice.confidenceOf(row.speaker, row.line)
   }));
   const memoryRoom = typeof CampaignMemory !== 'undefined' ? CampaignMemory.cast(sharedState).geo : null;
   for (const row of reports) if (row.stage === 'displayed' && row.geoKey === memoryRoom) CampaignMemory.rememberDialogue(sharedState, null,
@@ -211,12 +228,19 @@ app.post('/set-dungeon-testing-mode', (req, res) => {
 
 app.post('/submit-target2', (req, res) => {
     if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before choosing a target.' });
-    const { combatant, target, cancelled, actionId } = req.body;
+    const { combatant, target, cancelled, actionId, turnId, action } = req.body;
     if (!actionDice.active || actionDice.active.kind !== 'combat' || actionDice.active.id !== actionId) {
       return res.status(409).json({ error: 'That combat turn is no longer active.' });
     }
+    const turn = actionDice.active.turn;
+    const validAction = turn && (action === 'attack' && !cancelled && turn.targets.includes(target) ||
+      action === 'retreat' && turn.allowRetreat && !cancelled ||
+      action === 'hold' && !turn.allowRetreat && cancelled === true);
+    if (!turn || turn.turnId !== turnId || turn.combatant !== combatant || !validAction) {
+      return res.status(409).json({ error: 'That player turn or target is no longer available.' });
+    }
     console.log(`Received target selection: ${combatant} targets ${target}`);
-    sharedState.emitter.emit(`target_response_${combatant}`, { target, cancelled: cancelled === true, actionId });
+    sharedState.emitter.emit(`target_response_${combatant}`, { target, cancelled: cancelled === true, actionId, turnId, action });
     res.json({ status: 'success' });
 });
 
@@ -289,7 +313,7 @@ app.post('/room-population/engage', async (req, res) => {
   const record = visit.population.actors[req.body.target], coords = sharedState.getLastCoords();
   const dungeon = sharedState.getRoomDungeonForSimulation(coords);
   const livingPc=JSON.parse(sharedState.getCombatCharactersString() || '[]').some(a=>a.type==='pc'&&(a.hp ?? 1)>0);
-  if (!livingPc || visit.population.starting || !record?.position || record.status !== 'present' || record.allegiance !== 'Hostile' ||
+  if (!livingPc || visit.population.starting && !record?.pursuit?.arrivedThrough || !record?.position || record.status !== 'present' || record.allegiance !== 'Hostile' ||
       Math.hypot(record.position.x + 0.5 - req.body.player.x, record.position.y + 0.5 - req.body.player.y) > 3.5 ||
       !Inhabitants.lineClear(dungeon, req.body.player, { x: record.position.x + 0.5, y: record.position.y + 0.5 })) return res.status(409).json({ error: 'There is no nearby hostile encounter.' });
   inputTaskInFlight = true;
@@ -387,7 +411,7 @@ app.post('/processInput7', async (req, res) => {
         musicArrangement: result.musicArrangement || null,
         npcDirectives: Array.isArray(result.npcDirectives) ? result.npcDirectives : [],
         population: result.population || null,
-        dialogue: result.dialogue || [],
+        dialogue: SidVoice.prefetch(result.dialogue || []),
         combatRoundOnly: !!(result.combatRoundOnly || result.actionOnly)
       };
       tasks.set(taskId, { 
@@ -511,7 +535,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
         imageUrl: (result && result.imageUrl) || null,
         musicArrangement: (result && result.musicArrangement) || null,
         population: result.population || null,
-        dialogue: result.dialogue || [],
+        dialogue: SidVoice.prefetch(result.dialogue || []),
         characterConfirmed: true
       };
 
@@ -704,7 +728,7 @@ app.get('/poll-task2/:taskId', (req, res) => {
 });
 
 app.post('/updateState7', async (req, res) => {
-    if (inputTaskInFlight) return res.status(409).json({ error: 'Cannot replace state during an action.' });
+    if (inputTaskInFlight || (typeof actionDice !== 'undefined' && actionDice.active)) return res.status(409).json({ error: 'Cannot replace state during an action.' });
     const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest, liveWorldState } = req.body; // New: currentQuest
     let roomSync;
     try {
@@ -743,6 +767,10 @@ app.post('/updateState7', async (req, res) => {
     console.info('[StateSyncAccepted]', JSON.stringify({ geoKey, bytes: Number(req.get('Content-Length')) || null,
       roomDatabaseMode: roomSync?.mode || 'unchanged', changedRooms: roomSync?.changedRooms || 0 }));
     res.json({ message: 'State updated successfully', geoKey, roomDatabaseSyncToken: roomSync?.token });
+    // Revisit pre-render: the client syncs the new room's coordinates before the turn runs. If that room already has a
+    // saved song (no LLM needed) and it is not in a slot, render it into the free slot now and announce it; the browser
+    // queues it and switches when the room is on screen. The turn's own render then reuses the slot.
+    if (geoKey) setImmediate(() => prerenderRoomSong(geoKey));
 });
 
 // NEW: Endpoint to get room music JSON by coordinates
@@ -752,7 +780,8 @@ app.get('/get-room-music', (req, res) => {
   const [x, y, z] = coords.split(',').map(n => parseInt(n) || 0);
   const coordsObj = { x, y, z };
   const music = sharedState.getRoomMusic(coordsObj);
-  res.json({ music });
+  // runId lets the browser ignore songs cached in IndexedDB by an earlier run (every run composes fresh music)
+  res.json({ music, runId: sharedState.getDungeonRunId() });
 });
 
 // NEW: Endpoint to set room music JSON by coordinates
@@ -784,11 +813,13 @@ app.post('/music/commit', async (req, res) => {
     fs.mkdirSync(retortDir, { recursive: true });
     fs.mkdirSync(sidDir, { recursive: true });
 
+    // Two-slot scheme: render into the slot the browser is not playing (retort/musicSlots.js).
+    const slot = MusicSlots.nextSlot();
     const jsonPath = path.join(retortDir, 'current_room.json');
-    const asmOut = path.join(sidDir, 'current_room.asm');
-    const sidPath = path.join(sidDir, 'current_room.sid');
+    const asmOut = path.join(sidDir, `room_${slot}.asm`);
+    const sidPath = path.join(sidDir, `room_${slot}.sid`);
     const renderSeconds = 60;
-    const wavBase = path.join(sidDir, 'current_room');
+    const wavBase = MusicSlots.base(slot);
     const sidCore = path.join(__dirname, 'assets', 'renderSid_poke.js');
     const { wavPath, renderer } = renderArrangementToWav(arrangement, {
       jsonPath,
@@ -805,15 +836,43 @@ app.post('/music/commit', async (req, res) => {
 
     // 4) broadcast + reply (cache-busted URL for clients)
     const token = Date.now();
-    const wavUrl = `/sid/current_room.wav?cb=${token}`;
-    broadcast({ type: 'roomMusicReady', coords: key, wav: wavUrl, token, renderer });
+    const wavUrl = MusicSlots.rendered(slot, key);
+    // SFX pass: the LLM's ambience tags ride along so the browser can start the room's ambient loops.
+    const ambience = Array.isArray(arrangement.ambience) ? arrangement.ambience : null;
+    broadcast({ type: 'roomMusicReady', coords: key, wav: wavUrl, token, renderer, ambience });
 
-    return res.json({ ok: true, coords: key, wav: wavUrl, renderer });
+    return res.json({ ok: true, coords: key, wav: wavUrl, renderer, ambience });
   } catch (err) {
     console.error('POST /music/commit error:', err);
     res.status(500).json({ error: String(err && err.message || err) });
   }
 });
+
+function prerenderRoomSong(geoKey) {
+  try {
+    const [x, y, z] = geoKey.split(',').map(Number);
+    const song = sharedState.getRoomMusic({ x, y, z });
+    if (!song || MusicSlots.find(geoKey)) return;
+    if (MusicSlots.latest().playing && MusicSlots.state.holds[MusicSlots.state.playing] === geoKey) return;
+    const t0 = Date.now(), slot = MusicSlots.nextSlot(), sidDir = path.join(__dirname, 'sid');
+    fs.mkdirSync(sidDir, { recursive: true });
+    const { wavPath, renderer } = renderArrangementToWav(song, {
+      jsonPath: path.join(__dirname, 'retort', 'current_room.json'), asmOut: path.join(sidDir, `room_${slot}.asm`),
+      sidOut: path.join(sidDir, `room_${slot}.sid`), outBaseNoExt: MusicSlots.base(slot), seconds: 60,
+      renderJsPath: path.join(__dirname, 'assets', 'renderSid_poke.js'), cwd: __dirname });
+    if (!wavPath || !fs.existsSync(wavPath)) return;
+    const wav = MusicSlots.rendered(slot, geoKey);
+    console.log(`[music] pre-rendered saved song for revisit ${geoKey} into slot ${slot} via ${renderer} in ${Date.now() - t0}ms`);
+    broadcast({ type: 'roomMusicUpdated', coords: geoKey, isNew: true, wav, ambience: Array.isArray(song.ambience) ? song.ambience : null, prerendered: true });
+  } catch (err) { console.warn('[music] revisit pre-render failed:', err && err.message); }
+}
+
+// Two-slot room music: the browser reports which slot it is playing, and asks for the latest song on page load.
+app.post('/music/now-playing', (req, res) => {
+  MusicSlots.setPlaying(String((req.body && req.body.slot) || ''));
+  res.json({ ok: true, ...MusicSlots.latest() });
+});
+app.get('/music/latest', (req, res) => res.json(MusicSlots.latest()));
 
 app.get('/get-room-dungeon', (req, res) => {
   const { coords } = req.query; // ?coords=x,y,z

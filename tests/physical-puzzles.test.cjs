@@ -139,11 +139,12 @@ test('the retired ash/ember/bone design is rejected; seeded fallback varies its 
 });
 test('one generated metadata response supplies both description and solution; malformed designs retry then fall back', async () => {
   let calls = 0; const prompts = [];
+  const context = { roomName: 'Archive', seed: 'test', quest: 'Recover the existing artifact.' },expected=P.fallback(context.seed,context.roomName);
   const agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); }, assistant: { generation: async ({ maxTokens }) => {
-    assert.equal(maxTokens, 4200); calls++; return { content: JSON.stringify(definition()) };
+    assert.equal(maxTokens, 4200); calls++; return { content: JSON.stringify(expected) };
   } } };
-  const context = { roomName: 'Archive', seed: 'test', quest: 'Recover the existing artifact.' };
-  assert.equal((await generateDesign(agent, context)).id, definition().id); assert.equal(calls, 1);
+  const result=await generateDesign(agent, context);
+  assert.equal(result.kind, expected.kind);assert.deepEqual(result.controls,expected.controls);assert.equal(result.readables.length,4);assert.equal(calls, 1);
   agent.assistant.generation = async () => { calls++; return { content: '{broken' }; };
   assert.ok((await generateDesign(agent, context)).id); assert.equal(calls, 3);
   assert.ok(prompts.some(s => s.includes('rejected')));

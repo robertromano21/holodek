@@ -39,6 +39,8 @@ test('combat immediately records partial kills and retains them after the player
   f.database['-1,-1,0'].monsters.inRoom = sheet('Vexathar', 0);
   const first = refreshCombatQuestProgress(f.state, consoleFor(sheet('Lathira', 20)));
   assert.match(first, /1\/3 requirements verified/);
+  for (const target of targets) assert.ok(first.includes(`Defeat ${target.name} in Room (${target.placement})`));
+  assert.equal(first.match(/^Quest Requirements:/gm).length, 1);
   assert.equal(f.tasks[0].progress.satisfied, 1);
   assert.equal(f.index, 0);
   assert.deepEqual(f.logs, []);
@@ -58,7 +60,9 @@ test('all three verified deaths advance only the current non-boss step and do no
   assert.equal(f.index, 1);
   assert.equal(f.seeded, false);
   assert.equal(f.logs.length, 1);
-  assert.equal(result.replace(/^Quest Progress:[^\n]*/m, ''), original.replace(/^Quest Progress:[^\n]*/m, ''));
+  assert.match(result, /^Quest Requirements: Step completed\./m);
+  const withoutQuestDisplay = text => text.replace(/^Quest (?:Progress|Requirements):[^\n]*\n/gm, '');
+  assert.equal(withoutQuestDisplay(result), withoutQuestDisplay(original));
   assert.equal(refreshCombatQuestProgress(f.state, result), result);
   assert.equal(f.logs.length, 1);
 });

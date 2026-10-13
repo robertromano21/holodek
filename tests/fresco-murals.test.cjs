@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
-const {createCanvas}=require('canvas'),Art=require('../assets/surfaceArt'),P=require('../assets/physicalPuzzles');
+const {createCanvas}=require('canvas'),Art=require('../assets/surfaceArt'),P=require('../assets/physicalPuzzles'),Designs=require('../assets/frescoDesigns'),Figures=require('../assets/frescoFigures');
 const {wallFaces,mountWall}=require('../retort/surfaceArtPlacement');
 function room(height=3,width=30){
   const d={layout:{width,height:width},start:{x:Math.floor(width/2),y:Math.floor(width/2)},cells:{},tiles:{},sceneObjects:[],
@@ -13,11 +13,12 @@ function candidates(d){return Object.entries(d.cells).filter(([,c])=>c.tile==='f
 });}
 function spec(){return{indoor:true,source:{roomName:'Ruined Temple Entrance',description:'A vaulted stone temple bears faded frescoes of the departed.'}};}
 test('indoor temple plans four dignified paintings; grand buildings six; outdoor wilderness is not filled with murals',()=>{
-  const plan=Art.plan(spec());assert.equal(plan.length,4);assert.ok(plan.every(a=>a.kind==='fresco'&&a.format==='mural'&&a.motifs.includes('Mortacia')));
-  const palace=Art.plan({indoor:true,source:{roomName:'Grand Palace',description:'A vaulted hall.'}});assert.equal(palace.length,6);
+  const plan=Art.plan(spec());assert.equal(plan.length,9);assert.equal(plan.filter(a=>a.kind==='fresco').length,4);
+  assert.ok(plan.filter(a=>a.kind==='fresco').every(a=>a.format==='mural'&&a.motifs.includes('Mortacia')));
+  const palace=Art.plan({indoor:true,source:{roomName:'Grand Palace',description:'A vaulted hall.'}});assert.equal(palace.length,12);assert.equal(palace.filter(a=>a.kind==='fresco').length,6);
   assert.equal(Art.plan({indoor:false,source:{roomName:'Desert',description:'Open dunes.'}}).length,0);
   assert.deepEqual(Art.plan(spec()),plan);
-  assert.equal(Art.validate(plan).length,4);assert.throws(()=>Art.validate([...plan,...plan]),/six/);
+  assert.equal(Art.validate(plan.filter(a=>a.kind==='fresco')).length,4);assert.throws(()=>Art.validate([...plan,...plan]),/six/);
   assert.throws(()=>Art.validate([{...plan[0],pigments:'hot pink'}]),/Invalid/);
 });
 test('fresco pigments ignore beige wall colors and retain probe-like contrast without changing character sprites',()=>{
@@ -35,14 +36,51 @@ test('fresco pigments ignore beige wall colors and retain probe-like contrast wi
   }
   assert.equal(hashes.size,4);
 });
+
+test('panoramic murals expand composition rather than figure anatomy and keep classic templates',()=>{
+  const art=Art.plan(spec())[0],rows=Designs.figures(art),classic=Designs.layout(art,rows),wide=Designs.layout(art,rows,128);
+  for(let i=0;i<rows.length;i++){
+    assert.equal(wide[i].box.width,classic[i].box.width);assert.equal(wide[i].box.height,classic[i].box.height);
+    assert.ok(Math.abs(wide[i].box.x+wide[i].box.width/2-(classic[i].box.x+classic[i].box.width/2)*4/3)<1e-8);
+  }
+  const frames=[];
+  for(const aspectRatio of[1.5,2,2.5]){
+    const row={...art,aspectRatio},{width,height}=Art.rasterSize(row),c=createCanvas(width,height);
+    Art.paint(c.getContext('2d'),createCanvas,row);assert.equal(width/height,aspectRatio);assert.ok(width*height<=16384);
+    const mesh=Art.mesh(c.getContext('2d').getImageData(0,0,width,height));assert.ok(mesh.vertices.length/9<65536);assert.ok(mesh.vertices.every(Number.isFinite));
+    frames.push({aspectRatio,c});
+  }
+  const c=createCanvas(96,96),ctx=c.getContext('2d'),draw=ctx.drawImage.bind(ctx),scales=[];
+  ctx.drawImage=(...args)=>{if(args.length===9)scales.push([args[7]/args[3],args[8]/args[4]]);draw(...args);};
+  Figures.paint(ctx,rows[0],Art.frescoPalette(art),{x:0,y:0,width:60,height:90},art.style,createCanvas);
+  assert.ok(scales.length>0&&scales.every(([x,y])=>Math.abs(x-y)<1e-8));
+  assert.equal(Art.validate([{...art,aspectRatio:1.5}])[0].aspectRatio,1.5);
+  assert.throws(()=>Art.validate([{...art,aspectRatio:20}]),/Invalid/);
+  if(process.env.HOLODEK_ART_PREVIEW==='1'){
+    const gallery=createCanvas(800,1320),g=gallery.getContext('2d');g.imageSmoothingEnabled=false;
+    frames.forEach(({aspectRatio,c},i)=>{g.drawImage(c,0,i*440,c.width*4,c.height*4);g.fillStyle='#eadbbb';g.font='14px Georgia';g.fillText(aspectRatio+':1',8,i*440+424);});
+    const dir=path.join(__dirname,'../logs/probes');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'fresco-wide-compositions.png'),gallery.toBuffer());
+  }
+});
+
+test('saved mural presentation fits its natural ratio without changing mounts, metadata or footprint',()=>{
+  for(const axis of['x','y'])for(const ratio of[1.5,2,2.5]){
+    const along=axis==='x'?'y':'x',art={kind:'fresco',surface:'wall',axis,aspectRatio:ratio,
+      position:{x:5,y:5,z:.35},size:{x:axis==='x'?.02:4,y:axis==='y'?.02:4,z:4}},before=JSON.stringify(art),shown=Art.presentation(art);
+    assert.equal(JSON.stringify(art),before);assert.equal(shown.size[along]/shown.size.z,ratio);
+    assert.ok(shown.position.z>=art.position.z&&shown.position.z+shown.size.z<=art.position.z+art.size.z);
+    assert.ok(shown.position[along]>=art.position[along]&&shown.position[along]+shown.size[along]<=art.position[along]+art.size[along]);
+  }
+  const a={kind:'relief',surface:'wall'};assert.equal(Art.presentation(a),a);
+});
 test('murals use several continuous wall cells, preserve proportions and spread across four faces',()=>{
   const d=room(),walls=wallFaces(d,candidates(d)),used=new Set(),groups=new Map(),centers=[];
-  const mounts=Art.plan(spec()).map(a=>{const mount=mountWall(walls,a,used,groups,centers);assert.ok(mount);mount.keys.forEach(k=>used.add(k));return mount;});
+  const mounts=Art.plan(spec()).filter(a=>a.kind==='fresco').map(a=>{const mount=mountWall(walls,a,used,groups,centers);assert.ok(mount);mount.keys.forEach(k=>used.add(k));return mount;});
   assert.equal(groups.size,4);
-  for(const m of mounts){const width=Math.max(m.size.x,m.size.y);assert.ok(width>=3&&m.size.z>=2);assert.equal(width/m.size.z,1.5);
+  for(const m of mounts){const width=Math.max(m.size.x,m.size.y);assert.ok(width>=3&&m.size.z>=2);assert.equal(width/m.size.z,2);
     assert.ok(m.keys.length>=3);assert.ok(m.keys.every(k=>d.cells[k].tile==='wall'));assert.ok(m.position.z+m.size.z<=3);}
   const tall=room(9),big=mountWall(wallFaces(tall,candidates(tall)),Art.plan(spec())[0],new Set());
-  assert.ok(Math.max(big.size.x,big.size.y)>7&&big.size.z>4.5);assert.ok(big.size.z<=5.2);
+  assert.ok(Math.max(big.size.x,big.size.y)>7&&big.size.z>3.5);assert.ok(big.size.z<=3.9);
 });
 test('murals never cross doors, exits, reserved routes, missing walls, roof edges or changes of elevation',()=>{
   const d=room(3,14);
@@ -74,14 +112,15 @@ test('full construction adds four murals plus a nearby diagram without changing 
     const {applySurfaceArt}=require('../retort/sceneRoomBuilder'),d=room(),s=spec();
     s.puzzleMechanism=P.fallback('mural-test','Ruined Temple Entrance');P.install(d,s);
     const before=JSON.stringify({cells:d.cells,items:d.sceneObjects,puzzle:d.physicalPuzzle});
-    const report=applySurfaceArt(d,s);assert.equal(report.frescoes,4);assert.equal(report.count,5);assert.equal(report.murals,4);
+    const report=applySurfaceArt(d,s);assert.equal(report.frescoes,4);assert.equal(report.count,10);assert.equal(report.murals,4);
+    assert.equal(d.surfaceArt.filter(a=>a.carvingStyle).length,4);
     assert.equal(JSON.stringify({cells:d.cells,items:d.sceneObjects,puzzle:d.physicalPuzzle}),before);
     assert.equal(d.surfaceArt.filter(a=>a.puzzleClue).length,1);assert.ok(P.verify(d).valid);
     assert.equal(applySurfaceArt(d,s).status,'existing');assert.deepEqual(JSON.parse(JSON.stringify(d.surfaceArt)),d.surfaceArt);
     if(process.env.HOLODEK_ART_PREVIEW==='1'){
       const gallery=createCanvas(576,384),ctx=gallery.getContext('2d');
       d.surfaceArt.filter(a=>a.kind==='fresco').forEach((art,i)=>{
-        const c=createCanvas(288,192);Art.paint(c.getContext('2d'),createCanvas,art,d.visualStyle.palette);ctx.drawImage(c,(i%2)*288,Math.floor(i/2)*192);
+        const c=createCanvas(288,144);Art.paint(c.getContext('2d'),createCanvas,art,d.visualStyle.palette);ctx.drawImage(c,(i%2)*288,Math.floor(i/2)*192);
       });
       const dir=path.join(__dirname,'../logs/probes');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'fresco-mural-preview.png'),gallery.toBuffer());
     }

@@ -80,6 +80,10 @@
   function isPresent(actor, population = null) {
     if (!actor || state(actor) === 'Dead') return false;
     const record = actor.type === 'monster' ? population?.actors?.[actor.name || actor.Name] : null;
+    if (actor.type === 'monster' && population) {
+      const actorRoom = roomKey(actor.mazeRoomKey);
+      if (!record || actorRoom && actorRoom !== roomKey(population.geoKey)) return false;
+    }
     return !record || !['dead', 'recruited', 'departed'].includes(record.status) && state(record) !== 'Dead';
   }
   function hasEncountered(actor, population) {
@@ -198,10 +202,14 @@
       }
       group.members.push(row.name);
       const profile = Profiles?.create(row, roomKey(geoKey));
-      actors[row.name] = { ...row, ...(profile ? { profile, personality: profile.personality, history: profile.history,
+      actors[row.name] = { ...row, pursuit: pursuitPolicy(row, geoKey, starting), ...(profile ? { profile, personality: profile.personality, history: profile.history,
         motivation: profile.motivation, memory: { profile } } : {}), encounterId: group.id, status: 'present', home: null, position: null, dialogueIndex: 0 };
     }
     return { version: VERSION, geoKey: roomKey(geoKey), indoor, starting, revision: 1, actors, groups };
+  }
+  function pursuitPolicy(actor, geoKey, starting = false) {
+    return { version: 1, willing: !starting && allegiance(actor) === 'Hostile' && hash(`${roomKey(geoKey)}:${actor.name}:pursuit`) % 4 === 0,
+      active: false, remainingRooms: 2, originRoom: roomKey(geoKey) };
   }
   function attach(roster, population, fallback = 'Neutral') {
     if (population && Array.isArray(roster)) {
@@ -230,6 +238,7 @@
       actor.home = record.home;
       actor.discoveryState = record.discoveryState;
       actor.discoveryRevision = record.discoveryRevision;
+      actor.pursuit = record.pursuit;
       if (record.discoveryRevision && actor._discoveryRevision !== record.discoveryRevision && record.position) {
         actor.mazeX = record.position.x; actor.mazeY = record.position.y; actor.mazeRoomKey = population.geoKey;
         actor.renderMazeX = actor.mazeX; actor.renderMazeY = actor.mazeY;
@@ -967,14 +976,15 @@
       npcs: text.match(/NPCs in Party:([\s\S]*?)(?=Monsters in Room:)/)?.[1]?.trim() || 'None',
       monsters: text.match(/Monsters in Room:([\s\S]*?)(?=Monsters Equipped Properties:)/)?.[1]?.trim() || 'None',
       monstersState: line('Monsters State') || 'None', puzzle: { inRoom: line('Puzzle in Room') || 'None', solution: line('Puzzle Solution') || 'None' },
-      currentQuest: line('Current Quest') || 'None', questProgress: line('Quest Progress') || '', nextArtifact: line('Next Artifact') || 'None',
+      currentQuest: line('Current Quest') || 'None', questProgress: line('Quest Progress') || '',
+      questRequirements: line('Quest Requirements') || '', nextArtifact: line('Next Artifact') || 'None',
       nextBoss: line('Next Boss') || 'None', nextBossRoom: line('Next Boss Room') || 'None', bossCoordinates: line('Boss Room Coordinates') || 'None',
       adjacentRooms: line('Adjacent Rooms') || 'None' };
   }
   const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
-    attach, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
+    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DungeonInhabitants = api;
 })(typeof window === 'undefined' ? globalThis : window);

@@ -84,7 +84,8 @@ function compactFingerprint(fp) {
 }
 function publicEntry(e) {
   if (!e) return null;
-  return { name: e.name, traits: e.traits || null, salt: e.salt >>> 0, variant: e.variant | 0, source: e.source || 'pending', attempts: e.attempts || 0 };
+  const stature = e.stature || (e.traits ? PC.characterStature({name:e.name,race:e.sheet?.race,traits:e.traits}) : null);
+  return { name: e.name, traits: e.traits || null, stature, salt: e.salt >>> 0, variant: e.variant | 0, source: e.source || 'pending', attempts: e.attempts || 0 };
 }
 function randomSalt() { return (Math.floor(Math.random() * 0xffffffff) >>> 0); }
 
@@ -117,6 +118,7 @@ function buildMessages(sheet, problems) {
     '"-kin/-spawn/-born" usually means a humanoid with the creature\'s traits). Pick the bodyPlan that best fits the creature:',
     'humanoid, beast (quadruped), serpent, insectoid, spider, ooze (amorphous blob / floating eye), elemental, spectral (floating ghost),',
     'skeletal (undead bones), draconic (full dragon), giant. Choose strong, readable, distinctive hex colours that match the words',
+    'Choose size when designing the creature: tiny/small/medium use ordinary 80-110 percent stature; large/huge use 150-200 percent. Core humanoid race proportions are engine-defined.',
     '(materials like shadow, glass, storm, blood, bone, gold, frost, flame, void, abyss). Outfit should match the class',
     '(casters/seers: robe, knights/warriors: plate or mail + helm, rogues/assassins: leather, clerics: tabard + holy symbol).',
     'The sprite is tiny (shown as a 24x24 C64-style token), so make the SILHOUETTE distinctive: prefer the creature features the words imply',
@@ -247,7 +249,7 @@ function ensureTraitSpec(sheet, options) {
     const spec = PC.buildProceduralSpriteSpec(sheet, traits, { salt: entry.salt, variant: 0, source: 'llm' });
     const r = uniqueAgainstCache(entry, spec);
     Object.assign(entry, {
-      traits, variant: r.spec.variant, source: 'llm', sheetKey: sheetKeyOf(sheet), sheet: compactSheet(PC.normalizeSheet(sheet)),
+      traits, stature:r.spec.stature, variant: r.spec.variant, source: 'llm', sheetKey: sheetKeyOf(sheet), sheet: compactSheet(PC.normalizeSheet(sheet)),
       fingerprint: compactFingerprint(r.fingerprint), updatedAt: Date.now(), rerolls: r.rerolls
     });
     retryState.delete(key);

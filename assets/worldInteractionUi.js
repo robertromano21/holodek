@@ -33,7 +33,8 @@
       const key = `${Math.floor(x)},${Math.floor(y)}`, c = dungeon.cells[key];
       if (key === target.key) continue;
       if (!c) return false;
-      const f = c.floorHeight || 0;
+      const renderedFloor = camera.floorHeightAt?.(x, y);
+      const f = Number.isFinite(renderedFloor) ? renderedFloor : c.floorHeight || 0;
       if (z < f || c.roof && z >= c.roof.height) return false;
       const solid = c.tile === 'wall' || c.tile === 'torch' || c.tile === 'door' && !c.door?.isOpen || c.tile?.startsWith('custom_') || c.tile === 'pillar';
       const height = c.structureHeight ?? Math.max(.5, (c.ceilHeight ?? f + 2) - f);
@@ -41,10 +42,12 @@
     }
     return true;
   }
-  function candidates(dungeon, player) {
+  function candidates(dungeon, player, camera) {
     const result = [], e = dungeon.physicalPuzzle, P = root.PhysicalPuzzles;
     for(const art of dungeon.surfaceArt || []){
-      const p=art.position,s=art.size,x=Math.max(p.x,Math.min(p.x+s.x,player.x)),y=Math.max(p.y,Math.min(p.y+s.y,player.y)),distance=Math.hypot(x-player.x,y-player.y);
+      if(root.AncientScripts?.replacesClueOverlay(dungeon,art))continue;
+      const shown=root.SurfaceArt?.presentation(art,{dungeon,verticalCompensation:camera?.artVerticalCompensation})||art;
+      const p=shown.position,s=shown.size,x=Math.max(p.x,Math.min(p.x+s.x,player.x)),y=Math.max(p.y,Math.min(p.y+s.y,player.y)),distance=Math.hypot(x-player.x,y-player.y);
       if(distance>18)continue;
       const near=distance<2.25;
       result.push({type:'art',key:art.key,x,y,width:Math.max(s.x,s.y),height:s.z,label:art.label,enabled:near,
@@ -65,6 +68,7 @@
         detail: near && f.id === 'plaque' ? P.clue(e.definition) : near && f.id === 'receiver' && e.state.status === 'complete' ? e.definition.lore : '' });
     }
     for (const item of root.getVisibleSceneObjects?.() || []) {
+      if (Array.isArray(camera?.billboards)) continue;
       if (Math.hypot(item.x + .5 - player.x, item.y + .5 - player.y) > 18) continue;
       const near = root.ItemInteractionUi?.reachable(dungeon, player, item);
       result.push({ type: 'item', item, key: `${item.x},${item.y}`, x: item.x + .5, y: item.y + .5,
@@ -100,19 +104,63 @@
     if (![u, v, camera?.x, camera?.y, camera?.eyeZ, camera?.dirX, camera?.dirY, camera?.planeScale, camera?.verticalScale].every(Number.isFinite) ||
         u < 0 || u > 1 || v < 0 || v > 1) return null;
     const dir = ray(camera, u, v), hits = [];
-    for (const target of candidates(dungeon, player)) {
+    for (const target of camera.billboards || []) {
+      if (target.character?.discoveryState === 'pending' || (target.character?.hp ?? 1) <= 0 || target.character?.state === 'Dead') continue;
+      if (target.character && root.isDungeonActorPresent && !root.isDungeonActorPresent(target.character)) continue;
+      const box = target.screen, pixels = target.pixels;
+      if (!box || !(box.right > box.left) || !(box.bottom > box.top)) continue;
+      const pv = (v - box.top) / (box.bottom - box.top);
+      const pu = (u - box.left - (box.upperShift || 0) * (1 - pv)) / (box.right - box.left);
+      if (pu < 0 || pu >= 1 || pv < 0 || pv >= 1 || !(target.distance > .03)) continue;
+      if (pixels?.data && pixels.data[(Math.floor(pv * pixels.h) * pixels.w + Math.floor(pu * pixels.w)) * 4 + 3] < 128) continue;
+      if (visible(dungeon, camera, dir, target.distance, target)) hits.push(target);
+    }
+    for (const target of candidates(dungeon, player, camera)) {
       if(target.type==='art'&&target.art.surface==='wall'&&['x','y'].includes(target.art.axis)&&
         (camera[target.art.axis]-target.art.position[target.art.axis])*(target.art.sign||-1)<0)continue;
       const z = dungeon.cells[target.key]?.floorHeight || 0;
       const distance = intersect({ x: camera.x, y: camera.y, z: camera.eyeZ }, dir,
         target.box || { x: target.x - target.width / 2, y: target.y - target.width / 2, z, sx: target.width, sy: target.width, sz: target.height });
+      if(distance!==null&&target.type==='art'&&target.art.kind==='mosaic'&&root.MosaicDesigns){
+        const b=target.box,px=camera.x+dir.x*distance,py=camera.y+dir.y*distance,pz=camera.eyeZ+dir.z*distance;
+        const u=target.art.surface==='floor'?(px-b.x)/b.sx:target.art.axis==='x'?(py-b.y)/b.sy:(px-b.x)/b.sx;
+        const v=target.art.surface==='floor'?(py-b.y)/b.sy:1-(pz-b.z)/b.sz;
+        if(!root.MosaicDesigns.contains(target.art,u,v))continue;
+      }
       if (distance !== null && visible(dungeon, camera, dir, distance, target)) hits.push({ ...target, distance });
     }
     return hits.sort((a, b) => a.distance - b.distance)[0] || null;
   }
-  function interactionBlocked() {
+  function visibleBillboards(dungeon,camera,type=null){
+    const targets=camera.billboards||[],result=[];
+    for(const target of targets){
+      if(type&&target.type!==type)continue;
+      const b=target.screen,p=target.pixels;if(!b||!p?.data||!(b.bottom>b.top)||!(b.right>b.left))continue;
+      const low=Math.max(0,Math.ceil((0-b.top)/(b.bottom-b.top)*p.h));
+      const high=Math.min(p.h-1,Math.floor((1-b.top)/(b.bottom-b.top)*p.h));
+      let seen=false;
+      for(let y=low;y<=high&&!seen;y+=Math.max(1,Math.floor((high-low+1)/8))){
+        const opaque=[];for(let x=0;x<p.w;x++)if(p.data[(y*p.w+x)*4+3]>=128)opaque.push(x);
+        for(const x of [opaque[0],opaque[Math.floor(opaque.length/2)],opaque[opaque.length-1]]){
+          if(x===undefined)continue;
+          const v=b.top+(y+.5)/p.h*(b.bottom-b.top);
+          const u=b.left+(x+.5)/p.w*(b.right-b.left)+(b.upperShift||0)*(1-(y+.5)/p.h);
+          if(u<0||u>1||v<0||v>1)continue;
+          if(pick(dungeon,camera,camera,u,v)===target){seen=true;break;}
+        }
+      }
+      if(seen)result.push(target);
+    }
+    return result;
+  }
+  function readBlocked() {
     return busy || root.GameCommandGate?.busy() || root.gamePaused || document.hidden || root._characterStartupPending || root._combatCommandPending ||
-      root.actionDiceState?.active || root._combatRoundActiveUntil > Date.now() || document.querySelector('.popup-container') || root.InventoryUi?.isOpen();
+      root.actionDiceState?.active || root._combatRoundActiveUntil > Date.now();
+  }
+  function interactionBlocked() {
+    const openPopup = [...document.querySelectorAll('.popup-container')].some(popup =>
+      popup.getClientRects().length > 0 && root.getComputedStyle(popup).visibility !== 'hidden');
+    return readBlocked() || openPopup || root.InventoryUi?.isOpen();
   }
   function blocked() { return drag?.active || interactionBlocked(); }
   function pageZoom(element) {
@@ -156,6 +204,7 @@
   }
   async function activate(target) {
     if (!target?.enabled || blocked()) return;
+    if (target.type === 'character') { root.CombatCharacterUi?.open(target.character); return; }
     if(target.type==='art'){
       root.DungeonActionNotices?.receive?.({id:'art:'+Date.now(),runId:root.dungeonRunId,geoKey:frame.dungeon.geoKey,
         kind:'art-examined',result:'observed',title:target.label,message:target.art.description+(target.art.text?' '+target.art.text:'')});
@@ -164,14 +213,7 @@
     if (target.type === 'item') {
       [...document.querySelectorAll('#phaser-container .clickable-object')].find(e =>
         e.getAttribute('data-object')?.trim().toLowerCase() === target.label.toLowerCase())?.click();
-      const take=document.getElementById('take-button');
-      if(take&&['book','scroll','map'].includes(root.SceneItems?.itemKind(target.item))){
-        const read=document.createElement('button');read.id='read-item-button';read.type='button';read.textContent='Read';
-        read.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();
-          if(root.GameCommandGate?.busy()||root.gamePaused)return;
-          take.closest('.popup-container')?.remove();requestRead(target.label);
-        });take.parentElement.appendChild(read);
-      }
+      addReadAction(document.getElementById('take-button')?.closest('.popup-container'), target.label);
       return;
     }
     const input = document.getElementById('chatuserinput');
@@ -183,11 +225,29 @@
   }
   async function requestRead(name){
     const input=document.getElementById('chatuserinput');
-    if(busy||root.GameCommandGate?.busy()||root.gamePaused||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
+    if(readBlocked()||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
     busy=true;input.value='read '+String(name).trim();clear();
     try{await root.chatbotprocessinput();return true;}
     catch(error){console.error('[ReadableItem]',error);return false;}
     finally{busy=false;}
+  }
+  function hasReadableContent(name){
+    const wanted=String(name||'').trim().toLowerCase();
+    const find=dungeon=>dungeon?.readables?.find(r=>String(r.name||'').trim().toLowerCase()===wanted);
+    const record=root.getReadableItemMetadata?.(name)||find(root.currentDungeon)||find(frame?.dungeon);
+    return !!root.ReadableItems?.hasContent(record);
+  }
+  function addReadAction(popup,name){
+    if(!popup||!hasReadableContent(name))return null;
+    const existing=popup.querySelector('#read-item-button');if(existing)return existing;
+    const read=document.createElement('button');read.id='read-item-button';read.type='button';read.className='popup-button';read.textContent='Read';
+    read.addEventListener('click',event=>{
+      event.preventDefault();event.stopPropagation();
+      if(readBlocked()||drag?.active||!hasReadableContent(name)||document.getElementById('chatuserinput')?.value.trim())return;
+      popup.remove();root.InventoryUi?.toggle(false);requestRead(name);
+    });
+    popup.insertBefore(read,popup.querySelector('#cancel-button'));
+    return read;
   }
   function backpackAt(x, y) {
     return document.elementFromPoint(x, y)?.closest?.('#dungeon-inventory-shortcut') || null;
@@ -233,7 +293,7 @@
     if (pending.active) { event.preventDefault(); event.stopPropagation(); suppressClickUntil = Date.now() + 400; }
     cancelDrag(); pointer = null;
     if (!overPack || interactionBlocked() || frame?.dungeon.geoKey !== pending.geoKey || root.currentDungeon?.geoKey !== pending.geoKey) return;
-    const target = candidates(frame.dungeon, frame.player).find(t => t.type === 'item' && t.key === pending.key && t.label === pending.name && t.enabled);
+    const target = candidates(frame.dungeon, frame.player, frame.camera).find(t => t.type === 'item' && t.key === pending.key && t.label === pending.name && t.enabled);
     if (target) activate(target);
   }
   function setPresentationCanvas(source, canvas) {
@@ -251,6 +311,7 @@
     if (frame?.canvas !== canvas || drag && frame?.dungeon.geoKey !== dungeon.geoKey) { cancelDrag(); pointer = null; }
     canvas.draggable = false; canvas.style.touchAction = 'none';
     frame = { dungeon, camera, sourceCanvas, canvas, player };
+    if(root.ObjectDiscovery&&Array.isArray(camera.billboards))root.ObjectDiscovery.update(dungeon,visibleBillboards(dungeon,camera,'item'));
     if (pointer) hover();
   }
   function bind() {
@@ -298,5 +359,6 @@
     root.addEventListener('blur', cancelDrag);
     document.addEventListener('visibilitychange', () => { if (document.hidden) { pointer = null; cancelDrag(); } });
   }
-  return { ray, intersect, pick, updateFrame, setPresentationCanvas, activate, requestRead, bind };
+  return { ray, intersect, pick, visibleBillboards, updateFrame, setPresentationCanvas, activate, requestRead,
+    hasReadableContent, addReadAction, bind };
 });

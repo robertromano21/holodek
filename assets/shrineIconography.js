@@ -6,12 +6,12 @@
   'use strict';
   // Compact visual index of the pantheon in retortWithUserInput's campaign prompt.
   const pantheon = {
-    Mortacia: { form:'human', wings:'skeletal', hair:'blonde', symbol:'winged_lady', color:'#eee7ce', domain:'death, memory, ancestors; tall White Lady with blonde hair and skeletal dragon wings' },
-    Atinus: { form:'dragon', symbol:'skull', color:'#ad674d', domain:'Wardrake; war, strategy, honor; draconic skull' },
+    Mortacia: { form:'human', wings:'skeletal', hair:'blonde', symbol:'winged_lady', color:'#eee7ce', domain:'death, memory, ancestors; tall White Lady with blonde hair and grey dragon wings: raised pointed wrists, long skeletal ribs and scalloped membranes, not feathers or bare bones' },
+    Atinus: { form:'dragon', symbol:'skull', color:'#ad674d', domain:'Wardrake; war, strategy, honor; narrow dragon skull, swept long horns, central spike, hooked cheeks and red-gold edging' },
     Arithus: { form:'dragon', symbol:'dagger', color:'#a34a3e', domain:'Kinslayer; vengeance, kinstrife; fists gripping a downward dagger' },
-    Atricles: { form:'dragon', symbol:'eye', color:'#a4aa9a', domain:'Ringdrake; justice and balance; banded agate dragon' },
+    Atricles: { form:'dragon', symbol:'eye', color:'#a4aa9a', domain:'Ringdrake; justice and balance; pale banded-agate dragon, long neck and curled tail, broad membrane wings, two hind legs and golden rings' },
     Chaoticum: { form:'dragon', symbol:'flame', color:'#e59946', domain:'chaos and destruction; fireball through stars' },
-    Dantuea: { form:'dragon', symbol:'serpent', color:'#594d66', domain:'Darkdrake; obsidian dragon, corruption and undeath' },
+    Dantuea: { form:'dragon', symbol:'serpent', color:'#594d66', domain:'Darkdrake; corruption and undeath; skeletal dragon with a narrow horned skull, exposed ribs and spine, bony wing spars and two hind legs' },
     Dyanetzia: { form:'dragon', symbol:'leaf', color:'#b29b52', domain:'Earthdragon, Dyana; topaz/clay dragon curled head to tail; nature and renewal' },
     Eredine: { form:'dragon', symbol:'eye', color:'#b4bfd4', domain:'magic and runes; dragon wings on an opal/crystal eye' },
     Krystalynn: { form:'dragon', symbol:'eye', color:'#a75d65', domain:'nightmares and illusions; dragon head with cracked bloodstone eye' },
@@ -25,7 +25,7 @@
     Sharlynn: { form:'dragon', symbol:'serpent', color:'#7c9562', domain:'betrayal and rot; green dragon looking back at its tail' },
     Sylanos: { form:'dragon', symbol:'moon', color:'#d5d5d1', domain:'white moon and positive energy; silver disk' },
     Syluria: { form:'dragon', symbol:'moon', color:'#759fcb', domain:'blue moon and change; blue disk' },
-    Turthus: { form:'dragon', symbol:'turtle', color:'#939887', domain:'wisdom and texts; stone turtle shell' },
+    Turthus: { form:'dragon', symbol:'turtle', color:'#939887', domain:'wisdom and texts; giant turtle dragon with a massive stone carapace, draconic head, sturdy limbs and long tail' },
     Uceracea: { form:'dragon', symbol:'unicorn', color:'#d6cec5', domain:'Unicorn; sacred animals, purification; unicorn profile with pearl horn' },
     Urthur: { form:'dragon', symbol:'eye', color:'#547ba3', domain:'Greatdrake; guardianship and loyalty; sapphire eye' },
     'Nameless Drake': { form:'dragon', symbol:'triangle', color:'#514b56', domain:'Unseen; cruelty and fear; black triangle' }
@@ -61,7 +61,7 @@
   // Art-direction recipes interpret the portfolios; they are not new campaign anatomy facts.
   const effigies={
     Atinus:{build:'heavy',horns:'ram',claws:true},Arithus:{build:'heavy',horns:'curved',spikes:true,fangs:true},
-    Atricles:{build:'slender',horns:'curved',markings:'stripes'},Chaoticum:{build:'heavy',wings:'flame',spikes:true},
+    Atricles:{build:'slender',horns:'curved',markings:'stripes',ringdrake:true},Chaoticum:{build:'heavy',wings:'flame',spikes:true},
     Dantuea:{build:'slender',wings:'bone',covering:'bone',markings:'cracks'},Dyanetzia:{build:'heavy',horns:'antlers',wings:'none',tail:'thick'},
     Eredine:{build:'slender',horns:'antlers',markings:'runes'},Krystalynn:{build:'slender',horns:'nubs',spikes:true,markings:'cracks'},
     Leona:{build:'slender',horns:'antlers',wings:'none',tail:'thin',covering:'bark'},Llellwyth:{build:'slender',wings:'flame',horns:'none'},
@@ -69,7 +69,7 @@
     Neptar:{build:'slender',horns:'long',tail:'scaled'},Poena:{build:'slender',horns:'none',wings:'spectral'},
     Rama:{build:'heavy',horns:'long',wings:'flame'},Sharlynn:{build:'slender',horns:'nubs',tail:'thick',claws:true},
     Sylanos:{build:'slender',horns:'curved',wings:'feather',markings:'none'},Syluria:{build:'slender',horns:'antlers',wings:'bat'},
-    Turthus:{build:'heavy',horns:'none',wings:'none',tail:'thick',covering:'stone'},Uceracea:{build:'slender',horns:'crown',wings:'feather'},
+    Turthus:{build:'heavy',horns:'none',wings:'none',tail:'thick',covering:'stone',carapace:true},Uceracea:{build:'slender',horns:'crown',wings:'feather'},
     Urthur:{build:'heavy',horns:'ram',wings:'bat',spikes:true},'Nameless Drake':{build:'slender',horns:'none',wings:'bone',covering:'shadow'}
   };
   for(const [deity,visual]of Object.entries(effigies))pantheon[deity].visual=visual;
@@ -88,7 +88,7 @@
   }
   const emblems=new Map();
   function bitmap(value){
-    const deity=name(value);if(!deity)return null;
+    const deity=/^suzerain(?: emblem)?$/i.test(String(value).trim())?'Suzerain':name(value);if(!deity)return null;
     if(emblems.has(deity))return emblems.get(deity);
     const size=25,grid=Array.from({length:size},()=>Array(size).fill('0'));
     const dot=(x,y)=>{x=Math.round(x);y=Math.round(y);if(x>=0&&x<size&&y>=0&&y<size)grid[y][x]='1';};
@@ -102,9 +102,25 @@
       for(const t of[6,9,12])line([12,10],[12+side*9,t]);if(!bone)line([12,10],[12+side*6,5]);};
     const flame=(x,y)=>path([[x,y+5],[x-3,y+2],[x-2,y-1],[x,y-5],[x+1,y],[x+3,y+2],[x,y+5]]);
     switch(deity){
-      case'Mortacia':oval(12,5,2,2,true);path([[12,8],[8,21],[16,21],[12,8]]);wing(-1,true);wing(1,true);break;
-      case'Atinus':path([[4,7],[2,2],[9,5],[15,5],[22,2],[20,7],[19,16],[16,20],[8,20],[5,16],[4,7]]);
-        oval(8,11,2,2,true);oval(16,11,2,2,true);path([[10,16],[12,14],[14,16]]);for(const x of[8,11,14,17])line([x,18],[x,22]);break;
+      case'Suzerain':
+        path([[12,1],[9,6],[12,11],[15,6],[12,1]]);line([12,10],[12,23]);
+        for(const side of[-1,1]){
+          const p=(x,y)=>[12+side*x,y];
+          path([p(0,12),p(5,11),p(8,7),p(9,3),p(5,5),p(4,8),p(5,9),p(7,7)]);
+          path([p(0,18),p(4,16),p(7,17),p(8,20),p(6,22),p(4,20),p(5,19)]);
+        }line([8,14],[16,14]);break;
+      case'Mortacia':oval(12,5,2,2,true);path([[12,8],[8,21],[16,21],[12,8]]);
+        for(const side of[-1,1]){const p=(x,y)=>[12+side*x,y],tip=p(6,1);
+          path([p(2,9),tip,p(9,8),p(11,22),p(8,18),p(6,21),p(4,15),p(3,17),p(2,9)]);
+          for(const end of[p(11,22),p(6,21),p(3,17)])line(tip,end);
+        }break;
+      case'Atinus':
+        path([[10,7],[2,1],[6,9],[5,8],[7,13],[4,11],[6,16],[9,17],[9,21],[11,23],[13,23],[15,21],[15,17],
+          [18,16],[20,11],[17,13],[19,8],[18,9],[22,1],[14,7],[12,4],[10,7]]);
+        path([[9,9],[7,8],[9,13],[10,12],[9,9]]);path([[15,9],[17,8],[15,13],[14,12],[15,9]]);
+        line([12,8],[12,15]);path([[10,17],[12,16],[14,17]]);dot(10,18);dot(14,18);
+        for(const x of[10,12,14])line([x,20],[x,22]);
+        for(const side of[-1,1])path([[12+side*4,16],[12+side*6,18],[12+side*4,18]]);break;
       case'Arithus':path([[12,2],[9,17],[12,23],[15,17],[12,2]]);line([6,9],[18,9]);
         for(const x of[5,14]){path([[x,6],[x+4,6],[x+4,12],[x,12],[x,6]]);for(let y=7;y<12;y+=2)line([x,y],[x+3,y]);}break;
       case'Atricles':dragon();for(const y of[6,10,14,18])line([5,y],[18,y]);break;
@@ -127,8 +143,12 @@
       case'Sharlynn':path([[3,19],[5,6],[11,3],[20,7],[22,17],[17,21],[11,18],[14,14],[19,15],[21,12]]);
         path([[5,6],[9,10],[8,13],[3,11]]);dot(6,10);break;
       case'Sylanos':case'Syluria':oval(12,12,10,10,true);break;
-      case'Turthus':oval(12,12,9,10);path([[7,7],[12,4],[17,7],[17,17],[12,20],[7,17],[7,7]]);line([7,12],[17,12]);line([12,4],[12,20]);
-        for(const [x,y]of[[5,8],[5,17],[19,8],[19,17]])oval(x,y,1,1,true);break;
+      case'Turthus':oval(11,13,7,8);path([[7,8],[11,6],[15,8],[16,13],[14,18],[10,20],[6,16],[7,8]]);
+        path([[8,11],[12,9],[15,12],[12,16],[8,14],[8,11]]);
+        for(const[a,b]of[[[8,11],[6,8]],[[12,9],[11,6]],[[15,12],[18,12]],[[12,16],[14,19]],[[8,14],[5,16]]])line(a,b);
+        path([[14,6],[15,3],[19,2],[23,5],[19,7],[17,9]]);dot(19,4);
+        for(const side of[-1,1]){path([[11+side*6,9],[11+side*10,7],[11+side*9,11]]);path([[11+side*6,17],[11+side*9,21],[11+side*5,20]]);}
+        path([[10,21],[7,24],[12,22]]);break;
       case'Uceracea':path([[5,22],[7,14],[6,9],[10,8],[10,4],[13,7],[22,3],[17,10],[21,13],[20,17],[12,16],[11,22]]);dot(14,11);break;
       case'Urthur':path([[2,12],[7,6],[17,6],[22,12],[17,18],[7,18],[2,12]]);oval(12,12,4,5);oval(12,12,1,3,true);break;
       case'Chaoticum':flame(17,9);path([[15,9],[3,22],[10,10],[15,9]]);for(const[x,y]of[[4,4],[19,20],[22,3]]){line([x-1,y],[x+1,y]);line([x,y-1],[x,y+1]);}break;
@@ -136,12 +156,48 @@
     }
     const rows=Object.freeze(grid.map(r=>r.join('')));emblems.set(deity,rows);return rows;
   }
-  function paint(ctx,value,x,y,size,color){
+  function paint(ctx,value,x,y,size,color,finish){
+    if(/^suzerain helmet$/i.test(String(value).trim())){paintSuzerainHelmet(ctx,x+size*.1,y,size*.8,size,finish==='painted'?undefined:color);return true;}
     const grid=bitmap(value);if(!grid)return false;
-    ctx.fillStyle=color||pantheon[name(value)].color;
-    grid.forEach((row,yy)=>[...row].forEach((bit,xx)=>{if(bit==='1')ctx.fillRect(x+xx*size/grid.length,y+yy*size/grid.length,size/grid.length+.1,size/grid.length+.1);}));
+    const pixel=(xx,yy)=>ctx.fillRect(x+xx*size/grid.length,y+yy*size/grid.length,size/grid.length+.1,size/grid.length+.1);
+    if(finish==='painted'&&name(value)==='Atinus'){
+      // Keep the colored edging inside the emblem box, including on small mosaics.
+      for(let yy=0;yy<grid.length;yy++)for(let xx=0;xx<grid.length;xx++)if(grid[yy][xx]!=='1'&&
+        [[-1,0],[1,0],[0,-1],[0,1]].some(([dx,dy])=>grid[yy+dy]?.[xx+dx]==='1')){
+        ctx.fillStyle=(xx+yy)%3?'#b25136':'#dfac59';pixel(xx,yy);
+      }
+    }
+    ctx.fillStyle=finish==='painted'&&name(value)==='Atinus'?'#392c2b':color||pantheon[name(value)]?.color||'#b87355';
+    grid.forEach((row,yy)=>[...row].forEach((bit,xx)=>{if(bit==='1')pixel(xx,yy);}));
     return true;
   }
+  function paintSuzerainHelmet(ctx,x,y,width,height,color){
+    ctx.save();ctx.translate(x,y);ctx.scale(width/32,height/40);
+    const edge=color||'#bd834c',red=color||'#9d3940',metal=color||'#302c35',light=color||'#8d8278',voidColor='#16171e';
+    const poly=(pts,fill,stroke)=>{ctx.beginPath();pts.forEach(([u,v],i)=>i?ctx.lineTo(u,v):ctx.moveTo(u,v));ctx.closePath();ctx.fillStyle=fill;ctx.fill();
+      if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=.8;ctx.stroke();}};
+    poly([[16,1],[9,3],[4,10],[3,24],[1,36],[8,39],[16,37],[24,39],[31,36],[29,24],[28,10],[23,3]],metal,edge);
+    for(const side of[-1,1]){
+      const pts=rows=>rows.map(([u,v])=>[16+side*u,v]);
+      poly(pts([[0,3],[7,5],[11,12],[12,23],[10,33],[4,34],[6,25],[3,19],[0,17]]),metal,light);
+      poly(pts([[0,19],[5,14],[12,17],[8,22],[3,25],[1,23]]),voidColor,red);
+      poly(pts([[3,25],[8,23],[10,33],[4,35]]),metal,edge);
+      poly(pts([[0,36],[4,34],[13,37],[8,38]]),light,edge);
+    }
+    poly([[16,21],[18,25],[18,34],[16,36],[14,34],[14,25]],voidColor,light);
+    paint(ctx,'Suzerain',10,3,12,red);
+    ctx.restore();
+  }
+  function paintSepulchra(ctx,x,y,width,height=width,color){
+    const polygon=(points,fill)=>{ctx.fillStyle=fill;ctx.beginPath();points.forEach(([u,v],i)=>i?ctx.lineTo(x+u*width,y+v*height):ctx.moveTo(x+u*width,y+v*height));ctx.closePath();ctx.fill();};
+    const edge=color||'#103e34',mid=color||'#23875a',light=color||'#8be4a5',deep=color||'#145741';
+    polygon([[.25,0],[.75,0],[1,.25],[1,.72],[.68,1],[.25,.94],[0,.68],[0,.25]],edge);
+    polygon([[.27,.08],[.73,.08],[.86,.3],[.69,.76],[.26,.73],[.13,.3]],mid);
+    polygon([[.27,.08],[.73,.08],[.65,.23],[.34,.23],[.18,.37],[.13,.3]],light);
+    polygon([[.86,.3],[.94,.26],[.94,.68],[.66,.94],[.69,.76]],deep);
+    polygon([[.34,.23],[.65,.23],[.76,.38],[.62,.67],[.33,.66],[.23,.39]],color||'#39b578');
+    if(!color){ctx.fillStyle='#d8f3bb';ctx.fillRect(x+width*.31,y+height*.25,Math.max(1,width*.09),Math.max(1,height*.19));}
+  }
   function toolbox(){return Object.fromEntries(Object.entries(pantheon).map(([n,c])=>[n,{form:c.form,color:c.color,symbol:c.symbolDescription,attribute:c.attribute,weapon:c.weapon,domain:c.domain}]));}
-  return { pantheon, name, find, bitmap, paint, toolbox };
+  return { pantheon, name, find, bitmap, paint, paintSepulchra, paintSuzerainHelmet, toolbox };
 });

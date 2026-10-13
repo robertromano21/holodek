@@ -40,7 +40,7 @@ for (const scale of [1, 1.75, 2]) {
     const r = { left: 600, right: 1400, top: 900, bottom: 1096 };
     const { panel } = mount(scale, r);
     const physicalRight = (parseFloat(panel.style.left) + panel.offsetWidth) * scale;
-    assert.equal(physicalRight, r.left - 8 * scale);
+    assert.equal(physicalRight, r.left - 4 * scale);
     assert.equal(parseFloat(panel.style.bottom) * scale, 4);
     assert.equal(panel.style.right, 'auto');
   });
@@ -60,7 +60,7 @@ test('compass follows resized commands and observes its own size', () => {
   assert.deepEqual(ui.observed, [ui.command, ui.panel]);
   r.left = 500;
   ui.events.resize();
-  assert.equal(parseFloat(ui.panel.style.left), (500 - 86 * 1.75) / 1.75 - 8);
+  assert.equal(parseFloat(ui.panel.style.left), (500 - 86 * 1.75) / 1.75 - 4);
   r.top = 800;
   r.left = 20;
   ui.resize();

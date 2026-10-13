@@ -2,7 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { evaluateTaskRequirements, mergeTaskProgress, taskBinding } = require('../retort/questProgress');
+const { evaluateTaskRequirements, mergeTaskProgress, taskBinding, verifiedTaskCompletion } = require('../retort/questProgress');
+const PhysicalPuzzles = require('../assets/physicalPuzzles');
 
 const sheet = (name, hp = 5) => `${name}\nFemale\nWraith\nMage\nLevel: 2\nAC: 12\nXP: 0\nHP: ${hp}\nMaxHP: 30\nEquipped: None\nAttack: 1\nDamage: 2\nArmor: 0\nMagic: 3`;
 const consoleFor = ({ inventory = 'None', monsters = 'None', npcs = 'None', pc = sheet('Hero'), prose = '' } = {}) =>
@@ -451,4 +452,47 @@ test('task binding includes immutable full identity but is stable across status/
   assert.equal(taskBinding(Object.fromEntries(Object.entries(progressed).reverse())), original);
   assert.equal(taskBinding(null), null);
   assert.equal(taskBinding(undefined), null);
+});
+
+test('completion requires the actual task action, never a generated status or prerequisites alone', () => {
+  for (const actionKind of ['deliver_item', 'solve_puzzle', 'defeat_monster', 'unlock_exit', 'negotiate', 'protect', 'investigate']) {
+    const task = { ...fetchTask(), actionKind, status: 'Completed' };
+    const assessment = evaluate(task, { roomKey: '1,0,0', consoleText: consoleFor({ inventory: 'Iron Sigil' }) });
+    assert.equal(assessment.progress.eligible, true);
+    assert.equal(verifiedTaskCompletion(task, assessment), false, actionKind);
+  }
+  const empty = { type: 'Puzzle', actionKind: 'solve_puzzle', status: 'Completed' };
+  assert.equal(verifiedTaskCompletion(empty, evaluate(empty)), false);
+  const talk = { type: 'Negotiate', actionKind: 'negotiate', hardRequirements: [{ check: 'at_coords', value: '0,0,0' }] };
+  assert.equal(verifiedTaskCompletion(talk, evaluate(talk)), false);
+});
+
+test('all required fetched items and defeated targets must be verified before engine completion', () => {
+  const task = fetchTask(), ctx = { roomKey: '1,0,0', consoleText: consoleFor({ inventory: 'Iron Sigil' }) };
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, ctx)), true);
+  assert.equal(verifiedTaskCompletion(task, evaluate(task)), false);
+  task.requiredElements.push({ type: 'object', name: 'Second Sigil', placement: '1,0,0' });
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, ctx)), false, 'An unbound second objective cannot be skipped');
+  task.hardRequirements.push({ check: 'inventory_contains', value: 'Second Sigil' });
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, ctx)), false);
+  ctx.consoleText = consoleFor({ inventory: 'Iron Sigil, Second Sigil' });
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, ctx)), true);
+  const defeat = bossTask();
+  assert.equal(verifiedTaskCompletion(defeat, evaluate(defeat, { consoleText: consoleFor({ monsters: sheet('The Ash Regent', 0) }) })), true);
+  defeat.requiredElements.push({ type: 'monster', name: 'Second Regent', placement: '0,0,0' });
+  assert.equal(verifiedTaskCompletion(defeat, evaluate(defeat, { consoleText: consoleFor({ monsters: sheet('The Ash Regent', 0) }) })), false);
+});
+
+test('a puzzle is complete only when its bound mechanism satisfies the solver, not when a status flag says so', () => {
+  const p = PhysicalPuzzles.fallback('quest-completion', 'Hall'), state = PhysicalPuzzles.initialState(p);
+  const task = { type: 'Puzzle', actionKind: 'solve_puzzle', actionRequirements: [{ check: 'puzzle_solved', value: '0,0,0', mechanismId: p.id }] };
+  const database = { '0,0,0': { puzzleMechanism: { ...p, state } } };
+  state.status = 'complete';
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, { database })), false);
+  let solved = PhysicalPuzzles.initialState(p);
+  for (const move of PhysicalPuzzles.findSolution(p)) solved = PhysicalPuzzles.step(p, solved, move.controlId, move.value);
+  database['0,0,0'].puzzleMechanism.state = solved;
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, { database })), true);
+  task.actionRequirements[0].mechanismId = 'different-mechanism';
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, { database })), false);
 });

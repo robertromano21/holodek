@@ -8,7 +8,7 @@
   <meta http-equiv="Expires" content="0" />
  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
  <script src="/node_modules/phaser/dist/phaser.min.js"></script>
-<audio id="room-music" src="/sid/current_room.wav" loop autoplay></audio>
+<audio id="room-music" loop preload="auto"></audio>
  <script src="/assets/renderCharacterProcedural.js"></script>
  <script src="/assets/renderSceneItems.js"></script>
  <script src="/assets/sceneObjectSync.js"></script>
@@ -17,10 +17,16 @@
  <script src="/assets/puzzleMotion.js"></script>
  <script src="/assets/shrineIconography.js"></script>
  <script src="/assets/artCharacters.js"></script>
+ <script src="/assets/sculptureAnatomy.js"></script>
  <script src="/assets/sculptureForms.js"></script>
+ <script src="/assets/stoneCarvings.js?v=uncut-field-relief-4"></script>
+ <script src="/assets/ancientScripts.js"></script>
   <script src="/assets/frescoDesigns.js"></script>
+  <script src="/assets/frescoSerpents.js"></script>
   <script src="/assets/frescoFigures.js"></script>
+ <script src="/assets/mosaicDesigns.js"></script>
  <script src="/assets/surfaceArt.js"></script>
+ <script src="/assets/artPresentation.js"></script>
  <script src="/assets/readableItems.js"></script>
  <script src="/assets/physicalPuzzles.js"></script>
  <script src="/assets/commandIntent.js"></script>
@@ -28,7 +34,11 @@
  <script defer src="/assets/worldInteractionUi.js"></script>
  <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js"></script>
+ <script src="/assets/combatCharacterUi.js"></script>
+ <script src="/assets/itemGiveUi.js"></script>
+ <script src="/assets/objectDiscovery.js"></script>
  <script src="/assets/partyRoster.js"></script>
+ <script src="/assets/combatTurnUi.js"></script>
  <script src="/assets/actionDiceUi.js"></script>
  <script src="/assets/roomDatabaseSync.js"></script>
  <script src="/assets/characterStartup.js"></script>
@@ -46,7 +56,7 @@
 <script src="/assets/inventoryUi.js"></script>
 <script src="/assets/itemInteractionUi.js"></script>
 <script src="/assets/mapShortcutUi.js"></script>
-<script src="/assets/gameMenuUi.js"></script>
+<script src="/assets/gameMenuUi.js?v=scoped-relief-300-v2"></script>
 <script src="/assets/characterProfiles.js"></script>
 <script src="/assets/dialogueAudience.js"></script>
 <script src="/assets/dungeonInhabitants.js"></script>
@@ -58,10 +68,11 @@
 <script src="/assets/commandGate.js"></script>
 <script src="/assets/outdoorDiscovery.js"></script>
 <script src="/assets/game.js"></script>
+<script src="/assets/sfx.js"></script>
  <script src="/assets/masonryPatterns.js"></script>
  <script src="/assets/voxelMaterials.js"></script>
  <script src="/assets/characterMotion3d.js"></script>
- <script src="/assets/rendererWebGL.js"></script>
+ <script src="/assets/rendererWebGL.js?v=uncut-field-relief-4"></script>
  <script src="/assets/rendererWebGPU.js"></script>
    <script>
    
@@ -109,7 +120,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const data = JSON.parse(event.data);
       if (data.type === 'roomMusicUpdated' && data.isNew) {
         console.log('New room music detected for coords:', data.coords);
-        playRoomMusic();
+        // sfx.js queues it (two-slot files) and starts it once the new room is on screen
+        if (!window.HolodekSfx?.queueRoomMusic) playRoomMusic();
       }
 
       if (data.type === 'npcAutonomyUpdate' && data.update) {
@@ -283,9 +295,12 @@ function toggleCombatMode() {
       let partyPopupOffsetY = 0;
 
       partyPopupHeader.addEventListener('mousedown', (e) => {
+        if (e.target.closest('button')) return;
         partyPopupDragging = true;
-        partyPopupOffsetX = e.clientX - partyPopup.offsetLeft;
-        partyPopupOffsetY = e.clientY - partyPopup.offsetTop;
+        const bounds = partyPopup.getBoundingClientRect();
+        partyPopupOffsetX = e.clientX - bounds.left;
+        partyPopupOffsetY = e.clientY - bounds.top;
+        partyPopup.dataset.centered = 'false';
         partyPopupHeader.style.cursor = 'grabbing';
       });
 
@@ -293,10 +308,12 @@ function toggleCombatMode() {
         if (!partyPopupDragging) return;
         const newX = e.clientX - partyPopupOffsetX;
         const newY = e.clientY - partyPopupOffsetY;
-        const maxX = window.innerWidth - partyPopup.offsetWidth;
-        const maxY = window.innerHeight - partyPopup.offsetHeight;
-        partyPopup.style.left = `${Math.min(Math.max(0, newX), maxX)}px`;
-        partyPopup.style.top = `${Math.min(Math.max(0, newY), maxY)}px`;
+        const bounds = partyPopup.getBoundingClientRect();
+        const zoom = bounds.width / partyPopup.offsetWidth || 1;
+        const maxX = Math.max(0, window.innerWidth - bounds.width);
+        const maxY = Math.max(0, window.innerHeight - bounds.height);
+        partyPopup.style.left = `${Math.min(Math.max(0, newX), maxX) / zoom}px`;
+        partyPopup.style.top = `${Math.min(Math.max(0, newY), maxY) / zoom}px`;
         partyPopup.style.bottom = 'auto';
       });
 
@@ -452,11 +469,30 @@ function toggleCombatMode() {
     function togglePartyPopup() {
       const popup = document.getElementById('party-popup');
       if (!popup) return;
-      popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
+      popup.style.display = getComputedStyle(popup).display === 'none' ? 'block' : 'none';
+      document.querySelectorAll('.combat-character-actions').forEach(node => node.remove());
+      delete window._combatSheetEntry;
       if (popup.style.display === 'block') {
         renderPartyInfoPopup();
+        centerPartySheet();
       }
     }
+
+    function centerPartySheet() {
+      const popup = document.getElementById('party-popup');
+      if (!popup || popup.style.display === 'none') return;
+      const bounds = popup.getBoundingClientRect();
+      const zoom = bounds.width / popup.offsetWidth || 1;
+      popup.style.left = `${Math.max(8, (window.innerWidth - bounds.width) / 2) / zoom}px`;
+      popup.style.top = `${Math.max(16, (window.innerHeight - bounds.height) / 2) / zoom}px`;
+      popup.style.right = 'auto';
+      popup.style.bottom = 'auto';
+      popup.dataset.centered = 'true';
+    }
+
+    window.addEventListener('resize', () => {
+      if (document.getElementById('party-popup')?.dataset.centered === 'true') centerPartySheet();
+    });
 
     function setDungeonFullscreenUiState(active) {
       const isActive = !!active;
@@ -655,6 +691,8 @@ function toggleCombatMode() {
     }
 
     function setPartyPanelIndex(nextIndex) {
+      delete window._combatSheetEntry;
+      document.querySelector('.combat-character-actions')?.remove();
       const entries = getPartyInfoEntries();
       if (!entries.length) {
         window._partyPanelIndex = 0;
@@ -675,22 +713,47 @@ function toggleCombatMode() {
     }
 
     function openPartySheet(index) {
+      delete window._combatSheetEntry;
+      document.querySelector('.combat-character-actions')?.remove();
       setPartyPanelIndex(index);
       const popup = document.getElementById('party-popup');
-      if (popup) popup.style.display = 'block';
+      if (popup) {
+        popup.style.display = 'block';
+        centerPartySheet();
+      }
+    }
+
+    function openCombatCharacterSheet(actor) {
+      const name=String(actor.name||actor.Name||'');
+      const index=getPartyInfoEntries().findIndex(e=>String(e.label).toLowerCase()===name.toLowerCase());
+      if(index>=0){openPartySheet(index);return;}
+      const text=actor.type==='monster'?window._combatMonsterSheets:actor.type==='pc'?window._partyInfoPCString:window._partyInfoNPCString;
+      const record=window.DungeonInhabitants?.parseBlocks(text,actor.type).find(e=>e.name.toLowerCase()===name.toLowerCase());
+      const source={...record,...actor};
+      let sheet=record?.sheet||actor.sheet||name;
+      if(Number.isFinite(actor.hp))sheet=sheet.replace(/^HP:\s*-?\d+/m,'HP: '+actor.hp);
+      const html=String(sheet).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])).replace(/\r?\n/g,'<br>');
+      window._combatSheetEntry={label:name,html,sprite:actor.sprite,source:{...source,sheet}};
+      renderPartyInfoPopup();
+      const popup=document.getElementById('party-popup');
+      if(popup){popup.style.display='block';centerPartySheet();}
     }
 
     function drawPartySpriteCanvas(canvas, entry) {
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
+      const drawId = {};
+      canvas._partySpriteDrawId = drawId;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.imageSmoothingEnabled = false;
       if (!entry) return;
 
       const renderCanvas = (sourceCanvas) => {
-        if (!sourceCanvas) return false;
-        const scale = Math.max(1, Math.floor(Math.min(canvas.width / sourceCanvas.width, canvas.height / sourceCanvas.height)));
+        if (!sourceCanvas || canvas._partySpriteDrawId !== drawId) return false;
+        const fit = Math.min(canvas.width / sourceCanvas.width, canvas.height / sourceCanvas.height);
+        // Integer upscaling stays crisp; smaller avatars must contain the entire sprite.
+        const scale = fit >= 1 ? Math.floor(fit) : fit;
         const drawW = sourceCanvas.width * scale;
         const drawH = sourceCanvas.height * scale;
         const x = Math.floor((canvas.width - drawW) / 2);
@@ -700,31 +763,33 @@ function toggleCombatMode() {
         return true;
       };
 
+      const source = entry.source || { Name: entry.label };
+      const normalizedCharacter = {
+        Name: source.Name || source.name || entry.label || 'Unknown',
+        Sex: source.Sex || source.sex || '',
+        Race: source.Race || source.race || '',
+        Class: source.Class || source.class || '',
+        Level: source.Level || source.level || '',
+        AC: source.AC || source.ac || '',
+        XP: source.XP || source.xp || '',
+        HP: source.HP || source.hp || '',
+        MaxHP: source.MaxHP || source.maxHP || ''
+      };
+      const spriteSpec = entry.sprite && entry.sprite.spec ? entry.sprite.spec : null;
+      // Match the live approved pose even before startup refreshes a cached portrait.
+      if (/^mortacia\b/i.test(String(normalizedCharacter.Name).replace(/^Name:\s*/i, '').trim()) &&
+          typeof window.createCharacterSpriteCanvas === 'function' &&
+          renderCanvas(window.createCharacterSpriteCanvas(normalizedCharacter, spriteSpec))) return;
+
       if (entry.sprite && entry.sprite.dataUrl) {
         const img = new Image();
-        img.onload = () => {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.imageSmoothingEnabled = false; // crisp pixel art (procedural sprites are 96px)
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        };
+        img.onload = () => renderCanvas(img);
         img.src = entry.sprite.dataUrl;
         return;
       }
 
       if (typeof window.createCharacterSpriteCanvas === 'function') {
-        const source = entry.source || { Name: entry.label };
-        const normalizedCharacter = {
-          Name: source.Name || source.name || entry.label || 'Unknown',
-          Sex: source.Sex || source.sex || '',
-          Race: source.Race || source.race || '',
-          Class: source.Class || source.class || '',
-          Level: source.Level || source.level || '',
-          AC: source.AC || source.ac || '',
-          XP: source.XP || source.xp || '',
-          HP: source.HP || source.hp || '',
-          MaxHP: source.MaxHP || source.maxHP || ''
-        };
-        const generated = window.createCharacterSpriteCanvas(normalizedCharacter, entry.sprite && entry.sprite.spec ? entry.sprite.spec : null);
+        const generated = window.createCharacterSpriteCanvas(normalizedCharacter, spriteSpec);
         if (renderCanvas(generated)) return;
       }
 
@@ -751,8 +816,8 @@ function toggleCombatMode() {
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
         return `<div class="party-icon-slot" data-party-slot="${index}"><button class="party-icon-button${index === activeIndex ? ' active' : ''}" onclick="openPartySheet(${index})" title="${safeLabel}">
-          <canvas class="party-icon-canvas" id="party-icon-canvas-${index}" width="28" height="28"></canvas>
-          <span class="party-icon-name">${safeLabel.slice(0, 8)}</span>
+          <canvas class="party-icon-canvas" id="party-icon-canvas-${index}" width="36" height="36"></canvas>
+          <span class="party-icon-name">${safeLabel}</span>
           <span class="party-icon-hp">${entry.hp || '--/--'}</span>
         </button></div>`;
       }).join('');
@@ -760,6 +825,30 @@ function toggleCombatMode() {
         drawPartySpriteCanvas(document.getElementById(`party-icon-canvas-${index}`), entry);
       });
       window.renderPartyDice?.(dock, entries);
+      positionPartyIconDock();
+    }
+
+    function positionPartyIconDock() {
+      const dock = document.getElementById('party-icon-dock');
+      if (!dock) return;
+      const bounds = dock.getBoundingClientRect(), scale = dock.offsetWidth ? bounds.width / dock.offsetWidth : 1;
+      const panels = ['chatbotcontainer', 'dungeon-compass'].map(id => document.getElementById(id)?.getBoundingClientRect())
+        .filter(r => r && r.width > 0 && r.height > 0);
+      const leftWidth = Math.min(252, (window.innerWidth - bounds.left) / scale - 8,
+        ...panels.map(r => (r.left - bounds.left) / scale - 6));
+      // Fit beside the compass before falling back to stacking on narrow screens.
+      dock.style.width = Math.max(1, leftWidth >= 100 ? leftWidth : Math.min(252, window.innerWidth / scale - 16)) + 'px';
+      dock.style.setProperty('--party-slot-width', leftWidth >= 100 && leftWidth < 180 ? '100%' : 'calc(50% - 2px)');
+      const fitted = dock.getBoundingClientRect();
+      const obstacles = panels
+        .filter(r => fitted.left < r.right && fitted.right > r.left);
+      const bottomEdge = Math.min(window.innerHeight - 6 * scale, ...obstacles.map(r => r.top - 6 * scale));
+      dock.style.bottom = Math.max(6, (window.innerHeight - bottomEdge) / scale) + 'px';
+      let topEdge = document.getElementById('game-menu-toggle')?.getBoundingClientRect().bottom || 36;
+      const map = document.getElementById('combat-popup')?.getBoundingClientRect();
+      if (map?.height > 0 && fitted.left < map.right && fitted.right > map.left && bottomEdge - map.bottom >= 80 * scale)
+        topEdge = Math.max(topEdge, map.bottom);
+      dock.style.maxHeight = Math.max(1, Math.min(window.innerHeight * .6, bottomEdge - topEdge - 8) / scale) + 'px';
     }
 
     function renderPartyInfoPopup() {
@@ -770,7 +859,7 @@ function toggleCombatMode() {
 
       const entries = getPartyInfoEntries();
       renderPartyIconDock();
-      if (!entries.length) {
+      if (!entries.length && !window._combatSheetEntry) {
         nameEl.textContent = '';
         sheetEl.innerHTML = '';
         drawPartySpriteCanvas(spriteCanvas, null);
@@ -779,7 +868,7 @@ function toggleCombatMode() {
 
       const activeIndex = Math.max(0, Math.min(entries.length - 1, window._partyPanelIndex || 0));
       window._partyPanelIndex = activeIndex;
-      const activeEntry = entries[activeIndex];
+      const activeEntry = window._combatSheetEntry || entries[activeIndex];
       nameEl.textContent = activeEntry.label || 'Unknown';
       sheetEl.innerHTML = formatPartySheetHtml(activeEntry);
       drawPartySpriteCanvas(spriteCanvas, activeEntry);
@@ -1122,7 +1211,9 @@ function toggleCombatMode() {
         position: fixed;
         left: 8px;
         bottom: 6px;
-        width: 236px;
+        width: 252px;
+        max-width: calc(100vw / var(--game-ui-scale) - 16px);
+        overflow-y: auto;
         display: flex;
         flex-wrap: wrap;
         gap: 4px;
@@ -1149,8 +1240,10 @@ function toggleCombatMode() {
     }
 
     .party-icon-button {
-        width: 56px;
-        min-height: 54px;
+        width: 80px;
+        min-width: 0;
+        flex: 1;
+        min-height: 70px;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -1165,7 +1258,7 @@ function toggleCombatMode() {
         cursor: pointer;
     }
 
-    .party-icon-slot { display: flex; align-items: center; }
+    .party-icon-slot { display: flex; align-items: center; gap: 3px; width: var(--party-slot-width, calc(50% - 2px)); min-width: 0; }
     .party-icon-slot.current-turn { outline: 1px solid white; background: #333333b0; }
     .party-d20 {
         width: 32px; height: 34px; padding: 0; border: 1px solid white;
@@ -1175,7 +1268,7 @@ function toggleCombatMode() {
     .party-d20:disabled { opacity: .7; }
     .party-d20.awaiting-roll { background: #ededed; color: #111; cursor: pointer; }
     .party-d20:focus-visible { outline: 3px solid white; outline-offset: -5px; }
-    .party-dice-wrap { display: flex; flex-direction: column; align-items: center; perspective: 160px; }
+    .party-dice-wrap { display: flex; flex: 0 0 40px; min-width: 0; flex-direction: column; align-items: center; perspective: 160px; }
     .party-d20.rolling { animation: dice-tumble 1s ease-out both; background: linear-gradient(135deg, #ededed, #888 55%, white); color: #111; }
     @keyframes dice-tumble {
       0% { transform: translateY(0) rotateX(0) rotateY(0) rotateZ(0) scale(.8); }
@@ -1184,7 +1277,7 @@ function toggleCombatMode() {
       100% { transform: translateY(0) rotateX(720deg) rotateY(1080deg) rotateZ(360deg) scale(1); }
     }
     @media (prefers-reduced-motion: reduce) { .party-d20.rolling { animation: none; } }
-    .party-roll-history { white-space: pre-line; color: #ededed; font: 9px monospace; }
+    .party-roll-history { max-width: 100%; white-space: pre-line; overflow-wrap: anywhere; color: #ededed; font: 9px monospace; }
     .party-roll-status { width: 100%; color: white; background: rgba(0, 0, 0, 0.9); font: 11px monospace; }
     .party-roll-status:empty { display: none; }
 
@@ -1193,8 +1286,8 @@ function toggleCombatMode() {
     }
 
     .party-icon-canvas {
-        width: 28px;
-        height: 28px;
+        width: 36px;
+        height: 36px;
         image-rendering: pixelated;
         background: transparent;
         border: none;
@@ -1207,40 +1300,45 @@ function toggleCombatMode() {
         width: 100%;
         text-align: center;
         font-family: monospace;
-        font-size: 7px;
-        line-height: 1.05;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        font-size: 9px;
+        line-height: 1.2;
+        white-space: normal;
+        overflow-wrap: anywhere;
         text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
     }
 
     .party-icon-hp {
         color: #d0d0d0;
+        white-space: nowrap;
     }
 
     #party-popup {
+        display: none;
         position: fixed;
         left: 8px;
         bottom: 120px;
         width: 260px;
+        max-width: calc(100vw / var(--game-ui-scale) - 16px);
+        max-height: calc(100vh / var(--game-ui-scale) - 32px);
         min-height: 165px;
         height: auto;
-        background: transparent;
-        border: none;
-        border-radius: 0;
-        box-shadow: none;
+        box-sizing: border-box;
+        padding: 12px;
+        background: rgba(0, 0, 0, 0.92);
+        border: 1px solid #919191;
+        border-radius: 6px;
+        box-shadow: 0 3px 16px rgba(0, 0, 0, 0.55);
         color: #e7e7e7;
-        z-index: 1145;
-        overflow: visible;
+        z-index: 3200;
+        overflow: auto;
         pointer-events: auto;
         backdrop-filter: none;
     }
 
     #party-popup-header {
         position: absolute;
-        top: -12px;
-        right: 0;
+        top: 4px;
+        right: 4px;
         width: auto;
         padding: 0;
         background: transparent;
@@ -1432,18 +1530,18 @@ function toggleCombatMode() {
     }
 
     #dungeon-compass {
-      position: fixed; left: 8px; right: auto; bottom: 8px; width: 96px; padding: 4px;
+      position: fixed; left: 8px; right: auto; bottom: 8px; width: 88px; padding: 4px;
       background: rgba(0,0,0,.86); border: 1px solid #8f8f8f; border-radius: 6px;
       color: #eee; text-align: center; font: 11px Arial,sans-serif; z-index: 1210; pointer-events: none;
     }
-    .compass-dial { position: relative; height: 90px; margin: 2px; border: 1px solid #777; border-radius: 50%; }
+    .compass-dial { position: relative; height: 82px; margin: 2px; border: 1px solid #777; border-radius: 50%; }
     .compass-rose { position: absolute; inset: 13px; }
     .compass-rose span { position: absolute; line-height: 12px; }
     .compass-n { left: calc(50% - 4px); top: 2px; color: #e6bd75; }
     .compass-s { left: calc(50% - 4px); bottom: 2px; }
     .compass-e { right: 4px; top: calc(50% - 6px); }
     .compass-w { left: 4px; top: calc(50% - 6px); }
-    .compass-pointer { position: absolute; top: 33px; left: calc(50% - 5px); width: 0; height: 0;
+    .compass-pointer { position: absolute; top: 29px; left: calc(50% - 5px); width: 0; height: 0;
       border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 22px solid #ccc; }
     .compass-readout { display: block; padding-top: 2px; }
     .compass-exit-pins { position: absolute; inset: 0; }
@@ -1587,6 +1685,8 @@ function toggleCombatMode() {
     left: 5px;
     width: 170px;
     height: 250px;
+    /* Keep the compact default, but let the map resize beyond the log/console half-screen cap. */
+    max-height: calc(100vh / var(--game-ui-scale) - 50px);
     background-color: black;
     color: white;
     border: 1px solid white;
@@ -1863,6 +1963,8 @@ function toggleCombatMode() {
       <button id="open-party-button" class="game-menu-button" onclick="togglePartyPopup()">Party</button>
       <button id="open-exploration-map-button" class="game-menu-button" aria-expanded="false" aria-controls="exploration-map-popup" onclick="window.DungeonExplorationMap.toggle()">Map</button>
       <button id="environment-lab-button" class="game-menu-button" onclick="window.open('/assets/environment-lab.html', '_blank', 'noopener')">Environment Lab</button>
+      <button id="carved-stonework-toggle" class="game-menu-button" aria-pressed="true" title="Toggle compatible stone and wood architectural carvings and statue refinements; OFF restores the previous geometry without changing the dungeon">Carved Stonework: ON</button>
+      <button id="stonework-fill-toggle" class="game-menu-button" title="Cycle 0%, 50%, 100%, 300% and 500%; above 100%, uncut stone within carving fields projects outward while grooves stay recessed, including pillar bases. Shafts, rims and backing stay at 100%. Below 100% is the older surface-repair trial and may show gaps. Lighting stays unchanged">Stonework Relief: 300%</button>
     </div>
     <!-- Physically placed combat mode toggle -->
     <div id="exploration-map-popup" role="dialog" aria-label="Exploration map">

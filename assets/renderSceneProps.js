@@ -802,10 +802,13 @@ function drawLandmarkSprite(ctx, createCanvas, type, opts = {}) {
   const usePrim = (opts.prim || opts.assembly) && ((opts.prim && opts.prim.shape) || opts.assembly) && (!key || (opts.prim && opts.prim.color) || opts.assembly || opts.preferPrimitive);
   (usePrim ? DRAW._primitive : (DRAW[key] || DRAW._generic))(P, pal, o, rng);
   if(opts.inscription){
-    const glyph=require('./puzzleModules').bitmap(opts.inscription.motif||'Skull');
+    const glyph=require('./shrineIconography').bitmap(opts.inscription.motif)||require('./puzzleModules').bitmap(opts.inscription.motif||'Skull');
     const y0=key==='sarcophagus'||key==='chest_tomb'?18:10;
-    P.rect(12,y0,8,9,pal.base);
-    glyph.forEach((row,y)=>[...row].forEach((bit,x)=>{if(bit==='1')P.px(12+x,y0+y,pal.dark);}));
+    if(key==='obelisk'){
+      for(const y0 of[9,16,23]){P.rect(14,y0,4,5,pal.base);
+        glyph.forEach((row,y)=>[...row].forEach((bit,x)=>{if(bit==='1')P.px(14+Math.floor(x*3/glyph.length),y0+Math.floor(y*4/glyph.length),pal.dark);}));}
+    }else{P.rect(12,y0,8,9,pal.base);
+      glyph.forEach((row,y)=>[...row].forEach((bit,x)=>{if(bit==='1')P.px(12+Math.floor(x*7/glyph.length),y0+Math.floor(y*7/glyph.length),pal.dark);}));}
   }
   // Surface effects only paint on the sprite itself, never on the transparent background.
   sctx.globalCompositeOperation = 'source-atop';

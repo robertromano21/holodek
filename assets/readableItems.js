@@ -1,11 +1,15 @@
 (function(root,factory){
-  const api=factory();
+  const api=factory(typeof module==='object'&&module.exports?require('./stoneCarvings'):root.StoneCarvings,
+    typeof module==='object'&&module.exports?require('./shrineIconography'):root.ShrineIconography);
   if(typeof module==='object'&&module.exports)module.exports=api;else root.ReadableItems=api;
-})(typeof window==='undefined'?globalThis:window,function(){
+})(typeof window==='undefined'?globalThis:window,function(Carvings,Icons){
   'use strict';
   const key=value=>String(value||'').trim().toLowerCase();
   const clean=(s,max)=>typeof s==='string'&&!!s.trim()&&s.length<=max&&!/[<>]/.test(s);
-  const fixtureTypes=['stone_tablet','gravestone','chest_tomb','sarcophagus'];
+  const fixtureTypes=['stone_tablet','gravestone','chest_tomb','sarcophagus','obelisk'];
+  function hasContent(record){
+    return Array.isArray(record?.chapters)&&record.chapters.some(c=>typeof c?.text==='string'&&!!c.text.trim());
+  }
   function validate(rows){
     if(rows===undefined)return[];
     if(!Array.isArray(rows)||rows.length>4)throw Error('At most four additional readable puzzle pieces.');
@@ -38,11 +42,11 @@
       const text=r?.kind==='inscription'?r.chapters?.[0]?.text:r?.text;
       if(!fixtureTypes.includes(r?.type)||!clean(r.name,65)||!/^[a-z][a-z '-]+$/.test(r.name)||names.has(key(r.name))||
         !clean(r.title,90)||/[\r\n]/.test(r.title)||!clean(r.backstory,350)||!clean(text,650)||
-        !['lore','mechanism_clue'].includes(r.role)||!['Skull','Dragon','Crown','Moon','Star','Key','Eye','Wave','Sun','Leaf','Mountain','Serpent'].includes(r.motif||'Skull'))
+        !['lore','mechanism_clue'].includes(r.role)||!['Skull','Dragon','Crown','Moon','Star','Key','Eye','Wave','Sun','Leaf','Mountain','Serpent'].includes(r.motif||'Skull')&&!Icons.name(r.motif))
         throw Error('Invalid inscribed fixture or epitaph.');
       names.add(key(r.name));
       return{id:'inscription_'+i,name:r.name.trim(),title:r.title.trim(),kind:'inscription',type:r.type,
-        backstory:r.backstory.trim(),role:r.role,clueChapter:1,motif:r.motif||'Skull',chapters:[{title:'Inscription',text:text.trim()}]};
+        backstory:r.backstory.trim(),role:r.role,clueChapter:1,motif:Icons.name(r.motif)||r.motif||'Skull',...Carvings.validate(r),chapters:[{title:'Inscription',text:text.trim()}]};
     });
   }
   function intent(input){
@@ -91,5 +95,5 @@
     return consoleText.replace(/^Objects in Room:[^\r\n]*/m,()=>`Objects in Room: ${names.join(', ')||'None'}`)
       .replace(/^Objects in Room Properties:[^\r\n]*/m,()=>`Objects in Room Properties: ${properties.join(', ')||'None'}`);
   }
-  return{validate,validateInscriptions,fixtureTypes,intent,passage,spawn,key};
+  return{validate,validateInscriptions,fixtureTypes,hasContent,intent,passage,spawn,key};
 });

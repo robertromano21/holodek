@@ -6,6 +6,7 @@ const B = require('../retort/indoorBlueprint');
 const { applySceneArchitecture, makeNavigation, reachable } = require('../retort/sceneArchitecture');
 const { applySceneRoofs } = require('../retort/sceneRoofs');
 const T = require('../retort/outdoorTerrain');
+const Puzzles = require('../assets/physicalPuzzles');
 
 function fixture(seed = 'complex-a', modules = []) {
   const plan = { rooms: [
@@ -185,6 +186,37 @@ test('partial corridor plans are honored and only their missing links are repair
   assert.equal(d.indoorLayout.corridors[0].repaired, false);
   assert.ok(d.indoorLayout.repairedLinks > 0);
   assert.equal(d.indoorLayout.disconnectedRooms, 0);
+});
+
+test('overlapping raised spawn chambers get reachable repair ramps and a buildable physical puzzle',()=>{
+  // Replay the 2026-10-11 second-room failure: a raised 6x6 chamber encloses the spawn.
+  const rooms=[
+    [22,44,19,16,'entrance',0,6],[18,25,25,19,'hall',.5,8],
+    [6,12,16,16,'chapel',1.5,5],[44,12,16,16,'chapel',2.5,5],
+    [9,44,9,9,'gallery',0,4],[44,44,9,9,'gallery',.5,4],
+    [28,6,6,6,'sanctum',1.5,6],[28,47,6,6,'chamber',2.5,5]
+  ];
+  const roofs=['barrel','groin','pendentive','pendentive','ribbed','ribbed','domed','boarded'],orders=['doric','corinthian','ionic','ionic','doric','doric','corinthian','doric'];
+  const plan={rooms:rooms.map(([x,y,w,h,role,floor,clearance],i)=>({x:(x+.01)/63,y:(y+.01)/63,w:(w+.01)/64,h:(h+.01)/64,role,floor,clearance,
+    roofStyle:roofs[i],columnOrder:orders[i]})),
+    corridors:[[0,1,3],[1,2,3],[1,3,3],[1,4,2],[1,5,2],[2,6,3],[4,7,2]].map(([fromRoom,toRoom,width])=>({fromRoom,toRoom,width}))};
+  const d={geoKey:'0,-1,0',layout:{width:64,height:64},start:{x:32,y:48},cells:{},tiles:{},classification:{indoor:true},
+    generation:{seed:'dungeon-v1:b50c23e4-b4e8-4834-b9a3-6c057b7c1ff2:0,-1,0'},blueprint:{indoorPlan:plan}};
+  B.build(d,plan,{floor:0,ceil:6});
+  assert.equal(d.indoorLayout.disconnectedRooms,0);assert.ok(d.indoorLayout.reachableCells>1500);
+  assert.deepEqual(d.start,{x:32,y:48});assert.equal(d.cells['32,48'].floorHeight,2.5);
+  for(const [i,r]of d.indoorRooms.entries())assert.equal(r.floor,rooms[i][5],'Authored room elevations remain in the plan');
+  assert.equal(d.cells['8,14'].floorHeight,1.5,'Distant chapel floor survives');
+  assert.equal(d.cells['57,14'].floorHeight,2.5,'Distant second chapel floor survives');
+  const connected=reachable(makeNavigation(d),d.start);
+  for(const r of d.indoorRooms)assert.ok(connected.seen[(r.y+Math.floor(r.h/2))*64+r.x+Math.floor(r.w/2)]);
+  const spec={indoor:true,architecture:'basilica',source:{roomName:'Basilica of Echoes',description:'A stone basilica with pendentive vaults.'},
+    exits:['north','up'],wallStyleMaterial:'brick'};
+  assert.equal(applySceneArchitecture(d,spec).status,'built');
+  assert.equal(applySceneRoofs(d,spec).status,'built');
+  assert.ok(reachable(makeNavigation(d),d.start).count>1000,'Architecture and roofs preserve the restored connecting ramps');
+  const built=Puzzles.install(d,{puzzleMechanism:Puzzles.fallback('overlapping-spawn','Hall of Echoes')});
+  assert.equal(built.valid,true);assert.equal(Puzzles.verify(d).valid,true);
 });
 
 test('fallback complexes remain seeded, varied and safe, including malformed module lists', () => {

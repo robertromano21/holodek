@@ -18,7 +18,8 @@ class ActionDice {
   snapshot() {
     return {
       type: 'dice_state', epoch: this.epoch, revision: this.revision, paused: this.paused,
-      active: this.active && { id: this.active.id, kind: this.active.kind, geoKey: this.active.geoKey },
+      active: this.active && { id: this.active.id, kind: this.active.kind, geoKey: this.active.geoKey,
+        ...(this.active.round ? { round: this.active.round } : {}), ...(this.active.turn ? { turn: this.active.turn } : {}) },
       pending: this.pending?.request || null,
       results: [...this.results.values()]
     };

@@ -12,15 +12,23 @@
 <script src="../assets/renderCharacterProcedural.js"></script>
 <script src="../assets/shrineIconography.js"></script>
 <script src="../assets/artCharacters.js"></script>
+<script src="../assets/sculptureAnatomy.js"></script>
 <script src="../assets/sculptureForms.js"></script>
+<script src="../assets/stoneCarvings.js"></script>
+<script src="../assets/ancientScripts.js"></script>
 <script src="../assets/frescoDesigns.js"></script>
+<script src="../assets/frescoSerpents.js"></script>
 <script src="../assets/frescoFigures.js"></script>
+<script src="../assets/mosaicDesigns.js"></script>
 <script src="../assets/surfaceArt.js"></script>
+<script src="../assets/artPresentation.js"></script>
 <script src="../assets/scenePropVoxels.js"></script>
 <script src="../assets/readableItems.js"></script>
 <script src="../assets/physicalPuzzles.js"></script>
 <script src="../assets/sceneExteriorDetails.js"></script>
 <script src="../assets/characterMotion3d.js"></script>
+<script src="../assets/renderSceneItems.js"></script>
+<script src="../assets/gameMenuUi.js"></script>
 <script src="../assets/rendererWebGL.js"></script>
 <script>
 try {
@@ -208,6 +216,62 @@ try {
   }
   window.dungeonViewShift = 0;
   const downhillPass = downhill[1].floorPixels > downhill[0].floorPixels && downhill.every(v => v.glError === gl.NO_ERROR);
+  // Large outdoor height ranges used to round the rendered floor above small loot.
+  const itemRoom = { geoKey: 'item-grounding', _geometryStamp: 'item-grounding', layout: { width: 8, height: 8 },
+    cells: {}, tiles: {}, classification: { indoor: false }, skyTop: '#0000ff', skyBot: '#0000ff', lighting: { intensity: 0 } };
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) itemRoom.cells[x + ',' + y] = { tile: 'floor', floorHeight: 1.83, ceilHeight: 4.33 };
+  itemRoom.cells['7,7'] = { tile: 'wall', floorHeight: -15, ceilHeight: 205 };
+  const groundItem = { name: 'siltpiercer dagger', type: 'weapon', magic: 0, x: 4, y: 3 };
+  window.currentDungeon = itemRoom; window.playerZ = 2.48;
+  window.getVisibleSceneObjects = () => [];
+  renderer.renderScene();
+  const groundBaseline = new Uint8Array(64 * 64 * 4);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, groundBaseline);
+  window.getVisibleSceneObjects = () => [groundItem];
+  const groundBase = renderer._getItemBaseZ;
+  const changedGroundPixels = () => {
+    renderer.renderScene();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let changed = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] !== groundBaseline[i] || pixels[i + 1] !== groundBaseline[i + 1] || pixels[i + 2] !== groundBaseline[i + 2]) changed++;
+    return changed;
+  };
+  renderer._getItemBaseZ = (d, o, b) => d.cells[o.x + ',' + o.y].floorHeight + 0.005 - b.footInset * b.worldHeight;
+  const buriedItemPixels = changedGroundPixels();
+  renderer._getItemBaseZ = groundBase;
+  const groundedItemPixels = changedGroundPixels();
+  const itemGrounding = { buriedItemPixels, groundedItemPixels, glError: gl.getError() };
+  const itemGroundingPass = buriedItemPixels === 0 && groundedItemPixels > 0 && itemGrounding.glError === gl.NO_ERROR;
+  window.getVisibleSceneObjects = () => [];
+  const shadowSamples = [], visibleActors = renderer._getVisibleCharacterVoxelActors, actorBillboard = renderer._getCharacterBillboard;
+  const invisibleActorTexture = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, invisibleActorTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+  renderer._getCharacterBillboard = () => ({ tex: invisibleActorTexture, worldHeight: 1.2, footInset: 0,
+    motion: { heightScale: 1, upperShift: 0 }, pixels: { w: 1, h: 1, data: new Uint8Array(4) } });
+  const shadowActor = { name: 'Shadow probe', type: 'npc', hp: 20, mazeX: 6, mazeY: 3 };
+  for (const blocker of ['open', 'pillar', 'wall']) {
+    const shadowRoom = { geoKey: 'shadow-' + blocker, _geometryStamp: 'shadow-' + blocker, layout: { width: 12, height: 8 },
+      cells: {}, tiles: { pillar: { spriteSpec: { voxelShape: 'column', baseWidth: 0.95, heightRatio: 1, columnOrder: 'doric' } } },
+      classification: { indoor: false }, skyTop: '#0000ff', skyBot: '#0000ff', lighting: { intensity: 0 } };
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 12; x++) shadowRoom.cells[x + ',' + y] = { tile: 'floor', floorHeight: 0, ceilHeight: 3 };
+    if (blocker !== 'open') shadowRoom.cells['4,3'].tile = blocker;
+    window.currentDungeon = shadowRoom; window.playerZ = 0.65;
+    renderer._getVisibleCharacterVoxelActors = () => [];
+    renderer.renderScene();
+    const baseline = new Uint8Array(64 * 64 * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, baseline);
+    renderer._getVisibleCharacterVoxelActors = () => [shadowActor];
+    renderer.renderScene();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    let changed = 0;
+    for (let i = 0; i < pixels.length; i += 4) if (pixels[i] !== baseline[i] || pixels[i + 1] !== baseline[i + 1] || pixels[i + 2] !== baseline[i + 2]) changed++;
+    shadowSamples.push({ blocker, changed, glError: gl.getError() });
+  }
+  renderer._getVisibleCharacterVoxelActors = visibleActors; renderer._getCharacterBillboard = actorBillboard;
+  gl.deleteTexture(invisibleActorTexture);
+  const actorShadowOcclusionPass = shadowSamples[0].changed > 0 && shadowSamples.slice(1).every(s => s.changed === 0) &&
+    shadowSamples.every(s => s.glError === gl.NO_ERROR);
   const gates = [];
   for (const direction of ['east', 'north']) {
     const forward = direction === 'east' ? [1, 0] : [0, -1], door = direction === 'east' ? { x: 5, y: 10 } : { x: 10, y: 14 };
@@ -311,12 +375,13 @@ try {
     const d={tiles:{[shape]:{spriteSpec:{voxelShape:shape,material:'metal',baseWidth:.7,heightRatio:.4,
       puzzleFace:{axis:'x',mark:'Crown',option:['Sun','Moon','Wave'][value]}}}},visualStyle:{palette:{}}};
     const mesh=renderer.getVoxelMesh(shape,d); if(!mesh) throw Error('Missing puzzle mesh: '+shape);
-    gl.bindBuffer(gl.ARRAY_BUFFER,mesh.vbo);
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mesh.ibo);
-    for(const [attribute,offset] of [[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]) {
-      gl.enableVertexAttribArray(attribute); gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+    gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    for(const pass of mesh.passes||[mesh]){
+      gl.bindBuffer(gl.ARRAY_BUFFER,pass.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,pass.ibo);
+      for(const [attribute,offset] of [[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]) {
+        gl.enableVertexAttribArray(attribute);gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+      }gl.drawElements(gl.TRIANGLES,pass.count,gl.UNSIGNED_SHORT,0);
     }
-    gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.drawElements(gl.TRIANGLES,mesh.count,gl.UNSIGNED_SHORT,0);
     gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
     let pixels=0, hash=2166136261, inkPixels=0, ivoryPixels=0;
     for(let i=0;i<characterPixels.length;i+=4) {
@@ -326,7 +391,7 @@ try {
       if(r>180 && g>170 && b>130) ivoryPixels++;
       hash=Math.imul(hash^characterPixels[i],16777619); hash=Math.imul(hash^characterPixels[i+1],16777619); hash=Math.imul(hash^characterPixels[i+2],16777619);
     }
-    puzzleMeshes.push({shape,vertices:mesh.count,pixels,inkPixels,ivoryPixels,hash:hash>>>0,error:gl.getError()});
+    puzzleMeshes.push({shape,vertices:(mesh.passes||[mesh]).reduce((sum,p)=>sum+p.count,0),pixels,inkPixels,ivoryPixels,hash:hash>>>0,error:gl.getError()});
     if (preview) {
       const card=document.createElement('figure'), label=document.createElement('figcaption'), canvas=document.createElement('canvas');
       canvas.width=canvas.height=256;
@@ -346,7 +411,7 @@ try {
   const artImage=createCanvas(144,96);
   SurfaceArt.paint(artImage.getContext('2d'),createCanvas,{kind:'fresco',label:'The White Lady',motifs:['Mortacia','skeleton'],composition:'apotheosis',text:'Memory endures.'});
   artImage.complete=true;artImage.naturalWidth=144;artImage.naturalHeight=96;
-  const art={tile:'art-probe',axis:'x',surface:'wall',sign:-1};
+  const art={tile:'art-probe',axis:'x',surface:'wall',sign:-1,kind:'fresco',label:'The White Lady',motifs:['Mortacia','skeleton'],composition:'apotheosis',text:'Memory endures.'};
   const artMesh=renderer.getSurfaceArtMesh(art,{'art-probe':artImage});
   gl.bindBuffer(gl.ARRAY_BUFFER,artMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,artMesh.ibo);
   for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]){
@@ -357,6 +422,56 @@ try {
   gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
   let artPixels=0;for(let i=0;i<characterPixels.length;i+=4)if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2])artPixels++;
   const artPass=artPixels>100&&gl.getError()===gl.NO_ERROR&&renderer.getSurfaceArtMesh(art,{'art-probe':artImage})===artMesh;
+  const wideArt={...art,tile:'wide-art',aspectRatio:2},wideSize=SurfaceArt.rasterSize(wideArt),wideImage=createCanvas(wideSize.width,wideSize.height);
+  SurfaceArt.paint(wideImage.getContext('2d'),createCanvas,wideArt);wideImage.complete=true;wideImage.naturalWidth=wideSize.width;wideImage.naturalHeight=wideSize.height;
+  const wideMesh=renderer.getSurfaceArtMesh(wideArt,{'wide-art':wideImage});
+  gl.bindBuffer(gl.ARRAY_BUFFER,wideMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,wideMesh.ibo);
+  for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])
+    gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+  gl.uniform3f(pu.modelPos,1,-.6,.15);gl.uniform3f(pu.modelScale,.02,1.2,.6);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,wideMesh.count,gl.UNSIGNED_SHORT,0);
+  gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
+  let widePixels=0;for(let i=0;i<characterPixels.length;i+=4)if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2])widePixels++;
+  const wideArtPass=widePixels>100&&wideSize.width/wideSize.height===2&&gl.getError()===gl.NO_ERROR;
+  // Measure a real circular emblem after the production vertex projection, including resize.
+  const roundImage=createCanvas(144,96),roundCtx=roundImage.getContext('2d');roundCtx.fillStyle='#000';roundCtx.fillRect(0,0,144,96);
+  roundCtx.fillStyle='#ff0000';roundCtx.beginPath();roundCtx.arc(72,48,20,0,Math.PI*2);roundCtx.fill();
+  roundImage.complete=true;roundImage.naturalWidth=144;roundImage.naturalHeight=96;
+  const roundArt={...art,tile:'circle-art',key:'2,0',position:{x:2,y:-.75,z:0},size:{x:.02,y:1.5,z:1}},roundRoom={cells:{'2,0':{floorHeight:0,ceilHeight:4}}};
+  const roundMesh=renderer.getSurfaceArtMesh(roundArt,{'circle-art':roundImage}),circleMeasurements=[];
+  gl.bindBuffer(gl.ARRAY_BUFFER,roundMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,roundMesh.ibo);
+  for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+  for(const[h,compensate]of[[256,true],[160,true],[144,true],[144,false]]){
+    const comp=256/h,shown=SurfaceArt.presentation(roundArt,{dungeon:roundRoom,verticalCompensation:compensate?comp:1});
+    gl.viewport(0,0,256,h);gl.uniform2f(pu.resolution,256,h);gl.uniform2f(pu.camPos,0,0);gl.uniform2f(pu.camDir,1,0);gl.uniform2f(pu.plane,0,Math.tan(Math.PI/6));
+    gl.uniform1f(pu.focalLength,h/(2*Math.tan(Math.PI/6)));gl.uniform1f(pu.eyeZ,shown.size.z/2);gl.uniform1f(pu.viewShift,0);gl.uniform1f(pu.unlit,1);
+    gl.uniform3f(pu.modelPos,shown.position.x,shown.position.y,shown.position.z);gl.uniform3f(pu.modelScale,shown.size.x,shown.size.y,shown.size.z);
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,roundMesh.count,gl.UNSIGNED_SHORT,0);
+    const pixels=new Uint8Array(256*h*4);gl.readPixels(0,0,256,h,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    let x0=256,x1=-1,y0=h,y1=-1;for(let y=0;y<h;y++)for(let x=0;x<256;x++){const i=(x+y*256)*4;if(pixels[i]>180&&pixels[i+1]<30){x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}}
+    circleMeasurements.push({compensate,viewport:[256,h],width:x1-x0+1,height:y1-y0+1,modelWidth:shown.size.y,error:gl.getError()});
+  }
+  const circleAspectPass=circleMeasurements.every(m=>m.width>10&&m.height>10&&m.modelWidth===1.5&&m.error===gl.NO_ERROR&&
+    (m.compensate?Math.abs(m.width-m.height)<=2:m.width/m.height>1.6));
+  // Use a production-painted circular mosaic, including its transparent surround and mesh.
+  const circularMosaic={...roundArt,tile:'circular-mosaic',kind:'mosaic',mosaicShape:'circle',mosaicPattern:'spiral_shield',style:'byzantine',
+    position:{x:2,y:-.55,z:0},size:{x:.02,y:1.1,z:1.1}},mosaicSize=SurfaceArt.rasterSize(circularMosaic),mosaicImage=createCanvas(mosaicSize.width,mosaicSize.height);
+  SurfaceArt.paint(mosaicImage.getContext('2d'),createCanvas,circularMosaic);mosaicImage.complete=true;mosaicImage.naturalWidth=mosaicSize.width;mosaicImage.naturalHeight=mosaicSize.height;
+  const mosaicMesh=renderer.getSurfaceArtMesh(circularMosaic,{'circular-mosaic':mosaicImage}),mosaicMeasurements=[];
+  gl.bindBuffer(gl.ARRAY_BUFFER,mosaicMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mosaicMesh.ibo);
+  for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+  for(const h of[256,160,144]){
+    const shown=SurfaceArt.presentation(circularMosaic,{dungeon:roundRoom,verticalCompensation:256/h});
+    gl.viewport(0,0,256,h);gl.uniform2f(pu.resolution,256,h);gl.uniform1f(pu.focalLength,h/(2*Math.tan(Math.PI/6)));gl.uniform1f(pu.eyeZ,shown.size.z/2);
+    gl.uniform3f(pu.modelPos,shown.position.x,shown.position.y,shown.position.z);gl.uniform3f(pu.modelScale,shown.size.x,shown.size.y,shown.size.z);
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,mosaicMesh.count,gl.UNSIGNED_SHORT,0);
+    const pixels=new Uint8Array(256*h*4);gl.readPixels(0,0,256,h,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    let x0=256,x1=-1,y0=h,y1=-1,count=0;for(let y=0;y<h;y++)for(let x=0;x<256;x++){
+      const i=(x+y*256)*4;if(pixels[i]+pixels[i+1]+pixels[i+2]>10){count++;x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}}
+    mosaicMeasurements.push({viewport:[256,h],width:x1-x0+1,height:y1-y0+1,coverage:count/((x1-x0+1)*(y1-y0+1)),modelWidth:shown.size.y,error:gl.getError()});
+  }
+  const circularMosaicPass=mosaicMeasurements.every(m=>m.width>50&&Math.abs(m.width-m.height)<=2&&m.coverage>.72&&m.coverage<.84&&m.modelWidth===1.1&&m.error===gl.NO_ERROR);
+  gl.viewport(0,0,256,256);gl.uniform2f(pu.resolution,256,256);gl.uniform1f(pu.focalLength,256/(2*Math.tan(Math.PI/6)));gl.uniform1f(pu.eyeZ,.5);
   const motionDungeon={tiles:{motion_dial:{spriteSpec:{voxelShape:'puzzle_dial_1',material:'metal',puzzleFace:{axis:'x',mark:'Crown',option:'Moon',pose:0}}}},visualStyle:{palette:{}}};
   let oldMesh=null,buffersFreed=true;const motionCounts=new Set();
   for(let i=0;i<=18;i++){
@@ -379,21 +494,305 @@ try {
     let pixels=0;for(let i=0;i<characterPixels.length;i+=4)if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2])pixels++;
     funeraryMeshes.push({shape,vertices:mesh.count,pixels,error:gl.getError()});
   }
-  const funeraryPass=funeraryMeshes.length===4&&funeraryMeshes.every(m=>m.vertices>0&&m.pixels>100&&m.error===gl.NO_ERROR);
+  const funeraryPass=funeraryMeshes.length===ReadableItems.fixtureTypes.length&&funeraryMeshes.every(m=>m.vertices>0&&m.pixels>100&&m.error===gl.NO_ERROR);
+  const refinementMeshes=[];
+  for(const sculptureStyle of SculptureForms.styles)for(const[form,pose,deity]of[['human','offering'],['human','contrapposto'],['dragon','guardian'],['human','laureate'],['human','mantled_scholar'],['human','victorious'],['human','lyrist'],
+    ['human','offering','Mortacia'],['dragon','guardian','Atinus'],['dragon','guardian','Atricles'],['dragon','guardian','Dantuea'],['dragon','guardian','Turthus']]){
+    const tile='refined_'+sculptureStyle+'_'+form+'_'+pose+'_'+(deity||''),d={tiles:{[tile]:{spriteSpec:{voxelShape:'statue',material:'marble',
+      sculpture:{label:deity||'Carved ancestor',form,pose,...(deity?{deity}:{}),head:'bare',robe:'toga',attribute:'none',workmanship:'carved',sculptureStyle}}}},visualStyle:{palette:{}}};
+    const mesh=renderer.getVoxelMesh(tile,d);gl.bindBuffer(gl.ARRAY_BUFFER,mesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,mesh.ibo);
+    const verts=new Float32Array(gl.getBufferParameter(gl.ARRAY_BUFFER,gl.BUFFER_SIZE)/4),ix=new Uint16Array(gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER,gl.BUFFER_SIZE)/2);
+    gl.getBufferSubData(gl.ARRAY_BUFFER,0,verts);gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER,0,ix);
+    const faceShades=new Set();for(let j=0;j<verts.length;j+=9)if(verts[j+4]<-.5&&verts[j+2]>.7&&verts[j+2]<.94)
+      faceShades.add(Array.from(verts.subarray(j+6,j+9)).join(','));
+    refinementMeshes.push({sculptureStyle,form,pose,deity,vertices:verts.length/9,indices:ix.length,valid:verts.length/9<65536&&verts.every(Number.isFinite)&&ix.every(i=>i<verts.length/9),
+      detail:mesh._debugKey.includes('size:64'),faceShades:faceShades.size,error:gl.getError()});
+  }
+  // A straight incision must stay visible through the raised uncut field.
+  const negativeRelief=[],reliefSize=32,reliefSource=new Uint8Array(reliefSize**3).fill(1),reliefCarved=new Uint8Array(reliefSource),
+    reliefAt=(x,y,z)=>x+y*reliefSize+z*reliefSize**2,reliefColor=(x,y,z,n)=>n[1]===-1&&y>.5?[.1,.3,.9]:[.9,.7,.4];
+  for(let z=8;z<24;z++)reliefCarved[reliefAt(15,0,z)]=0;
+  const reliefBase=renderer.greedyMesh(reliefCarved,reliefSize,reliefColor,{closedSurface:1}),tan=Math.tan(Math.PI/6),
+    reliefUpload=mesh=>{
+      const vbo=gl.createBuffer(),ibo=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vbo);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(mesh.vertices),gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ibo);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(mesh.indices),gl.STATIC_DRAW);
+      return{vbo,ibo,count:mesh.indices.length};
+    },reliefDraw=part=>{
+      gl.bindBuffer(gl.ARRAY_BUFFER,part.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,part.ibo);
+      for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+      gl.drawElements(gl.TRIANGLES,part.count,gl.UNSIGNED_SHORT,0);
+    },reliefBaseGpu=reliefUpload(reliefBase),priorReliefUnlit=gl.getUniform(renderer.voxelProgram,pu.unlit);
+  gl.uniform2f(pu.camPos,15.5/32-.5,-1.6);gl.uniform2f(pu.camDir,0,1);gl.uniform2f(pu.plane,-tan,0);
+  gl.uniform1f(pu.eyeZ,16.5/32);gl.uniform1f(pu.unlit,1);gl.uniform1f(pu.depthBias,0);
+  gl.uniform3f(pu.modelPos,-.5,-.5,0);gl.uniform3f(pu.modelScale,1,1,1);
+  for(const extension of[.5,2,4]){
+    const extra=StoneCarvings.ridgeMesh(reliefSource,reliefCarved,32,extension,reliefColor,
+      {shape:'stone_tablet',carving:{version:1,region:'panel',pattern:'interlace'}}),gpu=reliefUpload(extra),pixels=new Uint8Array(256*256*4),
+      depth=1.1-extension/32,x=Math.floor(128+(10/32/tan)/depth*128),rimY=Math.floor(128+(1.5/32-16.5/32)*256/(2*tan)/depth),
+      sample=(x,y)=>Array.from(pixels.subarray((x+y*256)*4,(x+y*256)*4+3));
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);reliefDraw(gpu);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    const raisedField=sample(x,128),grooveOverlay=sample(128,128),rimOverlay=sample(x,rimY);
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);reliefDraw(reliefBaseGpu);reliefDraw(gpu);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    const grooveFloor=sample(128,128);
+    negativeRelief.push({percent:(1+extension)*100,raisedField,grooveOverlay,rimOverlay,grooveFloor,error:gl.getError()});
+    gl.deleteBuffer(gpu.vbo);gl.deleteBuffer(gpu.ibo);
+  }
+  gl.deleteBuffer(reliefBaseGpu.vbo);gl.deleteBuffer(reliefBaseGpu.ibo);gl.uniform1f(pu.unlit,priorReliefUnlit);gl.uniform1f(pu.eyeZ,.5);
+  const negativeReliefPass=negativeRelief.every(m=>m.raisedField[0]>150&&m.raisedField[0]>m.raisedField[2]&&
+    m.grooveOverlay.every(v=>v===0)&&m.rimOverlay.every(v=>v===0)&&m.grooveFloor[2]>m.grooveFloor[0]*2&&m.error===gl.NO_ERROR);
+  const architecturalCarvingMeshes=[],sealedArchitecture=new Map(),oldCarvingFlag=window.ARCHITECTURAL_CARVINGS,oldClosureFlag=window.STONEWORK_SURFACE_CLOSURE;
+  for(const shape of StoneCarvings.voxelShapes)for(const material of['stone','wood'])for(const percent of[100,300,500]){
+    const tile='carved_'+shape+'_'+material,spec=shape==='pillar'?{profile:'cylinder',gridWidth:.5,heightRatio:1,material}:{voxelShape:shape,material},
+      d={tiles:{[tile]:{spriteSpec:spec}},visualStyle:{palette:{}}};window.STONEWORK_SURFACE_CLOSURE=percent/100;
+    window.ARCHITECTURAL_CARVINGS=true;const mesh=renderer.getVoxelMesh(tile,d);
+    const parts=mesh.passes||[mesh],buffers=parts.map(part=>{
+      gl.bindBuffer(gl.ARRAY_BUFFER,part.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,part.ibo);
+      const verts=new Float32Array(gl.getBufferParameter(gl.ARRAY_BUFFER,gl.BUFFER_SIZE)/4),ix=new Uint16Array(gl.getBufferParameter(gl.ELEMENT_ARRAY_BUFFER,gl.BUFFER_SIZE)/2);
+      gl.getBufferSubData(gl.ARRAY_BUFFER,0,verts);gl.getBufferSubData(gl.ELEMENT_ARRAY_BUFFER,0,ix);return{verts,ix};
+    }),views=[];
+    if(percent===100)sealedArchitecture.set(tile,buffers[0]);
+    const sealed=sealedArchitecture.get(tile),baseUnchanged=sealed.verts.length===buffers[0].verts.length&&sealed.ix.length===buffers[0].ix.length&&
+      sealed.verts.every((v,i)=>v===buffers[0].verts[i])&&sealed.ix.every((v,i)=>v===buffers[0].ix[i]);
+    const carving=StoneCarvings.resolveVoxelDescriptor(spec,tile),high=shape==='doric_column'?.062:shape==='gothic_pier'?.095:shape==='fluted_column'?.18:.155,
+      protectedShaft=carving.region!=='base'||buffers.slice(1).every(b=>b.verts.every((v,i)=>i%9!==2||v<=Math.ceil(high*64)/64+.008/64+1e-7));
+    for(const angle of[0,.7]){
+      const x=Math.sin(angle),y=Math.cos(angle);gl.uniform2f(pu.camPos,-x*1.3,1.3-y*1.3);gl.uniform2f(pu.camDir,x,y);gl.uniform2f(pu.plane,-y*Math.tan(Math.PI/6),x*Math.tan(Math.PI/6));
+      gl.uniform3f(pu.modelPos,-.5,1,0);gl.uniform3f(pu.modelScale,1,.6,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+      for(const part of parts){
+        gl.bindBuffer(gl.ARRAY_BUFFER,part.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,part.ibo);
+        for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+        gl.drawElements(gl.TRIANGLES,part.count,gl.UNSIGNED_SHORT,0);
+      }
+      gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);let pixels=0;
+      for(let i=0;i<characterPixels.length;i+=4)if(characterPixels[i]||characterPixels[i+1]||characterPixels[i+2])pixels++;views.push(pixels);
+    }
+    window.ARCHITECTURAL_CARVINGS=false;const fallback=renderer.getVoxelMesh(tile,d),original=shape==='pillar'?renderer.buildVoxelGrid(tile,d,16,{carveArchitecture:false}):ScenePropVoxels.build(shape,16),restored=renderer.buildVoxelGrid(tile,d,16);
+    architecturalCarvingMeshes.push({shape,material,percent,baseUnchanged,protectedShaft,reliefRegion:carving.region,passes:parts.length,vertices:buffers.map(b=>b.verts.length/9),indices:buffers.map(b=>b.ix.length),views,pixels:Math.min(...views),
+      valid:buffers.every(b=>b.verts.length/9<65536&&b.verts.every(Number.isFinite)&&b.ix.every(i=>i<b.verts.length/9)),
+      carved:mesh._debugKey.includes('size:64'),fallback:fallback._debugKey.includes('size:16')&&original.every((v,i)=>v===restored[i])&&parts.every(part=>!gl.isBuffer(part.vbo)),error:gl.getError()});
+  }
+  if(oldCarvingFlag===undefined)delete window.ARCHITECTURAL_CARVINGS;else window.ARCHITECTURAL_CARVINGS=oldCarvingFlag;
+  if(oldClosureFlag===undefined)delete window.STONEWORK_SURFACE_CLOSURE;else window.STONEWORK_SURFACE_CLOSURE=oldClosureFlag;
+  gl.uniform2f(pu.camDir,1,0);gl.uniform2f(pu.plane,0,Math.tan(Math.PI/6));
+  const architecturalCarvingPass=architecturalCarvingMeshes.every(m=>m.valid&&m.carved&&m.fallback&&m.baseUnchanged&&m.protectedShaft&&m.pixels>100&&m.error===gl.NO_ERROR);
+  const columnSolidity=[];
+  const silhouette=(mesh,distance,angle)=>{
+    const vb=gl.createBuffer(),ib=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(mesh.vertices),gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint32Array(mesh.indices),gl.STATIC_DRAW);
+    for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+    const x=Math.cos(angle),y=Math.sin(angle);gl.uniform2f(pu.camPos,-x*distance,-y*distance);gl.uniform2f(pu.camDir,x,y);gl.uniform2f(pu.plane,-y*Math.tan(Math.PI/6),x*Math.tan(Math.PI/6));
+    gl.uniform3f(pu.modelPos,-.5,-.5,0);gl.uniform3f(pu.modelScale,1,1,2.7);gl.uniform1f(pu.unlit,1);gl.uniform1f(pu.depthBias,0);
+    gl.clearColor(1,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,mesh.indices.length,gl.UNSIGNED_INT,0);
+    const pixels=new Uint8Array(256*256*4);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);gl.deleteBuffer(vb);gl.deleteBuffer(ib);return pixels;
+  };
+  for(const shape of ['fluted_column','corinthian_column']){
+    const original=ScenePropVoxels.build(shape,64),grid=ScenePropVoxels.build(shape,64,0,{stoneCarving:StoneCarvings.resolveVoxelDescriptor({voxelShape:shape})});
+    const reference=renderer.meshVoxelsSimple(grid,64,()=>[1,1,1]),legacy=renderer.greedyMesh(grid,64,[1,1,1]),
+      half=renderer.greedyMesh(grid,64,[1,1,1],{closedSurface:.5}),closed=renderer.greedyMesh(grid,64,[1,1,1],{closedSurface:true});
+    const raised=[1,4].map(extension=>{
+      const ridge=StoneCarvings.ridgeMesh(original,grid,64,extension,[1,1,1],{shape}),base=closed.vertices.length/9;
+      return{vertices:closed.vertices.concat(ridge.vertices),indices:closed.indices.concat(ridge.indices.map(i=>i+base))};
+    });
+    for(const distance of [.65,1.2])for(const angle of [0,.35,.8,1.4,2.5,3.9,5.1]){
+      const ref=silhouette(reference,distance,angle),old=silhouette(legacy,distance,angle),trial=silhouette(half,distance,angle),fixed=silhouette(closed,distance,angle),
+        ridgePixels=raised.map(mesh=>silhouette(mesh,distance,angle));let visible=0,legacyGaps=0,halfGaps=0,gaps=0;const ridgeGaps=[0,0];
+      for(let i=0;i<ref.length;i+=4)if(ref[i+1]>0){visible++;if(!old[i+1])legacyGaps++;if(!trial[i+1])halfGaps++;if(!fixed[i+1])gaps++;
+        for(let j=0;j<ridgePixels.length;j++)if(!ridgePixels[j][i+1])ridgeGaps[j]++;}
+      columnSolidity.push({shape,distance,angle,visible,legacyGaps,halfGaps,gaps,ridgeGaps,error:gl.getError()});
+    }
+  }
+  const columnSolidityPass=columnSolidity.every(m=>m.visible>1000&&m.gaps===0&&m.ridgeGaps.every(n=>n===0)&&m.error===gl.NO_ERROR)&&columnSolidity.some(m=>m.legacyGaps>0);
+  gl.uniform2f(pu.camPos,0,0);gl.uniform2f(pu.camDir,1,0);gl.uniform2f(pu.plane,0,Math.tan(Math.PI/6));gl.clearColor(0,0,0,1);
+  const carvedArt={...art,kind:'relief',carvingStyle:'acanthus',carvingDepth:'incised'},relief=renderer.getSurfaceArtMesh(carvedArt,{'art-probe':artImage});
+  const lamp=ArtPresentation.plan({...art,position:{x:1,y:1,z:.35},size:{x:.02,y:4,z:2}})[0];
+  const lampMeshes=[false,true].map(flame=>renderer.getArtLampMesh(lamp,flame));
+  const artRefinementPass=refinementMeshes.every(m=>m.valid&&m.detail&&m.error===gl.NO_ERROR&&(m.form!=='human'||m.faceShades>1))&&relief!==artMesh&&relief.count>artMesh.count&&
+    lampMeshes.every(m=>m.count>0)&&renderer.getArtLampMesh(lamp,true)===lampMeshes[1]&&gl.getError()===gl.NO_ERROR;
+  const colors=[];
+  for(const color of['#80503a','#365c76']){
+    const backing=makeTexture(color),textures={'art-probe':artImage,wall:backing},mesh=renderer.getSurfaceArtMesh(carvedArt,textures);
+    gl.bindBuffer(gl.ARRAY_BUFFER,mesh.vbo);const vertex=new Float32Array(9);gl.getBufferSubData(gl.ARRAY_BUFFER,0,vertex);colors.push(Array.from(vertex.slice(6)));
+    if(renderer.getSurfaceArtMesh(carvedArt,textures)!==mesh)throw Error('Room-colored stonework was not cached');
+  }
+  const stoneworkPalettePass=colors[0][0]>colors[0][2]&&colors[1][2]>colors[1][0]&&gl.getError()===gl.NO_ERROR;
+  // Exercise the production voxel-light shader, not merely lamp metadata or an unlit preview.
+  gl.useProgram(renderer.voxelProgram);gl.viewport(0,0,256,256);gl.disable(gl.DEPTH_TEST);gl.disable(gl.CULL_FACE);
+  const emptyCells=gl.createTexture();gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,emptyCells);
+  gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,8,8,0,gl.RGBA,gl.FLOAT,new Float32Array(8*8*4));
+  gl.uniform1i(pu.cells,0);gl.uniform2i(pu.gridSize,8,8);gl.uniform1i(pu.flipY,0);gl.uniform1f(pu.unlit,0);
+  gl.uniform1f(pu.shadowStrength,0);gl.uniform1f(pu.lightIntensity,.1);gl.uniform1f(pu.depthShadeScale,0);
+  gl.uniform1f(pu.torchRadiusScale,1);gl.uniform1f(pu.torchLightScale,.6);gl.uniform1f(pu.highlightBoost,.4);
+  gl.uniform3f(pu.toneShadow,.2,.18,.15);gl.uniform3f(pu.toneMid,1,1,1);gl.uniform3f(pu.toneHighlight,1,1,1);
+  gl.bindBuffer(gl.ARRAY_BUFFER,artMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,artMesh.ibo);
+  for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]){
+    gl.enableVertexAttribArray(attribute);gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+  }
+  gl.uniform3f(pu.modelPos,1,-.4,.15);gl.uniform3f(pu.modelScale,.02,.8,.8);
+  const wallArt={...art,position:{x:1,y:-.4,z:.15},size:{x:.02,y:.8,z:.8}},wallLamps=ArtPresentation.plan(wallArt);
+  const lightLevels=[];
+  for(const on of[false,true]){
+    gl.uniform1i(pu.torchCount,on?wallLamps.length:0);
+    if(on){gl.uniform3fv(pu.torchPos,new Float32Array(wallLamps.flatMap(l=>[l.x,l.y,l.z])));
+      gl.uniform1fv(pu.torchRadius,new Float32Array(wallLamps.map(l=>l.radius)));gl.uniform1fv(pu.torchIntensity,new Float32Array(wallLamps.map(l=>l.intensity)));}
+    gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,artMesh.count,gl.UNSIGNED_SHORT,0);
+    gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,characterPixels);
+    let sum=0;for(let i=0;i<characterPixels.length;i+=4)sum+=characterPixels[i]+characterPixels[i+1]+characterPixels[i+2];lightLevels.push(sum);
+  }
+  const artLightingPass=lightLevels[0]>0&&lightLevels[1]>lightLevels[0]*1.1&&gl.getError()===gl.NO_ERROR;
+  const stonePreview=new URLSearchParams(location.search).has('stonework-preview'),overfillPreview=new URLSearchParams(location.search).has('overfill'),
+    artifactPreview=new URLSearchParams(location.search).has('artifact'),stoneLevels=artifactPreview?[1,3,3]:overfillPreview?[1,3,5]:[0,.5,1],
+    stoneCards=[],stoneworkComparison=[];
+  if(stonePreview){
+    const closureBefore=window.STONEWORK_SURFACE_CLOSURE,carvingsBefore=window.ARCHITECTURAL_CARVINGS,
+      revBefore=window.VOXEL_MESH_REV,boundedRidgeMesh=StoneCarvings.ridgeMesh;
+    window.ARCHITECTURAL_CARVINGS=true;
+    gl.enable(gl.DEPTH_TEST);gl.depthMask(true);gl.depthFunc(gl.LEQUAL);
+    gl.uniform2f(pu.lightDir,-.8,-.6);gl.uniform1f(pu.lightElev,.55);gl.uniform1f(pu.lightIntensity,.55);
+    gl.uniform1i(pu.torchCount,1);gl.uniform3fv(pu.torchPos,new Float32Array([-.85,-1.1,1.3]));
+    gl.uniform1fv(pu.torchRadius,new Float32Array([2.5]));gl.uniform1fv(pu.torchIntensity,new Float32Array([.7]));
+    gl.uniform1f(pu.torchLightScale,.6);gl.uniform1f(pu.torchRadiusScale,1);gl.uniform1f(pu.depthShadeScale,0);
+    const tile='stonework_comparison',d={tiles:{[tile]:{spriteSpec:{voxelShape:artifactPreview?'ionic_column':'fluted_column',material:'stone',
+      palette:{primary:'#9b876d',secondary:'#796c58',highlight:'#c5b295',shadow:'#413a30'},
+      stoneCarving:{version:1,region:'base',pattern:artifactPreview?'laurel':'palmette'}}}},visualStyle:{palette:{}}};
+    const snapshot=JSON.stringify(d);
+    for(const view of[{name:'Close plinth',angle:.15,distance:.78,eye:artifactPreview?.65:.38},{name:'Oblique plinth',angle:.8,distance:.9,eye:artifactPreview?.65:.4}]){
+      const x=Math.cos(view.angle),y=Math.sin(view.angle);
+      gl.uniform2f(pu.camPos,-x*view.distance,-y*view.distance);gl.uniform2f(pu.camDir,x,y);gl.uniform2f(pu.plane,-y*Math.tan(Math.PI/6),x*Math.tan(Math.PI/6));
+      gl.uniform1f(pu.eyeZ,view.eye);gl.uniform3f(pu.modelPos,-.5,-.5,0);gl.uniform3f(pu.modelScale,1,1,artifactPreview?7:2.7);
+      const samples=[],draws=[],ridgeMaxZ=[];
+      for(const[slot,closure]of stoneLevels.entries()){
+        if(artifactPreview){
+          window.VOXEL_MESH_REV=(revBefore||0)+slot+1;
+          StoneCarvings.ridgeMesh=slot===1?((source,carved,size,extension,colorFn)=>boundedRidgeMesh(source,carved,size,extension,colorFn)):boundedRidgeMesh;
+        }
+        window.STONEWORK_SURFACE_CLOSURE=closure;const mesh=renderer.getVoxelMesh(tile,d);
+        gl.clearColor(.13,.17,.2,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+        for(const part of mesh.passes||[mesh]){
+          gl.bindBuffer(gl.ARRAY_BUFFER,part.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,part.ibo);
+          for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+          gl.uniform1f(pu.unlit,part.unlit);gl.uniform1f(pu.toonSteps,part.toonSteps);
+          gl.uniform3fv(pu.toneShadow,part.toneShadow);gl.uniform3fv(pu.toneMid,part.toneMid);gl.uniform3fv(pu.toneHighlight,part.toneHighlight);
+          gl.drawElements(gl.TRIANGLES,part.count,gl.UNSIGNED_SHORT,0);
+        }
+        draws.push((mesh.passes||[mesh]).length);
+        if(artifactPreview&&mesh.passes?.length===2){
+          const part=mesh.passes[1];gl.bindBuffer(gl.ARRAY_BUFFER,part.vbo);
+          const verts=new Float32Array(gl.getBufferParameter(gl.ARRAY_BUFFER,gl.BUFFER_SIZE)/4);gl.getBufferSubData(gl.ARRAY_BUFFER,0,verts);
+          let max=-Infinity;for(let i=2;i<verts.length;i+=9)max=Math.max(max,verts[i]);ridgeMaxZ.push(max);
+        }else ridgeMaxZ.push(null);
+        const pixels=new Uint8Array(256*256*4);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);samples.push(pixels);
+        const card=document.createElement('figure'),image=document.createElement('canvas'),caption=document.createElement('figcaption');image.width=image.height=256;
+        const flipped=new Uint8ClampedArray(pixels.length);for(let row=0;row<256;row++)flipped.set(pixels.subarray(row*1024,(row+1)*1024),(255-row)*1024);
+        image.getContext('2d').putImageData(new ImageData(flipped,256,256),0,0);
+        caption.textContent=view.name+' / '+closure*100+'% '+(artifactPreview?['baseline','old edge-only reference','raised uncut field'][slot]:
+          closure===0?'original':closure===.5?'half repair':closure===1?'sealed':'raised ridges');
+        card.append(image,caption);stoneCards.push(card);
+      }
+      let firstToMiddle=0,middleToLast=0;
+      for(let i=0;i<samples[0].length;i+=4){
+        if([0,1,2].some(c=>samples[0][i+c]!==samples[1][i+c]))firstToMiddle++;
+        if([0,1,2].some(c=>samples[1][i+c]!==samples[2][i+c]))middleToLast++;
+      }
+      stoneworkComparison.push({view:view.name,levels:stoneLevels,draws,ridgeMaxZ,firstToMiddle,middleToLast,unchangedSource:JSON.stringify(d)===snapshot,
+        protectedRim:!artifactPreview||ridgeMaxZ[1]>.155&&ridgeMaxZ[2]<.155,error:gl.getError()});
+    }
+    if(closureBefore===undefined)delete window.STONEWORK_SURFACE_CLOSURE;else window.STONEWORK_SURFACE_CLOSURE=closureBefore;
+    if(carvingsBefore===undefined)delete window.ARCHITECTURAL_CARVINGS;else window.ARCHITECTURAL_CARVINGS=carvingsBefore;
+    if(revBefore===undefined)delete window.VOXEL_MESH_REV;else window.VOXEL_MESH_REV=revBefore;
+    StoneCarvings.ridgeMesh=boundedRidgeMesh;
+  }
+  const stoneworkComparisonPass=!stonePreview||stoneworkComparison.every(m=>m.firstToMiddle>0&&m.middleToLast>0&&m.unchangedSource&&m.protectedRim&&m.error===gl.NO_ERROR);
+  // Exercise the menu API through the real full-scene renderer, not a direct mesh draw.
+  const livePreview=new URLSearchParams(location.search).has('stonework-live-preview'),liveCards=[],liveStoneworkFrames=[],liveSamples=[];
+  const liveTile='custom_structure_v6_corinthian_column_wood',liveRoom={geoKey:'stonework-live-fixture',_geometryStamp:'wood-relief-live-1',
+    layout:{width:8,height:8},start:{x:3,y:3},classification:{indoor:true},tiles:{wall:{},floor:{},
+      [liveTile]:{spriteSpec:{voxelShape:'corinthian_column',material:'wood',profile:'flat',heightRatio:1,baseWidth:.85,gridWidth:.85,collisionRadius:.43}}},cells:{},
+    lighting:{dir:'SE',elevation:.6,intensity:.35},visualStyle:{palette:{primary:'#7A6B5A',secondary:'#4A3C3B',highlight:'#D9C68A',shadow:'#2F2A27'}}};
+  for(let y=0;y<8;y++)for(let x=0;x<8;x++)liveRoom.cells[x+','+y]={tile:x&&y&&x<7&&y<7?'floor':'wall',floorHeight:1,ceilHeight:6};
+  liveRoom.cells['4,3']={tile:liveTile,architectureRole:'roof-support',floorHeight:1,ceilHeight:6,structureHeight:5};
+  const liveSource=JSON.stringify(liveRoom),savedLiveFlags={paused:window.gamePaused,render:window.renderDungeonView,
+    carvings:window.ARCHITECTURAL_CARVINGS,closure:window.STONEWORK_SURFACE_CLOSURE};
+  // Earlier direct-mesh probes leave attribute pointers into disposable buffers.
+  gl.bindVertexArray(gl.createVertexArray());gl.colorMask(true,true,true,true);gl.depthMask(true);
+  window.currentDungeon=liveRoom;window.dungeonTextures={wall:makeTexture('#4A3C3B'),floor:makeTexture('#7A6B5A')};
+  window.dungeonTexturesMeta={[liveTile]:liveRoom.tiles[liveTile].spriteSpec};window.combatCharacters=[];
+  window.playerDungeonX=window.playerDungeonY=3;window.playerPosX=3.2;window.playerPosY=3.2;
+  window.playerAngle=Math.atan2(.3,1.3);window.playerZ=1.65;window.gamePaused=true;
+  window.ARCHITECTURAL_CARVINGS=true;let liveRedraws=0;
+  window.renderDungeonView=()=>{liveRedraws++;renderer.renderScene();};
+  for(const[enabled,percent]of[[true,100],[true,500],[true,300],[false,300],[true,300],[true,100]]){
+    if(window.ARCHITECTURAL_CARVINGS!==enabled)GameMenuUi.setStonework(enabled);else GameMenuUi.setStoneworkClosure(percent/100);
+    const pixels=new Uint8Array(256*256*4);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);liveSamples.push(pixels);
+    const mesh=renderer.voxelMeshes[liveTile],status=GameMenuUi.getStoneworkStatus();
+    liveStoneworkFrames.push({enabled,percent,status,draws:renderer.lastFrameStats?.voxelDrawCalls,
+      detail:mesh?._debugKey.includes('size:64'),passes:mesh?.passes?.length||1,frameStonework:renderer.lastFrameStats?.stonework,error:gl.getError()});
+    if(livePreview){
+      const card=document.createElement('figure'),canvas=document.createElement('canvas'),caption=document.createElement('figcaption');canvas.width=canvas.height=256;
+      const flipped=new Uint8ClampedArray(pixels.length);for(let row=0;row<256;row++)flipped.set(pixels.subarray(row*1024,(row+1)*1024),(255-row)*1024);
+      canvas.getContext('2d').putImageData(new ImageData(flipped,256,256),0,0);caption.textContent=(enabled?'ON':'OFF')+' / '+percent+'% / wood column';
+      card.append(canvas,caption);liveCards.push(card);
+    }
+  }
+  const livePixelChanges=[];
+  for(const[a,b]of[[0,1],[1,2],[2,3],[3,4],[0,5],[2,4]]){
+    let changed=0;for(let i=0;i<liveSamples[a].length;i+=4)if([0,1,2].some(c=>liveSamples[a][i+c]!==liveSamples[b][i+c]))changed++;
+    livePixelChanges.push({from:a,to:b,changed});
+  }
+  const liveStoneworkPass=liveRedraws===6&&JSON.stringify(liveRoom)===liveSource&&window.gamePaused===true&&
+    liveStoneworkFrames.every(f=>f.error===gl.NO_ERROR&&f.status.percent===f.percent&&f.status.enabled===f.enabled&&f.status.compatibleInstances===1&&
+      f.status.baseSurfacePercent===100&&f.status.reliefScope==='carving-fields'&&f.status.carvingRegions.base===1&&
+      f.detail===f.enabled&&f.frameStonework?.percent===f.percent&&f.frameStonework?.enabled===f.enabled&&
+      (!f.enabled||f.status.cachedPercentages.includes(f.percent))&&f.passes===(f.enabled?(f.percent>100?2:1):3))&&
+    livePixelChanges.every((p,i)=>i<4?p.changed>0:p.changed===0);
+  const combatRenderFrames=[],combatBackgrounds=[],combatLighting=JSON.stringify(liveRoom.lighting);
+  const combatActor={name:'Mortacia',type:'npc',hp:20,mazeX:4,mazeY:4,mazeRoomKey:renderer._getCurrentRoomKey(),walkFrame:0,
+    sprite:{spec:ProceduralCharacters.getPresetProceduralSpec('Mortacia')}};
+  for(const phase of ['before','alive','dead','retreat','after']){
+    // Interleaved UI/debug draws must not define the world pass's depth state.
+    if(phase==='before'||phase==='after'){gl.disable(gl.DEPTH_TEST);gl.depthMask(false);gl.enable(gl.BLEND);}
+    window.combatCharacters=phase==='alive'?[{...combatActor}]:phase==='dead'?[{...combatActor,hp:0,state:'Dead'}]:[];
+    window.playerPosX=phase==='retreat'?3.5:3.2;window.playerPosY=phase==='retreat'?3.5:3.2;
+    renderer.renderScene();
+    const pixels=new Uint8Array(256*256*4);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    combatBackgrounds.push(pixels);
+    combatRenderFrames.push({phase,error:gl.getError(),draws:renderer.lastFrameStats?.voxelDrawCalls,actors:renderer._getVisibleCharacterVoxelActors().length,
+      depthTest:gl.isEnabled(gl.DEPTH_TEST),depthWrite:gl.getParameter(gl.DEPTH_WRITEMASK),
+      sameGeometry:JSON.stringify(liveRoom)===liveSource,sameLighting:JSON.stringify(liveRoom.lighting)===combatLighting});
+  }
+  let combatBackgroundChanges=0,combatActorChanges=0;
+  for(let i=0;i<combatBackgrounds[0].length;i++){
+    if(combatBackgrounds[0][i]!==combatBackgrounds[4][i])combatBackgroundChanges++;
+    if(combatBackgrounds[0][i]!==combatBackgrounds[1][i])combatActorChanges++;
+  }
+  const combatRenderPass=combatRenderFrames.every(f=>f.error===gl.NO_ERROR&&f.depthTest&&f.depthWrite&&f.sameGeometry&&f.sameLighting&&f.actors===(f.phase==='alive'?1:0))&&combatBackgroundChanges===0&&combatActorChanges>0;
+  window.gamePaused=savedLiveFlags.paused;window.renderDungeonView=savedLiveFlags.render;
+  window.ARCHITECTURAL_CARVINGS=savedLiveFlags.carvings;window.STONEWORK_SURFACE_CLOSURE=savedLiveFlags.closure;
+  gl.deleteTexture(emptyCells);
   document.getElementById('results').textContent = JSON.stringify({
     shadersCompiled: true,
     initializationMs, adapter, startupEvents: renderer.startupEvents,
     pass: results.every(result => result.gpuUploadByteMismatches === 0 && result.glError === gl.NO_ERROR) &&
-      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && mechanismMotionPass && funeraryPass,
-      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass,artPass,artPixels,mechanismMotionPass,funeraryMeshes,funeraryPass
+      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && itemGroundingPass && actorShadowOcclusionPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && wideArtPass && circleAspectPass && circularMosaicPass && architecturalCarvingPass && columnSolidityPass && stoneworkPalettePass && mechanismMotionPass && funeraryPass&&artRefinementPass&&artLightingPass&&stoneworkComparisonPass&&liveStoneworkPass&&negativeReliefPass&&combatRenderPass,
+      results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, itemGrounding, itemGroundingPass, shadowSamples, actorShadowOcclusionPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass,artPass,wideArtPass,circleAspectPass,circleMeasurements,circularMosaicPass,mosaicMeasurements,architecturalCarvingPass,architecturalCarvingMeshes,columnSolidity,columnSolidityPass,stoneworkPalettePass,artPixels,mechanismMotionPass,funeraryMeshes,funeraryPass,artRefinementPass,refinementMeshes,artLightingPass,lightLevels,stoneworkComparison,stoneworkComparisonPass,liveStoneworkPass,liveStoneworkFrames,livePixelChanges,liveRedraws,negativeRelief,negativeReliefPass,combatRenderPass,combatRenderFrames,combatBackgroundChanges
   });
+  if(stonePreview||livePreview){
+    for(const node of document.querySelectorAll('body > canvas, #dungeon-popup, #results'))node.style.display='none';
+    const style=document.createElement('style');style.textContent='body{margin:0;background:#14191c;color:#efdbb5;font:17px Georgia,serif}header{padding:18px 24px 4px}h1{margin:0 0 8px;font-size:25px}p{margin:0}main{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;padding:20px 24px}figure{margin:0;background:#0c1115;border:1px solid #76634d;padding:8px;text-align:center}canvas{width:100%;height:auto;image-rendering:pixelated}figcaption{padding:8px}';
+    document.head.appendChild(style);const heading=document.createElement('header');
+    heading.innerHTML=livePreview?'<h1>Live Menu-to-Renderer Stonework Test</h1><p>Current-room wood column metadata. Same camera and lighting; changes are triggered by the menu API while paused.</p>':
+      artifactPreview?'<h1>Recessed Carving / Raised Uncut Stone</h1><p>Same 7-unit column, laurel incision, camera and lighting. The full uncut field rises; carving lines and protected rims stay low.</p>':
+      overfillPreview?'<h1>Stonework Ridge Extension Comparison</h1><p>Same sealed carvings, camera, materials and production lighting. Only ridge tops and connecting walls extend outward.</p>':
+      '<h1>Stonework Surface Repair Comparison</h1><p>Same 64-voxel carvings, camera, materials and production lighting. Only face placement and seam overlap change.</p>';
+    const gallery=document.createElement('main');gallery.append(...(livePreview?liveCards:stoneCards));document.body.append(heading,gallery);
+  }
   if (preview) {
     for(const node of document.querySelectorAll('body > canvas, #dungeon-popup, #results')) node.style.display='none';
     const style=document.createElement('style'); style.textContent='body{margin:0;background:#171c21;color:#efd7a3;font:16px Georgia,serif}main{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;padding:24px}figure{margin:0;background:#0b1015;border:1px solid #5c6c74;padding:8px;text-align:center}figure canvas{width:100%;height:auto;image-rendering:pixelated}figcaption{padding:8px}';
     document.head.appendChild(style); const gallery=document.createElement('main'); gallery.append(...cards); document.body.appendChild(gallery);
   }
 } catch (error) {
-  document.getElementById('results').textContent = JSON.stringify({ error: error.message });
+  document.getElementById('results').textContent = JSON.stringify({ error: error.stack });
 }
 </script>
 </html>

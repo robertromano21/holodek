@@ -1,0 +1,165 @@
+'use strict';
+// SID effect and ambience designs. t = frame (50 Hz). Every voice field: hz, wave, gate, pw, ad, sr, sync, ring.
+module.exports = ({ shot, loop, midi, ad, sr, rng }) => {
+  const off = { gate: 0 };
+  const lerp = (a, b, x) => a + (b - a) * Math.max(0, Math.min(1, x));
+  const expl = (a, b, x) => a * Math.pow(b / a, Math.max(0, Math.min(1, x)));
+
+  // ---------- footsteps: a short low noise tap through the low-pass, two variants ----------
+  [['step1', 900, 520], ['step2', 760, 440]].forEach(([n, nz, cut]) => shot(n, 5, t => ({
+    v: [{ hz: nz, wave: 'noise', gate: t < 1, ad: ad(0, 4), sr: sr(0, 3) }, off, off],
+    f: { cut: cut - t * 60, res: 2, route: 1, mode: 'lp', vol: 15 } }), { gain: 0.9 }));
+
+  // ---------- door: creaking hinge (saw, wobbling pitch, sync) then a heavy thud ----------
+  { const r = rng(7); let w = 0; shot('door', 42, t => {
+    w += (r() - 0.5) * 9; const creak = t < 30;
+    return { v: [
+      { hz: 95 + Math.sin(t * 0.9) * 18 + w, wave: 'saw', gate: creak, ad: ad(3, 4), sr: sr(9, 2) },
+      { hz: 160 + Math.sin(t * 1.7) * 25, wave: 'pulse', pw: 400 + t * 40, gate: creak, sync: true, ad: ad(4, 4), sr: sr(6, 2) },
+      { hz: t < 30 ? 60 : expl(180, 50, (t - 30) / 8), wave: t < 32 ? 'noise' : 'tri', gate: t >= 30 && t < 33, ad: ad(0, 8), sr: sr(0, 8) }],
+      f: { cut: t < 30 ? 700 + Math.sin(t * 0.5) * 150 : 300, res: 9, route: 3, mode: 'bp', vol: 15 } }; }); }
+
+  // ---------- pickup: classic rising pulse arpeggio blips ----------
+  { const notes = [72, 76, 79, 84]; shot('pickup', 14, t => ({ v: [
+    { hz: midi(notes[Math.min(3, t >> 1)]), wave: 'pulse', pw: 1024 + t * 120, gate: t < 9, ad: ad(0, 6), sr: sr(8, 4) },
+    { hz: midi(notes[Math.min(3, t >> 1)] + 12) * 1.004, wave: 'tri', gate: t < 9, ad: ad(0, 6), sr: sr(6, 5) }, off] })); }
+
+  // ---------- coins / treasure: bright ring-modulated chimes ----------
+  shot('coins', 22, t => { const k = t < 6 ? 0 : t < 12 ? 1 : 2, gate = (t % 6) < 2;
+    return { v: [{ hz: midi([88, 91, 96][k]), wave: 'tri', ring: true, gate, ad: ad(0, 7), sr: sr(0, 7) }, off,
+      { hz: midi([81, 86, 89][k]), wave: 'tri', gate: false }] }; });
+
+  // ---------- spell cast: rising sync shimmer + ring-mod sparkle ----------
+  shot('spell', 48, t => ({ v: [
+    { hz: expl(220, 1760, t / 40), wave: 'saw', sync: true, gate: t < 40, ad: ad(6, 8), sr: sr(10, 9) },
+    { hz: expl(90, 330, t / 40), wave: 'tri', gate: t < 40, ad: ad(5, 8), sr: sr(8, 8) },
+    { hz: midi(84 + [0, 4, 7, 12][t % 4]), wave: 'tri', ring: true, gate: t > 6 && t < 44, ad: ad(4, 6), sr: sr(10, 8) }],
+    f: { cut: 300 + t * 34, res: 12, route: 1, mode: 'bp', vol: 15 } }));
+
+  // ---------- fire / force spell: noise blast with filter sweeping down ----------
+  shot('fireball', 46, t => ({ v: [
+    { hz: expl(4000, 600, t / 40), wave: 'noise', gate: t < 26, ad: ad(1, 9), sr: sr(12, 9) },
+    { hz: expl(200, 45, t / 30), wave: 'pulse', pw: 600 + t * 50, gate: t < 14, ad: ad(0, 8), sr: sr(9, 9) }, off],
+    f: { cut: expl(2000, 180, t / 40), res: 10, route: 3, mode: 'lp', vol: 15 } }));
+
+  // ---------- heal / bless: rising major arpeggio, soft triangle with octave echo ----------
+  { const n = [60, 64, 67, 72, 76, 79, 84]; shot('heal', 46, t => { const i = Math.min(6, t >> 2);
+    return { v: [{ hz: midi(n[i]) * (1 + Math.sin(t * 0.8) * 0.004), wave: 'tri', gate: t < 34, ad: ad(2, 6), sr: sr(10, 9) },
+      { hz: midi(n[Math.max(0, i - 1)] + 12), wave: 'tri', gate: t > 3 && t < 36, ad: ad(4, 6), sr: sr(7, 10) }, off] }; }); }
+
+  // ---------- melee hit: noise crack + pitch-dropping square thump ----------
+  shot('hit', 12, t => ({ v: [
+    { hz: 3200, wave: 'noise', gate: t < 2, ad: ad(0, 6), sr: sr(0, 6) },
+    { hz: expl(260, 55, t / 8), wave: 'pulse', pw: 2048, gate: t < 3, ad: ad(0, 7), sr: sr(0, 6) }, off],
+    f: { cut: 1500 - t * 90, res: 4, route: 2, mode: 'lp', vol: 15 } }));
+
+  // ---------- critical hit: double crack, ring-mod clang, deeper boom ----------
+  shot('crit', 30, t => ({ v: [
+    { hz: t < 6 ? 5000 : 1800, wave: 'noise', gate: t < 2 || (t >= 6 && t < 8), ad: ad(0, 8), sr: sr(0, 8) },
+    { hz: expl(320, 38, t / 18), wave: 'pulse', pw: 1600 + t * 60, gate: t < 6, ad: ad(0, 9), sr: sr(0, 9) },
+    { hz: 1180, wave: 'tri', ring: true, gate: t < 3, ad: ad(0, 9), sr: sr(0, 9) }],
+    f: { cut: expl(1800, 300, t / 25), res: 8, route: 3, mode: 'lp', vol: 15 } }));
+
+  // ---------- miss: blade whoosh (band-passed noise, filter swept up then down) ----------
+  shot('miss', 18, t => ({ v: [{ hz: 2400, wave: 'noise', gate: t < 9, ad: ad(4, 6), sr: sr(10, 6) }, off, off],
+    f: { cut: t < 8 ? 250 + t * 160 : 1530 - (t - 8) * 130, res: 13, route: 1, mode: 'bp', vol: 15 } }));
+
+  // ---------- monster death: falling saw groan + noise collapse ----------
+  shot('monster_death', 60, t => ({ v: [
+    { hz: expl(330, 40, t / 50) * (1 + Math.sin(t * 1.3) * 0.03), wave: 'saw', gate: t < 42, ad: ad(1, 9), sr: sr(12, 9) },
+    { hz: expl(220, 30, t / 55) * 1.01, wave: 'pulse', pw: 300 + t * 30, gate: t < 42, ad: ad(3, 9), sr: sr(10, 9) },
+    { hz: 700, wave: 'noise', gate: t >= 30 && t < 36, ad: ad(0, 9), sr: sr(0, 9) }],
+    f: { cut: expl(1600, 150, t / 55), res: 9, route: 7, mode: 'lp', vol: 15 } }));
+
+  // ---------- player hurt: short dissonant square drop ----------
+  shot('hurt', 16, t => ({ v: [
+    { hz: expl(520, 180, t / 10), wave: 'pulse', pw: 900, gate: t < 6, ad: ad(0, 7), sr: sr(6, 6) },
+    { hz: expl(552, 190, t / 10), wave: 'pulse', pw: 1800, gate: t < 6, ad: ad(0, 7), sr: sr(6, 6) },
+    { hz: 1500, wave: 'noise', gate: t < 1, ad: ad(0, 5), sr: sr(0, 5) }] }));
+
+  // ---------- party member death: Mortacia's lament, a slow falling minor line over a low pedal ----------
+  { const line = [69, 68, 65, 64, 62, 57]; shot('death', 140, t => { const i = Math.min(5, Math.floor(t / 20));
+    return { v: [
+      { hz: midi(line[i]) * (1 + (t % 20 > 8 ? Math.sin(t * 0.7) * 0.006 : 0)), wave: 'pulse', pw: 1200 + Math.sin(t * 0.1) * 600, gate: t < 118 && t % 20 !== 19, ad: ad(4, 9), sr: sr(10, 9) },
+      { hz: midi(45), wave: 'saw', gate: t < 120, ad: ad(9, 9), sr: sr(12, 11) },
+      { hz: midi(line[i] - 12), wave: 'tri', gate: t < 118 && t % 20 !== 19, ad: ad(5, 9), sr: sr(10, 9) }],
+      f: { cut: 700 - t * 3, res: 6, route: 2, mode: 'lp', vol: 15 } }; }, { tail: 1.6 }); }
+
+  // ---------- level up: classic SID fanfare, fast arps then a held major chord ----------
+  { const seq = [[60, 64, 67], [65, 69, 72], [67, 71, 74], [72, 76, 79]]; shot('levelup', 90, t => {
+    const ph = Math.min(3, Math.floor(t / 10)), ch = seq[ph], held = t >= 30;
+    return { v: [
+      { hz: midi(ch[t % 3] + 12), wave: 'pulse', pw: 800 + t * 30, gate: t < 70 && (held || t % 10 !== 9), ad: ad(0, 8), sr: sr(11, 9) },
+      { hz: midi(ch[0] - 12), wave: 'saw', gate: t < 72 && (held || t % 10 !== 9), ad: ad(0, 8), sr: sr(10, 9) },
+      { hz: midi(held ? 84 : ch[2] + 12) * (held ? 1 + Math.sin(t * 0.6) * 0.005 : 1), wave: 'tri', gate: t < 74, ad: ad(1, 8), sr: sr(12, 10) }],
+      f: { cut: 500 + Math.min(t, 40) * 25, res: 7, route: 2, mode: 'lp', vol: 15 } }; }, { tail: 1.4 }); }
+
+  // ---------- combat start: tritone brass stab + war-drum roll ----------
+  shot('combat_start', 56, t => ({ v: [
+    { hz: midi(t < 24 ? 50 : 49), wave: 'saw', gate: t < 44, ad: ad(0, 9), sr: sr(10, 9) },
+    { hz: midi(t < 24 ? 56 : 55) * 1.003, wave: 'pulse', pw: 1400 + t * 25, gate: t < 44, ad: ad(0, 9), sr: sr(10, 9) },
+    { hz: t % 6 < 1 ? 180 : 90, wave: t % 6 < 1 ? 'noise' : 'tri', gate: t % 6 < 2 && t < 40, ad: ad(0, 6), sr: sr(0, 6) }],
+    f: { cut: t < 4 ? 1400 : 1400 - t * 18, res: 10, route: 3, mode: 'lp', vol: 15 } }));
+
+  // ---------- room enter: soft filtered whoosh and a low bell ----------
+  shot('room_enter', 70, t => ({ v: [
+    { hz: 1200, wave: 'noise', gate: t < 22, ad: ad(9, 9), sr: sr(4, 10) },
+    { hz: midi(45), wave: 'tri', ring: true, gate: t >= 10 && t < 14, ad: ad(0, 10), sr: sr(0, 10) },
+    { hz: midi(45) * 2.76, wave: 'tri', gate: false }],
+    f: { cut: 200 + Math.sin(Math.min(t, 40) / 40 * Math.PI) * 700, res: 11, route: 1, mode: 'bp', vol: 15 } }), { gain: 0.8 });
+
+  // ---------- dice roll: rattling clicks slowing down ----------
+  { const r = rng(42); const hits = []; let x = 0, gap = 1; while (x < 40) { hits.push(x); x += Math.round(gap); gap *= 1.18; }
+    shot('dice', 46, t => { const on = hits.includes(t); return { v: [
+      { hz: 2600 + r() * 1500, wave: 'noise', gate: on, ad: ad(0, 2), sr: sr(0, 2) },
+      { hz: 900 + r() * 400, wave: 'tri', gate: on && r() < 0.5, ad: ad(0, 2), sr: sr(0, 2) }, off],
+      f: { cut: 1300, res: 8, route: 1, mode: 'hp', vol: 15 } }; }); }
+
+  // ---------- notice: short two-note UI chirp ----------
+  shot('notice', 8, t => ({ v: [{ hz: midi(t < 3 ? 79 : 84), wave: 'pulse', pw: 2048, gate: t < 5, ad: ad(0, 4), sr: sr(6, 4) }, off, off] }), { gain: 0.6 });
+
+  // ---------- quest / discovery: three bell strikes rising ----------
+  shot('quest', 70, t => { const k = Math.min(2, Math.floor(t / 10)), g = t % 10 < 2 && t < 30;
+    return { v: [{ hz: midi([74, 78, 81][k]), wave: 'tri', ring: true, gate: g, ad: ad(0, 10), sr: sr(0, 10) }, off,
+      { hz: midi([74, 78, 81][k]) * 1.41, wave: 'tri', gate: false }] }; }, { tail: 1.0 });
+
+  // ===================== AMBIENCE LOOPS (seamless, quiet layers) =====================
+  // wind: band-passed noise with slowly wandering cutoff (two incommensurate LFOs)
+  loop('amb_wind', 12, (t, n) => { const x = t / 50; return { v: [{ hz: 1100, wave: 'noise', gate: true, ad: ad(9, 0), sr: sr(15, 0) }, off, off],
+    f: { cut: 380 + Math.sin(x * 0.7) * 160 + Math.sin(x * 1.9) * 70, res: 11, route: 1, mode: 'bp', vol: 15 } }; }, { gain: 0.7 });
+  // sandstorm: brighter, gusting high-passed hiss + low roar on voice 2
+  loop('amb_sandstorm', 12, t => { const x = t / 50, g = Math.sin(x * 1.1) + Math.sin(x * 2.9) * 0.5;
+    return { v: [{ hz: 3200 + g * 600, wave: 'noise', gate: true, ad: ad(9, 0), sr: sr(15, 0) },
+      { hz: 260, wave: 'noise', gate: true, ad: ad(10, 0), sr: sr(12, 0) }, off],
+      f: { cut: 900 + g * 330, res: 6, route: 1, mode: 'lb', vol: 15 } }; }, { gain: 0.6 });
+  // drips: sparse resonant triangle plinks with downward chirp (cave water)
+  { const r = rng(3), drips = []; for (let x = 20; x < 14 * 50; x += 40 + Math.floor(r() * 70)) drips.push([x, 1300 + r() * 1300]);
+    loop('amb_drips', 12, t => { const d = drips.find(([s]) => t >= s && t < s + 4); return { v: [
+      { hz: d ? d[1] * (1 - (t - d[0]) * 0.12) : 1000, wave: 'tri', gate: !!d && t - d[0] < 1, ad: ad(0, 4), sr: sr(0, 6) }, off, off] }; }, { gain: 0.8 }); }
+  // fire crackle: random noise pops over a soft low-passed roar
+  { const r = rng(11); loop('amb_fire', 10, t => { const pop = r() < 0.18;
+    return { v: [{ hz: 2000 + r() * 4000, wave: 'noise', gate: pop, ad: ad(0, 1), sr: sr(0, 1) },
+      { hz: 500, wave: 'noise', gate: true, ad: ad(9, 0), sr: sr(10, 0) }, off],
+      f: { cut: 240 + Math.sin(t / 13) * 40, res: 4, route: 2, mode: 'lp', vol: 15 } }; }, { gain: 0.8 }); }
+  // distant howls: rare, slow pulse/tri glides through a low-pass
+  { const how = [[30, 64], [330, 61], [520, 66]]; loop('amb_howls', 16, t => { const h = how.find(([s]) => t >= s && t < s + 110), p = h ? (t - h[0]) / 110 : 0;
+    const env = h ? Math.sin(Math.min(1, p * 1.2) * Math.PI) : 0;
+    return { v: [{ hz: midi(h ? h[1] : 60) * (1 + Math.sin(p * Math.PI) * 0.12 - (p > 0.7 ? (p - 0.7) * 0.6 : 0)) * (1 + Math.sin(t * 0.9) * 0.008),
+      wave: 'tri', gate: !!h && p < 0.7, ad: ad(11, 9), sr: sr(12, 11) },
+      { hz: midi(h ? h[1] : 60) * 1.5 * (1 + Math.sin(p * Math.PI) * 0.12), wave: 'pulse', pw: 300, gate: !!h && p < 0.5, ad: ad(12, 9), sr: sr(6, 11) }, off],
+      f: { cut: 300 + env * 250, res: 8, route: 3, mode: 'lp', vol: 15 } }; }, { gain: 0.9 }); }
+  // chanting: low male-voice drone, two saws a fifth apart, slow vowel (band-pass) movement
+  { const notes = [45, 45, 46, 45, 43, 45]; loop('amb_chant', 18, t => { const i = Math.floor(t / 150) % notes.length, x = t / 50;
+    return { v: [{ hz: midi(notes[i]) * (1 + Math.sin(x * 5.5) * 0.004), wave: 'saw', gate: t % 150 < 140, ad: ad(10, 9), sr: sr(12, 10) },
+      { hz: midi(notes[i] + 7) * 1.003, wave: 'pulse', pw: 1000 + Math.sin(x) * 400, gate: t % 150 < 140, ad: ad(11, 9), sr: sr(10, 10) },
+      { hz: midi(33), wave: 'tri', gate: true, ad: ad(12, 0), sr: sr(10, 0) }],
+      f: { cut: 260 + Math.sin(x * 0.9) * 90 + (t % 150) * 0.6, res: 13, route: 3, mode: 'bp', vol: 15 } }; }, { gain: 0.75 }); }
+  // rumble: sub-bass triangle + low-passed noise swelling (earth, lava, distant machinery)
+  loop('amb_rumble', 12, t => { const x = t / 50; return { v: [
+    { hz: 38 + Math.sin(x * 0.6) * 4, wave: 'tri', gate: true, ad: ad(10, 0), sr: sr(15, 0) },
+    { hz: 300, wave: 'noise', gate: true, ad: ad(10, 0), sr: sr(13, 0) }, off],
+    f: { cut: 110 + Math.sin(x * 0.5) * 50 + Math.sin(x * 1.7) * 20, res: 7, route: 2, mode: 'lp', vol: 15 } }; }, { gain: 1.0 });
+  // water: running stream, fast-modulated band-passed noise
+  { const r = rng(5); let c = 600; loop('amb_water', 10, t => { c += (r() - 0.5) * 120; c = Math.max(450, Math.min(950, c));
+    return { v: [{ hz: 2600, wave: 'noise', gate: true, ad: ad(9, 0), sr: sr(13, 0) }, off, off], f: { cut: c, res: 9, route: 1, mode: 'bp', vol: 15 } }; }, { gain: 0.6 }); }
+};

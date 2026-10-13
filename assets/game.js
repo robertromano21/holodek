@@ -299,6 +299,8 @@ async function switchDungeonForCoordinates(coordString) {
   updatePlayerHeightFromCell();
   refreshPartyDungeonPresence(true);
   renderDungeonView();
+  // Revisited (cached) room is on screen: let the queued room song start (two-slot music, sfx.js).
+  requestAnimationFrame(() => requestAnimationFrame(() => window.HolodekSfx?.roomShown?.(currentDungeon?.geoKey || geoKey)));
   logDungeonCombatSync('move');
 }
 
@@ -484,7 +486,7 @@ function attachMusicSSE() {
     if (data?.type === 'roomMusicStop') {
       stopRoomWav();
     }
-    if (data?.type === 'roomMusicReady' && data?.wav) {
+    if (data?.type === 'roomMusicReady' && data?.wav && !window.HolodekSfx?.queueRoomMusic) {
       playRoomWavFresh(data.wav, data.token || Date.now());
     }
   };
@@ -639,6 +641,7 @@ const eventSource = new EventSource('/combat-updates2');
 eventSource.onmessage = function(event) {
   let data;
   try { data = JSON.parse(event.data); } catch { return; }
+  try { window.HolodekSfx?.onServerEvent(data); } catch (error) { console.warn('[sfx]', error.message); }
   if (data.type === 'dungeonRun') {
     if (window.dungeonRunId !== data.runId) {
       window.dungeonRunId = data.runId;
@@ -649,9 +652,11 @@ eventSource.onmessage = function(event) {
       window.InventoryUi?.reset();
       window.DungeonLife?.reset();
       window.ItemInteractionUi?.reset();
+      window.ObjectDiscovery?.reset();
       window.DungeonActionNotices?.reset();
       window.DungeonCompass?.setNavigation(null, null);
       window.questProgressText = '';
+      window.questRequirementsText = '';
       window.lastServerGameConsole = '';
       window.dungeonItemConsole = null;
       roomDatabaseSyncClient.reset();
@@ -687,6 +692,10 @@ eventSource.onmessage = function(event) {
     Promise.resolve(window.applyRealtimeCombatResult?.(data)).catch(error=>console.warn('[EncounterResult]',error.message));
     return;
   }
+  if (data.type === 'combat_health') {
+    window.applyLiveCombatHealth?.(data);
+    return;
+  }
   if (data.type === 'dice_state') {
     window.receiveDiceState?.(data);
     if (!data.active) window._combatRoundActiveUntil = 0;
@@ -700,7 +709,8 @@ eventSource.onmessage = function(event) {
 
   // Room music
   if (data?.type === 'roomMusicReady' && data?.wav) {
-    playRoomWavFresh(data.wav, data.token || Date.now());
+    // sfx.js queues the song and switches when the room is on screen (two-slot scheme)
+    if (!window.HolodekSfx?.queueRoomMusic) playRoomWavFresh(data.wav, data.token || Date.now());
     return;
   }
 
@@ -777,6 +787,8 @@ eventSource.onmessage = function(event) {
         updatePlayerHeightFromCell();
         refreshPartyDungeonPresence(true);
         renderDungeonView();
+        // The room is spawned and drawn: let the queued room song start (after the next painted frames).
+        requestAnimationFrame(() => requestAnimationFrame(() => window.HolodekSfx?.roomShown?.(currentDungeon?.geoKey || geoKey)));
       })();
         
     // Refresh the combat-map overlay if the scene is alive (rotating version preferred)
@@ -822,8 +834,7 @@ eventSource.onmessage = function(event) {
         if (combatScene) combatScene.updatePositions(newCombatCharacters);
         window.renderPartyIconDock?.();
     } else if (data.type === 'target_prompt') {
-        const { combatant, targets, positions, actionId } = data;
-        showTargetSelectionPopup(combatant, targets, positions, actionId);
+        window.showCombatTargetPrompt?.(data);
     } else if (data.type === 'combat_log') {
         const { log } = data;
         updateChatLog("<br><br>" + log.replace(/\n/g, "<br>"));
@@ -1062,17 +1073,18 @@ const PLAYER_RADIUS = 0.2;
 const Z_SMOOTH = 8.0;
 const RUN_MULT = 1.6;
 const PC_WALK_FRAME_MS = 220;
-const NPC_WALK_FRAME_MS = 200;
-const NPC_MOVE_TWEEN_MS = 420;
+const NPC_WALK_FRAME_MS = 200 / 0.6;
+const NPC_MOVE_TWEEN_MS = 420 / 0.6;
 const NPC_MOVE_THINK_MS = 90;
-const NPC_MOVE_STEP_MS = 380;
-const NPC_MOVE_VARIANCE_MS = 240;
+const NPC_MOVE_STEP_MS = 380 / 0.6;
+const NPC_MOVE_VARIANCE_MS = 240 / 0.6;
 const PARTY_IDLE_INTERVAL_MS = 180;
 const COMBAT_GRID_SIZE = 31;
 const COMBAT_CELL_SIZE = 25;
 const COMBAT_GRID_CENTER = Math.floor(COMBAT_GRID_SIZE / 2);
 const COMBAT_CANVAS_SIZE = COMBAT_GRID_SIZE * COMBAT_CELL_SIZE;
-const COMBAT_ACTOR_TOKEN_SCALE = 1.25;
+const COMBAT_ACTOR_TOKEN_SCALE = 1.35;
+const COMBAT_MORTACIA_TOKEN_SCALE = 1.75;
 
 function deriveFacingFromDelta(dx, dy, fallback = 'left') {
   const safeFallback = String(fallback || 'left').toLowerCase() === 'right' ? 'right' : 'left';
@@ -1086,6 +1098,18 @@ function deriveFacingFromDelta(dx, dy, fallback = 'left') {
   if (dy > 0) return 'right';
   if (dy < 0) return 'left';
   return safeFallback;
+}
+
+function combatFacingFromControls(keys, fallback = 'left') {
+  const horizontal=Number(!!(keys.right||keys.strafeRight))-Number(!!(keys.left||keys.strafeLeft));
+  if(horizontal)return horizontal>0?'right':'left';
+  const vertical=Number(!!keys.backward)-Number(!!keys.forward);
+  return vertical?vertical>0?'right':'left':fallback;
+}
+
+function rememberCombatMovementFacing(actor, dx, dy) {
+  actor.mapMoveX=dx;actor.mapMoveY=dy;
+  actor.facing=deriveFacingFromDelta(dx,dy,actor.facing);
 }
 
 function advanceWalkFrame(character, now = Date.now(), minIntervalMs = PC_WALK_FRAME_MS) {
@@ -1822,8 +1846,8 @@ function updateDungeonMovement(now) {
   const combatScene = window.combatGame && window.combatGame.scene.getScene('CombatScene');
   const pcGlobal = Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.type === 'pc') : null;
   if (pcGlobal) {
+    pcGlobal.facing = combatFacingFromControls(DUNGEON_MOVE.keys, pcGlobal.facing);
     if (movedThisFrame) {
-      pcGlobal.facing = deriveFacingFromDelta(playerPosX - prevX, playerPosY - prevY, pcGlobal.facing);
       advanceWalkFrame(pcGlobal, now, PC_WALK_FRAME_MS);
     } else {
       resetWalkFrame(pcGlobal);
@@ -2020,16 +2044,20 @@ class MainScene extends Phaser.Scene {
         const inventory = data?.inventory || "Empty";
         const inventoryProperties = data?.inventoryProperties || "None";
         const monsters = data?.monsters || "None";
+        window._combatMonsterSheets = monsters;
         const monstersState = data?.monstersState || "None";
         const puzzle = data?.puzzle || { inRoom: "No puzzle", solution: "No solution" };
         const currentQuest = data?.currentQuest || "None";
         const questProgress = data?.questProgress ?? window.questProgressText ?? '';
+        const questRequirements = data?.questRequirements ?? window.questRequirementsText ?? '';
+        window.questRequirementsText = questRequirements;
         const escapedText = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
         const nextArtifact = data?.nextArtifact || "None";
         const nextBoss = data?.nextBoss || "None";
         const nextBossRoom = data?.nextBossRoom || "None";
         const bossCoordinates = data?.bossCoordinates || "None";
-        const adjacentRooms = window.OutdoorRoutes?.displayName?.(data?.adjacentRooms || "None") || data?.adjacentRooms || "None";
+        const adjacentRooms = consoleAdjacentRooms(roomNameDatabase, coordinates,
+          window.OutdoorRoutes?.displayName?.(data?.adjacentRooms || "None") || data?.adjacentRooms || "None");
         
         // In MainScene create method, before constructing fullText
         const imageHtml = (window.roomImages && window.roomImages[coordinates]) ? `<img src="${window.roomImages[coordinates]}" alt="Room Image" style="max-width:100%;"><br>` : `<img src="https://childrenofthegrave.com/test22/Tartarus.png" alt="Default Room Image" style="max-width:100%;"><br>`;
@@ -2043,8 +2071,9 @@ class MainScene extends Phaser.Scene {
         let objectsHtml = objects;
         if (objects !== "None") {
             const objectList = objects.split(", ");
-            objectsHtml = objectList.map(object => `<span class="clickable-object" data-object="${object}">${object}</span>`).join(", ");
+            objectsHtml = objectList.map(object => `<span data-room-object="${escapedText(object)}" hidden><span data-object-comma>, </span><span class="clickable-object" data-object="${escapedText(object)}">${escapedText(object)}</span></span>`).join('');
         }
+        objectsHtml = `<span data-room-object-list>${objects === 'None' ? '' : objectsHtml}<span data-no-visible-objects>None in view</span></span>`;
         
         let inventoryHtml = inventory;
         if (inventory !== "Empty") {
@@ -2158,7 +2187,9 @@ Exits: ${exitsHtml}
 
 Objects in Room: ${objectsHtml}
 
-Objects in Room Properties: ${objectsInRoomProperties}
+Objects in Room Properties: <span data-room-object-properties>None in view</span>
+
+Objects in Room Remaining: <span data-room-object-count>${window.ObjectDiscovery?.countRemaining(objects) ?? 0}</span>
 
 Inventory: ${inventoryHtml}
 
@@ -2179,6 +2210,7 @@ Solution: ${puzzle.solution}
 
 Current Quest: ${currentQuest}
 ${questProgress && questProgress !== 'None' ? `\nQuest Progress: ${escapedText(questProgress)}\n` : ''}
+${currentQuest !== 'None' && questRequirements && questRequirements !== 'None' ? `\nQuest Requirements: ${escapedText(questRequirements)}\n` : ''}
 
 Next Artifact: ${nextArtifact}
 
@@ -2189,7 +2221,7 @@ Next Boss Room: ${nextBossRoom}
 Boss Room Coordinates: ${bossCoordinates}
 
 Adjacent Rooms:
-${adjacentRooms}
+<span data-adjacent-rooms>${escapedText(adjacentRooms)}</span>
         `;
 
         // Get the popup div
@@ -2199,7 +2231,10 @@ ${adjacentRooms}
         // Update the content inside the popup
         contentDiv.innerHTML = fullText;
         contentDiv.dataset.consoleGeoKey = window.DungeonInhabitants.roomKey(coordinates) || '';
+        contentDiv.dataset.roomObjectProperties=objectsInRoomProperties;
+        contentDiv.dataset.roomObjects=objects;
         window.refreshDungeonConsoleStates?.();
+        window.ObjectDiscovery?.refreshConsole();
         window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs });
         const consoleCoordNumbers = String(coordinates).match(/-?\d+/g);
         window.DungeonActionNotices?.observeItems({ geoKey: consoleCoordNumbers?.length === 3 ? consoleCoordNumbers.join(',') : null,
@@ -2214,6 +2249,7 @@ ${adjacentRooms}
             const target = event.target;
             if (target.classList.contains('clickable-object')) {
                 const objectName = target.getAttribute('data-object');
+                if(window.ObjectDiscovery&&currentDungeon&&!window.ObjectDiscovery.isVisible(currentDungeon,objectName))return;
                 console.log(`Clicked on object: ${objectName}`);
         
                 // Remove any existing popup
@@ -2236,9 +2272,11 @@ ${adjacentRooms}
                 // Append the popup to the body
                 document.body.appendChild(popup);
                 popup.dataset.dungeonItem = objectName;
+                window.WorldInteractionUi?.addReadAction(popup, objectName);
         
                 // Add event listeners for buttons
                 document.getElementById('take-button').addEventListener('click', () => {
+                    if(window.ObjectDiscovery&&currentDungeon&&!window.ObjectDiscovery.isVisible(currentDungeon,objectName)){popup.remove();return;}
                     const chatInput = document.getElementById('chatuserinput');
                     chatInput.value = `take ${objectName}`;
                     chatbotprocessinput(); // Process the "take" command
@@ -2270,7 +2308,7 @@ ${adjacentRooms}
         
                 // Add popup content
                 popup.innerHTML = `
-                    <p>Drop or Equip ${objectName}?</p>
+                    <p>${window.WorldInteractionUi?.hasReadableContent(objectName) ? 'Read, Drop or Equip' : 'Drop or Equip'} ${objectName}?</p>
                     <button class="popup-button" id="drop-button">Drop</button>
                     <button class="popup-button" id="equip-button">Equip</button>
                     <button class="popup-button" id="cancel-button">Cancel</button>
@@ -2278,6 +2316,7 @@ ${adjacentRooms}
         
                 // Append the popup to the body
                 document.body.appendChild(popup);
+                window.WorldInteractionUi?.addReadAction(popup, objectName);
         
                 // Add event listeners for buttons
                 document.getElementById('drop-button').addEventListener('click', () => {
@@ -2451,6 +2490,7 @@ ${adjacentRooms}
                     <p>What would you like to do with ${monsterName}?</p>
                     <button class="popup-button" id="add-button">Add to Party</button>
                     <button class="popup-button" id="attack-button">Attack</button>
+                    <button class="popup-button" id="give-item-button">Give Item</button>
                     <button class="popup-button" id="cancel-button">Cancel</button>
                 `;
                 document.body.appendChild(popup);
@@ -2467,6 +2507,7 @@ ${adjacentRooms}
                     chatbotprocessinput(); // Process the command
                     popup.remove();
                 });
+                document.getElementById('give-item-button').addEventListener('click', () => window.ItemGiveUi?.open(monsterName));
                 document.getElementById("cancel-button").addEventListener("click", () => popup.remove());
             }
         });
@@ -2488,6 +2529,7 @@ ${adjacentRooms}
           const coordKey = coordinatesToString(currentCoordinates);
           const currentRoom = roomNameDatabase.get(coordKey);
           const exitData = currentRoom && currentRoom.exits ? currentRoom.exits[exitDirection] : null;
+          const destinationName = consoleExitDestinationName(roomNameDatabase, currentCoordinates, exitDirection, exitData);
         
           // Consider anything not "open" as locked (e.g., "sealed", "locked", etc.)
           const isLocked = !!(exitData && String(exitData.status || "").toLowerCase() !== "open");
@@ -2501,7 +2543,7 @@ ${adjacentRooms}
         
           // Base popup (Go / [Unlock] / Cancel). Unlock appears only when isLocked = true
           popup.innerHTML = `
-            <p>Go ${exitDirection}?</p>
+            <p>Go ${escapedText(exitDirection)}${destinationName ? ' to ' + escapedText(destinationName) : ' (destination not yet known)'}?</p>
             ${requiredKeyHint}
             <button class="popup-button" id="go-button">Go</button>
             ${isLocked ? `<button class="popup-button" id="unlock-button">Unlock</button>` : ""}
@@ -2666,6 +2708,46 @@ function ensurePCSpriteInCombatList(list) {
 window.ensurePCSpriteInCombatList = ensurePCSpriteInCombatList;
 window.ensureKnownSpritesInCombatList = ensureKnownSpritesInCombatList;
 
+function fitCombatNpcSpriteSheet(sheet,character,frameCount=4) {
+  const name=String(character?.name||character?.Name||'').replace(/^Name:\s*/i,'').trim();
+  if(!sheet)return sheet;
+  const sized=character?.sprite?.spec?.stature;
+  if(Number.isFinite(sheet._combatBodyHeight))character._combatBodyFraction=sheet._combatBodyHeight/sheet.height;
+  if(character?.type==='pc'&&!sized||/^mortacia\b/i.test(name)||character?.sprite?.spec?.kind==='placeholder')return sheet;
+  const size=sheet.height,count=Math.max(1,Math.min(frameCount,Math.floor(sheet.width/size)));
+  const pixels=sheet.getContext('2d').getImageData(0,0,sheet.width,sheet.height).data;
+  let x0=size,y0=size,x1=-1,y1=-1;
+  // One shared crop for the whole animation keeps its pose from resizing every frame.
+  for(let y=0;y<size;y++)for(let x=0;x<sheet.width;x++)if(pixels[(x+y*sheet.width)*4+3]){
+    const xx=x%size;x0=Math.min(x0,xx);x1=Math.max(x1,xx);y0=Math.min(y0,y);y1=Math.max(y1,y);
+  }
+  if(x1<0)return sheet;
+  const w=x1-x0+1,h=y1-y0+1,scale=Math.min(size/w,size/h);
+  if(scale<=1)return sheet;
+  const canvas=document.createElement('canvas');canvas.width=sheet.width;canvas.height=size;
+  character._combatBodyFraction=Number.isFinite(sheet._combatBodyHeight)?sheet._combatBodyHeight*scale/size:Math.min(1,h*scale/size);
+  const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
+  for(let i=0;i<count;i++)ctx.drawImage(sheet,i*size+x0,y0,w,h,i*size+(size-w*scale)/2,(size-h*scale)/2,w*scale,h*scale);
+  return canvas;
+}
+
+function combatMapActorSize(character,cellSize) {
+  const name=String(character?.name||character?.Name||'').replace(/^Name:\s*/i,'').trim();
+  const api=typeof window!=='undefined'?window.ProceduralCharacters:null;
+  const spec=api?.getPresetProceduralSpec?.(name)||character?.sprite?.spec;
+  const stature=api?.characterStature?.(spec);
+  if(stature)return cellSize*COMBAT_ACTOR_TOKEN_SCALE*stature.scale/(character._combatBodyFraction||1);
+  return cellSize*(/^mortacia\b/i.test(name)?COMBAT_MORTACIA_TOKEN_SCALE:COMBAT_ACTOR_TOKEN_SCALE);
+}
+
+function setCombatPlayerTokenOwner(scene,composited) {
+  if(!scene)return;
+  scene._pcTokenComposited=!!composited;
+  const pcData=scene?.characters?.[scene.pcName];
+  if(pcData?.sprite?.setVisible)pcData.sprite.setVisible(!composited);
+  pcData?.label?.setVisible?.(false);
+}
+
 function ensureCombatTextureForCharacter(scene, character) {
   if (!scene || !scene.textures || !character || !character.name) return null;
   applyProceduralSpriteToEntry(character);
@@ -2675,13 +2757,16 @@ function ensureCombatTextureForCharacter(scene, character) {
     else if (character.type === 'monster') ensureMonsterSpriteData(character);
   }
   if (!character.sprite || !character.sprite.dataUrl) return null;
+  if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character);
 
   const texKey = getCombatTextureKey(character);
   if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteSheetCanvas === 'function') {
     try {
-      const sheetCanvas = window.createCharacterSpriteSheetCanvas(character, character.sprite && character.sprite.spec, 4);
+      const drawSheet=window.NATIVE_COMBAT_SPRITES!==false&&window.createCombatSpriteSheetCanvas||window.createCharacterSpriteSheetCanvas;
+      const sheetCanvas = fitCombatNpcSpriteSheet(drawSheet(character, character.sprite && character.sprite.spec, 4),character,4);
       scene.textures.addCanvas(texKey, sheetCanvas);
       const tex = scene.textures.get(texKey);
+      tex._combatBodyFraction=character._combatBodyFraction;
       const fw = sheetCanvas.height;
       for (let i = 0; i < 4; i++) {
         tex.add('frame' + i, 0, i * fw, 0, fw, fw);
@@ -2695,9 +2780,10 @@ function ensureCombatTextureForCharacter(scene, character) {
   }
   if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteCanvas === 'function') {
     try {
-      const canvasEl = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+      const canvasEl = fitCombatNpcSpriteSheet(window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec),character,1);
       scene.textures.addCanvas(texKey, canvasEl);
       const tex = scene.textures.get(texKey);
+      tex._combatBodyFraction=character._combatBodyFraction;
       if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
     } catch (e) {
       console.warn('[Sprite] canvas registration failed', character.name, e);
@@ -2712,6 +2798,7 @@ function ensureCombatTextureForCharacter(scene, character) {
   }
   if (scene.textures.exists(texKey)) {
     const tex = scene.textures.get(texKey);
+    if(Number.isFinite(tex._combatBodyFraction))character._combatBodyFraction=tex._combatBodyFraction;
     if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
     return texKey;
   }
@@ -2724,7 +2811,15 @@ function getCombatFrameName(character) {
 }
 
 function getCombatFacingFlip(character) {
-  return deriveFacingFromDelta(0, 0, character && character.facing) === 'right';
+  let facing=deriveFacingFromDelta(0,0,character?.facing);
+  if(character?.type!=='pc'&&Number.isFinite(character?.mapMoveX)&&Number.isFinite(character?.mapMoveY)){
+    const angle=typeof getCombatMapRotationAngle==='function'?getCombatMapRotationAngle():0;
+    const dx=character.mapMoveX,dy=character.mapMoveY;
+    facing=deriveFacingFromDelta(dx*Math.cos(angle)-dy*Math.sin(angle),dx*Math.sin(angle)+dy*Math.cos(angle),facing);
+  }
+  // Mortacia's approved profile faces left; the original catalog profiles face right.
+  const name=String(character?.name||character?.Name||'').replace(/^Name:\s*/i,'').trim();
+  return /^mortacia\b/i.test(name)?facing==='right':facing==='left';
 }
 
 function applyCombatVisualFrame(sprite, character) {
@@ -2741,31 +2836,38 @@ function applyCombatVisualFrame(sprite, character) {
 
 function drawCombatTextureOnRT(scene, texKey, frameName, x, y, size, character) {
   if (!scene || !scene.renderRT || !texKey || !scene.textures || !scene.textures.exists(texKey)) return false;
+  const target = scene.actorRT || scene.renderRT;
+  const pixelScale = scene.actorRT ? scene.PIXEL_SCALE : 1;
+  x *= pixelScale; y *= pixelScale; size *= pixelScale;
   const frame = frameName || undefined;
   const flipped = getCombatFacingFlip(character);
+  if(scene.combatActorHitTargets&&character?.name){
+    const scale=scene.actorRT?1:scene.PIXEL_SCALE||1;
+    scene.combatActorHitTargets.push({character,texKey,frameName,flipped,x:x*scale,y:y*scale,size:size*scale});
+  }
 
   if (scene.make && typeof scene.make.sprite === 'function') {
     const temp = scene.make.sprite({ x: x + size / 2, y: y + size / 2, key: texKey, frame, add: false });
     temp.setOrigin(0.5, 0.5);
     temp.setDisplaySize(size, size);
     if (typeof temp.setFlipX === 'function') temp.setFlipX(flipped);
-    scene.renderRT.draw(temp);
+    target.draw(temp);
     temp.destroy();
     return true;
   }
 
-  if (frameName && typeof scene.renderRT.drawFrame === 'function') {
-    scene.renderRT.drawFrame(texKey, frameName, x, y);
+  if (frameName && typeof target.drawFrame === 'function') {
+    target.drawFrame(texKey, frameName, x, y);
     return true;
   }
-  scene.renderRT.draw(texKey, x, y);
+  target.draw(texKey, x, y);
   return true;
 }
 
 function setCombatVisualOverlayVisible(charData, visible) {
   if (!charData) return;
   if (charData.sprite && typeof charData.sprite.setVisible === 'function') charData.sprite.setVisible(visible);
-  if (charData.label && typeof charData.label.setVisible === 'function') charData.label.setVisible(visible);
+  if (charData.label && typeof charData.label.setVisible === 'function') charData.label.setVisible(false);
 }
 
 function syncCombatActorOverlayFromMaze(scene) {
@@ -2835,7 +2937,8 @@ function createCombatVisual(scene, character) {
     const sprite = frameKey
       ? scene.add.sprite(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey, frameKey)
       : scene.add.image(character.x * 25 + 12.5, character.y * 25 + 12.5, texKey);
-    sprite.setDisplaySize(31.875, 31.875);
+    const size=combatMapActorSize(character,COMBAT_CELL_SIZE);
+    sprite.setDisplaySize(size,size);
     sprite.setVisible(true);
     sprite._holodekTexKey = texKey;
     applyCombatVisualFrame(sprite, character);
@@ -2895,6 +2998,25 @@ class CombatScene extends Phaser.Scene {
         this.renderRT.setOrigin(0);
         this.renderRT.setScale(this.PIXEL_SCALE);
         this.renderRT.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+        // Thin swords and hands vanish when reduced below one pixel in the map RT.
+        // Keep the chunky terrain layer, but composite actors at their full map size.
+        this.actorRT = this.add.renderTexture(0, 0, this.worldW, this.worldH);
+        this.actorRT.setOrigin(0);
+        this.actorRT.texture.setFilter(Phaser.Textures.FilterMode.NEAREST);
+        this.input.on('pointerup', pointer => {
+          if(pointer.button!==0||pointer.getDistance?.()>6)return;
+          const point=this.cameras.main.getWorldPoint(pointer.x,pointer.y);
+          let targets=this.combatActorHitTargets||[];
+          if(!currentDungeon)targets=Object.entries(this.characters||{}).filter(([,v])=>v.sprite?.visible).map(([name,v])=>({
+            character:(window.combatCharacters||[]).find(c=>c.name===name),texKey:v.sprite.texture?.key,frameName:v.sprite.frame?.name,
+            flipped:!!v.sprite.flipX,x:v.sprite.x-v.sprite.displayWidth/2,y:v.sprite.y-v.sprite.displayHeight/2,size:v.sprite.displayWidth}));
+          const actor=window.CombatCharacterUi?.pick(targets,point.x,point.y,(t,u,v)=>{
+            if(!t.texKey||!this.textures.getPixelAlpha)return 255;
+            const f=this.textures.getFrame(t.texKey,t.frameName),w=f?.cutWidth||96,h=f?.cutHeight||96;
+            return this.textures.getPixelAlpha(Math.min(w-1,Math.floor(u*w)),Math.min(h-1,Math.floor(v*h)),t.texKey,t.frameName);
+          });
+          if(actor)window.CombatCharacterUi.open(actor);
+        });
     
         // Camera shows only the RT
         const cam = this.cameras.main;
@@ -3082,6 +3204,8 @@ class CombatScene extends Phaser.Scene {
     }
 
     redrawCombatRT() {
+        this.combatActorHitTargets=[];
+        if (this.actorRT) this.actorRT.clear();
         if (!this.renderRT) return;
         this.renderRT.clear();
 
@@ -3092,6 +3216,7 @@ class CombatScene extends Phaser.Scene {
         }
 
         if (!currentDungeon || !currentDungeon.cells) {
+            setCombatPlayerTokenOwner(this,false);
             this.forcePlayerToCenter();
             return;
         }
@@ -3256,6 +3381,7 @@ class CombatScene extends Phaser.Scene {
         if (window.SceneItems) {
             const isz = Math.max(4, Math.round(cs * 0.8));
             for (const obj of getVisibleSceneObjects()) {
+                if(window.ObjectDiscovery&&!window.ObjectDiscovery.hasDiscovered(currentDungeon,obj.name))continue;
                 const ddx = obj.x - Math.floor(pos.x), ddy = obj.y - Math.floor(pos.y);
                 if (Math.abs(ddx) > viewRadius || Math.abs(ddy) > viewRadius) continue;
                 const tkey = 'scene-item-' + window.SceneItems.normName([obj.name, obj.type, obj.magic].join(' ')).replace(/ /g, '_') + '-' + isz;
@@ -3304,7 +3430,6 @@ class CombatScene extends Phaser.Scene {
         // Root cause: redrawCombatRT only stamped the PC token, so Mode 1/2/3 showed actors in 3D
         // but not on the combat map whenever the RT path was active.
         if (Array.isArray(window.combatCharacters)) {
-            const actorSize = (this.cellSize / this.PIXEL_SCALE) * COMBAT_ACTOR_TOKEN_SCALE;
             for (const entry of window.combatCharacters) {
                 if (!isDungeonActorPresent(entry) || entry.type === 'pc' || entry.discoveryState === 'pending') continue;
                 if (entry.type === 'monster') ensureMonsterSpriteData(entry);
@@ -3325,9 +3450,10 @@ class CombatScene extends Phaser.Scene {
                 const ry = centerY + lx * Math.sin(combatAngle) + ly * Math.cos(combatAngle);
                 const tex = this.textures.get(tkey);
                 const frameName = (tex && tex.has && tex.has('frame0')) ? getCombatFrameName(entry) : null;
-                const dx = Math.round(rx - actorSize / 2);
-                const dy = Math.round(ry - actorSize / 2);
-                drawCombatTextureOnRT(this, tkey, frameName, dx, dy, actorSize, entry);
+                const tokenSize = combatMapActorSize(entry,this.cellSize / this.PIXEL_SCALE);
+                const dx = Math.round(rx - tokenSize / 2);
+                const dy = Math.round(ry - tokenSize / 2);
+                drawCombatTextureOnRT(this, tkey, frameName, dx, dy, tokenSize, entry);
             }
         }
 
@@ -3340,13 +3466,12 @@ class CombatScene extends Phaser.Scene {
         // we can pick frames here. We do a cheap time-based cycle so the token has subtle life (stride/idle)
         // even inside the static-per-frame RT composite. Phaser's NEAREST + RT scale does the rest.
         let pcKey = null;
-        // Determine PC name robustly: prefer scene's, else scan global combat list for the 'pc' type entry.
-        // This prevents cases where redrawCombatRT is called before this.characters/this.pcName fully populated in init paths.
-        let pcNameForDraw = this.pcName;
-        if (!pcNameForDraw && Array.isArray(window.combatCharacters)) {
-            const pcEntryGlobal = window.combatCharacters.find(c => c && c.type === 'pc');
-            if (pcEntryGlobal) pcNameForDraw = pcEntryGlobal.name;
-        }
+        let pcTokenDrawn = false;
+        // The roster is authoritative after a party/PC switch; the scene may still
+        // name the former PC and would select that actor's texture and map scale.
+        const pcEntryGlobal = (window.combatCharacters || []).find(c => c && c.type === 'pc');
+        let pcNameForDraw = pcEntryGlobal?.name || this.pcName;
+        if (pcEntryGlobal?.name) this.pcName = pcEntryGlobal.name;
         if (!pcNameForDraw && window._selectedPCSprite) {
             // Fallback if only the sprite ref exists (pre-name)
             pcNameForDraw = 'pc';
@@ -3355,45 +3480,13 @@ class CombatScene extends Phaser.Scene {
             const pcEntry = (this.characters && this.characters[pcNameForDraw]) || (Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.name === pcNameForDraw) : null) || {};
             let pcTex = (pcEntry.sprite && pcEntry.sprite.texture) || (window._selectedPCSprite && window._selectedPCSprite.texture);
             pcKey = pcTex && pcTex.key;
-            const tKey = pcKey || ('pc-sprite-' + (pcNameForDraw || 'pc').replace(/\s+/g, '_') + '-sheet');
             const fullChar = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw) || { name: pcNameForDraw, type: 'pc', sprite: (window._selectedPCSprite || (window._pendingStartingCharacter && window._pendingStartingCharacter.sprite)) };
-            if (!pcKey || !this.textures.exists(tKey)) {
-                // Force ensure the custom selected sprite texture for PC draw in RT (get rid of any non-custom).
-                const spriteDataUrl = fullChar.sprite && fullChar.sprite.dataUrl;
-                if (!this.textures.exists(tKey)) {
-                    if (typeof window.createCharacterSpriteSheetCanvas === 'function') {
-                        try {
-                            const sheetCanvas = window.createCharacterSpriteSheetCanvas(fullChar, fullChar.sprite && fullChar.sprite.spec, 4);
-                            this.textures.addCanvas(tKey, sheetCanvas);
-                            const tex = this.textures.get(tKey);
-                            const fw = sheetCanvas.height;
-                            for (let i = 0; i < 4; i++) {
-                                tex.add('frame' + i, 0, i * fw, 0, fw, fw);
-                            }
-                            if (tex.update) tex.update();
-                            if (tex.refresh) tex.refresh();
-                            if (tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
-                        } catch (e) {}
-                    }
-                    if (!this.textures.exists(tKey) && typeof window.createCharacterSpriteCanvas === 'function') {
-                        try {
-                            const canvasEl = window.createCharacterSpriteCanvas(fullChar, fullChar.sprite && fullChar.sprite.spec);
-                            this.textures.addCanvas(tKey, canvasEl);
-                        } catch (e) {}
-                    }
-                    if (!this.textures.exists(tKey) && spriteDataUrl && typeof spriteDataUrl === 'string' && spriteDataUrl.startsWith('data:')) {
-                        try {
-                            this.textures.addBase64(tKey, spriteDataUrl);
-                        } catch (e) {}
-                    }
-                }
-                pcKey = tKey;
-            }
+            // PCs must use the same revision-aware sheets as companions, not an
+            // older selected-image/overlay texture left over from character review.
+            pcKey = ensureCombatTextureForCharacter(this, fullChar) || pcKey;
             if (pcKey && this.textures.exists(pcKey)) {
-                // Custom sprite icon size (user request: shrink by 15% from the 1.5x enlargement).
-                // Base: 25px on screen. Now ~31.875px (1.275x). Use ~15.9375 in RT space (PIXEL_SCALE=2) for final ~31.875px.
-                // NEAREST keeps pixels crisp.
-                const pcSize = (this.cellSize / this.PIXEL_SCALE) * COMBAT_ACTOR_TOKEN_SCALE;
+                // Match the scene-overlay size in low-resolution RT units.
+                const pcSize = combatMapActorSize(fullChar,this.cellSize / this.PIXEL_SCALE);
                 // Try to use a frame from the sheet if present (Phaser sprite editor style output)
                 const tex = this.textures.get(pcKey);
                 let frameName = null;
@@ -3407,7 +3500,7 @@ class CombatScene extends Phaser.Scene {
                 const pcAnimState = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw)
                   || (window.combatCharacters || []).find(c => c && c.type === 'pc')
                   || fullChar;
-                drawCombatTextureOnRT(this, pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcAnimState);
+                pcTokenDrawn = drawCombatTextureOnRT(this, pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcAnimState);
             }
         }
 
@@ -3440,6 +3533,9 @@ class CombatScene extends Phaser.Scene {
             arrowGfx.destroy();
         }
 
+        // The RT already contains the facing-correct PC. A visible Phaser overlay
+        // would draw a second, differently flipped copy; retain its name label only.
+        setCombatPlayerTokenOwner(this,pcTokenDrawn);
         this.forcePlayerToCenter();
     }
 
@@ -3701,17 +3797,19 @@ class CombatScene extends Phaser.Scene {
             sprite.setOrigin(0.5, 0.5);
    
             const pcFontSize = (character.type === 'pc') ? '10px' : '11px';
-            let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, character.name, {
+            let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, '', {
                 fontSize: pcFontSize,
                 color: '#ffffff',
                 align: 'center'
             });
             label.setOrigin(0.5, 0.5);
+            label.setVisible(false);
     
             this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type, texKey: sprite._holodekTexKey || null };
             applyCombatVisualFrame(sprite, character);
             setCombatVisualOverlayVisible(this.characters[character.name], character.discoveryState !== 'pending');
         });
+        setCombatPlayerTokenOwner(this,this._pcTokenComposited);
    
         this.time.delayedCall(50, () => this.sys.game.loop.sleep());
     }
@@ -3794,12 +3892,13 @@ class CombatScene extends Phaser.Scene {
                 sprite = createCombatVisual(this, character);
                 sprite.setOrigin(0.5, 0.5);
                 const pcFontSize = (character.type === 'pc') ? '10px' : '11px';
-                let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, character.name, {
+                let label = this.add.text(character.x * 25 + 12.5, character.y * 25 + 29, '', {
                     fontSize: pcFontSize,
                     color: '#ffffff',
                     align: 'center'
                 });
                 label.setOrigin(0.5, 0.5);
+                label.setVisible(false);
                 this.characters[character.name] = { sprite, label, x: character.x, y: character.y, type: character.type, texKey: sprite._holodekTexKey || null };
                 applyCombatVisualFrame(sprite, character);
             }
@@ -3837,6 +3936,7 @@ class CombatScene extends Phaser.Scene {
             moveCombatVisualTo(this, charData, character, false);
             setCombatVisualOverlayVisible(charData, character.discoveryState !== 'pending');
         });
+        setCombatPlayerTokenOwner(this,this._pcTokenComposited);
         ensurePCSpriteInCombatList(window.combatCharacters);
         // Update combatCharactersString globally
         window.combatCharactersString = JSON.stringify(window.combatCharacters);
@@ -5610,6 +5710,7 @@ npcs.forEach(npc => {
         let currentQuestMatch = serverGameConsole.match(/Current Quest: (.+)/);
         if (currentQuestMatch) currentQuest = currentQuestMatch[1];
         window.questProgressText = serverGameConsole.match(/^Quest Progress:[ \t]*([^\r\n]*)/m)?.[1] || '';
+        window.questRequirementsText = serverGameConsole.match(/^Quest Requirements:[ \t]*([^\r\n]*)/m)?.[1] || '';
 
         let nextArtifactMatch = serverGameConsole.match(/Next Artifact: (.+)/);
         if (nextArtifactMatch) nextArtifact = nextArtifactMatch[1];
@@ -6608,6 +6709,7 @@ Next Boss Room: ${nextBossRoom}
 Boss Room Coordinates: ${bossCoordinates}
 Current Quest: ${currentQuest}
 Quest Progress: ${window.questProgressText || 'None'}
+Quest Requirements: ${window.questRequirementsText || 'None'}
 Inventory: ${inventoryString}
 Inventory Properties: ${inventoryPropertiesString}
 Turns: ${turns}
@@ -7090,6 +7192,43 @@ function isExitTraversable(coordinates, direction) {
 
 
 // Function to calculate new coordinates based on direction
+function consoleAdjacentRooms(database, coordinates, fallback = 'None') {
+  const key = window.DungeonInhabitants.roomKey(coordinates);
+  const at = value => typeof database?.get === 'function' ? database.get(value) || database.get('X: ' + value.split(',')[0] + ', Y: ' + value.split(',')[1] + ', Z: ' + value.split(',')[2]) : database?.[value];
+  const room = key && at(key);
+  if (!room?.exits) return fallback;
+  const labels = new Map(String(fallback).split(/,\s*/).map(part => {
+    const i = part.indexOf(':'); return [part.slice(0, i).trim().toLowerCase(), part.slice(i + 1).trim().replace(/\s*\((locked|sealed|open)\)\s*$/i, '')];
+  }));
+  return Object.entries(room.exits).map(([direction, exit]) => {
+    const target = window.DungeonInhabitants.roomKey(exit?.targetCoordinates || exit?.targetCoords);
+    const rawName = target && at(target)?.name || labels.get(direction) || 'Unknown room';
+    const name = window.OutdoorRoutes?.displayName?.(rawName) || rawName;
+    const status = String(exit?.status || 'open').toLowerCase();
+    return `${direction}: ${name}${status === 'open' ? '' : ' (' + status + ')'}`;
+  }).join(', ') || 'None';
+}
+function refreshConsoleExitStatus() {
+  const adjacent = consoleAdjacentRooms(roomNameDatabase, coordinatesToString(currentCoordinates), window.latestUpdatedData?.adjacentRooms);
+  updatedGameConsole = String(updatedGameConsole).replace(/^Adjacent Rooms:[^\r\n]*/m, () => 'Adjacent Rooms: ' + adjacent);
+  if (window.latestUpdatedData) window.latestUpdatedData.adjacentRooms = adjacent;
+  const container = document.getElementById('phaser-container');
+  if (container?.dataset.consoleGeoKey === window.DungeonInhabitants.roomKey(coordinatesToString(currentCoordinates))) {
+    const label = container.querySelector('[data-adjacent-rooms]'); if (label) label.textContent = adjacent;
+  }
+  syncDungeonExitNavigation();
+}
+function consoleExitDestinationName(database, coordinates, direction, exitData) {
+  const target = exitData?.targetCoordinates ?? exitData?.targetCoords;
+  const point = target ?? getCoordinatesForDirection(coordinates, direction);
+  const key = typeof point === 'string' ? point.replace(/[XYZ:\s]/gi, '')
+    : point && [point.x, point.y, point.z].every(Number.isFinite) ? `${point.x},${point.y},${point.z}` : '';
+  if (!/^-?\d+,-?\d+,-?\d+$/.test(key)) return null;
+  const [x, y, z] = key.split(',');
+  const room = database.get(key) ?? database.get(`X: ${x}, Y: ${y}, Z: ${z}`);
+  return typeof room === 'string' ? room : room?.name || null;
+}
+
 function getCoordinatesForDirection(coordinates, direction) {
   const offsets = {
     north: { x: 0, y: 1, z: 0 },
@@ -7969,6 +8108,7 @@ function registerPartyCharacter(character, role = 'npc') {
 
 function ensureCharacterSpriteData(character, options = {}) {
   if (!character) return null;
+  if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character);
   const regenerate = !!options.regenerate;
   if (!character._rerollSeed || regenerate) {
     character._rerollSeed = Math.random();
@@ -8027,9 +8167,11 @@ function ensureKnownSpritesInCombatList(list) {
       delete entry.sprite;
     }
     if (applyProceduralSpriteToEntry(entry)) return;
+    if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(entry);
     if (entry.sprite && entry.sprite.dataUrl) return;
     const known = resolveKnownCharacterSprite(entry.name, entry.type);
     if (known) entry.sprite = known;
+    if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(entry);
   });
   return list;
 }
@@ -8058,7 +8200,9 @@ function copyCombatPersistentFields(target, source) {
   if (source.mazeRoomKey) target.mazeRoomKey = source.mazeRoomKey;
   if (Number.isFinite(source.walkFrame)) target.walkFrame = source.walkFrame;
   if (source.facing) target.facing = source.facing;
-  for (const field of ['hp', 'state', 'allegiance', 'encounterId', 'job', 'activity', 'routine', 'home', 'personality', 'motivation', 'race', 'className', 'mazePoint', 'discoveryState', 'discoveryRevision', '_discoveryRevision']) {
+  if (Number.isFinite(source.mapMoveX)) target.mapMoveX = source.mapMoveX;
+  if (Number.isFinite(source.mapMoveY)) target.mapMoveY = source.mapMoveY;
+  for (const field of ['hp', 'state', 'allegiance', 'encounterId', 'job', 'activity', 'routine', 'home', 'personality', 'motivation', 'race', 'className', 'mazePoint', 'discoveryState', 'discoveryRevision', '_discoveryRevision', 'pursuit', 'moveTweenMs', '_partyCatchingUp', '_nextMazeStepAt', '_nextWanderAt', 'renderMazeX', 'renderMazeY', '_renderFromMazeX', '_renderFromMazeY', '_renderTweenToX', '_renderTweenToY', '_renderTweenStartedAt']) {
     if (source[field] !== undefined && (!['hp', 'state', 'allegiance'].includes(field) || target[field] === undefined)) target[field] = source[field];
   }
 }
@@ -8069,9 +8213,24 @@ function isDungeonActorPresent(actor) {
   if (actor.type === 'pc') return true;
   const population = window.DungeonLife?.population();
   const key = window.DungeonInhabitants.roomKey(window.currentCoordinates);
+  const actorRoom = window.DungeonInhabitants.roomKey(actor.mazeRoomKey);
+  if (actor.type === 'monster' && actorRoom && key && actorRoom !== key) return false;
   return window.DungeonInhabitants.isPresent(actor, population?.geoKey === key ? population : null);
 }
 window.isDungeonActorPresent = isDungeonActorPresent;
+
+window.getReadableItemMetadata = name => {
+  const wanted = String(name || '').trim().toLowerCase();
+  for (const room of roomNameDatabase.values()) {
+    const record = room?.readables?.find(r => String(r.name).toLowerCase() === wanted);
+    if (record) return record;
+  }
+  return null;
+};
+window.getInventoryGiveItems = () => window.InventoryUi?.inventoryItems(inventory, inventoryProperties) || [];
+window.persistDungeonObjectDiscoveries = dungeon => {
+  if(dungeon===currentDungeon)scheduleLodCachePersist();
+};
 
 function seedPartyCombatRoster(pcCharacter, partyMembers) {
   const roster = [buildCombatEntryFromCharacter(pcCharacter, 'pc')];
@@ -8189,7 +8348,7 @@ function getPartyEntryRenderMazePosition(entry, now = Date.now()) {
   const started = Number.isFinite(entry._renderTweenStartedAt) ? entry._renderTweenStartedAt : now;
   const t = Math.max(0, Math.min(1, (now - started) / tweenMs));
   // Smootherstep: less pop at start/end of cell transitions
-  const ease = t * t * t * (t * (t * 6 - 15) + 10);
+  const ease = entry._partyCatchingUp ? t : t * t * t * (t * (t * 6 - 15) + 10);
   const fromX = entry._renderFromMazeX;
   const fromY = entry._renderFromMazeY;
   const x = fromX + (toX - fromX) * ease;
@@ -8255,6 +8414,19 @@ function collectNearbyWalkableTiles(dungeon, origin, maxRadius = 18) {
 function markCombatRoundActive(ms = 90000) {
   window._combatRoundActiveUntil = Date.now() + ms;
 }
+window.faceDungeonCombatTarget = name => {
+  const wanted=String(name||'').trim().toLowerCase();
+  const monsters=(window.combatCharacters||[]).filter(a=>a.type==='monster'&&isDungeonActorPresent(a)&&Number.isFinite(a.mazeX)&&Number.isFinite(a.mazeY)&&
+    (!a.mazeRoomKey||window.DungeonInhabitants.roomKey(a.mazeRoomKey)===currentDungeon?.geoKey));
+  const matches=wanted?monsters.filter(a=>String(a.name).toLowerCase()===wanted||String(a.name).toLowerCase().startsWith(wanted+' ')):[];
+  const actor=matches.find(a=>String(a.name).toLowerCase()===wanted)||(matches.length===1?matches[0]:null);
+  if(!actor)return false;
+  const point=getPartyEntryRenderMazePosition(actor)||{x:actor.mazeX,y:actor.mazeY};
+  playerAngle=Math.atan2(point.y+.5-playerPosY,point.x+.5-playerPosX);window.playerAngle=playerAngle;
+  window._combatCameraTarget=actor.name;
+  if (typeof renderDungeonView === 'function') renderDungeonView();
+  return true;
+};
 function isCombatRoundActive() {
   return !!window._combatCommandPending || !!window.actionDiceState?.active || Date.now() < (window._combatRoundActiveUntil || 0);
 }
@@ -8267,13 +8439,13 @@ function applyCombatMazeStep(data) {
   if (!entry || !Number.isInteger(data.x) || !Number.isInteger(data.y)) return;
   entry._renderFromMazeX = Number.isFinite(entry.renderMazeX) ? entry.renderMazeX : entry.mazeX;
   entry._renderFromMazeY = Number.isFinite(entry.renderMazeY) ? entry.renderMazeY : entry.mazeY;
-  entry.facing = deriveFacingFromDelta(data.x - entry.mazeX, data.y - entry.mazeY, entry.facing);
+  rememberCombatMovementFacing(entry,data.x-entry.mazeX,data.y-entry.mazeY);
   entry.mazeX = data.x;
   entry.mazeY = data.y;
   entry.mazeRoomKey = getCurrentCombatRoomKey();
   entry._renderTweenToX = data.x;
   entry._renderTweenToY = data.y;
-  entry._renderTweenStartedAt = performance.now();
+  entry._renderTweenStartedAt = Date.now();
   entry.moveTweenMs = data.duration || 200;
   advanceWalkFrame(entry, Date.now(), NPC_WALK_FRAME_MS);
   if (entry.type === 'pc') {
@@ -8284,6 +8456,7 @@ function applyCombatMazeStep(data) {
     updatePlayerHeightFromCell();
   }
   refreshPartyCombatProjection(true);
+  if(window._combatCameraTarget)window.faceDungeonCombatTarget?.(window._combatCameraTarget);
   renderDungeonView();
 }
 
@@ -8403,7 +8576,8 @@ function applyCharacterTraitSpecs(map) {
     const prev = window._characterTraitSpecs[key];
     if (prev && prev.source === 'llm' && entry.source !== 'llm') return; // never downgrade
     if (prev && prev.source === entry.source && prev.salt === entry.salt && prev.variant === entry.variant
-      && JSON.stringify(prev.traits || null) === JSON.stringify(entry.traits || null)) return;
+      && JSON.stringify(prev.traits || null) === JSON.stringify(entry.traits || null)
+      && JSON.stringify(prev.stature || null) === JSON.stringify(entry.stature || null)) return;
     window._characterTraitSpecs[key] = entry;
     changed = true;
   });
@@ -8455,7 +8629,7 @@ function getProceduralSpriteFor(entry) {
   requestCharacterTraitSpecs([sheet]);
   const server = window._characterTraitSpecs[key] || null;
   const ready = !!(server && server.source === 'llm' && server.traits);
-  const sig = (ready ? [server.salt, server.variant, sheet.level, hashCharacterName(JSON.stringify(server.traits)).toString(36)].join(':') : 'placeholder');
+  const sig = (ready ? [server.salt, server.variant, sheet.level, hashCharacterName(JSON.stringify([server.traits,server.stature])).toString(36)].join(':') : 'placeholder');
   const cached = window._proceduralSpriteCache[key];
   if (cached && cached.sig === sig) return cached.sprite;
   let sprite;
@@ -8463,7 +8637,7 @@ function getProceduralSpriteFor(entry) {
     sprite = createSpritePlaceholder(entry);
   } else {
     try {
-      const spec = api.buildProceduralSpriteSpec(sheet, server.traits, { salt: server.salt >>> 0, variant: server.variant | 0, source: 'llm' });
+      const spec = api.buildProceduralSpriteSpec(sheet, server.traits, { salt: server.salt >>> 0, variant: server.variant | 0, source: 'llm', stature:server.stature });
       const canvas = window.createTraitSpriteCanvas(spec, 0);
       const dataUrl = canvas && canvas.toDataURL ? canvas.toDataURL('image/png') : '';
       if (!dataUrl) return null;
@@ -8554,7 +8728,12 @@ function fireTraitReadyWaiters() {
 function getCombatTextureKey(character) {
   const base = 'char-sprite-' + String(character && character.name).replace(/\s+/g, '_') + '-sheet';
   const spec = character && character.sprite && character.sprite.spec;
-  return spec && (spec.kind === 'procedural' || spec.kind === 'placeholder') && spec.key ? base + '-' + spec.key : base;
+  const revision=character?.sprite?.artRevision;
+  let artKey=revision?base+'-'+String(revision).replace(/[^a-z0-9_-]/gi,'_'):base;
+  // Re-register cached generated sheets when combat body metrics change, without rerolling their art.
+  if(spec?.kind==='procedural'&&spec.traits&&!/^mortacia\b/i.test(character?.name||''))artKey+='-combat-fit-2';
+  if(spec?.kind==='procedural'&&spec.traits&&window.NATIVE_COMBAT_SPRITES!==false)artKey+='-native-1';
+  return spec && (spec.kind === 'procedural' || spec.kind === 'placeholder') && spec.key ? artKey + '-' + spec.key : artKey;
 }
 
 // Re-create a combat-map visual when its sprite (texture key) changed, e.g. after an LLM spec arrived.
@@ -8624,16 +8803,31 @@ function ensureMonsterSpriteData(entry) {
   }
 }
 
+function preferPartyViewingTiles(tiles,occupied=new Set(),entry=null) {
+  const cameraX=Number.isFinite(playerPosX)?playerPosX:playerDungeonX+.5;
+  const cameraY=Number.isFinite(playerPosY)?playerPosY:playerDungeonY+.5;
+  const available=tiles.filter(t=>!occupied.has(`${t.x},${t.y}`));
+  // Enlarged companions need three paces; tight corridors still have a fallback.
+  const spec=window.ProceduralCharacters?.getPresetProceduralSpec?.(entry?.name)||entry?.sprite?.spec;
+  const minimum=window.ProceduralCharacters?.characterViewingDistance?.(spec)||3;
+  const spaced=available.filter(t=>Math.hypot(t.x+.5-cameraX,t.y+.5-cameraY)>=minimum);
+  return spaced.length?spaced:available;
+}
+
 function ensurePartyMazeAnchors(forceReset = false) {
   if (!shouldUsePartyMazeAnchors()) return;
-  window.combatCharacters = window.combatCharacters.filter(isDungeonActorPresent);
   const roomKey = getCurrentCombatRoomKey();
   const origin = { x: playerDungeonX, y: playerDungeonY };
   const tiles = collectNearbyWalkableTiles(currentDungeon, origin, 18)
     .filter(tile => !(tile.x === origin.x && tile.y === origin.y));
   const occupied = new Set([`${origin.x},${origin.y}`]);
   const population = window.DungeonLife?.population();
-  if (population) window.DungeonInhabitants.attach(window.combatCharacters, population);
+  if (population) {
+    window.combatCharacters = window.combatCharacters.filter(entry =>
+      entry.type !== 'monster' || Object.hasOwn(population.actors, entry.name));
+    window.DungeonInhabitants.attach(window.combatCharacters, population);
+  }
+  window.combatCharacters = window.combatCharacters.filter(isDungeonActorPresent);
   const residentNames = new Set(Object.keys(population?.actors || {}));
   window.combatCharacters.filter(c => c.type === 'monster' && residentNames.has(c.name)).forEach(entry => {
     const record = population.actors[entry.name];
@@ -8648,14 +8842,18 @@ function ensurePartyMazeAnchors(forceReset = false) {
     entry.mazeX = point.x; entry.mazeY = point.y; entry.mazeRoomKey = roomKey;
     occupied.add(`${point.x},${point.y}`);
   });
-  // NPCs and monsters both get a dungeon cell through the same placement path.
+  // Only companions travel with the PC. Legacy monsters use this path until a population is available.
   const npcEntries = window.combatCharacters
-    .filter(c => c && (c.type === 'npc' || c.type === 'monster' && !residentNames.has(c.name)))
+    .filter(c => c && (c.type === 'npc' || !population && c.type === 'monster'))
     .sort((a, b) => ((a.type === 'monster') - (b.type === 'monster')) || (hashCharacterName(a.name) - hashCharacterName(b.name)));
   npcEntries.forEach(ensureMonsterSpriteData);
 
   const originCell = currentDungeon.cells[`${origin.x},${origin.y}`] || {};
   const originFloor = typeof originCell.floorHeight === 'number' ? originCell.floorHeight : 0;
+  const spawnTiles=tiles.filter(tile=>{
+    const floor=currentDungeon.cells[`${tile.x},${tile.y}`]?.floorHeight;
+    return Math.abs((Number.isFinite(floor)?floor:0)-originFloor)<=MAX_STEP;
+  });
   npcEntries.forEach(entry => {
     const cell = (Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY))
       ? currentDungeon.cells[`${entry.mazeX},${entry.mazeY}`]
@@ -8678,17 +8876,13 @@ function ensurePartyMazeAnchors(forceReset = false) {
     }
   });
 
-  let tileIndex = 0;
   npcEntries.forEach(entry => {
     if (Number.isFinite(entry.mazeX) && Number.isFinite(entry.mazeY)) {
       entry.mazeRoomKey = roomKey;
       return;
     }
 
-    while (tileIndex < tiles.length && occupied.has(`${tiles[tileIndex].x},${tiles[tileIndex].y}`)) {
-      tileIndex++;
-    }
-    let fallback = tiles[tileIndex];
+    let fallback = preferPartyViewingTiles(spawnTiles,occupied,entry)[0];
     if (!fallback) {
       // Same-floor-band search so we never drop party onto a terrace the 3D view reads as mid-floor / under-floor
       const safe = findNearestUnblockedTile(currentDungeon, origin);
@@ -8722,7 +8916,6 @@ function ensurePartyMazeAnchors(forceReset = false) {
     entry._renderTweenToY = entry.mazeY;
     entry._renderTweenStartedAt = Date.now();
     occupied.add(`${entry.mazeX},${entry.mazeY}`);
-    tileIndex++;
   });
 }
 
@@ -8832,8 +9025,8 @@ function getPartyNpcDesiredPoint(entry, behavior, now) {
 
 function buildPartyNpcGoalTile(entry, occupiedTiles, now) {
   const current = { x: entry.mazeX, y: entry.mazeY };
-  const tiles = collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 8)
-    .filter(tile => tile.dist >= 1 && tile.dist <= 5);
+  const tiles = preferPartyViewingTiles(collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 8)
+    .filter(tile => tile.dist >= 1 && tile.dist <= 8),occupiedTiles,entry);
   if (!tiles.length) return current;
 
   const hash = hashCharacterName(entry.name);
@@ -8917,7 +9110,12 @@ function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
 
     for (const next of neighbors) {
       const nextKey = key(next.x, next.y);
-      const cost = current.cost + 1;
+      const cameraX = typeof playerPosX === 'number' ? playerPosX : playerDungeonX + .5;
+      const cameraY = typeof playerPosY === 'number' ? playerPosY : playerDungeonY + .5;
+      const cameraDistance = Math.hypot(next.x + .5 - cameraX, next.y + .5 - cameraY);
+      // Prefer going around the camera, not through it. A penalty rather than a
+      // prohibition keeps narrow corridors and real combat paths traversable.
+      const cost = current.cost + 1 + Math.max(0, 3 - cameraDistance) * 4;
       if (cost >= (costs.get(nextKey) ?? Infinity)) continue;
       if (blockedTiles.has(nextKey) && nextKey !== goalKey) continue;
       if (!canEnterTile(current.x, current.y, next.x, next.y, excludeName)) continue;
@@ -8938,7 +9136,9 @@ function findNextPartyMazeStep(start, goal, excludeName, blockedTiles) {
 
 function partyFollowCadence(entry, normalCadence) {
   const distance = Math.hypot(entry.mazeX - playerDungeonX, entry.mazeY - playerDungeonY);
-  return distance > 5 ? Math.min(normalCadence, 150) : normalCadence;
+  // Hysteresis prevents rapid changes between roaming and catch-up speed.
+  entry._partyCatchingUp = distance > (entry._partyCatchingUp ? 4 : 5);
+  return entry._partyCatchingUp ? Math.min(normalCadence, 150) : normalCadence;
 }
 
 // ---- Monster wandering ---------------------------------------------------------------------------------
@@ -8949,8 +9149,8 @@ const MONSTER_WANDER_MIN_MS = 1500;
 const MONSTER_WANDER_MAX_MS = 3000;
 const MONSTER_WANDER_RADIUS = 7;      // max Chebyshev distance from the home cell
 const MONSTER_MIN_PC_DIST = 2;        // never closer than this (Chebyshev) to the player
-const MONSTER_MOVE_TWEEN_MS = 640;
-const MONSTER_WALK_FRAME_MS = 300;
+const MONSTER_MOVE_TWEEN_MS = 640 / 0.6;
+const MONSTER_WALK_FRAME_MS = 300 / 0.6;
 window._monsterHomeAnchors = window._monsterHomeAnchors || {};
 
 function getCurrentRoomMonsterEntries() {
@@ -9029,6 +9229,12 @@ function chooseMonsterWanderStep(entry, home, blockedTiles, hostile, rng) {
     if (isObstacleAtPos(opt.x + 0.5, opt.y + 0.5, entry.name)) return;
     const pcDist = chebyshevDist(opt.x, opt.y, px, py);
     if (pcDist < MONSTER_MIN_PC_DIST && pcDist < curPcDist + 1) return; // never step next to the player
+    const cameraX = typeof playerPosX === 'number' ? playerPosX : px + .5;
+    const cameraY = typeof playerPosY === 'number' ? playerPosY : py + .5;
+    const cameraDistance = Math.hypot(opt.x + .5 - cameraX, opt.y + .5 - cameraY);
+    const currentCameraDistance = Math.hypot(cx + .5 - cameraX, cy + .5 - cameraY);
+    const minimum=window.ProceduralCharacters?.characterViewingDistance?.(entry.sprite?.spec)||3;
+    if (cameraDistance < minimum && cameraDistance <= currentCameraDistance) return;
     const homeDist = chebyshevDist(opt.x, opt.y, home.x, home.y);
     if (homeDist > MONSTER_WANDER_RADIUS && homeDist >= chebyshevDist(cx, cy, home.x, home.y)) return;
     let score = rng() * 4;                                // random walk
@@ -9065,19 +9271,26 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
     const hostile = isMonsterHostile(entry) && window.DungeonInhabitants?.lineClear(currentDungeon,
       { x: entry.mazeX + 0.5, y: entry.mazeY + 0.5 }, { x: playerPosX, y: playerPosY }) &&
       chebyshevDist(entry.mazeX, entry.mazeY, playerDungeonX, playerDungeonY) <= 10;
+    const pursuing = entry.pursuit?.willing && entry.pursuit.active && entry.pursuit.targetRoom === currentDungeon.geoKey &&
+      isMonsterHostile(entry) && now - entry.pursuit.lastSeenAt <= 15000;
     const span = MONSTER_WANDER_MAX_MS - MONSTER_WANDER_MIN_MS;
-    entry._nextWanderAt = now + MONSTER_WANDER_MIN_MS + Math.floor(Math.random() * span) - (hostile ? 300 : 0);
+    entry._nextWanderAt = now + (pursuing ? MONSTER_MOVE_TWEEN_MS : MONSTER_WANDER_MIN_MS + Math.floor(Math.random() * span) - (hostile ? 300 : 0));
     // Idle sometimes (non-hostile monsters linger more).
     const idleChance = ['work', 'rest', 'guard'].includes(entry.routine) && !hostile ? 0.82 : hostile ? 0.12 : 0.3;
-    if (!force && (Date.now() < (entry._conversationUntil || 0) || Math.random() < idleChance)) { resetWalkFrame(entry); return; }
+    if (!force && !pursuing && (Date.now() < (entry._conversationUntil || 0) || Math.random() < idleChance)) { resetWalkFrame(entry); return; }
     const blocked = new Set(reservedTiles);
     blocked.delete(`${entry.mazeX},${entry.mazeY}`);
-    const step = chooseMonsterWanderStep(entry, home, blocked, hostile, Math.random);
+    // A pursuer walks toward the last verified sighting, not through walls toward an unseen PC.
+    const goal = pursuing ? { x: Math.floor(hostile ? playerPosX : entry.pursuit.target.x), y: Math.floor(hostile ? playerPosY : entry.pursuit.target.y) } : null;
+    const next = pursuing && !(hostile && Math.hypot(entry.mazeX+.5-playerPosX,entry.mazeY+.5-playerPosY)<=1.5) ?
+      findNextPartyMazeStep({ x: entry.mazeX, y: entry.mazeY }, goal, entry.name, blocked) : null;
+    const step = pursuing ? next && !blocked.has(`${next.x},${next.y}`) && (next.x !== entry.mazeX || next.y !== entry.mazeY) ?
+      next : null : chooseMonsterWanderStep(entry, home, blocked, hostile, Math.random);
     if (!step) { resetWalkFrame(entry); return; }
     reservedTiles.delete(`${entry.mazeX},${entry.mazeY}`);
     entry._prevMazeX = entry.mazeX;
     entry._prevMazeY = entry.mazeY;
-    entry.facing = deriveFacingFromDelta(step.x - entry.mazeX, step.y - entry.mazeY, entry.facing);
+    rememberCombatMovementFacing(entry,step.x-entry.mazeX,step.y-entry.mazeY);
     entry.mazeX = step.x;
     entry.mazeY = step.y;
     entry.mazeRoomKey = roomKey;
@@ -9138,7 +9351,7 @@ function updatePartyMazeLocomotion(force = false) {
 
     const moved = nextStep.x !== entry.mazeX || nextStep.y !== entry.mazeY;
     if (moved) {
-      entry.facing = deriveFacingFromDelta(nextStep.x - entry.mazeX, nextStep.y - entry.mazeY, entry.facing);
+      rememberCombatMovementFacing(entry,nextStep.x-entry.mazeX,nextStep.y-entry.mazeY);
       // Keep 3D billboard tween continuous from last rendered pos (not a snap)
       if (Number.isFinite(entry.renderMazeX) && Number.isFinite(entry.renderMazeY)) {
         entry._renderFromMazeX = entry.renderMazeX;
@@ -9200,7 +9413,7 @@ window.applyOutdoorDiscoveries = population => {
   scene?.updatePositions?.(window.combatCharacters);
   for (const [name, visual] of Object.entries(scene?.characters || {})) {
     const visible = population.actors[name]?.discoveryState !== 'pending';
-    visual.sprite?.setVisible?.(visible); visual.label?.setVisible?.(visible);
+    visual.sprite?.setVisible?.(visible); visual.label?.setVisible?.(false);
   }
 };
 window.refreshDungeonConsoleStates = () => {
@@ -9247,13 +9460,13 @@ window.focusDungeonSpeaker = (name, duration) => {
   const actor = (window.combatCharacters || []).find(a => a.name === name);
   if (!actor || !currentDungeon || !Number.isFinite(actor.mazeX)) return;
   actor._conversationUntil = Date.now() + duration;
-  actor.facing = deriveFacingFromDelta(playerPosX - actor.mazeX - 0.5, playerPosY - actor.mazeY - 0.5, actor.facing);
+  rememberCombatMovementFacing(actor,playerPosX-actor.mazeX-.5,playerPosY-actor.mazeY-.5);
   if (actor.type !== 'npc' || isCombatRoundActive() || Math.hypot(actor.mazeX - playerDungeonX, actor.mazeY - playerDungeonY) > 6) return;
   const front = { x: playerPosX + Math.cos(playerAngle) * 2, y: playerPosY + Math.sin(playerAngle) * 2 };
   const occupied = new Set((window.combatCharacters || []).filter(a => a !== actor).map(a => `${a.mazeX},${a.mazeY}`));
-  const tiles = collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 3)
+  const tiles = preferPartyViewingTiles(collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 3)
     .filter(t => t.dist >= 1 && !occupied.has(`${t.x},${t.y}`) &&
-      window.DungeonInhabitants.lineClear(currentDungeon, { x: playerPosX, y: playerPosY }, { x: t.x + 0.5, y: t.y + 0.5 }))
+      window.DungeonInhabitants.lineClear(currentDungeon, { x: playerPosX, y: playerPosY }, { x: t.x + 0.5, y: t.y + 0.5 })),occupied,actor)
     .sort((a,b) => Math.hypot(a.x + 0.5-front.x,a.y + 0.5-front.y) - Math.hypot(b.x + 0.5-front.x,b.y + 0.5-front.y));
   actor._conversationGoal = tiles[0] || null;
 };
@@ -9261,6 +9474,7 @@ window.beginEncounterCombat = name => {
   const input = document.getElementById('chatuserinput');
   if (!input || input.value.trim() || window.gamePaused || isCombatRoundActive() || window._npcCombatQueued) return;
   window._npcCombatQueued = true;
+  window.faceDungeonCombatTarget?.(name);
   window._combatCommandPending = true;
   markCombatRoundActive(180000);
   fetch('/room-population/engage', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -9269,6 +9483,45 @@ window.beginEncounterCombat = name => {
     .then(async response => { const event = await response.json(); if (!response.ok) throw Error(event.error || 'Encounter failed.'); await window.applyRealtimeCombatResult(event); })
     .catch(error => console.warn('[EncounterCombat]', error.message))
     .finally(() => { window._npcCombatQueued = false; window._combatCommandPending = false; window._combatRoundActiveUntil = 0; });
+};
+window.applyLiveCombatHealth = event => {
+  const active = window.actionDiceState?.active;
+  const api = window.DungeonInhabitants;
+  if (!event || event.runId !== window.dungeonRunId || event.geoKey !== currentDungeon?.geoKey ||
+      !active || active.kind !== 'combat' || event.actionId !== active.id ||
+      !Number.isInteger(event.revision) || event.revision < 0 || !api) return;
+  const text = event.updatedGameConsole;
+  if (typeof text !== 'string' || api.roomKey(text.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]) !== event.geoKey) return;
+  const previous = window._lastCombatHealthUpdate;
+  if (previous?.runId === event.runId && previous.actionId === event.actionId && previous.revision >= event.revision) return;
+  const sheets = ['PC', 'NPCs in Party', 'Monsters in Room'].flatMap(label => api.parseSheets(text, label));
+  if (!sheets.some(actor => actor.type === 'pc')) return;
+  const byName = new Map(sheets.map(actor => [actor.name.toLowerCase(), actor]));
+  window._lastCombatHealthUpdate = { runId: event.runId, actionId: event.actionId, revision: event.revision };
+  window.lastServerGameConsole = text;
+  updateCharacterSheetsFromConsole(text);
+  // Health-only projection: do not respawn actors, change camera/positions or release the action lock.
+  for (const actor of window.combatCharacters || []) {
+    const sheet = byName.get(String(actor.name || actor.Name).toLowerCase());
+    if (sheet) Object.assign(actor, { hp: sheet.hp, maxHp: sheet.maxHp, state: api.state(sheet) });
+  }
+  const cached = [...(typeof characters !== 'undefined' ? characters : []),
+    ...(typeof npcs !== 'undefined' ? npcs : []),
+    ...(typeof monstersInVisitedRooms !== 'undefined' ? monstersInVisitedRooms.get(event.geoKey) || [] : [])];
+  for (const actor of cached) {
+    const sheet = byName.get(String(actor.Name || actor.name).toLowerCase());
+    if (sheet) Object.assign(actor, { HP: sheet.hp, MaxHP: sheet.maxHp, XP: sheet.xp,
+      Level: sheet.level, State: api.state(sheet) });
+  }
+  window.latestUpdatedData = api.consoleView(text, window.latestUpdatedData);
+  window._partyInfoPCString = window.latestUpdatedData.pc;
+  window._partyInfoNPCString = window.latestUpdatedData.npcs;
+  window._combatMonsterSheets = window.latestUpdatedData.monsters;
+  if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
+  window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
+  window.combatGame?.scene?.getScene('CombatScene')?.updatePositions(window.combatCharacters || []);
+  window.renderPartyIconDock?.();
+  renderDungeonView();
 };
 const realtimeCombatResultsSeen = new Set();
 window.applyRealtimeCombatResult = async event => {
@@ -9932,6 +10185,8 @@ async function chatbotprocessinput(textin) {
   }
 
   if (!completedStartResult && /\battack\b/i.test(userInput)) {
+    const target=/^\s*attack\s+(.+)\s*$/i.exec(userInput)?.[1];
+    if(target)window.faceDungeonCombatTarget?.(target);
     markCombatRoundActive();
   }
 
@@ -10156,6 +10411,7 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
           // Rebuild strings from the Map
           roomNameDatabasePlainObject = mapToPlainObject(roomNameDatabase);
           roomNameDatabaseString = JSON.stringify(roomNameDatabasePlainObject);
+          refreshConsoleExitStatus();
           
           // Debug log to verify contents
           console.log("Updated roomNameDatabaseString:", roomNameDatabaseString);
@@ -12651,10 +12907,10 @@ const taskRequest = {
                   // 1) ask server for JSON it has for this room
                   fetch(`/get-room-music?coords=${encodeURIComponent(coordsKey)}`)
                     .then(r => r.json())
-                    .then(async ({ music }) => {
+                    .then(async ({ music, runId }) => {
                       if (music) {
                         // 2) cache locally
-                        await idbSetMusic(coordsKey, music);
+                        await idbSetMusic(coordsKey, { ...music, __runId: runId });
                         // 3) tell server to write retort/current_room.json and render WAV
                         return fetch('/music/commit', {
                           method: 'POST',
@@ -12664,7 +12920,7 @@ const taskRequest = {
                       } else {
                         // No JSON on server? try local cache
                         const local = await idbGetMusic(coordsKey);
-                        if (!local) {
+                        if (!local || !runId || local.__runId !== runId) { // only this run's songs; a new run composes fresh
                           console.warn('No music JSON for room; skipping audio for now:', coordsKey);
                           return null;
                         }
@@ -12795,6 +13051,8 @@ const taskRequest = {
                     solution: puzzleSolution || "No solution"
                 },
                 currentQuest: currentQuest || "None",
+                questProgress: serverGameConsole.match(/^Quest Progress:[ \t]*([^\r\n]*)/m)?.[1] || '',
+                questRequirements: serverGameConsole.match(/^Quest Requirements:[ \t]*([^\r\n]*)/m)?.[1] || '',
                 nextArtifact: nextArtifact || "None",
                 nextBoss: nextBoss || "None",
                 nextBossRoom: nextBossRoom || "None",

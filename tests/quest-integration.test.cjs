@@ -8,6 +8,11 @@ const vm = require('node:vm');
 const progress = require('../retort/questProgress');
 const bossGate = require('../retort/bossGate');
 const PuzzleRewards = require('../retort/puzzleRewards');
+const PhysicalPuzzles = require('../assets/physicalPuzzles');
+const Inhabitants = require('../assets/dungeonInhabitants');
+const ItemTransfer = require('../retort/itemTransfer');
+const { createPopulationService } = require('../retort/roomPopulation');
+const QuestDeliverySuccessors = require('../retort/questDeliverySuccessors');
 const { parseSheets } = require('../assets/partyRoster');
 
 const filename = path.join(__dirname, '..', 'retort', 'retortWithUserInput.js');
@@ -67,6 +72,13 @@ function puzzleTask(overrides = {}) {
   return { type: 'Puzzle', actionKind: 'solve_puzzle', desc: 'Read the oath.', metrics: 'Speak the old oath', status: 'Pending',
     requiredElements: [], hardRequirements: [], actionRequirements: [], targetID: 'puzzle-one', ...overrides };
 }
+function attachSolvedMechanism(h) {
+  const p = PhysicalPuzzles.fallback('quest-integration', 'Entry');
+  let state = PhysicalPuzzles.initialState(p);
+  for (const move of PhysicalPuzzles.findSolution(p)) state = PhysicalPuzzles.step(p, state, move.controlId, move.value);
+  const db = h.db(); db['0,0,0'].puzzleMechanism = { ...p, state }; h.state.database = JSON.stringify(db);
+  h.state.tasks[0].actionRequirements.push({ check: 'puzzle_solved', value: '0,0,0', mechanismId: p.id });
+}
 
 function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = database(), text = consoleText(),
   quest = 'Recover Sepulchra', onGenerateQuest } = {}) {
@@ -97,7 +109,7 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
     setLastQuestUpdate: value => { state.updates.push(value); }, appendQuestLog: value => { state.logs.push(clone(value)); }
   };
   const sync = name => async (_agent, _coords, _db, text) => { state.synchronizers.push(name); return text; };
-  const dependencies = { console: quiet, sharedState, PuzzleRewards, ...progress, ...bossGate, ...actualRoomHelpers,
+  const dependencies = { console: quiet, sharedState, PuzzleRewards, QuestDeliverySuccessors, ...progress, ...bossGate, ...actualRoomHelpers,
     seedBossKey: (db, gate, placement, options) => {
       state.seedAttempts.push(placement);
       return bossGate.seedBossKey(db, gate, placement, options);
@@ -222,12 +234,9 @@ test('real quest manager stores partial progress, blocks model completion/reward
   assert.deepEqual([first.activeTask.progress.satisfied, first.activeTask.progress.total, first.activeTask.progress.eligible], [1, 2, false]);
   assert.doesNotMatch(first.questUpdate, /XP gained/);
   assert.match(h.state.text, /^Quest Progress: Step 1\/3: In Progress; 1\/2/m);
-  const eligible = await h.turn({ text: consoleText({ inventory: 'Iron Sigil' }) });
-  assert.equal(eligible.activeTask.progress.eligible, true);
-  assert.equal(h.state.index, 0);
-  assert.equal(h.state.tasks[0].status, 'Pending');
+  assert.match(h.state.text, /^Quest Requirements: .*Have "Iron Sigil" in your inventory\. Item source: Entry \(0,0,0\)/m);
   const callsBeforeCompletion = h.state.requests.length;
-  const done = await h.turn({ responses: [COMPLETED, { placement: '0,1,0' }] });
+  const done = await h.turn({ text: consoleText({ inventory: 'Iron Sigil' }), responses: [PENDING, { placement: '0,1,0' }] });
   assert.equal(h.state.tasks[0].status, 'Completed');
   assert.equal(h.state.index, 1);
   assert.equal(h.state.seeded, true);
@@ -237,6 +246,9 @@ test('real quest manager stores partial progress, blocks model completion/reward
   assert.equal(done.activeTask.progress.total, 1);
   assert.equal(h.state.requests.slice(callsBeforeCompletion).filter(r => r.parameters.updatedStatus).length, 1);
   assert.match(h.state.text, /^Quest Progress: Step 2\/3: Pending; 0\/1/m);
+  const nextRequirements = h.state.text.match(/^Quest Requirements:[^\r\n]*/m)?.[0];
+  assert.ok(nextRequirements.includes(`Have "${done.activeTask.requiredElements[0].name}" in your inventory.`));
+  assert.doesNotMatch(nextRequirements, /Iron Sigil/);
   assert.match(done.questUpdate, /Task completed/);
   assert.doesNotMatch(done.questUpdate, /XP gained/);
   assert.equal(h.state.xp, 200);
@@ -245,14 +257,14 @@ test('real quest manager stores partial progress, blocks model completion/reward
 });
 
 test('an already-seeded stage 0 never creates or fetches the special boss key early', async () => {
-  const h = harness({ text: consoleText({ inventory: 'Iron Sigil' }) });
+  const h = harness({ text: consoleText() });
   const result = await h.turn();
   const gate = h.db()[BOSS_KEY].bossGate;
   assert.equal(h.state.index, 0);
   assert.equal(h.state.seeded, true);
   assert.equal(result.questJustSeeded, false);
-  assert.equal(h.state.tasks[0].status, 'Pending');
-  assert.equal(h.state.tasks[0].progress.eligible, true);
+  assert.equal(h.state.tasks[0].status, 'In Progress');
+  assert.equal(h.state.tasks[0].progress.eligible, false);
   assert.equal(gate.keySeeded, false);
   assert.equal(gate.keyPlacement, null);
   assert.equal(h.state.seedAttempts.length, 0);
@@ -403,10 +415,8 @@ test('real stage 2 binds the original boss and cannot reuse a same-named remote 
   assert.equal(h.state.index, 2);
   assert.equal(wrongRoom.questJustSeeded, false);
   assert.doesNotMatch(seeded.questUpdate, /XP gained/);
-  await h.turn({ text: consoleText({ roomKey: BOSS_KEY, inventory: key, monsters: sheet(BOSS, 0) }), responses: [PENDING] });
+  const completed = await h.turn({ text: consoleText({ roomKey: BOSS_KEY, inventory: key, monsters: sheet(BOSS, 0) }), responses: [PENDING] });
   assert.equal(task.progress.eligible, true);
-  assert.equal(h.state.index, 2);
-  const completed = await h.turn({ responses: [COMPLETED] });
   assert.equal(task.status, 'Completed');
   assert.equal(h.state.index, 3);
   assert.equal(h.state.seeded, false);
@@ -418,13 +428,16 @@ test('real stage 2 binds the original boss and cannot reuse a same-named remote 
   assert.doesNotMatch(completed.questUpdate, /XP gained/);
 });
 
-test('real resolver writes puzzle success binding and real quest manager advances exactly once', async () => {
+test('real resolver and verified mechanism completion advance the quest exactly once', async () => {
   const h = harness({ tasks: [puzzleTask()] });
+  attachSolvedMechanism(h);
   await h.adjudicate({ questAttempted: true, questSucceeded: true, prereqsMet: true });
   assert.equal(h.state.lastAdjudication.taskBinding, progress.taskBinding(h.state.tasks[0]));
   assert.equal(h.state.lastAdjudication.roomKey, '0,0,0');
   const result = await h.turn({ responses: [{ placement: '0,1,0' }] });
   assert.equal(h.state.tasks[0].status, 'Completed');
+  assert.equal(h.state.tasks[0].progress.eligible, true);
+  assert.equal(h.state.tasks[0].progress.checks[0].evidence.source, 'database.puzzleMechanism');
   assert.equal(h.state.index, 1);
   assert.equal(h.state.seeded, true);
   assert.equal(result.questJustSeeded, true);
@@ -441,7 +454,7 @@ test('a success for a differently targeted legacy puzzle cannot complete the nex
   const h = harness({ tasks: [next] });
   await h.adjudicate({ questAttempted: true, questSucceeded: true, prereqsMet: true }, 'solve first tablet', old);
   const result = await h.turn();
-  assert.equal(h.state.tasks[0].status, 'Pending');
+  assert.equal(h.state.tasks[0].status, 'In Progress');
   assert.equal(h.state.index, 0);
   assert.equal(h.state.seeded, true);
   assert.equal(result.activeTask, h.state.tasks[0]);
@@ -483,6 +496,7 @@ test('a missing boss gate must leave stage 1 pending instead of generating a key
 
 test('successful puzzle adjudication must not evaluate or complete a second pre-existing task in the same turn', async () => {
   const h = harness({ tasks: [puzzleTask(), fetchTask()] });
+  attachSolvedMechanism(h);
   await h.adjudicate({ questAttempted: true, questSucceeded: true, prereqsMet: true });
   const nextTask = clone(h.state.tasks[1]);
   const result = await h.turn({ responses: [{ placement: '0,1,0' }] });
@@ -505,7 +519,7 @@ for (const flag of ['questAttempted', 'questSucceeded', 'prereqsMet']) {
     const result = await h.turn();
     assert.equal(h.state.index, 0);
     assert.equal(h.state.seeded, true);
-    assert.equal(h.state.tasks[0].status, 'Pending');
+    assert.equal(h.state.tasks[0].status, 'In Progress');
     assert.equal(result.questJustSeeded, false);
     assert.equal(result.activeTask, h.state.tasks[0]);
     assert.equal(h.state.requests.length, 1);
@@ -520,7 +534,7 @@ test('puzzle success from another room or an unbound legacy hint cannot be reuse
     change(h.state.lastAdjudication);
     await h.turn();
     assert.equal(h.state.index, 0);
-    assert.equal(h.state.tasks[0].status, 'Pending');
+    assert.equal(h.state.tasks[0].status, 'In Progress');
     assert.equal(h.state.seeded, true);
   }
 });
@@ -534,7 +548,7 @@ test('different immutable task identities cannot reuse a previous puzzle success
     await h.adjudicate({ questAttempted: true, questSucceeded: true, prereqsMet: true }, 'solve previous oath', old);
     await h.turn();
     assert.equal(h.state.index, 0, JSON.stringify(overrides));
-    assert.equal(h.state.tasks[0].status, 'Pending');
+    assert.equal(h.state.tasks[0].status, 'In Progress');
     assert.equal(h.state.seeded, true);
   }
 });
@@ -554,11 +568,13 @@ test('saved puzzle prereqsMet=true cannot override current lost inventory or unk
 });
 
 test('real manager preserves earned checkpoints without eligibility after item loss and JSON reload', async () => {
-  const h = harness();
+  const h = harness({ tasks: [fetchTask({ actionKind: 'unlock_exit',
+    actionRequirements: [{ check: 'exit_open', coords: '0,0,0', direction: 'west' }] })] });
   await h.turn({ text: consoleText({ inventory: 'Iron Sigil' }) });
   assert.equal(h.state.index, 0);
   const first = clone(h.state.tasks[0].progress);
-  assert.equal(first.eligible, true);
+  assert.equal(first.eligible, false, 'The item checkpoint is earned but the actual exit action remains pending');
+  assert.ok(first.earnedCheckpointIds.includes('hard:1'));
   h.state.tasks = clone(h.state.tasks);
   await h.turn({ text: consoleText() });
   const lost = clone(h.state.tasks[0].progress);
@@ -669,11 +685,15 @@ test('stage 0 actual seeding restricts the placement enum to non-boss rooms and 
 });
 
 test('finishing a quest preserves generateQuest fresh console/boss/quest bindings and waiting UI', async () => {
-  const finished = fetchTask({ hardRequirements: [], actionRequirements: [], type: 'Defeat', actionKind: 'defeat_monster' });
+  const finished = { type: 'Defeat', actionKind: 'defeat_monster', desc: 'Defeat the bound regent.',
+    requiredElements: [{ type: 'monster', name: BOSS, placement: BOSS_KEY }],
+    hardRequirements: [{ check: 'monster_hp_zero', value: BOSS }], actionRequirements: [] };
+  const db = database(); db[BOSS_KEY].monsters.consoleBlock = `Monsters in Room:\n${sheet(BOSS, 0)}`;
   const fresh = consoleText({ 'Current Quest': 'New quest: find the chalice', 'Next Boss': 'New Bound Boss',
     'Next Boss Room': 'Fresh Sanctuary', 'Boss Room Coordinates': '5,6,7', 'Next Artifact': 'Fresh Chalice',
     inventory: 'Fresh Chalice', 'Quest Progress': 'old display should be replaced' });
   const h = harness({ tasks: [fetchTask({ status: 'Completed' }), fetchTask({ status: 'Completed' }), finished], index: 2,
+    db,
     onGenerateQuest: state => {
       state.quest = 'New quest: find the chalice';
       state.tasks = [];
@@ -693,10 +713,26 @@ test('finishing a quest preserves generateQuest fresh console/boss/quest binding
   assert.match(h.state.text, /^Next Artifact: Fresh Chalice$/m);
   assert.match(h.state.text, /^Inventory: Fresh Chalice$/m);
   assert.match(h.state.text, /^Quest Progress: Step 1\/3: waiting/m);
+  assert.match(h.state.text, /^Quest Requirements: Awaiting the next step/m);
   assert.equal(h.state.text.match(/^Quest Progress:/gm).length, 1);
   assert.doesNotMatch(h.state.text, /old display/);
   assert.doesNotMatch(result.questUpdate, /XP gained/);
   assert.equal(h.state.requests.length, 1);
+});
+
+test('future ordinary fetch quests publish exact required names even when generated descriptions abbreviate them', async () => {
+  const db = database(), name = 'shroud of eternal echoes';
+  db['0,1,0'].name = 'Hall of Eternal Echoes';
+  db['0,1,0'].objects = [{ name, type: 'armor' }];
+  const h = harness({ tasks: [], seeded: false, db, text: consoleText({ roomKey: '0,1,0', inventory: 'soulshroud' }) });
+  const result = await h.turn({ responses: [{ count: 1 }, { type: 'object' }, { placement: '0,1,0' },
+    { type: 'fetch' }, { actionKind: 'other' }, { desc: 'Find the shroud in the northern hall.' },
+    { metrics: 'Find the shroud.' }, COMPLETED] });
+  const text = h.state.text.match(/^Quest Requirements:[^\r\n]*/m)[0];
+  assert.ok(text.includes('Have "shroud of eternal echoes" in your inventory. Item source: Hall of Eternal Echoes (0,1,0).'));
+  assert.doesNotMatch(text, /northern hall|soulshroud/);
+  assert.equal(h.state.index, 0);
+  assert.equal(result.activeTask.progress.eligible, false, 'A similarly named item is not the required shroud');
 });
 
 const PLANNER_RESPONSES = [{ questAttempted: 'true' }, { engagedInDialogue: false, justLooking: false,
@@ -743,18 +779,143 @@ test('planner checks hard prerequisites only; manager still gates locked actions
   assert.doesNotMatch(result.questUpdate, /puzzle completed|XP gained/);
 });
 
-test('successful real planner flags flow through the real resolver into single-step puzzle completion', async () => {
+test('successful model planner flags cannot complete a puzzle without verified mechanism state', async () => {
   const h = harness({ tasks: [puzzleTask({ hardRequirements: [{ check: 'inventory_contains', value: 'Iron Sigil' }] })],
     text: consoleText({ inventory: 'Iron Sigil' }) });
   const planned = await h.plan(PLANNER_RESPONSES);
   assert.deepEqual([planned.questAttempted, planned.questSucceeded, planned.prereqsMet], [true, true, true]);
   await h.adjudicate(planned);
-  const result = await h.turn({ responses: [{ placement: '0,1,0' }] });
-  assert.equal(h.state.tasks[0].status, 'Completed');
-  assert.equal(h.state.index, 1);
+  const result = await h.turn({ responses: [COMPLETED] });
+  assert.equal(h.state.tasks[0].status, 'In Progress');
+  assert.equal(h.state.index, 0);
   assert.equal(h.state.seeded, true);
-  assert.equal(result.questJustSeeded, true);
+  assert.equal(result.questJustSeeded, false);
+  assert.equal(h.state.tasks.length, 1);
+  assert.equal(h.state.requests.filter(r => r.parameters?.updatedStatus).length, 1);
+  assert.match(result.questUpdate, /programmatically verified/);
+  assert.doesNotMatch(result.questUpdate, /puzzle completed|XP gained/);
+});
+
+test('location-only, empty and unsupported objectives reject generated Completed statuses', async () => {
+  for (const task of [{ type: 'Talk', actionKind: 'negotiate', hardRequirements: [], actionRequirements: [] },
+    { type: 'Investigate', actionKind: 'investigate', hardRequirements: [{ check: 'at_coords', value: '0,0,0' }], actionRequirements: [] },
+    puzzleTask({ hardRequirements: [{ check: 'inventory_contains', value: 'Iron Sigil' }] })]) {
+    const h = harness({ tasks: [task], text: consoleText({ inventory: 'Iron Sigil' }) });
+    const result = await h.turn({ responses: [COMPLETED] });
+    assert.equal(h.state.index, 0);
+    assert.equal(h.state.tasks[0].status, 'In Progress');
+    assert.equal(h.state.generatedQuests.length, 0);
+    assert.equal(h.state.xp, 200);
+    assert.match(result.questUpdate, /programmatically verified/);
+    assert.doesNotMatch(result.questUpdate, /Task completed|XP gained/);
+  }
+});
+
+test('a solved physical mechanism completes from database evidence even with no adjudication hint and Pending model output', async () => {
+  const h = harness({ tasks: [puzzleTask()] }); attachSolvedMechanism(h);
+  const result = await h.turn({ responses: [PENDING, { placement: '0,1,0' }] });
+  assert.equal(h.state.index, 1);
+  assert.equal(h.state.tasks[0].status, 'Completed');
+  assert.equal(h.state.tasks[0].progress.eligible, true);
   assert.equal(h.state.tasks[1].status, 'Pending');
-  assert.equal(h.state.requests.filter(r => r.parameters?.updatedStatus).length, 0);
-  assert.match(result.questUpdate, /Quest puzzle completed/);
+  assert.match(result.questUpdate, /Task completed/);
+});
+
+test('real future quest generation compiles vague two-item delivery prose into exact bindings and completes through real handoffs', async () => {
+  const db = database(), itemNames = ['chronicle of ruined temple entrance', 'shroud of eternal echoes'], name = 'Grelma Voss';
+  db['0,0,0'].name = 'Ruined Temple Entrance'; db['0,0,0'].objects = [{ name: itemNames[0], type: 'other' }];
+  db['-1,1,0'] = { name: 'Hall of Eternal Echoes', objects: [{ name: itemNames[1], type: 'armor' }], exits: {} };
+  db['0,1,0'].name = 'Hall of Quiet Descent';
+  db['0,1,0'].monsters = { inRoom: name, consoleBlock: `Monsters in Room:\n${sheet(name, 20)}`, state: 'Neutral' };
+  db['0,0,1'] = { name: 'Sanctum of Silent Reckoning', objects: [], exits: {} };
+  const h = harness({ tasks: [], seeded: false, db, text: consoleText({ roomKey: '0,0,1' }) });
+  const result = await h.turn({ responses: [{ count: 3 }, { type: 'object' }, { placement: '0,0,0' },
+    { type: 'object' }, { placement: '-1,1,0' }, { type: 'monster' }, { placement: '0,1,0' },
+    { type: 'deliver' }, { actionKind: 'deliver_item' },
+    { desc: 'Retrieve the chronicle and shroud from the northern hall and deliver both to Grelma.' },
+    { metrics: 'Both items in inventory and Grelma encountered.' }, COMPLETED] });
+  const task = result.activeTask;
+  assert.equal(task, h.state.tasks[0]); assert.equal(task.type, 'Deliver'); assert.equal(task.actionKind, 'deliver_item');
+  assert.deepEqual(task.hardRequirements, [{ check: 'at_coords', value: '0,1,0' }]);
+  assert.deepEqual(task.actionRequirements, itemNames.map(item => ({ check: 'item_delivered', item, recipient: name, coords: '0,1,0' })));
+  assert.ok(task.desc.includes('chronicle of ruined temple entrance from Ruined Temple Entrance (0,0,0)'));
+  assert.ok(task.desc.includes('shroud of eternal echoes from Hall of Eternal Echoes (-1,1,0)'));
+  assert.ok(task.desc.includes('Grelma Voss in Hall of Quiet Descent (0,1,0)'));
+  assert.doesNotMatch(task.desc, /northern hall/); assert.match(task.metrics, /engine item-transfer receipt/);
+  const requirements = h.state.text.match(/^Quest Requirements:[^\r\n]*/m)?.[0];
+  for (const item of itemNames) assert.ok(requirements.includes(`Give "${item}" to Grelma Voss in Hall of Quiet Descent (0,1,0).`));
+  assert.ok(requirements.includes('Item source: Hall of Eternal Echoes (-1,1,0).'));
+  assert.equal(h.state.index, 0, 'Invented Completed output cannot advance a newly generated delivery');
+  assert.equal(task.actionRequirements.some(r => r.check === 'puzzle_solved'), false);
+  const population = Inhabitants.createPopulation('0,1,0', [{ name, allegiance: 'Neutral' }]);
+  Object.assign(population.actors[name], { sheet: sheet(name, 20), hp: 20, home: { x: 5, y: 4 }, position: { x: 5, y: 4 } });
+  const dungeon = { geoKey: '0,1,0', start: { x: 4, y: 4 }, layout: { width: 12, height: 12 }, cells: {} };
+  for (let y = 0; y < 12; y++) for (let x = 0; x < 12; x++) dungeon.cells[`${x},${y}`] = { tile: 'floor' };
+  let roster = JSON.stringify([{ name: 'Hero', type: 'pc', hp: 20, mazeX: 4, mazeY: 4, mazeRoomKey: '0,1,0' },
+    { name, type: 'monster', hp: 20, mazeX: 5, mazeY: 4, mazeRoomKey: '0,1,0' }]);
+  Object.assign(h.sharedState, { getLastCoords: () => ({ x: 0, y: 1, z: 0 }), getRoomDungeonForSimulation: () => dungeon,
+    getRoomPopulation: () => population, setRoomPopulation() {}, getDungeonRunId: () => 'delivery-test',
+    getCombatCharactersString: () => roster, setCombatCharactersString: value => { roster = value; } });
+  const service = createPopulationService(h.sharedState);
+  h.state.text = consoleText({ roomKey: '0,1,0', inventory: itemNames.join(', '), monsters: sheet(name, 20) });
+  const ownedDB = h.db(); ownedDB['0,0,0'].objects = []; ownedDB['-1,1,0'].objects = []; h.state.database = JSON.stringify(ownedDB);
+  const before = h.state.requests.length;
+  assert.match(ItemTransfer.give(h.sharedState, service, `give ${itemNames[0]} to ${name}`).questUpdate, /1\/2/);
+  assert.equal(h.state.index, 0); assert.equal(h.state.tasks[0].status, 'In Progress');
+  h.state.tasks = clone(h.state.tasks); h.state.database = JSON.stringify(h.db());
+  assert.match(ItemTransfer.give(h.sharedState, service, `give ${itemNames[1]} to ${name}`).questUpdate, /Task completed/);
+  assert.equal(h.state.index, 1); assert.equal(h.state.tasks[0].status, 'Completed');
+  assert.equal(h.state.tasks[0].progress.satisfied, 3); assert.equal(h.state.tasks[0].progress.total, 3);
+  assert.equal(h.state.requests.length, before, 'Handoffs and progress persistence need no model adjudication');
+  assert.equal(h.db()['0,1,0'].itemTransfers.length, 2); assert.equal(h.state.xp, 200);
+});
+
+test('future generation does not expose a delivery choice without a recipient and rejects invalid model proposals before saving a task', async () => {
+  const h = harness({ tasks: [], seeded: false, text: consoleText({ roomKey: '0,1,0' }) });
+  const result = await h.turn({ responses: [{ count: 1 }, { type: 'object' }, { placement: '0,0,0' },
+    { type: 'deliver' }] });
+  const types = h.state.requests.find(r => r.parameters.type?.enum?.includes('fetch'));
+  assert.ok(!types.parameters.type.enum.includes('deliver'));
+  const actions = h.state.requests.find(r => r.parameters.actionKind);
+  assert.equal(actions, undefined, 'Reject an unsupported type before requesting an action');
+  assert.equal(h.state.tasks.length, 0); assert.equal(h.state.index, 0); assert.equal(h.state.seeded, false);
+  assert.equal(result.activeTask, null); assert.equal(result.questJustSeeded, false);
+});
+
+test('a future key-delivery quest requires handing over the key, not unlocking an unrelated exit or keeping it afterward', async () => {
+  const db = database(), name = 'Grelma Voss';
+  db['0,0,0'].objects = [{ name: 'sepulchral sigil', type: 'key', properties: { magic: 0 }, unlocks: { coordinates: '0,0,0', direction: 'north' } }];
+  db['0,1,0'].monsters = { inRoom: name, consoleBlock: `Monsters in Room:\n${sheet(name, 20)}`, state: 'Neutral' };
+  const h = harness({ tasks: [], seeded: false, db, text: consoleText({ roomKey: '0,1,0' }) });
+  const result = await h.turn({ responses: [{ count: 2 }, { type: 'key' }, { placement: '0,0,0' },
+    { type: 'monster' }, { placement: '0,1,0' }, { type: 'deliver' }, { actionKind: 'deliver_item' },
+    { desc: 'Give the sigil to Grelma Voss.' }, { metrics: 'The sigil is handed over.' }, PENDING] });
+  assert.equal(result.activeTask.actionKind, 'deliver_item');
+  assert.deepEqual(result.activeTask.hardRequirements, [{ check: 'at_coords', value: '0,1,0' }]);
+  assert.deepEqual(result.activeTask.actionRequirements, [{ check: 'item_delivered', item: 'sepulchral sigil', recipient: name, coords: '0,1,0' }]);
+  assert.equal(result.activeTask.actionRequirements.some(r => r.check === 'exit_open'), false);
+});
+
+test('future generation never offers unimplemented types or actions and rejects an out-of-schema choice before publishing', async () => {
+  for (const type of ['investigate', 'negotiate', 'protect', 'hybrid']) {
+    const h = harness({ tasks: [], seeded: false, text: consoleText({ roomKey: '0,1,0' }) });
+    const result = await h.turn({ responses: [{ count: 1 }, { type: 'object' }, { placement: '0,1,0' }, { type }] });
+    const types = h.state.requests.find(r => r.parameters.type?.enum?.includes('fetch'));
+    assert.deepEqual(types.parameters.type.enum, ['fetch']); assert.equal(h.state.tasks.length, 0); assert.equal(h.state.seeded, false);
+    assert.equal(result.activeTask, null); assert.match(h.state.text, /^Quest Requirements: Awaiting the next step/m);
+    assert.equal(h.state.requests.some(r => r.parameters.actionKind), false);
+  }
+});
+
+test('zero-element future puzzle tasks bind an existing unsolved mechanism rather than invented model completion conditions', async () => {
+  const db = database(), mechanism = PhysicalPuzzles.fallback('generated-puzzle', 'Key Hall');
+  mechanism.state = PhysicalPuzzles.initialState(mechanism); db['0,1,0'].puzzleMechanism = mechanism;
+  const h = harness({ tasks: [], seeded: false, db, text: consoleText({ roomKey: '0,1,0' }) });
+  const result = await h.turn({ responses: [{ count: 0 }, { type: 'puzzle' }, { actionKind: 'solve_puzzle' },
+    { desc: 'Investigate an invented southern shrine.' }, { metrics: 'The narrator decides it is done.' }, PENDING] });
+  assert.equal(result.activeTask.physicalPuzzleRoom, '0,1,0');
+  assert.deepEqual(result.activeTask.actionRequirements, [{ check: 'puzzle_solved', value: '0,1,0', mechanismId: mechanism.id }]);
+  assert.match(result.activeTask.desc, /Key Hall/); assert.doesNotMatch(result.activeTask.desc, /invented southern shrine/);
+  assert.match(h.state.text, /^Quest Requirements: .*Solve the physical puzzle.*Key Hall/m);
+  assert.equal(result.activeTask.progress.eligible, false);
 });

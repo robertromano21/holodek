@@ -182,6 +182,7 @@ test('the actual monster wandering loop respects the subtitle wait even during a
     isMonsterHostile: () => false, MONSTER_WANDER_MIN_MS: 100, MONSTER_WANDER_MAX_MS: 200,
     chooseMonsterWanderStep: actor => { steps++; return { x: actor.mazeX + 1, y: actor.mazeY }; },
     deriveFacingFromDelta: () => 'right', advanceWalkFrame() {}, MONSTER_WALK_FRAME_MS: 150, MONSTER_MOVE_TWEEN_MS: 420 };
+  vm.runInNewContext(source.slice(source.indexOf('function rememberCombatMovementFacing('), source.indexOf('function advanceWalkFrame(')), context);
   vm.runInNewContext(source.slice(begin, end), context);
   for (let i = 0; i < 5; i++) context.updateMonsterWandering([queued], new Set(), 10000 + i * 1000, true);
   assert.equal(steps, 0); assert.equal(queued.mazeX, 5);

@@ -70,7 +70,7 @@ test('working parts have genuine intermediate geometry instead of flashing betwe
 test('shrine forms obey the campaign pantheon and reuse the detailed character generator',()=>{
   const presetBefore=JSON.stringify(require('../assets/renderCharacterProcedural').getPresetProceduralSpec('Mortacia'));
   const m=S.normalize({deity:'Mortacia',form:'dragon'});assert.equal(m.form,'human');assert.equal(m.hair,'blonde');assert.equal(m.wings,'skeletal');
-  assert.equal(S.characterSpec(m).traits.bodyPlan,'humanoid');assert.equal(S.characterSpec(m).traits.wings,'bone');
+  assert.equal(S.characterSpec(m).traits.bodyPlan,'humanoid');assert.equal(S.characterSpec(m).traits.wings,'bat');assert.equal(S.characterSpec(m).traits.wingShape,'mortacia');
   for(const name of ['Atinus','Arithus','Poena','Earthdragon']){
     const s=S.normalize({deity:name,form:'human'});assert.equal(s.form,'dragon');assert.equal(S.characterSpec(s).traits.bodyPlan,'draconic');
     assert.notDeepEqual(S.build(24,1,m),S.build(24,1,s));

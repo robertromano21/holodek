@@ -1,14 +1,16 @@
 (function(root, factory) {
   const api=factory(typeof module==='object' && module.exports?require('./shrineIconography'):root.ShrineIconography,
     typeof module==='object' && module.exports?require('./renderCharacterProcedural'):root.ProceduralCharacters,
-    typeof module==='object' && module.exports?require('./artCharacters'):root.ArtCharacters);
+    typeof module==='object' && module.exports?require('./artCharacters'):root.ArtCharacters,
+    typeof module==='object' && module.exports?require('./sculptureAnatomy'):root.SculptureAnatomy);
   if (typeof module==='object' && module.exports) module.exports=api;
   else root.SculptureForms=api;
-})(typeof window==='undefined'?globalThis:window,function(Iconography,Characters,People){
+})(typeof window==='undefined'?globalThis:window,function(Iconography,Characters,People,Anatomy){
   'use strict';
-  const poses=['offering','guardian','mourning','pointing','contemplative','invocation'];
+  const poses=['offering','guardian','mourning','pointing','contemplative','invocation',...Anatomy.poses];
   const heads=['bare','helmet','hood','laurel','class'],robes=['pleated','toga','mantle','armor','shroud','class'],attributes=People.attributes;
   const forms=['human','dragon','skeleton','wraith','angel','demon'];
+  const styles=['classical','renaissance'];
   const altarTypes=['horned_altar','stepped_altar','draconic_altar','canopied_altar','reredos_altar'];
   function validateShrines(rows){
     if(rows===undefined)return[];
@@ -36,16 +38,36 @@
       if(typeof s?.label!=='string'||!s.label.trim()||s.label.length>70||/[<>\r\n]/.test(s.label)||
         !poses.includes(s.pose)||!heads.includes(s.head)||!robes.includes(s.robe)||!attributes.includes(s.attribute)||
         s.form!==undefined&&!forms.includes(s.form)||s.deity!==undefined&&!Iconography.name(s.deity)||
-        s.motif!==undefined&&(typeof s.motif!=='string'||s.motif.length>28||/[<>\r\n]/.test(s.motif)))throw Error('Invalid sculpture assembly.');
+        s.motif!==undefined&&(typeof s.motif!=='string'||s.motif.length>28||/[<>\r\n]/.test(s.motif))||
+        s.workmanship!==undefined&&!['classic','carved'].includes(s.workmanship)||
+        s.sculptureStyle!==undefined&&!styles.includes(s.sculptureStyle))throw Error('Invalid sculpture assembly.');
       const person=People.validate(s);
       if(Iconography.name(s.deity)&&Object.keys(person).length)throw Error('Invalid mortal overrides on a canonical deity.');
-      return normalize({label:s.label.trim(),pose:s.pose,head:s.head,robe:s.robe,attribute:s.attribute,...person,
-        ...(s.form?{form:s.form}:{}),...(s.deity?{deity:s.deity}:{}),...(s.motif?{motif:s.motif}:{})});
+      const normalized=normalize({label:s.label.trim(),pose:s.pose,head:s.head,robe:s.robe,attribute:s.attribute,...person,
+        ...(s.form?{form:s.form}:{}),...(s.deity?{deity:s.deity}:{}),...(s.motif?{motif:s.motif}:{}),...(s.workmanship?{workmanship:s.workmanship}:{}),
+        ...(s.sculptureStyle?{sculptureStyle:s.sculptureStyle}:{})});
+      // Saved definitions use their serialized order in the original mechanism hash.
+      // Preserve that order after validating values, including an originally inferred form.
+      if(typeof s.wings==='string'&&typeof s.hair==='string'){
+        const stable={};for(const key of Object.keys(s))if(Object.hasOwn(normalized,key))stable[key]=normalized[key];
+        for(const[key,value]of Object.entries(normalized))if(!Object.hasOwn(stable,key))stable[key]=value;
+        return stable;
+      }
+      return normalized;
     });
+  }
+  function visualSpec(raw,enabled=true,seed=''){
+    if(!raw)return raw;
+    const result={...raw};
+    if(!enabled||raw.workmanship==='classic'){delete result.sculptureStyle;return result;}
+    result.workmanship='carved';
+    result.sculptureStyle=raw.sculptureStyle||styles[Characters.hashString(raw.label||String(seed))%styles.length];
+    return result;
   }
   function build(size,seed,raw={}){
     const n=parseInt(String(seed),16)||Number(seed)||17;
-    const s=normalize({pose:poses[n%poses.length],head:heads[(n>>>3)%4],robe:robes[(n>>>5)%3],attribute:attributes[(n>>>7)%5],...raw});
+    const s=normalize({pose:poses[n%(raw.workmanship==='carved'?poses.length:6)],head:heads[(n>>>3)%4],robe:robes[(n>>>5)%3],attribute:attributes[(n>>>7)%5],...raw});
+    if(s.workmanship==='carved'||s.sculptureStyle&&s.workmanship!=='classic'||s.deity==='Turthus'||s.deity==='Dantuea'||Anatomy.poses.includes(s.pose))return Anatomy.build(size,s,s.race?People.characterSpec(s).traits:{});
     const traits=s.race?People.characterSpec(s).traits:null,height=s.race?People.scale(s):1,width=traits?.build==='heavy'?1.13:traits?.build==='slender'?.85:1;
     const voxels=new Uint8Array(size**3), put=(x,y,z)=>{
       if(s.race&&z/size>.12){x=Math.round((x-size*.5)*width+size*.5);z=Math.round(size*.12+(z-size*.12)*Math.min(1,height));}
@@ -81,7 +103,17 @@
         z/size>.82&&z/size<.88&&y/size<.43&&(Math.abs(x/size-.43)<.03||Math.abs(x/size-.53)<.03))voxels[x+y*size+z*size*size]=0;
       limb([.5,.55,.44],[.5,.55,.74],.022);
     }
-    if(s.wings!=='none'||s.form==='dragon')for(const side of [-1,1]){
+    if(s.deity==='Mortacia'){
+      const shape=Characters.mortaciaWingProfile();
+      for(const side of[-1,1]){
+        const map=p=>[.5+side*(.12+p[0]*.35),.62+p[0]*.06,.98-p[1]*.76];
+        const membrane=Characters.renderMortaciaWingPixels(size*.35,size*.76);
+        for(let y=0;y<membrane.h;y++)for(let x=0;x<membrane.w;x++)if(membrane.data[(x+y*membrane.w)*4+3]){
+          const point=map([x/(membrane.w-1),y/(membrane.h-1)]);put(...point.map(v=>Math.round(v*size)));
+        }
+        for(const [a,b]of shape.ribs)limb(map(a),map(b),.019);
+      }
+    }else if(s.wings!=='none'||s.form==='dragon')for(const side of [-1,1]){
       const base=[.5+side*.13,.58,.68],tip=[.5+side*.46,.65,.94],low=[.5+side*.43,.68,.4];
       limb(base,tip,.023);limb(tip,low,.018);
       for(let i=0;i<4;i++)limb(base,tip.map((v,j)=>v+(low[j]-v)*i/3),.012);
@@ -140,6 +172,8 @@
     traits.bodyPlan={human:'humanoid',dragon:'draconic',skeleton:'skeletal',wraith:'spectral',angel:'humanoid',demon:'humanoid'}[s.form];
     traits.covering=s.form==='dragon'?'scales':s.form==='skeleton'?'bone':s.form==='wraith'?'mist':'skin';
     traits.wings=s.wings==='skeletal'?'bone':s.form==='angel'?'feather':['dragon','demon'].includes(s.form)?'bat':'none';
+    // Legacy "skeletal" metadata means prominent dragon ribs, not missing membranes.
+    if(s.deity==='Mortacia'){traits.wings='bat';traits.wingShape='mortacia';}
     if(canon?.visual)Object.assign(traits,canon.visual);
     traits.aura={color:canon?.color||'#b6ab85',strength:0};traits.items=[];
     traits.palette={...traits.palette,skin:canon?.color||palette.secondary||'#c1b59c',skin2:palette.primary||'#81776a',
@@ -147,6 +181,7 @@
     return Characters.buildProceduralSpriteSpec({name,race:s.form,sex:s.deity==='Mortacia'?'Female':'',class:'Shrine effigy',level:1},traits,{signature:false,source:'shrine',salt:Characters.hashString(s.label||name)});
   }
   function paintFigure(ctx,raw,palette={},box={x:0,y:0,width:64,height:64}) {
+    if(raw.workmanship==='carved'||raw.sculptureStyle&&raw.workmanship!=='classic'||['Turthus','Dantuea'].includes(normalize(raw).deity))return Anatomy.paint(ctx,normalize(raw),palette,box,64,raw.race?People.characterSpec(raw).traits:{});
     const image=Characters.createProceduralCharacterCanvas(characterSpec(raw,palette),{scale:1,frame:0});
     if(image){
       if(box.pigment){
@@ -160,6 +195,6 @@
       ctx.imageSmoothingEnabled=false;ctx.drawImage(image,box.x,box.y,box.width,box.height);
     }
   }
-  return{poses,heads,robes,attributes,forms,altarTypes,validateShrines,normalize,validate,build,characterSpec,paintFigure,
-    toolbox:()=>({poses,heads,robes,attributes,forms,altarTypes,deities:Iconography.toolbox(),people:People.toolbox()})};
+  return{poses,heads,robes,attributes,forms,styles,altarTypes,validateShrines,normalize,validate,visualSpec,build,characterSpec,paintFigure,
+    toolbox:()=>({poses,heads,robes,attributes,forms,workmanship:['classic','carved'],sculptureStyle:styles,altarTypes,deities:Iconography.toolbox(),people:People.toolbox()})};
 });

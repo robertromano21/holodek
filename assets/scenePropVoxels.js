@@ -4,6 +4,7 @@
   const sculptures = typeof module !== 'undefined' && module.exports ? require('./sculptureForms') : root.SculptureForms;
   const symbols = typeof module !== 'undefined' && module.exports ? require('./puzzleModules') : root.PuzzleModules;
   const iconography = typeof module !== 'undefined' && module.exports ? require('./shrineIconography') : root.ShrineIconography;
+  const carvings = typeof module !== 'undefined' && module.exports ? require('./stoneCarvings') : root.StoneCarvings;
   const treeShapes = ['dead_tree', 'oak', 'pine', 'willow', 'cypress', 'mushroom_tree', 'bone_tree', 'charred_tree'];
   const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
   const deadTrees = ['pale_hollow_tree', 'split_snag', 'wind_bent_tree', 'dead_willow', 'skeletal_pine', 'twisted_yew', 'rootbound_tree'];
@@ -198,7 +199,7 @@
       return sculpture;
     }
     if (shape.startsWith('corbel_') && shape !== 'corbel_east') {
-      const source = build('corbel_east', size, seed), rotated = new Uint8Array(source.length);
+      const source = build('corbel_east', size, seed, appearance), rotated = new Uint8Array(source.length);
       for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         const rx = shape === 'corbel_west' ? size - 1 - x : y;
         const ry = shape === 'corbel_west' ? y : shape === 'corbel_north' ? size - 1 - x : x;
@@ -207,7 +208,7 @@
       return rotated;
     }
     if (shape === 'pediment_side' || shape === 'timber_gate_side' || shape === 'grand_gate_side') {
-      const source = build(shape.slice(0, -5), size, seed), rotated = new Uint8Array(source.length);
+      const source = build(shape.slice(0, -5), size, seed, appearance), rotated = new Uint8Array(source.length);
       for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         rotated[(size - 1 - y) + x * size + z * size * size] = source[x + y * size + z * size * size];
       }
@@ -317,10 +318,11 @@
         box(.26,.12,.35,.74,.88,.92);for(let i=0;i<3;i++)box(.21,.2+i*.23,.43+pose*.08,.79,.37+i*.23,.78+pose*.08);
       } else if (shape === 'puzzle_plaque') {
         box(.42, .42, .1, .58, .58, .4);
-        box(.37, .12, .35, .63, .88, .96);
-        for (const z of [.45, .6, .75, .88]) {
-          box(.3, .24, z, .37, .76, z + .035); box(.63, .24, z, .7, .76, z + .035);
-        }
+        // The central core stays behind both recessed engraved faces.
+        box(.42, .12, .35, .58, .88, .96);
+        box(.3,.12,.35,.7,.88,.42);box(.3,.12,.9,.7,.88,.96);
+        box(.3,.12,.42,.7,.21,.9);box(.3,.79,.42,.7,.88,.9);
+        for(const y of[.15,.85])for(const z of[.39,.93])box(.28,y-.025,z-.025,.72,y+.025,z+.025);
       } else {
         box(.39, .34, .1, .61, .66, .45);
         box(.31, .3, .14, .69, .7, .31);
@@ -778,7 +780,7 @@
         rotated[size - 1 - y + x * size + z * size * size] = grid[x + y * size + z * size * size];
       return rotated;
     }
-    return grid;
+    return carvings?.carveVoxels(grid,size,appearance.stoneCarving,shape)||grid;
   }
 
   function usesRoomPalette(shape) {
@@ -983,11 +985,22 @@
       return body;
     }
     if (usesRoomPalette(shape)) {
+      if(options.inscription&&shape==='obelisk'){
+        const face=Math.abs(normal[0])>.5||Math.abs(normal[1])>.5,u=Math.abs(normal[0])>.5?y:x;
+        const band=Math.floor((z-.12)/.24),top=.12+(band+1)*.24;
+        const motif=[options.inscription.motif||'Dragon','Moon','Serpent'][band],glyph=motif&&(iconography.bitmap(motif)||symbols.bitmap(motif));
+        if(face&&glyph&&z>.12&&z<.84){const n=glyph.length,gx=Math.floor((u-.31)/.38*n),gy=Math.floor((top-.03-z)/.18*n);
+          if(gx>=0&&gx<n&&gy>=0&&gy<n&&glyph[gy][gx]==='1')return rgb('#39322b');
+          if(u>.27&&u<.73&&(Math.abs(z-(top-.025))<.012||Math.abs(u-.28)<.025||Math.abs(u-.72)<.025))return rgb('#796a54');}
+      }
       if(options.inscription && /stone_tablet|gravestone|chest_tomb|sarcophagus/.test(shape)){
         const face=Math.abs(normal[1])>.5,u=normal[1]>0?1-x:x;
         const upper=shape==='sarcophagus'?.58:.75,bottom=shape==='sarcophagus'?.25:.36;
-        const glyph=symbols.bitmap(options.inscription.motif||'Skull'),gx=Math.floor((u-.3)/.4*7),gy=Math.floor((upper-z)/(upper-bottom)*7);
-        if(face&&gx>=0&&gx<7&&gy>=0&&gy<7&&glyph[gy][gx]==='1')return rgb('#39322b');
+        const glyph=iconography.bitmap(options.inscription.motif)||symbols.bitmap(options.inscription.motif||'Skull'),n=glyph.length,
+          gx=Math.floor((u-.3)/.4*n),gy=Math.floor((upper-z)/(upper-bottom)*n);
+        if(face&&gx>=0&&gx<n&&gy>=0&&gy<n&&glyph[gy][gx]==='1')return rgb('#39322b');
+        if(face&&options.inscription.carvingStyle&&u>.12&&u<.88&&z>.18&&z<.85&&
+          (u<.26||u>.74||z>upper+.02)&&carvings?.ink(options.inscription.carvingStyle,(u-.12)/.76,(z-.18)/.67))return rgb('#796a54');
         if(face&&x>.3&&x<.7&&z>.23&&z<.32&&Math.floor(z*96)%3===0)return rgb('#635747');
       }
       if (!textures) return base.slice();

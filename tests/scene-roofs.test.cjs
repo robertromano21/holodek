@@ -288,7 +288,7 @@ test('overhead architecture matches column range, including diagonal and extende
     [500, 500, []]
   ]) {
     const instances = [], fetched = [];
-    const context = { dungeon: { sceneStructures: parts }, voxelInstances: instances, playerX, playerY,
+    const context = { window:{},dungeon: { sceneStructures: parts }, voxelInstances: instances, playerX, playerY,
       VIS_RADIUS: 10, VOXEL_VIS_RADIUS: 64,
       renderer: { getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
     vm.runInNewContext(`(function() { ${source.slice(start, end)} }).call(renderer)`, context);

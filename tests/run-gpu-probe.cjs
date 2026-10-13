@@ -9,13 +9,20 @@ const browser = process.env.GPU_PROBE_BROWSER || process.argv.slice(2).find(a =>
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'holodek-gpu-probe-'));
 const blank = process.argv.includes('--blank');
 const preview = process.argv.includes('--puzzle-preview');
+const overfillPreview = process.argv.includes('--stonework-overfill-preview');
+const livePreview = process.argv.includes('--stonework-live-preview');
+const artifactPreview = process.argv.includes('--stonework-artifact-preview');
+const stonePreview = process.argv.includes('--stonework-preview') || overfillPreview || artifactPreview;
 const probeUrl=pathToFileURL(path.join(__dirname,'dungeon-gpu-probe.html'));
 if (preview) probeUrl.search='puzzle-preview=1';
+if (stonePreview) probeUrl.search=overfillPreview?'stonework-preview=1&overfill=1':'stonework-preview=1';
+if (artifactPreview) probeUrl.search='stonework-preview=1&artifact=1';
+if (livePreview) probeUrl.search='stonework-live-preview=1';
 const args = ['--headless=new', '--no-first-run', '--enable-logging=stderr', `--user-data-dir=${profile}`, '--dump-dom',
   blank ? 'about:blank' : probeUrl.href];
-if (preview) {
+if (preview || stonePreview || livePreview) {
   const directory=path.join(__dirname,'../logs/probes'); fs.mkdirSync(directory,{recursive:true});
-  args.unshift('--window-size=1400,850','--screenshot='+path.join(directory,'puzzle-voxels.png'));
+  args.unshift(stonePreview||livePreview?'--window-size=1400,1100':'--window-size=1400,850','--screenshot='+path.join(directory,artifactPreview?'stonework-cornice-artifact-comparison.png':livePreview?'stonework-live-renderer-comparison.png':overfillPreview?'stonework-ridge-comparison.png':stonePreview?'stonework-fill-comparison.png':'puzzle-voxels.png'));
 }
 if (process.env.GPU_PROBE_SOFTWARE === '1' || process.argv.includes('--software')) args.unshift('--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
 const started = Date.now();
@@ -31,5 +38,7 @@ const output = { wallMs: Date.now() - started, status: result.status,
 console.log(JSON.stringify(process.argv.includes('--summary') ? { wallMs: output.wallMs, status: output.status,
   processError: output.processError, pass: report.pass, adapter: report.adapter,
   initializationMs: report.initializationMs, nearClip: report.nearClip, characterMotion: report.characterMotion, puzzleMeshesPass: report.puzzleMeshesPass,
-  artPass:report.artPass,mechanismMotionPass:report.mechanismMotionPass,funeraryPass:report.funeraryPass,error: report.error } : output, null, 2));
+  negativeReliefPass:report.negativeReliefPass,negativeRelief:report.negativeRelief,
+  combatRenderPass:report.combatRenderPass,combatRenderFrames:report.combatRenderFrames,combatBackgroundChanges:report.combatBackgroundChanges,
+  artPass:report.artPass,wideArtPass:report.wideArtPass,circleAspectPass:report.circleAspectPass,circleMeasurements:report.circleMeasurements,circularMosaicPass:report.circularMosaicPass,mosaicMeasurements:report.mosaicMeasurements,architecturalCarvingPass:report.architecturalCarvingPass,architecturalCarvingMeshes:report.architecturalCarvingMeshes,columnSolidityPass:report.columnSolidityPass,columnSolidity:report.columnSolidity,stoneworkComparison:report.stoneworkComparison,stoneworkComparisonPass:report.stoneworkComparisonPass,stoneworkPalettePass:report.stoneworkPalettePass,mechanismMotionPass:report.mechanismMotionPass,funeraryPass:report.funeraryPass,artRefinementPass:report.artRefinementPass,artLightingPass:report.artLightingPass,lightLevels:report.lightLevels,itemGroundingPass:report.itemGroundingPass,itemGrounding:report.itemGrounding,actorShadowOcclusionPass:report.actorShadowOcclusionPass,shadowSamples:report.shadowSamples,error: report.error } : output, null, 2));
 process.exitCode = report.pass && !result.error ? 0 : 1;

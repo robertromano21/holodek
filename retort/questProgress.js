@@ -1,14 +1,17 @@
 'use strict';
 
+const { randomUUID } = require('node:crypto');
 const { parseSheets } = require('../assets/partyRoster');
+const Inhabitants = require('../assets/dungeonInhabitants');
 const PhysicalPuzzles = require('../assets/physicalPuzzles');
+const { isReservedBossKeyName } = require('./bossGate');
 
 const MAX_CHECKS = 64;
 const MAX_JSON_CHARS = 16384;
 const PHASES = { hard: 'hardRequirements', action: 'actionRequirements' };
 const SUPPORTED = { hard: ['at_coords', 'inventory_contains', 'monster_hp_zero'],
-  action: ['exit_open', 'monster_hp_zero', 'puzzle_solved'] };
-const SECTION = /^(?:PC|NPCs(?: in Party)?|Monsters in Room|Monsters Equipped Properties|Monsters State|Objects in Room(?: Properties)?|Rooms Visited|Inventory(?: Properties)?|Room Name|Room Description|Coordinates(?: of Connected Rooms)?|Exits|Adjacent Rooms|Score|Turns|Puzzle in Room|Puzzle Solution|Artifacts Found|Quests Achieved|Next Artifact|Next Boss(?: Room)?|Boss Room Coordinates|Current Quest|Party Status):/i;
+  action: ['exit_open', 'monster_hp_zero', 'puzzle_solved', 'item_delivered'] };
+const SECTION = /^(?:PC|NPCs(?: in Party)?|Monsters in Room|Monsters Equipped Properties|Monsters State|Objects in Room(?: Properties)?|Rooms Visited|Inventory(?: Properties)?|Room Name|Room Description|Coordinates(?: of Connected Rooms)?|Exits|Adjacent Rooms|Score|Turns|Puzzle in Room|Puzzle Solution|Artifacts Found|Quests Achieved|Next Artifact|Next Boss(?: Room)?|Boss Room Coordinates|Current Quest|Quest Progress|Quest Requirements|Party Status):/i;
 const STAT = /^(?:Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic|State):/i;
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const validName = value => typeof value === 'string' && value.trim().length > 0 &&
@@ -175,6 +178,20 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
     } else if (!SUPPORTED[phase].includes(check)) {
       diagnostic = `Unknown ${phase} requirement "${r.check}"`;
       result = { passed: null, evidence: { reason: 'unsupported_requirement' } };
+    } else if (check === 'item_delivered') {
+      const target = coordKey(r.coords), item = r.item, recipient = r.recipient;
+      const bound = deliveryBindings(task).find(b => b.item === item && b.recipient === recipient && b.coords === target);
+      const valid = target && validName(item) && validName(recipient) && !!bound;
+      const destination = roomAt(database, target);
+      const receipt = valid && destination?.itemTransfers?.find(row => row.source === 'engine-give-item-v1' &&
+        row.item === item && row.recipient === recipient && coordKey(row.roomKey) === target && row.taskBinding === taskBinding(task) &&
+        (!row.acceptedBy && !row.successorId || destination.deliverySuccessors?.some(delegate => delegate.source === 'engine-delivery-successor-v1' &&
+          delegate.id === row.successorId && delegate.name === row.acceptedBy && delegate.recipient === recipient &&
+          delegate.taskBinding === row.taskBinding && coordKey(delegate.roomKey) === target &&
+          destination.inhabitants?.actors?.[row.acceptedBy]?.deliverySuccessorId === row.successorId)));
+      diagnostic = `Give "${item}" to ${recipient} at ${target}`;
+      result = { passed: !!receipt, evidence: { source: 'database.itemTransfers', roomKey: target, item: item || null,
+        recipient: recipient || null, receiptId: receipt?.id || null } };
     } else if (check === 'puzzle_solved') {
       const target = coordKey(r.value), room = roomAt(database, target), p = room?.puzzleMechanism;
       diagnostic = `Solve the physical mechanism at ${target || 'its bound room'}`;
@@ -272,6 +289,35 @@ function taskBinding(task) {
   const identity = Object.fromEntries(Object.entries(task).filter(([key]) => key !== 'status' && key !== 'progress'));
   return JSON.stringify(snapshot(identity));
 }
+/** Completion is an engine decision; eligibility alone only proves prerequisites. */
+function verifiedTaskCompletion(task, assessment) {
+  const checks = assessment?.checks;
+  if (!isRecord(task) || !Array.isArray(checks) || !checks.length || checks.some(c => c.passed !== true)) return false;
+  const has = (check, value) => checks.some(c => c.requirement?.check === check &&
+    (value === undefined || c.requirement.value === value));
+  const kind = String(task.actionKind || '').toLowerCase(), type = String(task.type || '').toLowerCase();
+  if (kind === 'deliver_item' || type === 'deliver') {
+    const bindings = deliveryBindings(task);
+    return bindings.length > 0 && bindings.every(b => checks.some(c => c.phase === 'action' &&
+      c.requirement?.check === 'item_delivered' && c.requirement.item === b.item &&
+      c.requirement.recipient === b.recipient && coordKey(c.requirement.coords) === b.coords));
+  }
+  if (kind === 'solve_puzzle' || type === 'puzzle') return has('puzzle_solved');
+  const elements = task.requiredElements ?? task.elements;
+  if (!Array.isArray(elements) && (kind === 'defeat_monster' || type === 'defeat' || type === 'fetch')) return false;
+  if (kind === 'defeat_monster' || type === 'defeat') {
+    const monsters = elements.filter(e => e?.type === 'monster');
+    return monsters.length > 0 && monsters.every(e => validName(e.name) && has('monster_hp_zero', e.name.trim()));
+  }
+  if (kind === 'unlock_exit') return has('exit_open');
+  if (type === 'fetch' && ['take_item', 'fetch_object', 'other', ''].includes(kind)) {
+    const items = elements.filter(e => e?.type !== 'monster');
+    return items.length > 0 && items.length === elements.length &&
+      items.every(e => validName(e.name) && has('inventory_contains', e.name.trim()));
+  }
+  // Unimplemented investigate/negotiate/protect actions cannot be completed by prose.
+  return false;
+}
 function normalizeDefeatTask(task) {
   if (!isRecord(task) || task.status === 'Completed' || String(task.type).toLowerCase() !== 'defeat' ||
       task.actionKind !== 'defeat_monster' || !Array.isArray(task.requiredElements) || !task.requiredElements.length ||
@@ -291,8 +337,240 @@ function normalizeDefeatTask(task) {
   delete next.progress;
   return next;
 }
+function buildDeliveryBindings(elements) {
+  const itemTypes = ['object', 'key', 'weapon', 'armor', 'shield', 'other', 'artifact', 'book', 'scroll', 'spellbook', 'map'];
+  if (!Array.isArray(elements) || elements.length < 2 || elements.length > MAX_CHECKS ||
+      elements.some(e => !isRecord(e) || !validName(e.name) || !coordKey(e.placement) ||
+        e.type !== 'monster' && !itemTypes.includes(e.type))) return [];
+  const recipients = elements.filter(e => e.type === 'monster'), items = elements.filter(e => e.type !== 'monster');
+  if (recipients.length !== 1 || !items.length || /^hostile$/i.test(recipients[0].allegiance || recipients[0].state || '') ||
+      new Set(items.map(e => e.name.trim().toLowerCase())).size !== items.length) return [];
+  return items.map(e => ({ item: e.name.trim(), recipient: recipients[0].name.trim(), coords: coordKey(recipients[0].placement) }));
+}
+function deliveryBindings(task) {
+  const expected = buildDeliveryBindings(task?.requiredElements);
+  if (!expected.length || (task.delivery && task.deliveries)) return [];
+  const stored = task.deliveries ?? (task.delivery ? [task.delivery] : []);
+  if (!Array.isArray(stored) || stored.length !== expected.length || stored.some(b => !isRecord(b))) return [];
+  return expected.every(b => stored.filter(s => s.item === b.item && s.recipient === b.recipient &&
+    coordKey(s.coords) === b.coords).length === 1) ? expected : [];
+}
+function deliveryRecipient(task, database, binding) {
+  const room = roomAt(database, binding.coords), identity = taskBinding(task);
+  const successors = (room?.deliverySuccessors || []).filter(row => row?.source === 'engine-delivery-successor-v1' &&
+    row.taskBinding === identity && row.recipient === binding.recipient && coordKey(row.roomKey) === binding.coords);
+  const latest = successors.at(-1), actor = room?.inhabitants?.actors?.[latest?.name];
+  return latest && actor?.deliverySuccessorId === latest.id ? { name: latest.name, predecessor: binding.recipient, id: latest.id } :
+    { name: binding.recipient, predecessor: null, id: null };
+}
+function normalizeDeliveryTask(task) {
+  if (!isRecord(task) || task.status === 'Completed' || !['fetch', 'deliver'].includes(String(task.type).toLowerCase()) ||
+      !Array.isArray(task.requiredElements)) return task;
+  const text = String(task.desc || '').toLowerCase();
+  const explicit = task.actionKind === 'deliver_item' || String(task.type).toLowerCase() === 'deliver';
+  if ((!explicit && !/\b(deliver|give|bring|present|return|hand)\b/.test(text)) || /\b(solve|align|rotate|activate|balance|unlock)\b/.test(text) ||
+      task.requiredElements.some(e => e?.type === 'puzzle')) return task;
+  const bindings = buildDeliveryBindings(task.requiredElements);
+  if (!bindings.length || (!explicit && (!text.includes(bindings[0].recipient.toLowerCase()) ||
+      bindings.some(b => !text.includes(b.item.toLowerCase()))))) return task;
+  const hardRequirements = [{ check: 'at_coords', value: bindings[0].coords }];
+  const actionRequirements = bindings.map(b => ({ check: 'item_delivered', ...b }));
+  const bindingFields = bindings.length === 1 ? { delivery: bindings[0] } : { deliveries: bindings };
+  if (task.actionKind === 'deliver_item' && deliveryBindings(task).length === bindings.length &&
+      JSON.stringify(task.hardRequirements) === JSON.stringify(hardRequirements) && JSON.stringify(task.actionRequirements) === JSON.stringify(actionRequirements)) return task;
+  const next = { ...task, type: 'Deliver', actionKind: 'deliver_item', hardRequirements, actionRequirements,
+    metrics: bindings.map(b => `${b.item} handed to ${b.recipient} at ${b.coords}, verified by an engine item-transfer receipt.`).join(' ') };
+  delete next.delivery; delete next.deliveries;
+  Object.assign(next, bindingFields);
+  delete next.progress; delete next.physicalPuzzleRoom;
+  return next;
+}
+function compileGeneratedDeliveryTask(task, database) {
+  const normalized = normalizeDeliveryTask(task), bindings = deliveryBindings(normalized);
+  const deliveryIntent = task?.actionKind === 'deliver_item' || String(task?.type).toLowerCase() === 'deliver' ||
+    /\b(deliver|give|present|hand)\b[\s\S]*\b(to|both|them)\b/i.test(String(task?.desc || ''));
+  if (!bindings.length) return deliveryIntent ? null : task;
+  const items = normalized.requiredElements.filter(e => e.type !== 'monster');
+  const first = bindings[0], destination = roomAt(database, first.coords);
+  if (!destination || items.some(e => {
+    const objects = roomAt(database, coordKey(e.placement))?.objects;
+    return !Array.isArray(objects) || !objects.some(o => validName(o?.name) && o.name.trim().toLowerCase() === e.name.trim().toLowerCase());
+  })) return null;
+  const record = destination.inhabitants?.actors?.[first.recipient];
+  const sheets = Inhabitants.parseBlocks(destination.monsters?.inRoom || '').concat(Inhabitants.parseBlocks(destination.monsters?.consoleBlock || ''));
+  const recipient = sheets.find(a => a.name === first.recipient);
+  const named = String(destination.monsters?.inRoom || '').split(',').some(n => n.trim() === first.recipient);
+  if ((!record && !recipient && !named) || (record && ['dead', 'departed', 'recruited'].includes(record.status)) ||
+      ['Dead', 'Hostile'].includes(Inhabitants.state(record || recipient, destination.monsters?.state))) return null;
+  const source = e => `${e.name} from ${roomAt(database, coordKey(e.placement)).name || 'the room'} (${coordKey(e.placement)})`;
+  const desc = `Retrieve ${items.map(source).join(' and ')}, then give ${items.length === 1 ? 'it' : 'each item'} to ${first.recipient} in ${destination.name || 'the room'} (${first.coords}).`;
+  return { ...normalized, id: normalized.id || `delivery:${randomUUID()}`, desc };
+}
+
+/** Compile new objectives from existing world records, never model-supplied gates. */
+function compileGeneratedTask(task, database, roomKey) {
+  if (!isRecord(task) || !['fetch', 'defeat', 'deliver', 'puzzle'].includes(String(task.type).toLowerCase()) ||
+      !Array.isArray(task.requiredElements) || task.requiredElements.length > MAX_CHECKS) return null;
+  const elements = [], seen = new Set();
+  for (const e of task.requiredElements) {
+    const placement = coordKey(e?.placement), room = roomAt(database, placement);
+    if (!validName(e?.name) || !room || !validName(room.name) || seen.has(e.name.trim().toLowerCase())) return null;
+    seen.add(e.name.trim().toLowerCase());
+    if (e.type === 'monster') {
+      const record = room.inhabitants?.actors?.[e.name], sheets = Inhabitants.parseBlocks(room.monsters?.inRoom || '')
+        .concat(Inhabitants.parseBlocks(room.monsters?.consoleBlock || ''));
+      const actor = record || sheets.find(a => a.name === e.name);
+      const named = String(room.monsters?.inRoom || '').split(',').some(n => n.trim() === e.name);
+      if (!actor && !named || actor && (['dead', 'departed', 'recruited'].includes(actor.status) || Inhabitants.state(actor) === 'Dead')) return null;
+      elements.push({ ...e, name: e.name.trim(), placement, allegiance: Inhabitants.allegiance(actor, room.monsters?.state) });
+    } else {
+      if (!['object', 'key', 'weapon', 'armor', 'shield', 'other', 'artifact', 'book', 'scroll', 'spellbook', 'map'].includes(e.type) ||
+          /,/.test(e.name) || isReservedBossKeyName(database, e.name)) return null;
+      const matches = Array.isArray(room.objects) ? room.objects.filter(o => validName(o?.name) &&
+        o.name.trim().toLowerCase() === e.name.trim().toLowerCase()) : [];
+      if (matches.length !== 1) return null;
+      const item = matches[0];
+      elements.push({ ...e, name: item.name.trim(), placement, unlocks: item.unlocks || undefined });
+    }
+  }
+  const type = String(task.type).toLowerCase(), kind = String(task.actionKind || '').toLowerCase();
+  const items = elements.filter(e => e.type !== 'monster'), monsters = elements.filter(e => e.type === 'monster');
+  const place = key => `${roomAt(database, key).name} (${key})`, sources = items.map(e => `${e.name} from ${place(e.placement)}`).join(' and ');
+  let next = { ...task, requiredElements: elements, hardRequirements: [], actionRequirements: [], status: 'Pending' };
+  delete next.progress;
+  if (kind === 'deliver_item' || type === 'deliver') {
+    if (!['fetch', 'deliver'].includes(type)) return null;
+    next = compileGeneratedDeliveryTask(next, database);
+    if (!next) return null;
+  } else if (type === 'defeat') {
+    if (kind !== 'defeat_monster' || !monsters.length || items.length || monsters.some(e => e.allegiance !== 'Hostile')) return null;
+    next.hardRequirements = monsters.map(e => ({ check: 'monster_hp_zero', value: e.name }));
+    next.desc = `Defeat ${monsters.map(e => `${e.name} in ${place(e.placement)}`).join(' and ')}.`;
+  } else if (type === 'puzzle') {
+    if (kind !== 'solve_puzzle' || elements.length) return null;
+    const key = coordKey(roomKey), room = roomAt(database, key), mechanism = room?.puzzleMechanism;
+    if (!room || !validName(room.name) || !mechanism || mechanism.state?.status === 'complete' || !PhysicalPuzzles.validState(mechanism, mechanism.state)) return null;
+    next.hardRequirements = [{ check: 'at_coords', value: key }];
+    next.actionRequirements = [{ check: 'puzzle_solved', value: key, mechanismId: mechanism.id }];
+    next.physicalPuzzleRoom = key;
+    next.desc = `Solve ${validName(mechanism.title) ? mechanism.title : 'the physical mechanism'} in ${place(key)}.`;
+  } else if (type === 'fetch') {
+    if (!items.length || monsters.length || !['other', 'take_item', 'fetch_object', 'unlock_exit', ''].includes(kind)) return null;
+    next.hardRequirements = items.map(e => ({ check: 'inventory_contains', value: e.name }));
+    next.desc = `Retrieve ${sources}.`;
+    if (kind === 'unlock_exit') {
+      const keys = items.filter(e => e.type === 'key' && e.unlocks);
+      if (!keys.length) return null;
+      for (const e of keys) {
+        const coords = coordKey(e.unlocks.coordinates), direction = e.unlocks.direction, exit = roomAt(database, coords)?.exits?.[direction];
+        if (!exit || !validName(roomAt(database, coords)?.name) || exit.key !== e.name) return null;
+        next.actionRequirements.push({ check: 'exit_open', coords, direction });
+      }
+      next.desc += ` Then ${next.actionRequirements.map(r => `open the ${r.direction} exit in ${place(r.coords)}`).join(' and ')}.`;
+    } else next.hardRequirements.unshift({ check: 'at_coords', value: items[0].placement });
+  } else return null;
+  const assessment = evaluateTaskRequirements(next, { roomKey, consoleText: 'Inventory: Empty', database });
+  if (assessment.checks.some(c => c.evidence.reason === 'unsupported_requirement' || c.evidence.reason === 'invalid_requirement') ||
+      !verifiedTaskCompletion(next, { checks: assessment.checks.map(c => ({ ...c, passed: true })) })) return null;
+  next.id ||= `task:${randomUUID()}`;
+  next.metrics = describeQuestRequirements(next, database) + (deliveryBindings(next).length ? ' Verified by engine item-transfer receipts.' : '');
+  return next;
+}
+
+function generatedTaskTypes(elements, database, roomKey) {
+  return [['fetch', 'other'], ['defeat', 'defeat_monster'], ['deliver', 'deliver_item'], ['puzzle', 'solve_puzzle']]
+    .filter(([type, actionKind]) => compileGeneratedTask({ id: 'candidate', type, actionKind, requiredElements: elements }, database, roomKey))
+    .map(([type]) => type);
+}
+
+function selectGeneratedElements(elements, database, roomKey, excludedRooms = []) {
+  const excluded = new Set(excludedRooms.map(coordKey).filter(Boolean));
+  const supported = rows => (rows.length || !excluded.has(coordKey(roomKey))) &&
+    rows.every(e => !excluded.has(coordKey(e.placement))) && generatedTaskTypes(rows, database, roomKey).length > 0;
+  const items = elements.filter(e => e?.type !== 'monster'), monsters = elements.filter(e => e?.type === 'monster');
+  for (const rows of [elements, items, monsters]) if ((rows.length || !elements.length) && supported(rows)) return rows;
+  const existing = Object.entries(database || {}).flatMap(([placement, room]) => !excluded.has(coordKey(placement)) && Array.isArray(room?.objects) ?
+    room.objects.filter(o => validName(o?.name)).map(o => ({ type: o.type === 'key' ? 'key' : 'object', name: o.name, placement: coordKey(placement) })) : []);
+  // Keep a selected non-hostile contact useful by pairing it with real existing loot.
+  for (const recipient of monsters) for (const item of existing) if (supported([item, recipient])) return [item, recipient];
+  for (const item of existing) if (supported([item])) return [item];
+  if (!excluded.has(coordKey(roomKey)) && supported([])) return [];
+  return elements;
+}
+
+/** Player-facing instructions come from the gates, never abbreviated model prose. */
+function describeQuestRequirements(task, database) {
+  if (!isRecord(task)) return 'Awaiting the next step\'s verified requirements.';
+  if (task.status === 'Completed') return 'Step completed. The next step\'s requirements will appear when it is prepared.';
+  const place = value => {
+    const key = coordKey(value);
+    if (!key) return 'an unverified room';
+    const name = roomAt(database, key)?.name;
+    return `${validName(name) ? name.trim() : 'Room'} (${key})`;
+  };
+  const elements = Array.isArray(task.requiredElements ?? task.elements) ? (task.requiredElements ?? task.elements) : [];
+  const source = name => {
+    const rooms = [...new Set(elements.filter(e => e?.type !== 'monster' && validName(e?.name) && e.name.trim() === name)
+      .map(e => coordKey(e.placement)))];
+    return rooms.length === 1 && rooms[0] ? ` Item source: ${place(rooms[0])}.` : '';
+  };
+  const instructions = [], checks = [], referencedItems = new Set();
+  for (const [phase, field] of Object.entries(PHASES)) {
+    const list = task[field] === undefined ? [] : Array.isArray(task[field]) ? task[field] : [null];
+    for (const raw of list) {
+      if (checks.length >= MAX_CHECKS) throw new RangeError('Quest requirements exceed 64 checks');
+      const r = snapshot(raw), check = typeof r?.check === 'string' ? r.check.toLowerCase() : '';
+      checks.push({ phase, requirement: r, passed: true });
+      let text;
+      if (!SUPPORTED[phase].includes(check)) {
+        text = `Unverified requirement: ${check || field + ' is invalid'}. Engine verification is not yet bound.`;
+      } else if (check === 'at_coords') {
+        text = `Be in ${place(r.value)}.`;
+      } else if (check === 'inventory_contains') {
+        const name = validName(r.value) ? r.value.trim() : '[unverified item]';
+        referencedItems.add(name);
+        text = `Have "${name}" in your inventory.${source(name)}`;
+      } else if (check === 'item_delivered') {
+        const name = validName(r.item) ? r.item.trim() : '[unverified item]';
+        referencedItems.add(name);
+        const binding = { item: r.item, recipient: r.recipient, coords: coordKey(r.coords) }, recipient = deliveryRecipient(task, database, binding);
+        text = `Give "${name}" to ${validName(recipient.name) ? recipient.name.trim() : '[unverified recipient]'}${recipient.predecessor ? ` (taking over for ${recipient.predecessor})` : ''} in ${place(r.coords)}.${source(name)} Dropping it or mentioning it does not count.`;
+      } else if (check === 'monster_hp_zero') {
+        const name = validName(r.value) ? r.value.trim() : '[unverified target]';
+        text = `Defeat ${name} in ${place(monsterBinding(task, name))} (HP must be 0 or below).`;
+      } else if (check === 'puzzle_solved') {
+        const mechanism = roomAt(database, coordKey(r.value))?.puzzleMechanism;
+        const title = mechanism && (!r.mechanismId || r.mechanismId === mechanism.id) && validName(mechanism.title) ? ` "${mechanism.title.trim()}"` : '';
+        text = `Solve the physical puzzle${title} in ${place(r.value)}.`;
+      } else if (check === 'exit_open') {
+        const direction = validName(r.direction) ? r.direction.trim() : '[unverified direction]';
+        text = `Open the ${direction} exit in ${place(r.coords)} (it must be unlocked).`;
+      }
+      instructions.push(text);
+    }
+  }
+  // Keep named objectives visible even if an old task lacks a complete gate binding.
+  for (const e of elements) if (e?.type !== 'monster' && validName(e?.name) && !referencedItems.has(e.name.trim())) {
+    const name = e.name.trim();
+    instructions.push(`Task item: "${name}".${source(name)}`);
+    referencedItems.add(name);
+  }
+  if (!verifiedTaskCompletion(task, { checks })) instructions.push('Completion is not yet fully bound to engine-verifiable actions.');
+  return [...new Set(instructions)].map((text, i) => `${i + 1}. ${text}`).join(' ');
+}
+
+function writeQuestRequirements(consoleText, task, database) {
+  const text = String(consoleText || '').replace(/^Quest Requirements:[^\r\n]*(?:\r?\n|$)/gm, '');
+  const newline = text.includes('\r\n') ? '\r\n' : '\n';
+  const line = `Quest Requirements: ${describeQuestRequirements(task, database)}`;
+  const anchor = /^Quest Progress:/m.test(text) ? /^Quest Progress:[^\r\n]*/m : /^Current Quest:[^\r\n]*/m;
+  return anchor.test(text) ? text.replace(anchor, match => `${match}${newline}${line}`) : `${text}${newline}${line}`;
+}
 
 function refreshCombatQuestProgress(state, consoleText) {
+  // The successor module depends on this evaluator; load it only at the commit boundary.
+  const recovery = require('./questDeliverySuccessors').ensure(state, consoleText);
+  if (recovery.changed) consoleText = recovery.consoleText;
   const storedTasks = state.getCurrentTasks?.(), index = state.getCurrentTaskIndex?.() ?? 0;
   if (!Array.isArray(storedTasks) || !Number.isInteger(index) || index < 0 || index > 2 || !storedTasks[index] ||
       typeof consoleText !== 'string') return consoleText;
@@ -317,9 +595,12 @@ function refreshCombatQuestProgress(state, consoleText) {
   tasks[index] = task;
   state.setCurrentTasks(tasks);
   const text = `Step ${index + 1}/3: ${task.status}; ${task.progress.satisfied}/${task.progress.total} requirements verified. ${task.desc || ''}`;
-  const next = /^Quest Progress:/m.test(consoleText) ? consoleText.replace(/^Quest Progress:[^\r\n]*/m, `Quest Progress: ${text}`) :
+  const progressText = /^Quest Progress:/m.test(consoleText) ? consoleText.replace(/^Quest Progress:[^\r\n]*/m, () => `Quest Progress: ${text}`) :
     consoleText.replace(/^Current Quest:[^\r\n]*/m, line => `${line}\nQuest Progress: ${text}`);
+  const next = writeQuestRequirements(progressText, task, database);
   state.setUpdatedGameConsole(next);
   return next;
 }
-module.exports = { evaluateTaskRequirements, mergeTaskProgress, taskBinding, normalizeDefeatTask, refreshCombatQuestProgress };
+module.exports = { evaluateTaskRequirements, mergeTaskProgress, taskBinding, verifiedTaskCompletion,
+  normalizeDefeatTask, buildDeliveryBindings, deliveryBindings, deliveryRecipient, normalizeDeliveryTask, compileGeneratedDeliveryTask,
+  compileGeneratedTask, generatedTaskTypes, selectGeneratedElements, describeQuestRequirements, writeQuestRequirements, refreshCombatQuestProgress };

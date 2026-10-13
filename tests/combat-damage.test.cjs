@@ -77,6 +77,16 @@ for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map'
     assert.equal(rolls.length, 0);
     assert.deepEqual(xp, [8000]);
     assert.deepEqual(loot, ['Sylvara']);
+    const health = events.filter(event => event.type === 'combat_health');
+    const injured = health.find(event => context.Inhabitants.parseSheets(event.updatedGameConsole).find(a => a.name === 'Sylvara')?.hp === 6);
+    const defeated = health.find(event => context.Inhabitants.parseSheets(event.updatedGameConsole).find(a => a.name === 'Sylvara')?.hp === -3);
+    assert.ok(injured, 'The first hit must reach the Game Console before another turn resolves.');
+    assert.ok(defeated, 'A lethal hit must also reach the console, not disappear with the living roster.');
+    assert.equal(JSON.parse(injured.combatCharactersString).find(a => a.name === 'Sylvara').hp, 6);
+    assert.ok(events.indexOf(injured) < events.findIndex(event => event.type === 'dice_state' &&
+      event.results?.some(roll => roll.actor === npc.Name && roll.label === 'Attack')),
+      'Health is published before the next attack roll.');
+    assert.ok(health.every(event => event.runId === 'run' && event.geoKey === '0,0,0' && event.actionId));
     const notice = events.filter(event => event.type === 'action_notice');
     assert.equal(notice.length, 1); assert.equal(notice[0].subject, 'Sylvara');
     assert.equal(notice[0].actor, 'Zarthul the Veiled Sentinel'); assert.equal(notice[0].geoKey, '0,0,0');

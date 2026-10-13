@@ -2,6 +2,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const R=require('../assets/readableItems'),P=require('../assets/physicalPuzzles'),I=require('../assets/dungeonInhabitants');
 const {prepare}=require('../retort/readableActions');
+const {supplementalReadables, generateDesign}=require('../retort/physicalPuzzleDesign');
 const Memory=require('../retort/campaignMemory'),Feedback=require('../assets/actionFeedback'),Items=require('../assets/renderSceneItems');
 function raw(kind='book'){
   return{kind,name:kind==='book'?'chronicle of the pale court':kind==='spellbook'?'grimoire of the white lady':kind+' of the pale court',
@@ -10,6 +11,29 @@ function raw(kind='book'){
       {title:'The Witnesses',text:'The mason preserved the crests beside each control.'}],
     modifiers:{attack_modifier:0,damage_modifier:0,ac:1,magic:2},spellRefs:kind==='spellbook'?['grave_light']:[]};
 }
+
+test('Read availability requires stored nonempty chapter text, not an item name, cover or description',()=>{
+  for(const record of [null,undefined,{name:'old book'},{name:'scroll',backstory:'An ancient document.'},
+    {chapters:[]},{chapters:[{title:'Chapter one'}]},{chapters:[{text:''},{text:' \n\t '}]},{chapters:'Text'},
+    {chapters:[null,{text:12}]}])assert.equal(R.hasContent(record),false);
+  for(const kind of ['book','scroll','spellbook','map'])assert.equal(R.hasContent(R.validate([raw(kind)])[0]),true);
+  assert.equal(R.hasContent({chapters:[{text:' '},{text:'The keeper recorded these words.'}]}),true);
+});
+
+test('suitable newly generated rooms receive persistent additional documents even on puzzle-design fallback', async()=>{
+  const context={seed:'reading-gap',roomName:'Ruined Temple Entrance'};
+  assert.deepEqual(supplementalReadables(context).map(r=>r.kind),['book','scroll']);
+  assert.deepEqual(supplementalReadables({roomName:'Underworld Library'}).map(r=>r.kind),['book','scroll','spellbook','map']);
+  assert.deepEqual(supplementalReadables({roomName:'Open Wasteland'}),[]);
+  let calls=0;
+  const agent={user(){},assistant:{generation:async()=>{calls++;return{content:'invalid'};}}};
+  const definition=await generateDesign(agent,context);
+  assert.equal(calls,2);assert.equal(definition.readables.length,2);
+  const room={objects:[{name:'iron sword',type:'weapon',properties:{damage_modifier:3}}]};
+  const text=R.spawn(definition,room,'Objects in Room: iron sword\nObjects in Room Properties: {name: "iron sword", type: "weapon", damage_modifier: 3}');
+  assert.equal(room.objects.length,3);assert.match(text,/iron sword, chronicle/);
+  const before=JSON.stringify(room);assert.equal(R.spawn(definition,room,text),text);assert.equal(JSON.stringify(room),before);
+});
 function fixture(){
   let p;for(let i=0;i<100;i++){const f=P.fallback('reading-'+i,'Pale Court');if(f.kind==='alignment'){p=P.compile({...f,readables:[raw()]});break;}}
   const room={name:'Pale Court',objects:[],puzzleMechanism:p},database={'0,0,0':room},

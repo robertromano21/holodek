@@ -557,9 +557,12 @@ test('the real client status check and typed unlock flow require the specific se
     coordinatesToString: coords => `${coords.x},${coords.y},${coords.z}`,
     mapToPlainObject: map => Object.fromEntries(map), gameConsoleData: consoleText(), inventory: ['old brass key'],
     userInput: 'unlock door with old brass key', chatLog: { innerHTML: '' }, chatHistory: '',
-    updateChatLog() {}, scrollToBottom() {}, console: { log() {} }
+    updateChatLog() {}, scrollToBottom() {}, console: { log() {} }, updatedGameConsole: consoleText(),
+    window: { DungeonInhabitants: require('../assets/dungeonInhabitants') },
+    document: { getElementById: () => null }, syncDungeonExitNavigation() {}
   };
-  vm.runInNewContext(`${traversal}\nfunction typedUnlock() {\n${unlock}\n}`, context);
+  const exitLabels = source.slice(source.indexOf('function consoleAdjacentRooms('), source.indexOf('function consoleExitDestinationName('));
+  vm.runInNewContext(`${traversal}\n${exitLabels}\nfunction typedUnlock() {\n${unlock}\n}`, context);
   assert.equal(context.isExitTraversable(context.currentCoordinates, 'east').traversable, false);
   context.typedUnlock();
   assert.equal(db['0,0,0'].exits.east.status, 'locked');

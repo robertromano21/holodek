@@ -496,6 +496,7 @@ function applySceneRoofs(dungeon, spec = {}) {
   }
   // Roof dressing is additive: retain earlier exterior gates, masonry and exit markers.
   dungeon.sceneStructures = [...(dungeon.sceneStructures || []), ...parts];
+  if(parts.length)require('./architecturalStonework').applyArchitecturalStonework(dungeon,spec);
   const count = Object.values(dungeon.cells).filter(c => c.roof).length;
   let covered = 0;
   if (coveragePlan?.indoor) for (const [key, c] of Object.entries(dungeon.cells)) {

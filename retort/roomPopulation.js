@@ -2,6 +2,7 @@ const Inhabitants = require('../assets/dungeonInhabitants');
 const Memory = require('./dialogueMemory');
 const MonsterConsoleSync = require('./monsterConsoleSync');
 const Discovery = require('../assets/outdoorDiscovery');
+const Pursuit = require('./hostilePursuit');
 
 function prepareEntryQuestContact(population, dungeon, roster, perception, quest) {
   const introduction = population?.questIntroduction, text = String(quest || '').trim();
@@ -108,7 +109,9 @@ function createPopulationService(state) {
     population.companions ||= {};
     const companions = new Set(Inhabitants.parseSheets(consoleText, 'NPCs in Party').filter(a=>a.hp>0).map(a=>a.name));
     for (const name of Object.keys(population.companions)) if (!companions.has(name)) delete population.companions[name];
-    const roster = JSON.parse(state.getCombatCharactersString() || '[]');
+    // The active roster is room-local; residents remain saved in their own population, not in the travelling party.
+    const roster = JSON.parse(state.getCombatCharactersString() || '[]').filter(actor =>
+      actor.type !== 'monster' || Object.hasOwn(population.actors, actor.name));
     const profiles = new Map((state.getCampaignMemory?.().records || []).filter(row => row.kind === 'biography' && row.profile)
       .map(row => [row.actors[0], row.profile]));
     for (const actor of roster) if (profiles.has(actor.name) || actor.originProfile || population.companions[actor.name]?.profile) {
@@ -176,6 +179,7 @@ function createPopulationService(state) {
     const discovery = Discovery.tick(dungeon, population, roster, player, {
       consoleText: state.getUpdatedGameConsole(), protectedNames: discoveryProtection() });
     persistentChange ||= discovery.changed;
+    persistentChange = Pursuit.observe(population, dungeon, player, Pursuit.protectedNames(state)) || persistentChange;
     if (discovery.waitReason && (discovery.discoveries.length || Date.now() - (discoveryLoggedAt.get(population) || 0) >= 30000)) {
       discoveryLoggedAt.set(population, Date.now());
       const travel = population.travelDiscovery;

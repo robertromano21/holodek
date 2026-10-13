@@ -17,16 +17,16 @@ test('all ten traditions change actual pixels, not just captions or pigment name
     const dir=path.join(__dirname,'../logs/probes');fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'fresco-traditions.png'),gallery.toBuffer());
   }
 });
-test('twelve poses and three facings produce distinct articulated figures without changing preset sprites',()=>{
+test('all fresco poses and three facings produce distinct articulated figures without changing preset sprites',()=>{
   const preset=C.getPresetProceduralSpec('Mortacia'),snapshot=JSON.stringify(preset),before=new Uint8ClampedArray(C.renderProceduralPixels(JSON.parse(snapshot),0,'billboard').data);
-  const hashes=new Set(),gallery=createCanvas(96*4,124*3),g=gallery.getContext('2d');
+  const hashes=new Set(),gallery=createCanvas(96*4,124*Math.ceil(Designs.poses.length/4)),g=gallery.getContext('2d');
   Designs.poses.forEach((pose,i)=>{
     const raw={subject:'Mortacia',pose,facing:'front',attribute:'none',robe:'pleated',head:'bare'},canvas=createCanvas(96,112);
     Figures.paint(canvas.getContext('2d'),raw,pal,{x:0,y:0,width:96,height:112},'renaissance',createCanvas);
     hashes.add(canvas.toBuffer().toString('base64'));assert.ok(canvas.getContext('2d').getImageData(0,0,96,112).data.some(Boolean));
     g.drawImage(canvas,(i%4)*96,Math.floor(i/4)*124);g.fillStyle='#e8d3a1';g.font='10px Georgia';g.fillText(pose,(i%4)*96+2,Math.floor(i/4)*124+121);
   });
-  assert.equal(hashes.size,12);assert.equal(JSON.stringify(preset),snapshot);assert.deepEqual(C.renderProceduralPixels(JSON.parse(snapshot),0,'billboard').data,before);
+  assert.equal(hashes.size,Designs.poses.length);assert.equal(JSON.stringify(preset),snapshot);assert.deepEqual(C.renderProceduralPixels(JSON.parse(snapshot),0,'billboard').data,before);
   const facings=new Set();for(const facing of ['front','left','right'])facings.add(Figures.assemble({subject:'human',pose:'pointing',facing,attribute:'staff',robe:'toga',head:'bare'},pal,'egyptian',createCanvas).toBuffer().toString('base64'));
   assert.equal(facings.size,3);
   if(process.env.HOLODEK_ART_PREVIEW==='1'){
@@ -35,7 +35,7 @@ test('twelve poses and three facings produce distinct articulated figures withou
 });
 test('scene subjects, costumes and held attributes have real visual consequences',()=>{
   const scenes=new Set();for(const scene of Designs.scenes){const c=createCanvas(144,96);Art.paint(c.getContext('2d'),createCanvas,row('renaissance',scene));scenes.add(c.toBuffer().toString('base64'));}
-  assert.equal(scenes.size,10);
+  assert.equal(scenes.size,Designs.scenes.length);
   const images=new Set();for(const subject of ['Mortacia','Atinus','Poena','Dyanetzia','human','skeleton','wraith','angel','demon']){
     const c=Figures.assemble({subject,pose:'offering',facing:'front',attribute:'scroll',robe:'mantle',head:'bare'},pal,'renaissance',createCanvas);images.add(c.toBuffer().toString('base64'));
   }assert.equal(images.size,9);
@@ -45,7 +45,7 @@ test('scene subjects, costumes and held attributes have real visual consequences
 test('assembly metadata is optional, isolated and does not alter ordinary character raster output',()=>{
   const spec=S.characterSpec({label:'Mortacia fresco',deity:'Mortacia',form:'human'},pal),before=C.renderProceduralPixels(spec,0,false),clone=new Uint8ClampedArray(before.data);
   const assembly=C.renderAssemblyPixels(spec);assert.deepEqual(assembly.data,clone);assert.ok(assembly.parts.some(id=>id===C.assemblyParts.HEAD));
-  assert.equal(before.parts,undefined);assert.equal(spec.traits.wings,'bone');
+  assert.equal(before.parts,undefined);assert.equal(spec.traits.wings,'bat');assert.equal(spec.traits.wingShape,'mortacia');
   const dragon=C.renderAssemblyPixels(S.characterSpec({deity:'Atinus',form:'dragon'},pal));assert.ok(dragon.parts.some(id=>id===C.assemblyParts.WING_L));
   const metadata=new Uint8Array(assembly.parts);Figures.assemble({subject:'Mortacia',pose:'mourning',facing:'front',attribute:'none',robe:'pleated',head:'bare'},pal,'renaissance',createCanvas);
   assert.deepEqual(assembly.parts,metadata);assert.deepEqual(C.renderProceduralPixels(spec,0,false).data,clone);

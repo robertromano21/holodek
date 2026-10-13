@@ -40,6 +40,16 @@ test('slot occupancy reads the original text sheet for all four slots', () => {
   assert.equal(Inventory.equippedName(sheet, 'other'), 'red ring');
 });
 
+test('item purposes use stored descriptions and explain combat and readable roles without inventing powers', () => {
+  assert.equal(Inventory.describeItem({ name: 'ritual bowl', purpose: 'A vessel used for offerings.' }), 'A vessel used for offerings.');
+  for (const type of ['weapon', 'armor', 'shield']) assert.match(Inventory.describeItem({ name: 'old gear', type }), /Equip/);
+  const readable = { title: 'History of the Pale Court', backstory: 'Kept by the ancient archivist.' };
+  assert.match(Inventory.describeItem({ name: 'chronicle' }, readable), /ancient archivist/);
+  assert.match(Inventory.describeItem({ name: 'old grimoire', type: 'other' }), /does not cast or teach/);
+  assert.match(Inventory.describeItem({ name: 'old scroll', type: 'other' }), /stored text/);
+  assert.match(Inventory.describeItem({ name: 'historical map', type: 'other' }), /not a guarantee/);
+});
+
 function ground() {
   const dungeon = { geoKey: '0,0,0', cells: {} };
   for (let y = 0; y < 5; y++) for (let x = 0; x < 5; x++) dungeon.cells[`${x},${y}`] = { tile: 'floor', floorHeight: 0 };
