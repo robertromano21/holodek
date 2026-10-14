@@ -9344,6 +9344,7 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
   const roomKey = getCurrentCombatRoomKey();
   let anyMoved = false;
   monsterEntries.forEach(entry => {
+    if (window.DungeonInhabitants?.isDown(entry)) { resetWalkFrame(entry); return; }
     if (window.DungeonLife?.isWaitingToSpeak?.(entry.name)) { resetWalkFrame(entry); return; }
     const home = getMonsterHomeAnchor(entry, roomKey);
     const seed = hashCharacterName(entry.name);
@@ -9357,20 +9358,25 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
       chebyshevDist(entry.mazeX, entry.mazeY, playerDungeonX, playerDungeonY) <= 10;
     const pursuing = entry.pursuit?.willing && entry.pursuit.active && entry.pursuit.targetRoom === currentDungeon.geoKey &&
       isMonsterHostile(entry) && now - entry.pursuit.lastSeenAt <= 15000;
+    const conversation = now < (entry._conversationUntil || 0) && entry._conversationGoal;
     const span = MONSTER_WANDER_MAX_MS - MONSTER_WANDER_MIN_MS;
-    entry._nextWanderAt = now + (pursuing ? MONSTER_MOVE_TWEEN_MS : MONSTER_WANDER_MIN_MS + Math.floor(Math.random() * span) - (hostile ? 300 : 0));
+    entry._nextWanderAt = now + (conversation || pursuing ? MONSTER_MOVE_TWEEN_MS : MONSTER_WANDER_MIN_MS + Math.floor(Math.random() * span) - (hostile ? 300 : 0));
     // Idle sometimes (non-hostile monsters linger more).
     const idleChance = ['work', 'rest', 'guard'].includes(entry.routine) && !hostile ? 0.82 : hostile ? 0.12 : 0.3;
-    if (!force && !pursuing && (Date.now() < (entry._conversationUntil || 0) || Math.random() < idleChance)) { resetWalkFrame(entry); return; }
+    if (!force && !conversation && !pursuing && (Date.now() < (entry._conversationUntil || 0) || Math.random() < idleChance)) { resetWalkFrame(entry); return; }
     const blocked = new Set(reservedTiles);
     blocked.delete(`${entry.mazeX},${entry.mazeY}`);
     // A pursuer walks toward the last verified sighting, not through walls toward an unseen PC.
-    const goal = pursuing ? { x: Math.floor(hostile ? playerPosX : entry.pursuit.target.x), y: Math.floor(hostile ? playerPosY : entry.pursuit.target.y) } : null;
-    const next = pursuing && !(hostile && Math.hypot(entry.mazeX+.5-playerPosX,entry.mazeY+.5-playerPosY)<=1.5) ?
+    const goal = conversation || (pursuing ? { x: Math.floor(hostile ? playerPosX : entry.pursuit.target.x), y: Math.floor(hostile ? playerPosY : entry.pursuit.target.y) } : null);
+    const next = (conversation || pursuing) && !(!conversation && hostile && Math.hypot(entry.mazeX+.5-playerPosX,entry.mazeY+.5-playerPosY)<=1.5) ?
       findNextPartyMazeStep({ x: entry.mazeX, y: entry.mazeY }, goal, entry.name, blocked) : null;
-    const step = pursuing ? next && !blocked.has(`${next.x},${next.y}`) && (next.x !== entry.mazeX || next.y !== entry.mazeY) ?
+    const step = conversation || pursuing ? next && !blocked.has(`${next.x},${next.y}`) && (next.x !== entry.mazeX || next.y !== entry.mazeY) ?
       next : null : chooseMonsterWanderStep(entry, home, blocked, hostile, Math.random);
-    if (!step) { resetWalkFrame(entry); return; }
+    if (!step) {
+      if (conversation && entry._conversationListenerPoint) rememberCombatMovementFacing(entry,
+        entry._conversationListenerPoint.x-entry.mazeX-.5,entry._conversationListenerPoint.y-entry.mazeY-.5);
+      resetWalkFrame(entry); return;
+    }
     reservedTiles.delete(`${entry.mazeX},${entry.mazeY}`);
     entry._prevMazeX = entry.mazeX;
     entry._prevMazeY = entry.mazeY;
@@ -9456,6 +9462,8 @@ function updatePartyMazeLocomotion(force = false) {
       anyMoved = true;
       entry._nextMazeStepAt = now + cadence;
     } else {
+      if (conversation && entry._conversationListenerPoint) rememberCombatMovementFacing(entry,
+        entry._conversationListenerPoint.x-entry.mazeX-.5,entry._conversationListenerPoint.y-entry.mazeY-.5);
       resetWalkFrame(entry);
       entry._nextMazeStepAt = now + Math.max(90, Math.floor(cadence * 0.55));
     }
@@ -9579,19 +9587,28 @@ window.onDungeonPause = paused => {
     });
   }
 };
-window.focusDungeonSpeaker = (name, duration) => {
+window.focusDungeonSpeaker = (name, duration, recipient = 'PC') => {
   const actor = (window.combatCharacters || []).find(a => a.name === name);
-  if (!actor || !currentDungeon || !Number.isFinite(actor.mazeX)) return;
+  if (!actor || !currentDungeon || !Number.isFinite(actor.mazeX) || window.DungeonInhabitants.isDown(actor)) return;
+  const listener = recipient !== 'PC' && (window.combatCharacters || []).find(a => a.name === recipient &&
+    a.mazeRoomKey === currentDungeon.geoKey && Number.isFinite(a.mazeX) && !window.DungeonInhabitants.isDown(a));
+  const target = listener && listener.type !== 'pc' ? { x: listener.mazeX + .5, y: listener.mazeY + .5 } : { x: playerPosX, y: playerPosY };
   actor._conversationUntil = Date.now() + duration;
-  rememberCombatMovementFacing(actor,playerPosX-actor.mazeX-.5,playerPosY-actor.mazeY-.5);
-  if (actor.type !== 'npc' || isCombatRoundActive() || Math.hypot(actor.mazeX - playerDungeonX, actor.mazeY - playerDungeonY) > 6) return;
-  const front = { x: playerPosX + Math.cos(playerAngle) * 2, y: playerPosY + Math.sin(playerAngle) * 2 };
+  actor._conversationRecipient = listener?.name || 'PC';
+  rememberCombatMovementFacing(actor,target.x-actor.mazeX-.5,target.y-actor.mazeY-.5);
+  if (isCombatRoundActive()) return;
+  actor._conversationGoal = null;
+  actor._conversationListenerPoint = target;
+  const distance = Math.max(2, window.ProceduralCharacters?.characterViewingDistance?.(actor.sprite?.spec) || 3);
+  const front = listener && listener.type !== 'pc' ? target : { x: target.x + Math.cos(playerAngle) * distance, y: target.y + Math.sin(playerAngle) * distance };
   const occupied = new Set((window.combatCharacters || []).filter(a => a !== actor).map(a => `${a.mazeX},${a.mazeY}`));
-  const tiles = preferPartyViewingTiles(collectNearbyWalkableTiles(currentDungeon, { x: playerDungeonX, y: playerDungeonY }, 3)
+  const nearby = collectNearbyWalkableTiles(currentDungeon, { x: Math.floor(target.x), y: Math.floor(target.y) }, Math.ceil(distance) + 1)
     .filter(t => t.dist >= 1 && !occupied.has(`${t.x},${t.y}`) &&
-      window.DungeonInhabitants.lineClear(currentDungeon, { x: playerPosX, y: playerPosY }, { x: t.x + 0.5, y: t.y + 0.5 })),occupied,actor)
+      window.DungeonInhabitants.lineClear(currentDungeon, target, { x: t.x + 0.5, y: t.y + 0.5 }));
+  const tiles = (listener && listener.type !== 'pc' ? nearby : preferPartyViewingTiles(nearby,occupied,actor))
     .sort((a,b) => Math.hypot(a.x + 0.5-front.x,a.y + 0.5-front.y) - Math.hypot(b.x + 0.5-front.x,b.y + 0.5-front.y));
   actor._conversationGoal = tiles[0] || null;
+  actor._nextWanderAt = 0; actor._nextMazeStepAt = 0;
 };
 window.beginEncounterCombat = name => {
   const input = document.getElementById('chatuserinput');

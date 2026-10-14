@@ -281,6 +281,7 @@ test('real room/puzzle helper accepts missing monsters using Retort template val
   const agent = { user: tag, assistant, run: callback => callback(agent) };
   const room = buildInitialWorldConsole().console.replace(/^Monsters in Room:.*\n?/m, '');
   const context = {
+    StoryPrompts: require('../retort/graveMasterStoryPrompts'),
     console: quiet, updatedGameConsole: room, roomNameDatabaseString: '{}',
     gameConsoleForPerception: () => Inhabitants.perceivedConsole(context.updatedGameConsole, []),
     ...require('../retort/worldContext'),
@@ -320,6 +321,7 @@ function roomPopulationHarness(room, database = {}, options = {}) {
   const agent = { user: tag, assistant, run: callback => callback(agent) };
   const context = {
     CharacterAuthorship: require('../retort/characterProfiles'),
+    StoryPrompts: require('../retort/graveMasterStoryPrompts'),
     console: { ...quiet, info: (...args) => logs.push(args) }, updatedGameConsole: room, roomNameDatabaseString: JSON.stringify(database),
     gameConsoleForPerception: () => Inhabitants.perceivedConsole(context.updatedGameConsole, []),
     parseSheets, Math: Object.assign(Object.create(Math), { random: options.random || Math.random }),

@@ -65,7 +65,7 @@ test('the continuous follow route prefers walking around the camera when there i
 
 function viewingHarness(tiles) {
   const source=fs.readFileSync('assets/game.js','utf8'),actor={name:'Mortacia',type:'npc',mazeX:1,mazeY:0};
-  const context={window:{combatCharacters:[actor],DungeonInhabitants:{lineClear:()=>true}},
+  const context={window:{combatCharacters:[actor],DungeonInhabitants:{lineClear:()=>true,isDown:()=>false}},
     playerDungeonX:0,playerDungeonY:0,playerPosX:.5,playerPosY:.5,playerAngle:0,currentDungeon:{},
     collectNearbyWalkableTiles:()=>tiles,getCurrentCombatRoomKey:()=> '0,0,0',isCombatRoundActive:()=>false,
     deriveFacingFromDelta:()=> 'left',hashCharacterName:()=>0,

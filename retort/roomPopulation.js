@@ -235,7 +235,8 @@ function createPopulationService(state) {
         Inhabitants.dialogueReach(dungeon, party.find(actor => actor.name===row.speaker), player).canSpeak));
       if (exchangeIndex >= 0) {
         const [exchange] = population.dialogueQueue.splice(exchangeIndex, 1);
-        dialogue.push(...exchange.lines.map(row => ({ ...row, kind:'canned' })));
+        dialogue.push(...exchange.lines.map((row, index) => ({ ...row, kind:'canned',
+          recipient: exchange.lines[index ? 0 : 1].speaker })));
       }
       const companions = roster.filter(a => a.type==='npc' && (a.hp ?? 1)>0 &&
         population.companions?.[a.name]?.dialogueIndex < (population.companions?.[a.name]?.dialogue?.length || 0) &&

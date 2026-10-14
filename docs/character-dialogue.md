@@ -113,3 +113,20 @@ Only dialogue subtitles and action notices have new X buttons. They hide the
 visible card immediately, preserve subsequent unread speech/notices, and work
 while paused or loading without triggering a world interaction. They do not
 change the Game Log, room/encounter title overlays or game state.
+
+## Logged Speech And Listeners
+
+Speech already delivered in the Game Log is authoritative for subtitle playback:
+distance, walls and missing world positions cannot suppress it. Nearby ambient
+speech still obeys hearing limits. Mixed responses retain backend-labelled
+identities while also recovering clearly attributed, unlabelled quotations.
+The fallback recognizes actions such as "stills", "slows", "keeps" and "remains";
+inscriptions, thoughts and ambiguous speakers are not invented as dialogue.
+
+Optional spoken metadata `recipient` identifies the PC or another known character.
+Paired companion exchanges supply each other's names automatically; an unambiguous
+vocative can also identify a listener. Merely mentioning someone is not addressing
+them. NPCs and residents use existing collision-checked walking toward a clear
+viewing tile in front of the PC, or beside the addressed character. Combat movement
+stays authoritative. An unreachable goal never teleports the speaker or delays
+their subtitles. Reload browser assets and restart the server for these changes.

@@ -486,7 +486,7 @@ app.post('/economy/action', (req, res) => {
 });
 
 app.post('/room-population/visit', async (req, res) => {
-  if (inputTaskInFlight || actionDice.active) return res.status(409).json({ error: 'The current action is resolving.' });
+  if (inputTaskInFlight || actionDice.active || npcAutonomyTickInFlight) return res.status(409).json({ error: 'The current action is resolving.' });
   let result = populationService.visit({ ...req.body, deferIntroductions: true });
   if (result.error) return res.status(result.status).json({ error: result.error });
   if (result.encounters?.length) {

@@ -34,7 +34,8 @@ function fixture() {
     fetch: async (url, options) => { posts.push({ url, body: JSON.parse(options.body) }); return { ok: true }; }
   });
   const event = { geoKey: d.geoKey, runId: 'run', dialogue: [{ speaker: actor.name, line: 'The wards here falter.' }] };
-  return { root, ctx, actor, event, nodes, reports, posts, advance: ms => { now += ms; }, flush: () => { while (timers.length) timers.shift()(); } };
+  return { root, ctx, actor, event, nodes, reports, get posts() { return posts.filter(row => row.url === '/debug/dialogue-subtitles'); },
+    advance: ms => { now += ms; }, flush: () => { while (timers.length) timers.shift()(); } };
 }
 
 test('Edran full live reply reaches every subtitle card and the voice engine without duplicate transport playback', () => {
@@ -142,11 +143,12 @@ test('paused subtitle dismissal retains unread cards until resuming and does not
 
 test('distance, occlusion and death suppress subtitles and record specific reasons', () => {
   for (const [change, reason] of [
-    [f => { f.actor.mazeX = 10; }, 'out-of-range'],
+    [f => { f.actor.mazeX = 25; }, 'out-of-range'],
     [f => { f.actor.mazeX = 6; f.ctx.dungeon.cells['5,4'].tile = 'wall'; }, 'occluded-or-absent'],
     [f => { f.actor.hp = 0; }, 'dead']
   ]) {
-    const f = fixture(); change(f); f.root.DungeonLife.receiveDialogue(f.event); f.root.DungeonLife.tick();
+    const f = fixture(); change(f); f.root.DungeonLife.receiveDialogue({ ...f.event,
+      dialogue: f.event.dialogue.map(row => ({ ...row, kind: 'canned' })) }); f.root.DungeonLife.tick();
     assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
     assert.ok(f.reports.some(row => row.stage === 'skipped' && row.reason === reason));
     assert.ok(!f.reports.some(row => row.stage === 'displayed'));
@@ -212,7 +214,7 @@ test('Vaelis waits through earlier speakers and her complete reply reaches the s
 test('waiting speakers are released when the listener leaves, the speaker dies, or the room changes', () => {
   for (const change of [f => { f.ctx.player.x = 20; }, f => { f.waiting.hp = 0; }, f => { f.ctx.dungeon.geoKey = '2,0,0'; }]) {
     const f = fixture(); f.waiting = { ...f.actor, name: 'Vaelis Thorne' }; f.ctx.actors.push(f.waiting);
-    f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [...f.event.dialogue, { speaker: f.waiting.name, line: 'I will answer next.' }] });
+    f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [...f.event.dialogue, { speaker: f.waiting.name, line: 'I will answer next.', kind: 'canned' }] });
     assert.equal(f.root.DungeonLife.isWaitingToSpeak(f.waiting.name), true);
     change(f); assert.equal(f.root.DungeonLife.isWaitingToSpeak(f.waiting.name), false);
     f.advance(20000); f.root.DungeonLife.tick();
@@ -259,7 +261,8 @@ test('party locomotion also respects waiting turns without changing its formatio
 });
 
 test('speech skipped before display is not marked as delivered and can later be retried nearby', () => {
-  const f = fixture(); f.actor.mazeX = 10; f.root.DungeonLife.receiveDialogue(f.event); f.root.DungeonLife.tick();
+  const f = fixture(); f.actor.mazeX = 25;
+  f.event.dialogue[0].kind = 'canned'; f.root.DungeonLife.receiveDialogue(f.event); f.root.DungeonLife.tick();
   assert.ok(f.reports.some(row => row.stage === 'skipped' && row.reason === 'out-of-range'));
   f.actor.mazeX = 5; f.root.DungeonLife.receiveDialogue(f.event); f.root.DungeonLife.tick();
   assert.equal(f.reports.filter(row => row.stage === 'displayed').length, 1);
@@ -276,7 +279,7 @@ test('normal Retort prose with a short monster name displays the whole quote rat
 });
 
 test('diagnostic history and forwarding stay bounded and are detached from caller edits', () => {
-  const f = fixture(); f.actor.mazeX = 10;
+  const f = fixture(); f.actor.mazeX = 25;
   for (let i = 0; i < 100; i++) f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: f.actor.name, line: `Line ${i}` }] });
   const history = f.root.DungeonLife.subtitleDiagnostics(); assert.equal(history.length, 64);
   history[0].line = 'Edited'; assert.notEqual(f.root.DungeonLife.subtitleDiagnostics()[0].line, 'Edited');
@@ -358,7 +361,7 @@ test('the client trusts validated backend speaker labels rather than reassigning
   assert.equal(f.reports.filter(row => row.stage === 'displayed').length, 1);
 });
 
-test('pausing preserves the current speech card; leaving range stops the remaining cards', () => {
+test('pausing preserves the current speech card; logged speech keeps playing after leaving range', () => {
   const f = fixture(), speech = 'The old temple keeps many secrets. '.repeat(30).trim();
   f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: f.actor.name, line: speech }] }); f.root.DungeonLife.tick();
   const first = f.nodes.get('dungeon-dialogue-words').textContent;
@@ -366,9 +369,9 @@ test('pausing preserves the current speech card; leaving range stops the remaini
   assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, first);
   f.root.DungeonLife.setPaused({ paused: false, runId: 'run' }); f.root.DungeonLife.tick();
   assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, first);
-  f.actor.mazeX = 10; f.root.DungeonLife.tick();
-  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
-  assert.ok(f.reports.some(row => row.stage === 'dismissed' && row.reason === 'speaker-left-hearing-range'));
+  f.actor.mazeX = 25; f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, false, 'Already delivered Game Log speech is independent of distance.');
+  assert.ok(!f.reports.some(row => row.reason === 'speaker-left-hearing-range'));
 });
 
 test('a nearby monologue continues across every card while the speaker is hidden behind a pillar', () => {
@@ -434,7 +437,7 @@ function routeFixture() {
   const routes = new Map(), logged = [], source = fs.readFileSync('server.js', 'utf8');
   const begin = source.indexOf("app.post('/debug/dialogue-subtitles'"), end = source.indexOf('// Procedural character sprites:', begin);
   vm.runInNewContext(source.slice(begin, end), { app: { post: (url, handler) => routes.set(url, handler) },
-    sharedState: { getDungeonRunId: () => 'run' }, console: { info: (...values) => logged.push(values) } });
+    sharedState: { getDungeonRunId: () => 'run' }, SidVoice: { profile() {}, moodOf() { return 'neutral'; }, cadenceOf() {}, confidenceOf() {} }, console: { info: (...values) => logged.push(values) } });
   return { logged, send(body) { let status = 200, result;
     routes.get('/debug/dialogue-subtitles')({ body }, { status(value) { status = value; return this; }, json(value) { result = value; } });
     return { status, result };
@@ -449,4 +452,28 @@ test('subtitle diagnostic endpoint records actual client reports, rejects stale 
   for (const reports of [Array(33).fill(row), [{ ...row, line: 'x'.repeat(24001) }], [{ ...row, stage: 'queued', line: 'x'.repeat(321) }], [{ ...row, stage: 'invented' }], [{ ...row, distance: -2 }]])
     assert.equal(f.send({ runId: 'run', reports }).status, 400);
   assert.equal(f.logged.length, 1);
+});
+
+test('every logged speaker receives subtitles across distance and walls, including unlabelled speech after labelled speech', () => {
+  const f = fixture(), second = { ...f.actor, name: 'Pellin', mazeX: 25, mazeY: 25 };
+  f.actor.name = 'Ilyra'; f.actor.mazeX = 24; f.ctx.actors.push(second);
+  for (let y = 0; y < 32; y++) f.ctx.dungeon.cells[`15,${y}`].tile = 'wall';
+  const first = 'There. The name was heard.', next = 'And the carving is still intact.';
+  f.root.DungeonLife.receiveTurnDialogue(`Ilyra stills her stylus. "${first}"\n\nPellin slows his brushing. "${next}"`, {
+    ...f.event, consoleText: '', dialogue: [{ speaker: 'Ilyra', line: first, attribution: 'labelled' }]
+  });
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, first);
+  f.advance(20000); f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, next);
+  assert.deepEqual(f.reports.filter(row => row.stage === 'displayed').map(row => row.speaker), ['Ilyra', 'Pellin']);
+  assert.ok(!f.reports.some(row => row.stage === 'skipped'));
+});
+
+test('logged speech can be displayed before a known sheet has a positioned world actor', () => {
+  const f = fixture(), line = 'A boundary can hold a rule.';
+  f.ctx.actors.length = 0;
+  f.root.DungeonLife.receiveTurnDialogue(`Vask says, "${line}"`, { ...f.event, dialogue: [{ speaker: 'Vask', line }],
+    consoleText: 'NPCs in Party: None\nMonsters in Room: None' });
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, line);
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, false);
 });

@@ -16,6 +16,8 @@ function fixture() {
   for(let y=0;y<64;y++)for(let x=0;x<64;x++)dungeon.cells[`${x},${y}`]={tile:'floor',floorHeight:0};
   const p=I.createPopulation(dungeon.geoKey,[{name:'Near Guard',allegiance:'Hostile',dialogue:['Keep back.']},
     {name:'Far Guard',allegiance:'Hostile'},{name:'Mason',allegiance:'Neutral'}]);
+  // These route fixtures revisit an introduced cast; first meetings have separate narrative tests.
+  for (const group of p.groups) group.introPlayed = true;
   for(const [name,x]of[['Near Guard',6],['Far Guard',25],['Mason',5]]){
     p.actors[name].position=p.actors[name].home={x,y:4};p.groups.find(g=>g.members.includes(name)).site={x,y:4};
   }

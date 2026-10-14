@@ -631,7 +631,13 @@
       const speaker = allowed.get(keyOf(row?.speaker));
       return speaker && typeof row.remember === 'string' && row.remember.trim() ? [[speaker, text(row.remember, 180)]] : [];
     }));
-    dialogue = dialogue.map(row => ({ ...row, ...(memories.has(row.speaker) ? { remember: memories.get(row.speaker) } : {}) }));
+    const recipients = new Map(rows.flatMap(row => {
+      const speaker = allowed.get(keyOf(row?.speaker)), target = row?.recipient;
+      const recipient = typeof target === 'string' && (/^PC$/i.test(target) ? 'PC' : allowed.get(keyOf(target)));
+      return speaker && recipient && recipient !== speaker ? [[speaker, recipient]] : [];
+    }));
+    dialogue = dialogue.map(row => ({ ...row, ...(memories.has(row.speaker) ? { remember: memories.get(row.speaker) } : {}),
+      ...(recipients.has(row.speaker) ? { recipient: recipients.get(row.speaker) } : {}) }));
     return { content, dialogue,
       replies: sanitizeReplies(parsed?.replies, names), exchanges: sanitizeExchanges(parsed?.exchanges, names) };
   }
@@ -679,7 +685,9 @@
     const rows = attributed.map(row => {
       const metadata = explicit.find(entry => entry.speaker === row.speaker && typeof entry.line === 'string' &&
         (row.line.includes(entry.line) || entry.line.includes(row.line)));
-      return { ...row, ...(metadata?.remember ? { remember: metadata.remember } : {}) };
+      return { ...row, ...(metadata?.remember ? { remember: metadata.remember } : {}),
+        ...(metadata?.attribution ? { attribution: metadata.attribution } : {}),
+        ...(metadata?.recipient ? { recipient: metadata.recipient } : {}) };
     });
     return [...rows, ...explicit.filter(row => !speakers.has(row.speaker))].slice(0, 32);
   }
@@ -731,7 +739,7 @@
     const normalized = value => String(value || '').replace(/\s+/g, ' ').trim();
     const witnesses = (Array.isArray(evidence) ? evidence : []).filter(row => allowed.includes(row?.speaker) && typeof row.line === 'string');
     const vocal = '\\b(?:voice|tone|gaze|eyes|lips|mouth|expression|face)\\b';
-    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed)';
+    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed)';
     // Resolve the narrative subject clause by clause, rather than requiring a
     // name immediately beside every quote or possessive voice/gaze reference.
     function narrativeOwner(prefix, previous) {
@@ -977,6 +985,20 @@
     if (!count && exchanges.length) count = new Set(exchanges.flatMap(exchange => exchange.lines.map(row => row.speaker))).size;
     return count;
   }
+  function dialogueRecipient(row, actors = []) {
+    const others = actors.filter(actor => actor.name !== row?.speaker && actor.type !== 'pc');
+    const explicit = row?.recipient || row?.addressee;
+    if (typeof explicit === 'string') {
+      const actor = actors.find(actor => keyOf(actor.name) === keyOf(explicit));
+      if (actor && actor.name !== row.speaker) return actor.name;
+      if (/^PC$/i.test(explicit)) return 'PC';
+    }
+    const words = String(row?.line || '').trim();
+    const addressed = others.filter(actor => [actor.name, actor.name.split(/\s+/)[0]].some(name =>
+      new RegExp('^(?:(?:Listen|Look|Tell me|Thank you|Thanks|Please|Hey),?\\s+)?' +
+        name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[,!:?](?:\\s|$)', 'i').test(words)));
+    return addressed.length === 1 ? addressed[0].name : 'PC';
+  }
   function noteSpoken(population, rows, entry = false) {
     if (!population || !rows.length) return;
     population.lastCannedSpeechAt=Date.now();
@@ -1080,7 +1102,7 @@
       nextBoss: line('Next Boss') || 'None', nextBossRoom: line('Next Boss Room') || 'None', bossCoordinates: line('Boss Room Coordinates') || 'None',
       adjacentRooms: line('Adjacent Rooms') || 'None' };
   }
-  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, isDown, isAlive, canAct,
+  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, dialogueRecipient, isDown, isAlive, canAct,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
     attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };

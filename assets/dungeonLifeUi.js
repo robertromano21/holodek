@@ -35,8 +35,7 @@
     subtitleReports.push(report); if (subtitleReports.length > 32) subtitleReports.shift();
     if (subtitleReportTimer === null) subtitleReportTimer = setTimeout(flushSubtitleReports, 250);
   }
-  // Player-initiated conversation (retort turn replies): the player is talking to this character, so show the subtitle
-  // even when the hearing/line-of-sight gate says out of range (it is 3 tiles for turns); only absent/dead/other-room blocks it.
+  // Speech already printed in the Game Log is not a proximity-triggered ambient line.
   function conversational(row, actor, ctx) {
     return row?.source === 'retort-response' && !!actor && (actor.hp ?? 1) > 0 && I.state(actor) !== 'Dead' && I.roomKey(actor.mazeRoomKey) === ctx.dungeon.geoKey;
   }
@@ -98,6 +97,7 @@
   }
   function isWaitingToSpeak(name) {
     const ctx = context();
+    if (active?.speaker === name) return false;
     if (!ctx?.dungeon || !queue.some(row => row.geoKey === ctx.dungeon.geoKey && row.speaker === name)) return false;
     return canSpeak(ctx.actors.find(actor => actor.name === name), ctx);
   }
@@ -118,7 +118,8 @@
       if (typeof row.line !== 'string' || !row.line.trim()) continue;
       const message = { ...row, geoKey: event.geoKey, source: event.source || 'dialogue-event' };
       const actor = ctx?.actors.find(a => a.name === row.speaker);
-      if (!ctx?.dungeon || event.geoKey !== ctx.dungeon.geoKey || !actor || I.roomKey(actor.mazeRoomKey) !== event.geoKey) {
+      const logged = message.source === 'retort-response' && row.kind === 'turn';
+      if (!ctx?.dungeon || event.geoKey !== ctx.dungeon.geoKey || !logged && (!actor || I.roomKey(actor.mazeRoomKey) !== event.geoKey)) {
         if (!event.retry) {
           pendingDialogue.push({ event: { ...event, dialogue: [row], retry: true }, expires: Date.now() + 30000 });
           if (pendingDialogue.length > 8) pendingDialogue.shift();
@@ -146,7 +147,10 @@
         }
       }
       queue.push({ ...message, line: row.line.trim(), kind: row.kind || 'turn', key });
-      if (queue.length > 32) subtitleReport('skipped', queue.shift(), { reason: 'queue-limit' });
+      if (queue.length > 32) {
+        const ambient = queue.findIndex(row => row.kind !== 'turn');
+        if (ambient >= 0) subtitleReport('skipped', queue.splice(ambient, 1)[0], { reason: 'queue-limit' });
+      }
       subtitleReport('queued', message, reach);
       console.info('[DialogueSubtitle]', { geoKey: event.geoKey, speaker: row.speaker, kind: row.kind || 'turn',
         distance: Math.round(reach.distance * 100) / 100, range: reach.range });
@@ -174,10 +178,13 @@
     receiveTurnDialogue(event.content, { ...event, source: 'encounter-story' });
   }
   function receiveTurnDialogue(content, event) {
-    const names = [...I.parseSheets(event.consoleText), ...I.parseSheets(event.consoleText, 'NPCs in Party')].map(a => a.name);
+    const names = [...new Set([...I.parseSheets(event.consoleText), ...I.parseSheets(event.consoleText, 'NPCs in Party'),
+      ...(context()?.actors || []).filter(a => a.type !== 'pc')].map(a => a.name))];
     const explicit = Array.isArray(event.dialogue) ? event.dialogue : [];
-    const rows = explicit.some(row => row.attribution === 'labelled') ? explicit :
-      I.mergeAttributedSpeech(explicit, I.extractAttributedSpeech(content, names, explicit));
+    const attributed = I.extractAttributedSpeech(content, names, explicit).filter(row => !explicit.some(known =>
+      known.attribution === 'labelled' && known.speaker !== row.speaker &&
+      (known.line.includes(row.line) || row.line.includes(known.line))));
+    const rows = I.mergeAttributedSpeech(explicit, attributed);
     receiveDialogue({ ...event, source: 'retort-response', dialogue: rows.map(row => ({ ...row, kind: 'turn' })) });
   }
   function flushPendingDialogue(ctx) {
@@ -216,13 +223,14 @@
     const chunks = I.splitSpeech(row.line);
     active = { ...row, chunks, part: 0, until: now };
     try { root.HolodekSfx?.voicePrefetch?.(row.speaker, chunks); } catch {} // SID speech: fetch every sentence of this line now
-    if (actor.sprite?.dataUrl) { portrait.src = actor.sprite.dataUrl; portrait.hidden = false; }
+    if (actor?.sprite?.dataUrl) { portrait.src = actor.sprite.dataUrl; portrait.hidden = false; }
     else { portrait.removeAttribute('src'); portrait.hidden = true; }
     panel.hidden = false; fit();
     seen.add(row.key); if (seen.size > 80) seen.delete(seen.values().next().value);
     showSpeechPart(ctx, now);
     if (row.kind !== 'turn') root.appendDungeonDialogueLog?.(row.speaker, row.line);
-    root.focusDungeonSpeaker?.(actor.name, chunks.reduce((ms, line) => ms + speechDuration(line) + 500, 0));
+    if (actor) root.focusDungeonSpeaker?.(actor.name, chunks.reduce((ms, line) => ms + speechDuration(line) + 500, 0),
+      I.dialogueRecipient?.(row, ctx.actors));
   }
   const speechDuration = line => Math.min(18000, Math.max(3500, line.trim().split(/\s+/).length * 300 + 700));
   const SPEECH_WAIT_MS = 10000;
