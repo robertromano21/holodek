@@ -11,6 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const PC = require('../assets/renderCharacterProcedural.js');
+const Pantheon = require('../assets/pantheonCharacters');
 
 const CACHE_FILE = process.env.HOLODEK_TRAIT_CACHE || path.join(__dirname, '..', '.retort-data', 'character-traits.json');
 const MODEL = process.env.HOLODEK_TRAIT_MODEL || 'gpt-4.1-mini';
@@ -85,7 +86,8 @@ function compactFingerprint(fp) {
 function publicEntry(e) {
   if (!e) return null;
   const stature = e.stature || (e.traits ? PC.characterStature({name:e.name,race:e.sheet?.race,traits:e.traits}) : null);
-  return { name: e.name, traits: e.traits || null, stature, salt: e.salt >>> 0, variant: e.variant | 0, source: e.source || 'pending', attempts: e.attempts || 0 };
+  return { name: e.name, traits: e.traits || null, stature, appearance: e.source === 'llm' && e.sheet ? compactSheet(e.sheet) : null,
+    salt: e.salt >>> 0, variant: e.variant | 0, source: e.source || 'pending', attempts: e.attempts || 0 };
 }
 function randomSalt() { return (Math.floor(Math.random() * 0xffffffff) >>> 0); }
 
@@ -134,6 +136,10 @@ function buildMessages(sheet, problems) {
     name: s.name, sex: s.sex, race: s.race, class: s.class, level: s.level,
     equipped: s.equipped, kind: s.isMonster ? 'monster' : (s.role === 'pc' ? 'player character' : 'npc')
   };
+  const deity = Pantheon.canon(s.name);
+  if (deity) user.pantheonAppearance = { name: deity.name, form: deity.form, color: deity.color, visual: deity.visual,
+    description: deity.domain, size: deity.name === 'Mortacia' ? 'medium' : 'large',
+    instruction: 'Use the canonical anatomy, not a generic mortal. Respect the trait schema and only depict actual equipped items.' };
   const messages = [{ role: 'system', content: sys }, { role: 'user', content: 'Character sheet:\n' + JSON.stringify(user) }];
   if (problems && problems.length) messages.push({ role: 'user', content: 'Your previous answer failed validation: ' + problems.join('; ') + '. Return a corrected JSON object.' });
   return messages;
@@ -142,7 +148,7 @@ function buildMessages(sheet, problems) {
 async function callModelOnce(sheet, problems) {
   const c = getClient();
   if (!c) { const err = new Error('no OpenAI client / API key'); err.fatal = true; throw err; }
-  const response = await c.chat.completions.create({
+  const response = await require('./modelTransport').complete(c, {
     model: MODEL,
     messages: buildMessages(sheet, problems),
     response_format: { type: 'json_object' },
@@ -235,7 +241,8 @@ function ensureTraitSpec(sheet, options) {
   const entry = ensureEntry(sheet);
   if (!entry) return Promise.resolve(null);
   const key = keyOf(entry.name);
-  if (entry.source === 'llm' && entry.traits && entry.sheetKey === sheetKeyOf(sheet)) return Promise.resolve(entry);
+  // Recruitment, equipment and rules annotations change the sheet, not the character's anatomy.
+  if (entry.source === 'llm' && entry.traits) return Promise.resolve(entry);
   if (inflight.has(key)) return inflight.get(key);
   const p = runQueued(async () => {
     const traits = await generateTraitsWithRetry(sheet);
@@ -307,7 +314,7 @@ function ensureTraitSpecsForConsole(consoleText, broadcast) {
     const parsed = PC.parseConsoleCharacterSheets(consoleText);
     const fresh = parsed.all.filter((s) => {
       const e = loadCache()[keyOf(s.name)];
-      return !(e && e.source === 'llm' && e.sheetKey === sheetKeyOf(s));
+      return !(e && e.source === 'llm' && e.traits);
     });
     if (fresh.length) requestTraitSpecs(fresh, { broadcast });
     return fresh.length;

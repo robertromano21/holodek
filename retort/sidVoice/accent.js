@@ -3,23 +3,28 @@
 // + emphasis/focus words. Phoneme transforms act on espeak IPA (Piper's input). Prosodic traits shape the SID intonation.
 const V = 'aeiouæɑɒɔəɛɜɪʊʌɐɚɝ';
 const PROFILES = {
-  orc:      { ph: [[/ð/g, 'd'], [/θ/g, 't']], traits: { rangeMul: 1.15, pull: 0.6, accentMul: 1.3, rateMul: 0.94, arch: 1.0 } },
-  elf:      { ph: [[/ɹ/g, 'ɾ'], [/ˈ([eiouæɑɔɛɪʊʌ])(?![ːaeiouæɑɒɔəɛɜɪʊʌ])/g, 'ˈ$1ː'], [/oʊ/g, 'oː']], traits: { rangeMul: 1.45, pull: 0.65, accentMul: 1.5, rateMul: 1.0, arch: 2.2 } },
-  northern: { ph: [[/oʊ/g, 'oː'], [/eɪ/g, 'eː']], traits: { rangeMul: 1.1, pull: 0.55, accentMul: 1.2, rateMul: 0.95, arch: 1.2 } },
-  rural:    { ph: [[/(^|\s)h(?=ˈ|ˌ|[aeiouæɑɒɔəɛɜɪʊʌ])/g, '$1'], [/ɪŋ(\s|$)/g, 'ɪn$1']], traits: { rangeMul: 1.3, pull: 0.55, accentMul: 1.4, rateMul: 0.92, arch: 1.6 } },
-  regal:    { ph: [[/æ/g, 'ɑː'], [/ɚ/g, 'ə'], [/oʊ/g, 'əʊ'], [/ˈ([eiouɑɔɛɪʊʌ])(?![ːaeiouæɑɒɔəɛɜɪʊʌ])/g, 'ˈ$1ː']], traits: { rangeMul: 1.35, pull: 0.6, accentMul: 1.3, rateMul: 0.93, arch: 2.0 } },
-  hiss:     { ph: [[/s/g, 'ss'], [/z/g, 'sz'], [/ʃ/g, 'ʃʃ']], traits: { rangeMul: 1.25, pull: 0.5, accentMul: 1.5, rateMul: 1.06, arch: 1.0 } },
+  orc:      { ph: [[/ð/g, 'd'], [/θ/g, 't']], traits: { rangeMul: 1.15, pull: 0, accentMul: 1.3, rateMul: 0.94, arch: 0.5 } },
+  elf:      { ph: [[/ɹ/g, 'ɾ'], [/ˈ([eiouæɑɔɛɪʊʌ])(?![ːaeiouæɑɒɔəɛɜɪʊʌ])/g, 'ˈ$1ː'], [/oʊ/g, 'oː']], traits: { rangeMul: 1.45, pull: 0, accentMul: 1.5, rateMul: 1.0, arch: 1.1 } },
+  northern: { ph: [[/oʊ/g, 'oː'], [/eɪ/g, 'eː']], traits: { rangeMul: 1.1, pull: 0, accentMul: 1.2, rateMul: 0.95, arch: 0.6 } },
+  rural:    { ph: [[/(^|\s)h(?=ˈ|ˌ|[aeiouæɑɒɔəɛɜɪʊʌ])/g, '$1'], [/ɪŋ(\s|$)/g, 'ɪn$1']], traits: { rangeMul: 1.3, pull: 0, accentMul: 1.4, rateMul: 0.92, arch: 0.8 } },
+  regal:    { ph: [[/æ/g, 'ɑː'], [/ɚ/g, 'ə'], [/oʊ/g, 'əʊ'], [/ˈ([eiouɑɔɛɪʊʌ])(?![ːaeiouæɑɒɔəɛɜɪʊʌ])/g, 'ˈ$1ː']], traits: { rangeMul: 1.35, pull: 0, accentMul: 1.3, rateMul: 0.93, arch: 1 } },
+  hiss:     { ph: [[/s/g, 'ss'], [/z/g, 'sz'], [/ʃ/g, 'ʃʃ']], traits: { rangeMul: 1.25, pull: 0, accentMul: 1.5, rateMul: 1.06, arch: 0.5 } },
   // Mid-Atlantic / Transatlantic (Mortacia): espeak RP phonology (crisp unflapped t, non-rhotic, broad 'ah' in bath words,
   // rounded 'aw'), precise articulation, measured cadence, gently elevated melodic glide.
-  midatl:   { lang: 'en-gb-x-rp', ph: [], traits: { rangeMul: 1.3, pull: 0.6, accentMul: 1.25, rateMul: 0.9, arch: 1.8 } },
-  neutral:  { ph: [], traits: { rangeMul: 1.25, pull: 0.55, accentMul: 1.3, rateMul: 1, arch: 1.5 } },
+  midatl:   { lang: 'en-gb-x-rp', ph: [], traits: { rangeMul: 1.3, pull: 0, accentMul: 1.25, rateMul: 0.9, arch: 0.9 } },
+  // round3: 'shade' = the dead / spectral: low, narrow, slow, slight rasp (f0Mul/raspAdd applied in index.withAccent)
+  shade:    { ph: [], traits: { rangeMul: 0.75, pull: 0, accentMul: 0.7, rateMul: 0.84, arch: 0.3, f0Mul: 0.86, raspAdd: 0.08 } },
+  // round3: living adventuring companion: brighter, a little quicker, wider and more conversational than neutral
+  party:    { ph: [], traits: { rangeMul: 1.35, pull: 0, accentMul: 1.25, rateMul: 1.05, arch: 0.6 } },
+  neutral:  { ph: [], traits: { rangeMul: 1.25, pull: 0, accentMul: 1.3, rateMul: 1, arch: 0.75 } },
 };
 const NAMED = { mortacia: 'midatl', 'old tobin': 'rural', snikkit: 'hiss', grishnak: 'orc', velyra: 'elf', azrakthul: 'northern' };
 function accentOf(P) {
+  if (P.accent && PROFILES[P.accent]) return P.accent; // stored per-character voice spec wins (stable across rooms)
   const n = String(P.name || '').toLowerCase(); for (const k in NAMED) if (n.includes(k)) return NAMED[k];
   const s = (n + ' ' + (P.kind || '') + ' ' + (P.race || '')).toLowerCase();
-  if (/orc|ogre|troll|beast|brute/.test(s)) return 'orc'; if (/goblin|kobold|snake|lizard|naga/.test(s)) return 'hiss';
-  if (/elf|elven|fae|sylph|shadowsong/.test(s)) return 'elf'; if (/dwar|undead|ghoul|giant|north/.test(s)) return 'northern';
+  if (/\b(orc|ogre|troll|beast|brute)/.test(s)) return 'orc'; if (/goblin|kobold|snake|lizard|naga/.test(s)) return 'hiss';
+  if (/elf|elven|fae|sylph|shadowsong/.test(s)) return 'elf'; if (/undead|ghoul|wraith|shade|spectr|ghost|lich|revenant|necro/.test(s)) return 'shade'; if (/dwar|giant|north/.test(s)) return 'northern';
   if (/regal|queen|king|lord|lady|goddess/.test(s)) return 'regal'; if (/old|farmer|peasant|innkeep/.test(s)) return 'rural';
   return 'neutral';
 }

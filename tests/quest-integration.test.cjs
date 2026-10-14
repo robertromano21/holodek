@@ -81,7 +81,7 @@ function attachSolvedMechanism(h) {
 }
 
 function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = database(), text = consoleText(),
-  quest = 'Recover Sepulchra', onGenerateQuest } = {}) {
+  quest = 'Recover Sepulchra', onGenerateQuest, stories = false, regional = false, dungeon = null } = {}) {
   const state = { tasks: clone(tasks), index, seeded, database: JSON.stringify(db), text, quest, lastAdjudication: null,
     updates: [], logs: [], setters: [], generatedQuests: [], prompts: [], requests: [], synchronizers: [],
     seedAttempts: [], xp: 200, score: 17 };
@@ -97,6 +97,11 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   } });
   const agent = { user: tagged, assistant };
   const sharedState = {
+    getDungeonRunId: () => 'integration-run',getGamePaused: () => false,
+    getLastCoords: () => {const [x,y,z]=Inhabitants.roomKey(state.text.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]).split(',').map(Number);return{x,y,z};},
+    getRoomDungeon: () => dungeon,getRoomDungeonForSimulation: () => dungeon,getRoomPopulation: () => null,
+    getCombatCharactersString: () => JSON.stringify([{name:'Hero',type:'pc',hp:20,mazeX:2,mazeY:2,mazeRoomKey:dungeon?.geoKey}]),
+    setRoomDungeon: (_coords,value) => dungeon=value,
     getCurrentQuest: () => state.quest, getCurrentTasks: () => state.tasks, getCurrentTaskIndex: () => state.index,
     getQuestSeeded: () => state.seeded, getRoomNameDatabase: () => state.database, getUpdatedGameConsole: () => state.text,
     getLastAdjudication: () => state.lastAdjudication,
@@ -109,7 +114,13 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
     setLastQuestUpdate: value => { state.updates.push(value); }, appendQuestLog: value => { state.logs.push(clone(value)); }
   };
   const sync = name => async (_agent, _coords, _db, text) => { state.synchronizers.push(name); return text; };
-  const dependencies = { console: quiet, sharedState, PuzzleRewards, QuestDeliverySuccessors, ...progress, ...bossGate, ...actualRoomHelpers,
+  const dependencies = { console: quiet, sharedState, PuzzleRewards, QuestDeliverySuccessors, Inhabitants, ...progress, ...bossGate, ...actualRoomHelpers,
+    Divinity: require('../retort/divineEncounters'), Pantheon: require('../assets/pantheonCharacters'), GeneratedNames: require('../retort/generatedNames'),
+    QuestScenes: stories ? require('../retort/questScenes') : undefined,
+    QuestWritings: stories ? require('../assets/questWritings') : undefined,
+    RegionalAdventure: regional ? require('../retort/regionalAdventure') : undefined,
+    AdventureJournal: regional ? require('../retort/adventureJournal') : undefined,
+    computeDungeonGeometryStamp: () => 'integration-writing-stamp',
     seedBossKey: (db, gate, placement, options) => {
       state.seedAttempts.push(placement);
       return bossGate.seedBossKey(db, gate, placement, options);
@@ -159,6 +170,39 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
     } };
 }
 
+function regionalHarness(blockWriting = false) {
+  const db=database(),name='Edrin Farrows',p=Inhabitants.createPopulation('0,1,0',[{name,allegiance:'Neutral',encounterId:'scribe'}]);
+  Object.assign(p.actors[name],{hp:20,sheet:sheet(name,20)+'\nState: Neutral',position:{x:3,y:2}});
+  db['0,1,0'].inhabitants=p;db['0,1,0'].monsters={inRoom:name,consoleBlock:p.actors[name].sheet,state:'Neutral'};
+  db['0,1,0'].exits.north={status:'open',targetCoordinates:'0,2,0'};
+  db['0,2,0']={name:'Amber Spring Approach',objects:[],exits:{},classification:{indoor:false}};
+  const dungeon={geoKey:'0,1,0',start:{x:2,y:2},layout:{width:12,height:12},cells:{},tiles:{},sceneObjects:[]};
+  for(let y=0;y<12;y++)for(let x=0;x<12;x++)dungeon.cells[`${x},${y}`]={tile:x===0||y===0||x===11||y===11?'wall':'floor',floorHeight:0,ceilHeight:3};
+  if(blockWriting)dungeon.cells={};
+  return harness({db,tasks:[],seeded:false,regional:true,stories:true,dungeon,
+    text:consoleText({roomKey:'0,1,0',monsters:p.actors[name].sheet,'Quests Achieved':'0/21'})});
+}
+test('real quest manager seeds the first LLM regional adventure while retaining its existing boss binding',async()=>{
+  const h=regionalHarness(),originalBoss=h.db()[BOSS_KEY].monsters;
+  await h.turn({responses:[require('./fixtures/regional-adventure.cjs')(),PENDING]});
+  assert.equal(h.state.tasks.length,1);assert.equal(h.state.tasks[0].type,'Regional');
+  assert.equal(h.db()['0,0,0'].regionalAdventureAttempt.status,'installed');
+  assert.deepEqual(h.db()[BOSS_KEY].monsters,originalBoss);assert.equal(h.db()[BOSS_KEY].bossGate.keySeeded,false);
+  assert.equal(h.state.requests.filter(r=>r.maxTokens===3200).length,1);
+  assert.ok(!h.state.prompts.some(p=>/How many required elements/.test(p)));
+});
+test('real quest manager falls through to the unchanged generator after a rejected regional proposal',async()=>{
+  const h=regionalHarness();await h.turn({responses:['not JSON',{count:0}]});
+  assert.equal(h.state.tasks.length,0);assert.equal(h.db()['0,0,0'].regionalAdventure,undefined);
+  assert.ok(h.state.prompts.some(p=>/How many required elements/.test(p)));
+  assert.equal(h.db()[BOSS_KEY].bossGate.keySeeded,false);
+});
+test('inaccessible covenant placement discards the entire regional proposal before the older fallback runs',async()=>{
+  const h=regionalHarness(true);await h.turn({responses:[require('./fixtures/regional-adventure.cjs')(),{count:0}]});
+  assert.equal(h.state.tasks.length,0);assert.equal(h.db()['0,0,0'].regionalAdventure,undefined);
+  assert.equal(h.db()['0,2,0'].regionalSite,undefined);assert.equal(h.db()['0,3,0'],undefined);
+  assert.ok(h.state.prompts.some(p=>/How many required elements/.test(p)));
+});
 test('entrance never generates a quest even when Rooms Visited has already reached two or more', async () => {
   for (const visited of ['1', '2', '12']) {
     const text = consoleText({ 'Room Name': 'Ruined Temple Entrance', 'Current Quest': 'None',
@@ -221,6 +265,19 @@ test('quest generation retains its original visited and artifact guards outside 
     await h.generate();
     assert.deepEqual(h.state, original);
   }
+});
+
+test('final quest generation binds Sepulchra and Arithus to Hades while ordinary bosses cannot impersonate deities', async () => {
+  const final = harness({ text: consoleText({ roomKey: '0,1,0', 'Current Quest': 'None', 'Next Artifact': 'None',
+    'Rooms Visited': '999', 'Artifacts Found': '14/15', 'Quests Achieved': '20/21' }), quest: 'None', tasks: [], seeded: false });
+  await final.generate(['Invented Crown', 'Invented Boss', 'Invented Hall', 'Complete the last obligation.']);
+  assert.match(final.state.text, /^Next Artifact: Sepulchra$/m);
+  assert.match(final.state.text, /^Next Boss: Arithus$/m);
+  assert.match(final.state.text, /^Next Boss Room: Throne Room of Hades$/m);
+  const early = harness({ text: consoleText({ roomKey: '0,1,0', 'Current Quest': 'None', 'Next Artifact': 'None', 'Rooms Visited': '2' }),
+    quest: 'None', tasks: [], seeded: false });
+  await early.generate(['Test Chalice', 'Artihus', 'Test Sanctuary', 'Retrieve Test Chalice.']);
+  assert.match(early.state.text, /^Next Boss: Throneward Sentinel /m);
 });
 
 test('real quest manager stores partial progress, blocks model completion/reward, and advances only after action completion', async () => {
@@ -682,6 +739,23 @@ test('stage 0 actual seeding restricts the placement enum to non-boss rooms and 
   assert.equal(result.activeTask.progress.total, 2);
   assert.equal(result.activeTask.progress.satisfied, 1);
   assert.deepEqual(h.db()[BOSS_KEY].monsters, originalBoss);
+});
+
+test('the real future generator publishes a staged writing quest, which only actual reading, pickup and an explicit conclusion can complete',async()=>{
+  const S=require('../retort/questScenes'),d={geoKey:'0,1,0',start:{x:2,y:2},layout:{width:8,height:8},cells:{}};
+  for(let y=0;y<8;y++)for(let x=0;x<8;x++)d.cells[`${x},${y}`]={tile:x===0||y===0||x===7||y===7?'wall':'floor'};
+  const h=harness({stories:true,dungeon:d,tasks:[],seeded:false,text:consoleText({roomKey:d.geoKey})});
+  const result=await h.turn({responses:[{count:1},{type:'object'},{placement:d.geoKey},{type:'fetch'},
+    {actionKind:'other'},{desc:'A debt that outlasts death.'},{metrics:'The sigil is returned'},COMPLETED]});
+  assert.ok(result.activeTask.story);assert.equal(h.state.index,0);
+  const task=result.activeTask;assert.equal(h.sharedState.getRoomDungeon().questWritings.length,1);
+  const pick=id=>{const scene=S.view(h.sharedState).scene;return S.choose(h.sharedState,createPopulationService(h.sharedState),
+    {runId:'integration-run',geoKey:d.geoKey,storyId:scene.storyId,stageId:scene.stageId,revision:scene.revision,optionId:id});};
+  assert.equal(pick('read').error,undefined);
+  h.state.text=h.state.text.replace('Inventory: None','Inventory: Iron Sigil');
+  assert.equal(S.view(h.sharedState).scene.stageId,'resolution');assert.equal(h.state.index,0);
+  assert.equal(pick('finish').error,undefined);assert.equal(h.state.index,1);assert.equal(task.status,'Completed');
+  assert.equal(h.state.seedAttempts.length,0,'The story cannot mint a boss key outside the existing final-key step');
 });
 
 test('finishing a quest preserves generateQuest fresh console/boss/quest bindings and waiting UI', async () => {

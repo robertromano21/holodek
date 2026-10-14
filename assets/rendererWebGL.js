@@ -909,6 +909,7 @@
     buildVoxelGrid(tileName, dungeon, size = 16, opts = {}) {
       const spec = window.PhysicalPuzzles?.visualSpec(dungeon, tileName) || dungeon.tiles?.[tileName]?.spriteSpec;
       const shape = spec?.voxelShape;
+      if (shape === 'secret_wall') return new Uint8Array(size ** 3).fill(1);
       const stoneCarving=window.ARCHITECTURAL_CARVINGS===false||opts.carveArchitecture===false?null:window.StoneCarvings?.resolveVoxelDescriptor(spec,tileName);
       const rawSculpture=spec?.sculpture||spec?.puzzleFace?.sculpture||(['statue','puzzle_statue'].includes(shape)?{}:undefined);
       const sculpture=window.SculptureForms?.visualSpec(rawSculpture,window.ARCHITECTURAL_CARVINGS!==false,tileName)||rawSculpture;
@@ -3865,14 +3866,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const view = pick.view;
       const facing = pick.facing === -1 ? -1 : 1;
       // The combat-map clock must not animate a stationary 3D billboard.
-      const frame = pick.frame;
+      const down = window.DungeonInhabitants?.isDown(actor);
+      const frame = down ? 0 : pick.frame;
       const bbRev = Number.isFinite(window.CHARACTER_BILLBOARD_REV) ? window.CHARACTER_BILLBOARD_REV : 0;
       // Cache by facing (drawn art), never by bitmap-mirror — keeps weapon on the same hand
-      const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev].join('|');
+      const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev, down ? 'down' : 'standing'].join('|');
       this._billboardTexCache = this._billboardTexCache || new Map();
       let entry = this._billboardTexCache.get(key);
       if (!entry) {
-        const pix = api.renderBillboardPixels(spec, { frame, view, facing });
+        const original = api.renderBillboardPixels(spec, { frame, view, facing });
+        const pix = down ? window.CombatLifeUi?.laidDownPixels(original) || original : original;
         if (!pix || !pix.bounds) return null;
         const data = new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength);
         const gl = this.gl;
@@ -3886,7 +3889,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
         try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
         const ws = Number.isFinite(spec.worldScale) ? Math.max(0.55, Math.min(1.7, spec.worldScale)) : 1;
-        const idle = frame === 0 ? pix : api.renderBillboardPixels(spec, { frame: 0, view, facing });
+        const idle = frame === 0 ? original : api.renderBillboardPixels(spec, { frame: 0, view, facing });
         const stature = api.humanoidWorldStature?.(spec);
         const bodyFraction = (idle?.bodyHeight || (idle?.bounds?.maxY - idle?.bounds?.minY + 1)) / idle?.h;
         // Measure the body, not transparent headroom, wings or a raised weapon.
@@ -3902,7 +3905,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           if (this._billboardFootInsets.size >= 256) this._billboardFootInsets.delete(this._billboardFootInsets.keys().next().value);
           this._billboardFootInsets.set(footKey, footInset);
         }
-        entry = { tex, worldHeight, footInset, view, facing, pixels: pix };
+        entry = { tex, worldHeight, footInset: down ? 0 : footInset, view, facing, pixels: pix };
         if (this._billboardTexCache.size >= 256) {
           const oldKey = this._billboardTexCache.keys().next().value;
           const old = this._billboardTexCache.get(oldKey);
@@ -3941,18 +3944,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       this._itemTexCache = this._itemTexCache || new Map();
       let entry = this._itemTexCache.get(key);
       if (entry) return entry;
-      const pix = api.renderItemPixels(obj, { scale: 2 });
+      const pix = api.renderItemPixels(obj, { scale: 2, world: true });
       const gl = this.gl;
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength));
-      try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
-      entry = { tex, worldHeight: 0.42, footInset: pix.footInset, glow: !!pix.glow, pixels: pix };
+      entry = { tex, worldHeight: api.worldHeight(0), footInset: pix.footInset, glow: !!pix.glow, pixels: pix };
       this._itemTexCache.set(key, entry);
       return entry;
     },
@@ -4324,7 +4326,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const focalLength = height / (2 * Math.tan(FOV / 2));
       const viewShift = Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
       const horizon = height * (.5 + viewShift);
-      const voxelCamera = { x: camX, y: camY, eyeZ, dirX, dirY, planeScale, viewShift, verticalScale: 2 * focalLength / height,
+      const voxelCamera = { x: camX, y: camY, eyeZ, dirX, dirY, planeScale, viewShift, verticalScale: 2 * focalLength / height, aspect: width / height,
         artVerticalCompensation: width / (2 * planeScale * focalLength),
         floorHeightAt: (x, y) => this._getRenderedFloorHeight(dungeon, x, y) };
 
@@ -5244,12 +5246,13 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const dxp = wx - camX, dyp = wy - camY;
         const distSq = dxp * dxp + dyp * dyp;
         if (distSq > VIS_RADIUS * VIS_RADIUS || distSq < 0.04) continue;
-        const it = this._getItemBillboard(obj);
-        if (!it) continue;
+        const cachedItem = this._getItemBillboard(obj);
+        if (!cachedItem) continue;
         const invDet = 1.0 / (planeX * dirY - dirX * planeY);
         const transformX = invDet * (dirY * dxp - dirX * dyp);
         const transformY = invDet * (-planeY * dxp + planeX * dyp);
         if (transformY <= 0.05) continue;
+        const it = { ...cachedItem, worldHeight: window.SceneItems.worldHeight(transformY) };
         const baseZ = this._getItemBaseZ(dungeon, obj, it, now);
         const screenX = (width / 2) * (1 + transformX / transformY);
         const screenH = it.worldHeight * focalLength / transformY;
@@ -5280,6 +5283,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             p.y + s.y < playerY - partRange || p.y > playerY + partRange + 1) continue;
         const mesh = this.getVoxelMesh(part.tile, dungeon);
         if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: p, modelScale: s });
+      }
+      for (const part of window.SecretDoorsUi?.parts(dungeon) || []) {
+        const mesh = this.getVoxelMesh(part.tile, dungeon);
+        if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: part.position, modelScale: part.size });
       }
       for(const art of dungeon.surfaceArt || []){
         if(window.AncientScripts?.replacesClueOverlay(dungeon,art))continue;
@@ -6296,7 +6303,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       gl.disable(gl.BLEND);
 
-      const puzzleMoving = window.PhysicalPuzzles?.motionActive(dungeon);
+      const puzzleMoving = window.PhysicalPuzzles?.motionActive(dungeon) || window.SecretDoorsUi?.active(dungeon);
       const wantsAnimation = puzzleMoving || torchLights.length > 0 || sprites.some((spr) => spr.type === 'torch');
       if (wantsAnimation && popup.style.display === 'block') {
         if (!window._dungeonAnimPending) {

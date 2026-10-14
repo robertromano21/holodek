@@ -6,7 +6,17 @@ const coords = key => { const [x, y, z] = key.split(',').map(Number); return { x
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 const point = a => a && { x: a.x + .5, y: a.y + .5 };
 function protectedNames(state) {
-  return new Set((state.getCurrentTasks?.() || []).flatMap(task => (task?.requiredElements || []).map(e => e?.name)).filter(Boolean));
+  const names = new Set((state.getCurrentTasks?.() || []).flatMap(task => [
+    ...(task?.requiredElements || []).map(e => e?.name),
+    ...(task?.guardElements || []).map(e => e?.name),
+    ...(task?.status==='Completed'?[]:task?.story?.stages||[]).flatMap(s=>[s.actor,...(s.targets||[])])
+  ]).filter(Boolean));
+  try {
+    const db = JSON.parse(state.getRoomNameDatabase?.() || '{}');
+    for (const room of Object.values(db)) for (const mission of Object.values(room?.minorMissions || {}))
+      if (mission.status !== 'completed') for (const name of mission.targets || []) names.add(name);
+  } catch {}
+  return names;
 }
 function observe(population, dungeon, player, protectedActors = new Set(), now = Date.now()) {
   let changed = false;

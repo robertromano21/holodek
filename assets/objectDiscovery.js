@@ -4,7 +4,7 @@
 })(typeof window==='object'?window:globalThis,function(root){
   'use strict';
   const key=value=>String(value||'').trim().toLowerCase();
-  let room=null, visible=new Set();
+  let room=null, visible=new Set(), view=null;
   function countRemaining(objects){
     const rows=Array.isArray(objects)?objects:String(objects||'').split(',');
     return new Set(rows.map(row=>key(typeof row==='string'?row:row?.name))
@@ -12,6 +12,18 @@
   }
   function isVisible(dungeon,name){return room===dungeon&&visible.has(key(name));}
   function hasDiscovered(dungeon,name){return !!dungeon?.objectDiscoveries?.names?.includes(key(name));}
+  function snapshot(dungeon) {
+    return room === dungeon && view ? { camera: { ...view }, names: [...visible] } : null;
+  }
+  function takeRequest(dungeon, command) {
+    const match = /^\s*(?:take|pick\s+up|collect)\s+(.+?)\s*$/i.exec(command);
+    if (!match) return { error: 'Choose an object currently in view to take.' };
+    const all = /^(?:all|all objects|everything)$/i.test(match[1]);
+    const names = all ? [...visible] : [...new Set(match[1].split(/,\s*/).map(key).filter(Boolean))];
+    if (room !== dungeon || !names.length || names.some(name => !isVisible(dungeon, name)))
+      return { error: 'Only objects currently shown in Objects in Room can be taken. Turn toward the object first.' };
+    return { names, all };
+  }
   function refreshConsole(){
     if(typeof document==='undefined')return;
     const container=document.getElementById('phaser-container');
@@ -36,7 +48,8 @@
     const popup=document.querySelector('.popup-container[data-dungeon-item]');
     if(popup&&!isVisible(room,popup.dataset.dungeonItem))popup.remove();
   }
-  function update(dungeon,targets){
+  function update(dungeon,targets,camera){
+    view = camera ? Object.fromEntries(['x','y','eyeZ','dirX','dirY','planeScale','verticalScale','viewShift','aspect'].map(k=>[k,camera[k] ?? (k==='aspect'?1:0)])) : null;
     const next=new Set(targets.filter(t=>t.type==='item').map(t=>key(t.label)));
     const changed=room!==dungeon||next.size!==visible.size||[...next].some(n=>!visible.has(n));
     room=dungeon;visible=next;
@@ -54,6 +67,6 @@
     if(fresh.length)root.persistDungeonObjectDiscoveries?.(dungeon);
     return fresh;
   }
-  function reset(){room=null;visible=new Set();}
-  return{update,isVisible,hasDiscovered,countRemaining,refreshConsole,reset};
+  function reset(){room=null;visible=new Set();view=null;}
+  return{update,isVisible,hasDiscovered,countRemaining,refreshConsole,reset,snapshot,takeRequest};
 });

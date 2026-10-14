@@ -3,6 +3,7 @@ const Memory = require('./dialogueMemory');
 const MonsterConsoleSync = require('./monsterConsoleSync');
 const Discovery = require('../assets/outdoorDiscovery');
 const Pursuit = require('./hostilePursuit');
+const Divinity = require('./divineEncounters');
 
 function prepareEntryQuestContact(population, dungeon, roster, perception, quest) {
   const introduction = population?.questIntroduction, text = String(quest || '').trim();
@@ -26,10 +27,12 @@ function createPopulationService(state) {
   const discoveryLoggedAt = new WeakMap();
   function discoveryProtection() {
     const names = (state.getCurrentTasks?.() || []).slice(0, 32).flatMap(task =>
-      (Array.isArray(task?.requiredElements) ? task.requiredElements : []).slice(0, 64).map(element => element?.name).filter(Boolean));
+      [...(Array.isArray(task?.requiredElements) ? task.requiredElements : []).slice(0, 64).map(element => element?.name),
+        ...(task?.status==='Completed'?[]:task?.story?.stages||[]).flatMap(s=>[s.actor,...(s.targets||[])])].filter(Boolean));
     const text = state.getUpdatedGameConsole() || '';
     const boss = text.match(/^Next Boss:[ \t]*([^\r\n]*)/m)?.[1]?.trim();
     if (boss) names.push(boss);
+    names.push(...Pursuit.protectedNames(state));
     return names;
   }
   function get(geoKey, consoleText = state.getUpdatedGameConsole(), dungeon = null, observer = null) {
@@ -48,6 +51,7 @@ function createPopulationService(state) {
         { starting, indoor: dungeon?.classification?.indoor !== false });
       state.setRoomPopulation(geoKey, population);
     }
+    try { Divinity.reconcile(JSON.parse(state.getRoomNameDatabase() || '{}'), population); } catch {}
     const sheets = Inhabitants.parseSheets(consoleText);
     const missing = sheets.filter(a => !population.actors[a.name]);
     for (const actor of missing) {
@@ -99,6 +103,7 @@ function createPopulationService(state) {
       if (population.equipmentProperties !== undefined) population.equipmentProperties = room.monsters.equippedProperties;
       room.monsters.consoleBlock = room.monsters.inRoom;
     }
+    Divinity.capture(db, population);
     state.setRoomNameDatabase(JSON.stringify(db));
     persistedAt.set(population,Date.now());
   }
@@ -107,7 +112,7 @@ function createPopulationService(state) {
     if (!geoKey) return null;
     const population = get(geoKey, consoleText, dungeon);
     population.companions ||= {};
-    const companions = new Set(Inhabitants.parseSheets(consoleText, 'NPCs in Party').filter(a=>a.hp>0).map(a=>a.name));
+    const companions = new Set(Inhabitants.parseSheets(consoleText, 'NPCs in Party').filter(Inhabitants.isAlive).map(a=>a.name));
     for (const name of Object.keys(population.companions)) if (!companions.has(name)) delete population.companions[name];
     // The active roster is room-local; residents remain saved in their own population, not in the travelling party.
     const roster = JSON.parse(state.getCombatCharactersString() || '[]').filter(actor =>
@@ -130,7 +135,7 @@ function createPopulationService(state) {
       const previous = roster.find(a => a.name === sheet.name);
       if (previous?.type === 'npc') continue;
       if (previous) Object.assign(previous, { hp: sheet.hp, state: Inhabitants.state(sheet), type: 'monster' });
-      else if (sheet.hp > 0) roster.push({ name: sheet.name, type: 'monster', hp: sheet.hp, state: sheet.state });
+      else if (Inhabitants.isAlive(sheet)) roster.push({ name: sheet.name, type: 'monster', hp: sheet.hp, state: sheet.state });
     }
     Inhabitants.attach(roster, population);
     state.setCombatCharactersString(JSON.stringify(roster));
@@ -145,7 +150,7 @@ function createPopulationService(state) {
       record.position = { x: actor.mazeX, y: actor.mazeY };
     }
   }
-  function visit({ geoKey, runId, actors = [], player }) {
+  function visit({ geoKey, runId, actors = [], player, deferIntroductions = false }) {
     if (runId !== state.getDungeonRunId()) return { error: 'That game is no longer active.', status: 409 };
     const coords = state.getLastCoords();
     if (geoKey !== `${coords.x},${coords.y},${coords.z}`) return { error: 'That room is no longer active.', status: 409 };
@@ -190,7 +195,7 @@ function createPopulationService(state) {
         unseenPlacedGroups: population.groups.filter(g => g.discoveryState === 'placed' && g.status === 'unseen').length,
         active: travel.active || null, discoveries: discovery.discoveries }));
     }
-    const dialogue = [], candidates = [];
+    const dialogue = [], candidates = [], encounters = [];
     const speakerActor = record => roster.find(a => a.name === record.name && a.type === 'monster') ||
       { ...record, type: 'monster', mazeX: record.position?.x, mazeY: record.position?.y, mazeRoomKey: geoKey };
     for (const group of population.groups) {
@@ -203,12 +208,16 @@ function createPopulationService(state) {
       }
       const speakers = group.members.map(name => population.actors[name]).filter(a => a?.status === 'present' && a.encounteredAt > 0 &&
         Inhabitants.dialogueReach(dungeon, speakerActor(a), player).canSpeak);
-      candidates.push(...speakers.filter(a=>a.dialogueIndex<a.dialogue.length));
+      if (!deferIntroductions || group.introPlayed) candidates.push(...speakers.filter(a=>a.dialogueIndex<a.dialogue.length));
       if (near.length && group.status === 'unseen') { group.status = 'discovered'; population.revision++;persistentChange=true; Discovery.release(population, group.id); }
       // Seeing a resident is not a conversation. Keep its introduction unspent until approached.
       if (!speakers.length) continue;
       if (dialogue.length>=2) continue;
       if (!group.introPlayed) {
+        if (deferIntroductions) {
+          if (encounters.length < 2) encounters.push({ groupId: group.id, names: speakers.map(a => a.name) });
+          continue;
+        }
         const speaker = speakers[0];
         const line = speaker.dialogue[0];
         if (line) dialogue.push({ speaker: speaker.name, line, kind: 'encounter' });
@@ -217,7 +226,7 @@ function createPopulationService(state) {
       }
     }
     const focused = population.dialogueFocus?.until > Date.now();
-    if (!dialogue.length && !focused && Date.now() - (population.lastCannedSpeechAt || 0) >= 30000) {
+    if (!dialogue.length && !encounters.length && !focused && Date.now() - (population.lastCannedSpeechAt || 0) >= 30000) {
       const party = roster.filter(a => a.type==='npc' && (a.hp ?? 1)>0 && Inhabitants.state(a)!=='Dead');
       const partyNames = new Set(party.map(actor => actor.name));
       population.dialogueQueue = Inhabitants.sanitizeExchanges(population.dialogueQueue, [...partyNames]);
@@ -250,7 +259,8 @@ function createPopulationService(state) {
       return { speaker: row.speaker, kind: row.kind, distance: Math.round(reach.distance * 100) / 100,
         range: reach.range, lineOfSight: reach.lineOfSight, canHear: reach.canHear };
     });
-    return { population, dialogue: dialogue.slice(0, 2), speech, discoveries: discovery.discoveries };
+    return { population, dialogue: dialogue.slice(0, 2), speech, discoveries: discovery.discoveries,
+      ...(deferIntroductions ? { encounters } : {}) };
   }
   return { get, save, prepare, visit, recordPositions };
 }

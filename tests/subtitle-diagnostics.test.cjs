@@ -6,6 +6,7 @@ const I = require('../assets/dungeonInhabitants');
 const C = require('../assets/dungeonCartography');
 const continued = require('./fixtures/continued-dialogue.cjs');
 const zharok = require('./fixtures/zharok-dialogue.cjs');
+const edran = require('./fixtures/edran-dialogue.cjs');
 
 function fixture() {
   let now = 1000;
@@ -35,6 +36,55 @@ function fixture() {
   const event = { geoKey: d.geoKey, runId: 'run', dialogue: [{ speaker: actor.name, line: 'The wards here falter.' }] };
   return { root, ctx, actor, event, nodes, reports, posts, advance: ms => { now += ms; }, flush: () => { while (timers.length) timers.shift()(); } };
 }
+
+test('Edran full live reply reaches every subtitle card and the voice engine without duplicate transport playback', () => {
+  const f = fixture(), played = [];
+  f.actor.name = edran.speaker;
+  f.root.HolodekSfx = { voicePrefetch() {}, stopSpeech() {}, speakLine(speaker, line, options) {
+    played.push({ speaker, line }); options.onSchedule(1000, false); return Promise.resolve();
+  } };
+  const dialogue = I.extractDialogue(edran.prose, [edran.speaker]).dialogue;
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue });
+  f.root.DungeonLife.receiveTurnDialogue(edran.prose, { ...f.event, dialogue,
+    consoleText: `NPCs in Party: None\nMonsters in Room:\n${edran.speaker}\nMale\nShade\nKeeper\nLevel: 1\nHP: 20\nMonsters Equipped Properties: None` });
+  for (const chunk of I.splitSpeech(edran.speech)) {
+    assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, chunk);
+    f.advance(20000); f.root.DungeonLife.tick();
+  }
+  assert.equal(played.map(row => row.line).join(' '), edran.speech);
+  assert.ok(played.every(row => row.speaker === edran.speaker));
+  assert.equal(f.reports.filter(row => row.stage === 'displayed').map(row => row.line).join(' '), edran.speech);
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+});
+
+test('Edran shortened live-reply echoes cannot reappear as idle subtitles or Game Log entries', () => {
+  const f = fixture(), logged = [];
+  f.actor.name = edran.speaker;
+  f.root.appendDungeonDialogueLog = (...row) => logged.push(row);
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: edran.speaker, line: edran.speech }] });
+  for (const line of edran.replies) f.root.DungeonLife.receiveDialogue({ ...f.event,
+    dialogue: [{ speaker: edran.speaker, line, kind: 'canned' }] });
+  for (let i = 0; i < 8; i++) { f.advance(20000); f.root.DungeonLife.tick(); }
+  assert.deepEqual(logged, []);
+  assert.equal(f.reports.filter(row => row.stage === 'skipped' && row.reason === 'recently-spoken').length, 3);
+  assert.equal(f.reports.filter(row => row.stage === 'displayed').map(row => row.line).join(' '), edran.speech);
+  const fresh = 'What became of the last burial register?';
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: edran.speaker, line: fresh, kind: 'canned' }] });
+  assert.deepEqual(logged, [[edran.speaker, fresh]]);
+});
+
+test('Edran pending idle echo is pruned when the live answer arrives first, without dropping other speech', () => {
+  const f = fixture(), logged = [];
+  f.actor.name = edran.speaker;
+  f.root.appendDungeonDialogueLog = (speaker, line) => logged.push(line);
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: edran.speaker, line: 'Let me consider your question.' }] });
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: edran.speaker, line: edran.replies[0], kind: 'canned' }] });
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: edran.speaker, line: edran.speech }] });
+  for (let i = 0; i < 8; i++) { f.advance(20000); f.root.DungeonLife.tick(); }
+  assert.deepEqual(logged, []);
+  assert.equal(f.reports.filter(row => row.stage === 'displayed').map(row => row.line).join(' '), 'Let me consider your question. ' + edran.speech);
+  assert.ok(f.reports.some(row => row.stage === 'skipped' && row.reason === 'recently-spoken'));
+});
 
 test('subtitle logging distinguishes queued lines from exact text actually displayed, without duplicating delivery', () => {
   const f = fixture(); f.root.DungeonLife.receiveDialogue(f.event);

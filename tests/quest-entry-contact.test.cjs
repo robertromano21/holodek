@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const I = require('../assets/dungeonInhabitants');
 const { prepareEntryQuestContact } = require('../retort/roomPopulation');
 const { generateInhabitants } = require('../retort/inhabitantGeneration');
+const inhabitantReply = require('./fixtures/inhabitants.cjs');
 const { describeCharacters, generateCharacterDialogue } = require('../retort/characterDialogue');
 const quest = 'Find the missing keeper before confronting the bound boss.';
 function fixture() {
@@ -48,10 +49,10 @@ test('a first-time contact cannot be discovered through a pillar, but a previous
 
 for (const proposed of ['Friendly', 'Hostile']) test(`quest-contact generation accepts ${proposed === 'Friendly' ? 'a friendly ally' : 'only nonhostile allegiance'} without changing other cast slots`, async () => {
   let requests = 0;
-  const agent = { user() {}, assistant: { generation: async () => { requests++; return { content: JSON.stringify({ inhabitants: [
+  const agent = { user() {}, assistant: { generation: async () => { requests++; return { content: JSON.stringify({ inhabitants: inhabitantReply(8, [
     { slot: 0, name: 'Guide', allegiance: proposed, dialogue: ['The keeper is missing. Can you investigate?'] },
     { slot: 3, name: 'Guard', allegiance: 'Friendly' }
-  ] }) }; } } };
+  ]) }) }; } } };
   const result = await generateInhabitants(agent, { roomName: 'Cloister', roomDescription: 'A ruined cloister.', geoKey: '1,0,0', indoor: true, quest, questSeed: true },
     { level: () => 1, random: () => 5, sex: () => 'Female', xp: () => 0, equipment: async () => null });
   assert.equal(requests, 1); assert.equal(result.population.actors.Guide.allegiance, proposed === 'Friendly' ? 'Friendly' : 'Neutral');

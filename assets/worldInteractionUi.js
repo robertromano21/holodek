@@ -8,6 +8,8 @@
   }
 })(typeof window === 'undefined' ? globalThis : window, function(root) {
   'use strict';
+  const Items = typeof module === 'object' && module.exports && typeof require === 'function' ? require('./renderSceneItems') : root.SceneItems;
+  const Puzzles = typeof module === 'object' && module.exports && typeof require === 'function' ? require('./physicalPuzzles') : null;
   let frame = null, pointer = null, caption = null, busy = false, bound = false;
   let propCache = null, drag = null, dragPreview = null, suppressClickUntil = 0;
   const presentationCanvases = new WeakMap();
@@ -43,7 +45,15 @@
     return true;
   }
   function candidates(dungeon, player, camera) {
-    const result = [], e = dungeon.physicalPuzzle, P = root.PhysicalPuzzles;
+    const result = [], e = dungeon.physicalPuzzle, P = Puzzles || root.PhysicalPuzzles;
+    for(const writing of dungeon.questWritings || []) {
+      const p=writing.position,s=writing.size;
+      const x=p.x+s.x/2,y=p.y+s.y/2,distance=Math.hypot(x-player.x,y-player.y);
+      if(distance>18)continue;
+      result.push({type:'writing',key:writing.key,x,y,width:Math.max(s.x,s.y),height:s.z,
+        box:{...p,sx:s.x,sy:s.y,sz:s.z},label:writing.name,enabled:distance<=2.5,
+        inscription:writing.inscription,command:'read '+writing.name,hint:'Walk closer to read'});
+    }
     for(const art of dungeon.surfaceArt || []){
       if(root.AncientScripts?.replacesClueOverlay(dungeon,art))continue;
       const shown=root.SurfaceArt?.presentation(art,{dungeon,verticalCompensation:camera?.artVerticalCompensation})||art;
@@ -153,6 +163,41 @@
     }
     return result;
   }
+  function visibleWritings(dungeon,camera,player=camera) {
+    const result=[];
+    for(const target of candidates(dungeon,player,camera).filter(t=>t.type==='writing'&&t.enabled)) {
+      const b=target.box,x=b.x+b.sx/2,y=b.y+b.sy/2,z=b.z+b.sz/2;
+      const dx=x-camera.x,dy=y-camera.y,t=dx*camera.dirX+dy*camera.dirY;
+      if(t<=.03)continue;
+      const u=.5+(-dx*camera.dirY+dy*camera.dirX)/(2*t*camera.planeScale);
+      const v=.5+(camera.viewShift||0)-(z-camera.eyeZ)*camera.verticalScale/(2*t);
+      if(u<0||u>1||v<0||v>1)continue;
+      // Use the same nearest-hit/occlusion rules as clicks, not a room-wide proximity trigger.
+      const hit=pick(dungeon,camera,player,u,v);
+      if(hit?.type==='writing'&&hit.inscription.id===target.inscription.id)result.push(target);
+    }
+    return result;
+  }
+  function itemInView(dungeon, player, item, view) {
+    const c = view?.camera, key = s => String(s || '').trim().toLowerCase();
+    if (!c || !Array.isArray(view.names) || view.names.length > 100 || !view.names.some(n => key(n) === key(item?.name)) ||
+        ![c.x,c.y,c.eyeZ,c.dirX,c.dirY,c.planeScale,c.verticalScale,c.viewShift,c.aspect,player?.x,player?.y,item?.x,item?.y].every(Number.isFinite) ||
+        Math.hypot(c.x-player.x,c.y-player.y) > .35 || Math.abs(Math.hypot(c.dirX,c.dirY)-1) > .01 ||
+        c.planeScale < .1 || c.planeScale > 2 || c.verticalScale < .1 || c.verticalScale > 5 ||
+        c.aspect < .2 || c.aspect > 8 || Math.abs(c.viewShift) > .2) return false;
+    const floor = dungeon?.cells?.[`${Math.floor(player.x)},${Math.floor(player.y)}`]?.floorHeight || 0;
+    if (c.eyeZ < floor + .1 || c.eyeZ > floor + 4) return false;
+    const dx = item.x + .5 - c.x, dy = item.y + .5 - c.y, depth = dx*c.dirX + dy*c.dirY;
+    if (depth <= .05 || Math.hypot(dx,dy) > 18) return false;
+    const pixels = Items.renderItemPixels(item, { scale: 1, world: true }), h = Items.worldHeight(depth);
+    const base = (dungeon.cells[`${item.x},${item.y}`]?.floorHeight || 0) + .05 - pixels.footInset*h;
+    const screenX = .5 + (-dx*c.dirY + dy*c.dirX)/(2*depth*c.planeScale);
+    const screenH = h*c.verticalScale/(2*depth), screenW = screenH/c.aspect;
+    const bottom = .5+c.viewShift+(c.eyeZ-base)*c.verticalScale/(2*depth);
+    const target = { type:'item', item, key:`${item.x},${item.y}`, label:item.name, distance:depth, pixels,
+      screen:{left:screenX-screenW/2,right:screenX+screenW/2,top:bottom-screenH,bottom} };
+    return visibleBillboards(dungeon, { ...c, billboards:[target] }, 'item').length > 0;
+  }
   function readBlocked() {
     return busy || root.GameCommandGate?.busy() || root.gamePaused || document.hidden || root._characterStartupPending || root._combatCommandPending ||
       root.actionDiceState?.active || root._combatRoundActiveUntil > Date.now();
@@ -205,6 +250,10 @@
   async function activate(target) {
     if (!target?.enabled || blocked()) return;
     if (target.type === 'character') { root.CombatCharacterUi?.open(target.character); return; }
+    if(target.type==='writing') {
+      if(await root.QuestSceneUi?.open(target.label,{silent:true}))return;
+      await requestRead(target.label);return;
+    }
     if(target.type==='art'){
       root.DungeonActionNotices?.receive?.({id:'art:'+Date.now(),runId:root.dungeonRunId,geoKey:frame.dungeon.geoKey,
         kind:'art-examined',result:'observed',title:target.label,message:target.art.description+(target.art.text?' '+target.art.text:'')});
@@ -227,7 +276,7 @@
     const input=document.getElementById('chatuserinput');
     if(readBlocked()||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
     busy=true;input.value='read '+String(name).trim();clear();
-    try{await root.chatbotprocessinput();return true;}
+    try{await root.chatbotprocessinput();if(root.getReadableItemMetadata?.(name)?.questHooks?.length)root.QuestSceneUi?.open(null,{silent:true});return true;}
     catch(error){console.error('[ReadableItem]',error);return false;}
     finally{busy=false;}
   }
@@ -311,7 +360,8 @@
     if (frame?.canvas !== canvas || drag && frame?.dungeon.geoKey !== dungeon.geoKey) { cancelDrag(); pointer = null; }
     canvas.draggable = false; canvas.style.touchAction = 'none';
     frame = { dungeon, camera, sourceCanvas, canvas, player };
-    if(root.ObjectDiscovery&&Array.isArray(camera.billboards))root.ObjectDiscovery.update(dungeon,visibleBillboards(dungeon,camera,'item'));
+    if(root.ObjectDiscovery&&Array.isArray(camera.billboards))root.ObjectDiscovery.update(dungeon,visibleBillboards(dungeon,camera,'item'),camera);
+    if(root.WritingDiscovery&&(dungeon.questWritings?.length||0)>0)root.WritingDiscovery.update(dungeon,visibleWritings(dungeon,camera,player));
     if (pointer) hover();
   }
   function bind() {
@@ -359,6 +409,6 @@
     root.addEventListener('blur', cancelDrag);
     document.addEventListener('visibilitychange', () => { if (document.hidden) { pointer = null; cancelDrag(); } });
   }
-  return { ray, intersect, pick, visibleBillboards, updateFrame, setPresentationCanvas, activate, requestRead,
+  return { ray, intersect, pick, visibleBillboards, visibleWritings, itemInView, updateFrame, setPresentationCanvas, activate, requestRead,
     hasReadableContent, addReadAction, bind };
 });

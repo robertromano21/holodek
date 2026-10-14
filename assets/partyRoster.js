@@ -1,4 +1,8 @@
 (function(root) {
+  // Presentation only: the stored class annotation still selects combat/spell rules.
+  function displaySheet(value) {
+    return String(value ?? '').replace(/[ \t]*\[rules:[ \t]*(?:Fighter|Wizard|Witch|Sorcerer|Warlock|Necromancer|Cleric)[ \t]*\][ \t]*(?=\r?$|<br\b)/gim, '');
+  }
   function parseSheets(text, type) {
     const lines = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     const result = [];
@@ -6,7 +10,7 @@
     for (let end = 0; end < lines.length; end++) {
       // Old sheets end at Magic; newer sheets append State without shifting the stats.
       if (!/^Magic:\s*-?\d+/i.test(lines[end])) continue;
-      if (/^State:\s*(?:Alive|Friendly|Neutral|Hostile|Dead)$/i.test(lines[end + 1] || '')) end++;
+      if (/^State:\s*(?:Alive|Friendly|Neutral|Hostile|Unconscious|Dying|Dead)$/i.test(lines[end + 1] || '')) end++;
       const block = lines.slice(start, end + 1);
       start = end + 1;
       while (/^(?:PC|NPCs|NPCs in Party):?$/i.test(block[0] || '')) block.shift();
@@ -20,7 +24,8 @@
         const match = /^(Level|AC|XP|HP|MaxHP|Attack|Damage|Armor|Magic):\s*(-?\d+)/i.exec(line);
         if (match) entry[match[1].toLowerCase()] = Number(match[2]);
       });
-      entry.state = entry.hp <= 0 ? 'Dead' : type === 'pc' ? 'Alive' : 'Friendly';
+      const stored = block.find(line => /^State:/i.test(line))?.split(':')[1].trim();
+      entry.state = entry.hp <= 0 ? ['Unconscious', 'Dying'].includes(stored) ? stored : 'Dead' : type === 'pc' ? 'Alive' : 'Friendly';
       entry.State = entry.state;
       result.push(entry);
     }
@@ -40,7 +45,7 @@
       return true;
     }).map(c => ({ ...lookup.get(c.name.toLowerCase()), ...c }));
   }
-  const api = { parseSheets, partyRoster };
+  const api = { parseSheets, partyRoster, displaySheet };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PartyRoster = api;
 })(typeof window === 'undefined' ? globalThis : window);

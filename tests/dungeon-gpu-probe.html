@@ -25,6 +25,8 @@
 <script src="../assets/scenePropVoxels.js"></script>
 <script src="../assets/readableItems.js"></script>
 <script src="../assets/physicalPuzzles.js"></script>
+<script src="../assets/dungeonInhabitants.js"></script>
+<script src="../assets/questWritings.js"></script>
 <script src="../assets/sceneExteriorDetails.js"></script>
 <script src="../assets/characterMotion3d.js"></script>
 <script src="../assets/renderSceneItems.js"></script>
@@ -766,6 +768,17 @@ try {
     if(combatBackgrounds[0][i]!==combatBackgrounds[1][i])combatActorChanges++;
   }
   const combatRenderPass=combatRenderFrames.every(f=>f.error===gl.NO_ERROR&&f.depthTest&&f.depthWrite&&f.sameGeometry&&f.sameLighting&&f.actors===(f.phase==='alive'?1:0))&&combatBackgroundChanges===0&&combatActorChanges>0;
+  const writingRoom=structuredClone(liveRoom),writingCells=JSON.stringify(writingRoom.cells),writingLighting=JSON.stringify(writingRoom.lighting);
+  const additions=QuestWritings.apply(writingRoom,{inscriptions:[{id:'writing:probe',questStoryId:'story:probe',kind:'inscription',
+    name:'covenant tablet',title:'The Unfinished Vow',chapters:[{text:'Return the iron sigil to the Hall of Records.'}]}]});
+  if(!additions.length)throw Error('Quest writing did not receive a reachable voxel placement');
+  const writing=additions[0],wx=writing.position.x+writing.size.x/2,wy=writing.position.y+writing.size.y/2;
+  window.currentDungeon=writingRoom;window.playerPosX=3.5;window.playerPosY=3.5;window.playerAngle=Math.atan2(wy-3.5,wx-3.5);
+  renderer.renderScene();
+  const writingMesh=renderer.voxelMeshes[writing.tile],writingError=gl.getError();
+  const questWritingPass=writingMesh?.passes?.length===3&&writingMesh.passes.every(p=>p.count>0)&&writingError===gl.NO_ERROR&&
+    JSON.stringify(writingRoom.cells)===writingCells&&JSON.stringify(writingRoom.lighting)===writingLighting;
+  const questWriting={pass:questWritingPass,passes:writingMesh?.passes?.length,draws:renderer.lastFrameStats?.voxelDrawCalls,error:writingError};
   window.gamePaused=savedLiveFlags.paused;window.renderDungeonView=savedLiveFlags.render;
   window.ARCHITECTURAL_CARVINGS=savedLiveFlags.carvings;window.STONEWORK_SURFACE_CLOSURE=savedLiveFlags.closure;
   gl.deleteTexture(emptyCells);
@@ -773,7 +786,8 @@ try {
     shadersCompiled: true,
     initializationMs, adapter, startupEvents: renderer.startupEvents,
     pass: results.every(result => result.gpuUploadByteMismatches === 0 && result.glError === gl.NO_ERROR) &&
-      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && itemGroundingPass && actorShadowOcclusionPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && wideArtPass && circleAspectPass && circularMosaicPass && architecturalCarvingPass && columnSolidityPass && stoneworkPalettePass && mechanismMotionPass && funeraryPass&&artRefinementPass&&artLightingPass&&stoneworkComparisonPass&&liveStoneworkPass&&negativeReliefPass&&combatRenderPass,
+      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && itemGroundingPass && actorShadowOcclusionPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && wideArtPass && circleAspectPass && circularMosaicPass && architecturalCarvingPass && columnSolidityPass && stoneworkPalettePass && mechanismMotionPass && funeraryPass&&artRefinementPass&&artLightingPass&&stoneworkComparisonPass&&liveStoneworkPass&&negativeReliefPass&&combatRenderPass&&questWritingPass,
+      questWriting,
       results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, itemGrounding, itemGroundingPass, shadowSamples, actorShadowOcclusionPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass,artPass,wideArtPass,circleAspectPass,circleMeasurements,circularMosaicPass,mosaicMeasurements,architecturalCarvingPass,architecturalCarvingMeshes,columnSolidity,columnSolidityPass,stoneworkPalettePass,artPixels,mechanismMotionPass,funeraryMeshes,funeraryPass,artRefinementPass,refinementMeshes,artLightingPass,lightLevels,stoneworkComparison,stoneworkComparisonPass,liveStoneworkPass,liveStoneworkFrames,livePixelChanges,liveRedraws,negativeRelief,negativeReliefPass,combatRenderPass,combatRenderFrames,combatBackgroundChanges
   });
   if(stonePreview||livePreview){

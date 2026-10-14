@@ -9,7 +9,7 @@ const { isReservedBossKeyName } = require('./bossGate');
 const MAX_CHECKS = 64;
 const MAX_JSON_CHARS = 16384;
 const PHASES = { hard: 'hardRequirements', action: 'actionRequirements' };
-const SUPPORTED = { hard: ['at_coords', 'inventory_contains', 'monster_hp_zero'],
+const SUPPORTED = { hard: ['at_coords', 'inventory_contains', 'inventory_magic_min', 'monster_hp_zero', 'quest_story_complete'],
   action: ['exit_open', 'monster_hp_zero', 'puzzle_solved', 'item_delivered'] };
 const SECTION = /^(?:PC|NPCs(?: in Party)?|Monsters in Room|Monsters Equipped Properties|Monsters State|Objects in Room(?: Properties)?|Rooms Visited|Inventory(?: Properties)?|Room Name|Room Description|Coordinates(?: of Connected Rooms)?|Exits|Adjacent Rooms|Score|Turns|Puzzle in Room|Puzzle Solution|Artifacts Found|Quests Achieved|Next Artifact|Next Boss(?: Room)?|Boss Room Coordinates|Current Quest|Quest Progress|Quest Requirements|Party Status):/i;
 const STAT = /^(?:Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic|State):/i;
@@ -117,7 +117,7 @@ function monsterHp(text, name, allowBare = false) {
 }
 
 function monsterBinding(task, name) {
-  const elements = task.requiredElements ?? task.elements;
+  const elements = [...(task.requiredElements ?? task.elements ?? []), ...(task.guardElements || [])];
   if (!Array.isArray(elements)) return null;
   const targets = elements.filter(e => isRecord(e) && e.type === 'monster' &&
     typeof e.name === 'string' && e.name.trim() === name);
@@ -178,6 +178,11 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
     } else if (!SUPPORTED[phase].includes(check)) {
       diagnostic = `Unknown ${phase} requirement "${r.check}"`;
       result = { passed: null, evidence: { reason: 'unsupported_requirement' } };
+    } else if (check === 'quest_story_complete') {
+      const bound = task.story?.id === r.value && coordKey(r.coords) === task.story?.hook?.roomKey;
+      diagnostic = 'Resolve the stored quest stages through their verified interactions';
+      result = { passed: !!bound && require('./questScenes').isComplete(task, database),
+        evidence: { source: 'database.questScenes', storyId: r.value, roomKey: coordKey(r.coords) } };
     } else if (check === 'item_delivered') {
       const target = coordKey(r.coords), item = r.item, recipient = r.recipient;
       const bound = deliveryBindings(task).find(b => b.item === item && b.recipient === recipient && b.coords === target);
@@ -185,6 +190,7 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
       const destination = roomAt(database, target);
       const receipt = valid && destination?.itemTransfers?.find(row => row.source === 'engine-give-item-v1' &&
         row.item === item && row.recipient === recipient && coordKey(row.roomKey) === target && row.taskBinding === taskBinding(task) &&
+        (!r.minimumMagic || Number(row.magic) >= r.minimumMagic) &&
         (!row.acceptedBy && !row.successorId || destination.deliverySuccessors?.some(delegate => delegate.source === 'engine-delivery-successor-v1' &&
           delegate.id === row.successorId && delegate.name === row.acceptedBy && delegate.recipient === recipient &&
           delegate.taskBinding === row.taskBinding && coordKey(delegate.roomKey) === target &&
@@ -197,6 +203,12 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
       diagnostic = `Solve the physical mechanism at ${target || 'its bound room'}`;
       result = { passed: !!p && (!r.mechanismId || r.mechanismId === p.id) && PhysicalPuzzles.validState(p, p.state) && p.state.status === 'complete',
         evidence: { source: 'database.puzzleMechanism', roomKey: target, mechanismId: p?.id || null, status: p?.state?.status || 'missing' } };
+    } else if (check === 'inventory_magic_min') {
+      const props = require('../assets/inventoryUi').parseProperties(String(consoleText || '').match(/^Inventory Properties:[ \t]*([^\r\n]*)/m)?.[1]);
+      const minimum = r.minimumMagic;
+      diagnostic = `Have ${r.value} with at least ${minimum} Magic remaining`;
+      result = { passed: validName(r.value) && Number.isSafeInteger(minimum) && minimum > 0 && inventoryContains(consoleText, r.value).passed === true &&
+        props.some(p => p.name === r.value && Number(p.magic) >= minimum), evidence: { source: 'console.Inventory Properties', item: r.value, minimumMagic: minimum } };
     } else if (check === 'at_coords') {
       const targetRoomKey = coordKey(r.value);
       diagnostic = targetRoomKey ? `Be at ${targetRoomKey}` : 'at_coords requires valid coordinates';
@@ -295,7 +307,10 @@ function verifiedTaskCompletion(task, assessment) {
   if (!isRecord(task) || !Array.isArray(checks) || !checks.length || checks.some(c => c.passed !== true)) return false;
   const has = (check, value) => checks.some(c => c.requirement?.check === check &&
     (value === undefined || c.requirement.value === value));
+  if (task.story && !has('quest_story_complete', task.story.id)) return false;
   const kind = String(task.actionKind || '').toLowerCase(), type = String(task.type || '').toLowerCase();
+  if (type === 'regional' && kind === 'resolve_regional_adventure') return task.story?.family === 'regional-v1' &&
+    has('at_coords') && has('quest_story_complete', task.story.id);
   if (kind === 'deliver_item' || type === 'deliver') {
     const bindings = deliveryBindings(task);
     return bindings.length > 0 && bindings.every(b => checks.some(c => c.phase === 'action' &&
@@ -345,7 +360,8 @@ function buildDeliveryBindings(elements) {
   const recipients = elements.filter(e => e.type === 'monster'), items = elements.filter(e => e.type !== 'monster');
   if (recipients.length !== 1 || !items.length || /^hostile$/i.test(recipients[0].allegiance || recipients[0].state || '') ||
       new Set(items.map(e => e.name.trim().toLowerCase())).size !== items.length) return [];
-  return items.map(e => ({ item: e.name.trim(), recipient: recipients[0].name.trim(), coords: coordKey(recipients[0].placement) }));
+  return items.map(e => ({ item: e.name.trim(), recipient: recipients[0].name.trim(), coords: coordKey(recipients[0].placement),
+    ...(e.minimumMagic > 0 ? { minimumMagic: e.minimumMagic } : {}) }));
 }
 function deliveryBindings(task) {
   const expected = buildDeliveryBindings(task?.requiredElements);
@@ -364,6 +380,7 @@ function deliveryRecipient(task, database, binding) {
     { name: binding.recipient, predecessor: null, id: null };
 }
 function normalizeDeliveryTask(task) {
+  if (task?.story) return task;
   if (!isRecord(task) || task.status === 'Completed' || !['fetch', 'deliver'].includes(String(task.type).toLowerCase()) ||
       !Array.isArray(task.requiredElements)) return task;
   const text = String(task.desc || '').toLowerCase();
@@ -430,7 +447,8 @@ function compileGeneratedTask(task, database, roomKey) {
         o.name.trim().toLowerCase() === e.name.trim().toLowerCase()) : [];
       if (matches.length !== 1) return null;
       const item = matches[0];
-      elements.push({ ...e, name: item.name.trim(), placement, unlocks: item.unlocks || undefined });
+      elements.push({ ...e, name: item.name.trim(), placement, unlocks: item.unlocks || undefined,
+        ...(Number(item.magic) > 0 ? { minimumMagic: e.minimumMagic || 1 } : {}) });
     }
   }
   const type = String(task.type).toLowerCase(), kind = String(task.actionKind || '').toLowerCase();
@@ -457,6 +475,7 @@ function compileGeneratedTask(task, database, roomKey) {
   } else if (type === 'fetch') {
     if (!items.length || monsters.length || !['other', 'take_item', 'fetch_object', 'unlock_exit', ''].includes(kind)) return null;
     next.hardRequirements = items.map(e => ({ check: 'inventory_contains', value: e.name }));
+    next.hardRequirements.push(...items.filter(e => e.minimumMagic > 0).map(e => ({ check: 'inventory_magic_min', value: e.name, minimumMagic: e.minimumMagic })));
     next.desc = `Retrieve ${sources}.`;
     if (kind === 'unlock_exit') {
       const keys = items.filter(e => e.type === 'key' && e.unlocks);
@@ -484,13 +503,16 @@ function generatedTaskTypes(elements, database, roomKey) {
 }
 
 function selectGeneratedElements(elements, database, roomKey, excludedRooms = []) {
+  const localOnly = e => (database?.[coordKey(e?.placement)]?.objects || []).some(o =>
+    String(o?.name || '').trim().toLowerCase() === String(e?.name || '').trim().toLowerCase() && (o.currency_kind || o.minor_mission_id || o.consumable_kind));
+  elements = elements.filter(e => !localOnly(e));
   const excluded = new Set(excludedRooms.map(coordKey).filter(Boolean));
   const supported = rows => (rows.length || !excluded.has(coordKey(roomKey))) &&
     rows.every(e => !excluded.has(coordKey(e.placement))) && generatedTaskTypes(rows, database, roomKey).length > 0;
   const items = elements.filter(e => e?.type !== 'monster'), monsters = elements.filter(e => e?.type === 'monster');
   for (const rows of [elements, items, monsters]) if ((rows.length || !elements.length) && supported(rows)) return rows;
   const existing = Object.entries(database || {}).flatMap(([placement, room]) => !excluded.has(coordKey(placement)) && Array.isArray(room?.objects) ?
-    room.objects.filter(o => validName(o?.name)).map(o => ({ type: o.type === 'key' ? 'key' : 'object', name: o.name, placement: coordKey(placement) })) : []);
+    room.objects.filter(o => validName(o?.name) && !o.currency_kind && !o.minor_mission_id && !o.consumable_kind).map(o => ({ type: o.type === 'key' ? 'key' : 'object', name: o.name, placement: coordKey(placement) })) : []);
   // Keep a selected non-hostile contact useful by pairing it with real existing loot.
   for (const recipient of monsters) for (const item of existing) if (supported([item, recipient])) return [item, recipient];
   for (const item of existing) if (supported([item])) return [item];
@@ -524,17 +546,21 @@ function describeQuestRequirements(task, database) {
       let text;
       if (!SUPPORTED[phase].includes(check)) {
         text = `Unverified requirement: ${check || field + ' is invalid'}. Engine verification is not yet bound.`;
+      } else if (check === 'quest_story_complete') {
+        text = require('./questScenes').describe(task, database);
       } else if (check === 'at_coords') {
         text = `Be in ${place(r.value)}.`;
       } else if (check === 'inventory_contains') {
         const name = validName(r.value) ? r.value.trim() : '[unverified item]';
         referencedItems.add(name);
         text = `Have "${name}" in your inventory.${source(name)}`;
+      } else if (check === 'inventory_magic_min') {
+        text = `Keep at least ${r.minimumMagic} Magic remaining in "${r.value}".${source(r.value)}`;
       } else if (check === 'item_delivered') {
         const name = validName(r.item) ? r.item.trim() : '[unverified item]';
         referencedItems.add(name);
         const binding = { item: r.item, recipient: r.recipient, coords: coordKey(r.coords) }, recipient = deliveryRecipient(task, database, binding);
-        text = `Give "${name}" to ${validName(recipient.name) ? recipient.name.trim() : '[unverified recipient]'}${recipient.predecessor ? ` (taking over for ${recipient.predecessor})` : ''} in ${place(r.coords)}.${source(name)} Dropping it or mentioning it does not count.`;
+        text = `Give "${name}" to ${validName(recipient.name) ? recipient.name.trim() : '[unverified recipient]'}${recipient.predecessor ? ` (taking over for ${recipient.predecessor})` : ''} in ${place(r.coords)}.${source(name)}${r.minimumMagic ? ` Keep at least ${r.minimumMagic} Magic in the item for this handoff.` : ''} Dropping it or mentioning it does not count.`;
       } else if (check === 'monster_hp_zero') {
         const name = validName(r.value) ? r.value.trim() : '[unverified target]';
         text = `Defeat ${name} in ${place(monsterBinding(task, name))} (HP must be 0 or below).`;
@@ -571,6 +597,11 @@ function refreshCombatQuestProgress(state, consoleText) {
   // The successor module depends on this evaluator; load it only at the commit boundary.
   const recovery = require('./questDeliverySuccessors').ensure(state, consoleText);
   if (recovery.changed) consoleText = recovery.consoleText;
+  if (state.getCurrentTasks?.()?.[state.getCurrentTaskIndex?.() ?? 0]?.story) {
+    state.setUpdatedGameConsole(consoleText);
+    require('./questScenes').refresh(state);
+    consoleText = state.getUpdatedGameConsole();
+  }
   const storedTasks = state.getCurrentTasks?.(), index = state.getCurrentTaskIndex?.() ?? 0;
   if (!Array.isArray(storedTasks) || !Number.isInteger(index) || index < 0 || index > 2 || !storedTasks[index] ||
       typeof consoleText !== 'string') return consoleText;

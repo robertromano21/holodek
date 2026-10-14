@@ -14,10 +14,11 @@ test('Mortacia and Suzerain keep their established origins instead of accepting 
   assert.match(P.create({ Name: 'Suzerain' }).history, /Knight of Atinus/);
   assert.equal(P.create({ Name: 'constructor' }).canonical, false);
 });
-test('individual backgrounds are stable, distinct and short without changing stats, equipment or sprites', () => {
+test('missing biographies stay explicitly pending, never become stock personal histories', () => {
   const actor = { Name: 'Mason', Race: 'Elf', Class: 'Mason', HP: 20, sprite: { dataUrl: 'unchanged' } }, before = JSON.stringify(actor);
   const profile = P.create(actor, 'run');
-  assert.deepEqual(P.create(actor, 'run'), profile); assert.notEqual(P.create({ ...actor, Name: 'Gardener' }, 'run').history, profile.history);
+  assert.deepEqual(P.create(actor, 'run'), profile); assert.equal(profile.source, 'pending');
+  assert.equal(profile.history, ''); assert.equal(P.complete(profile), false);
   assert.ok(profile.history.length <= 600 && profile.personality.length <= 220); assert.equal(JSON.stringify(actor), before);
 });
 test('party-mode backgrounds use one batch for random companions and keep Mortacia canonical', async () => {

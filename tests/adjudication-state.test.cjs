@@ -174,7 +174,7 @@ for (const scenario of ['discovery', 'failed search', 'exhausted', 'dialogue', '
       '{"count":1}', '{"name":"ethereal bloom"}', '{"type":"other"}', '{"name":"Garden of Vows"}'];
     const agent = { user: (parts, ...values) => { prompts.push(parts.reduce((text, part, i) => text + part + (values[i] ?? ''), '')); },
       assistant: { generation: async () => ({ content: responses.shift() || '{}' }) } };
-    const context = { console: quiet, parseSheets, evaluateTaskRequirements, generateObjectModifiers: async () => ({ magic: 2 }),
+    const context = { console: quiet, parseSheets, evaluateTaskRequirements, GeneratedNames: require('../retort/generatedNames'), generateObjectModifiers: async () => ({ magic: 2 }),
       Math: Object.assign(Object.create(Math), { random: () => 0 }),
       sharedState: { getRoomNameDatabase: () => database, setRoomNameDatabase: value => { database = value; },
         setUpdatedGameConsole: value => { consoleText = value; } } };
@@ -234,7 +234,7 @@ test('HP/XP commit also updates living combat actors and removes a trap-killed a
   const fn = source.slice(source.indexOf('function processGameUpdate('), source.indexOf('async function adjudicateActionWithCodeInterpreter('));
   let consoleText = startingConsole(), database = '{}';
   let roster = JSON.stringify([{ name: 'Mortacia', hp: 20, mazeX: 1 }, { name: 'Zarthul the Veiled Sentinel', hp: 10 }, { name: 'Enemy', hp: 25 }]);
-  const context = { console: quiet, parseSheets, applyAdditionalOutcomes,
+  const context = { console: quiet, parseSheets, applyAdditionalOutcomes, Inhabitants: require('../assets/dungeonInhabitants'),
     sharedState: { getRoomNameDatabase: () => database, setRoomNameDatabase: value => { database = value; },
       setUpdatedGameConsole: value => { consoleText = value; }, getCombatCharactersString: () => roster,
       setCombatCharactersString: value => { roster = value; } } };

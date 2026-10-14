@@ -1,5 +1,38 @@
 # Grounded Queued Dialogue
 
+## Character Creation
+
+The Ruined Temple now uses the same inhabitant generator as regional rooms.
+It retains one to four Friendly residents for solo starts; party awakening
+still does not add another starting-room cast. The one generation supplies
+individual names, occupations, personalities, voices, histories, motivations
+and greetings. The engine continues to assign allegiance, stats and equipment.
+Authored profiles persist with the room, companions and campaign memories;
+switching models does not reroll a character's life or identity.
+
+Party creation already requested biographies. Its original pre-Luna writing
+prompt is preserved verbatim, with Mortacia and Suzerain's canonical profiles
+excluded from random authorship. Completing an older partial profile preserves
+its established fields rather than rewriting a real history to add a voice.
+
+Missing biographies no longer get locally fabricated regret/betrayal templates.
+Existing sessions detect those legacy templates and request real authorship
+before the next story response. Invalid JSON, missing rows or fields, duplicate
+identities and provider errors stop generation with a bounded diagnostic;
+they do not substitute stock residents or retry silently. Look for
+`[InhabitantGeneration]` and `[CharacterProfiles]` requested/generated/failed
+events, including the failing field and up to 2,000 response characters.
+
+Isolated Retort character-generation sub-runs explicitly inherit the unchanged
+original Grave Master lore for either model. Biography and inhabitant calls
+clear any previous equipment-modifier response schema. The model adapter
+contains backend routing/format instructions, not a different personality prompt.
+
+`tests/character-generation.test.cjs` pins the pre-Luna biography prompt and
+captures offline starting/regional requests with identical cast/world inputs
+for 4.1 Mini and Luna. This verifies prompt/transport parity, not a claim about
+live literary quality. Both original top and bottom prompts remain hash-pinned.
+
 Normal Retort narration keeps the existing bounded conversation history, prose,
 speaker metadata and subtitle pipeline. That same generation prepares future
 character remarks and optional companion exchanges; it does not make a second
@@ -36,6 +69,43 @@ the existing IndexedDB storage; they are not stored as performed dialogue.
 prompt. `[DialogueRefresh]` reports the periodic batch. `[DialogueSubtitle]`
 distinguishes queued text from text actually displayed. Only delivered speech
 enters the campaign dialogue archive, never unspoken alternatives.
+
+## Complete Speech And Idle Echoes
+
+The October 14 Edran reply contained three quotations separated by gestures.
+Only its first quote appeared in `[DialogueSubtitle]` reports: unlabelled speech
+after "His thumb rubs at a faded groove" lost its speaker before reaching the
+voice system. The shared fallback extractor now accepts embodied possessive
+gestures only after a speaker has been established. Existing inscription,
+unknown-speaker and player-speech exclusions remain. Inline labelled speech is
+still preferred. No SID synthesis or voice timing change was needed.
+
+The same generation put shortened versions of that answer into future idle
+alternatives. Prompt guidance now requires new thoughts, not live-answer copies.
+Server cache updates and the browser subtitle queue also screen obvious lexical
+echoes against recent speech by that character. This bounded history expires
+after ten minutes and is not campaign evidence. New facts and questions are
+retained; live player-requested answers are not suppressed by the idle filter.
+
+## Prompt Comparison Baseline
+
+The added public-culture recap and instruction to give lore before asking a
+question have been removed from inhabitant creation, live dialogue and queued
+dialogue. Campaign recall again uses its earlier unknown-evidence wording.
+The full original Grave Master lore and bottom action/dialogue instructions
+remain unchanged, including character agency, questions and disagreements.
+
+Custom biography generation, error diagnostics, witnessed-memory restrictions,
+command-selector semantics and speech deduplication remain in place. Regional
+inhabitants still receive their original community-generation context. This
+isolates the added lore emphasis from the removal of stock biography fallbacks;
+it does not substitute another personality directive. Moral inversion remains
+absent from variability seeds; its leftover rhyme examples and mandatory
+quest-progress moral twists have also been removed.
+
+Restart the server to load prompt changes. Saved biographies, delivered dialogue
+and existing caches are not rewritten. Use a new adventure for the cleanest
+comparison; earlier lore-heavy conversations otherwise remain part of memory.
 
 ## Dismiss Controls
 

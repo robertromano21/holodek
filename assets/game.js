@@ -624,10 +624,12 @@ window.applyLivingEnvironmentDelta = function(data) {
     return;
   }
   if (data.physicalPuzzle) window.PhysicalPuzzles?.beginMotion(currentDungeon, currentDungeon.physicalPuzzle, data.physicalPuzzle);
+  if (data.secretDoors) window.SecretDoorsUi?.begin(currentDungeon, data.secretDoors);
   Object.assign(currentDungeon.cells, data.cells);
   if (data.actionAttempts) currentDungeon.actionAttempts = data.actionAttempts;
   if (data.livingEncounter) currentDungeon.livingEncounter = data.livingEncounter;
   if (data.physicalPuzzle) currentDungeon.physicalPuzzle = data.physicalPuzzle;
+  if (data.secretDoors) currentDungeon.secretDoors = data.secretDoors;
   currentDungeon._geometryStamp = data.geometryStamp;
   currentDungeon._meta = { ...currentDungeon._meta, geometryStamp: data.geometryStamp };
   delete currentDungeon._lodCache;
@@ -667,6 +669,7 @@ eventSource.onmessage = function(event) {
   }
 
   if (data.type === 'game_pause') {
+    if (window._gameOver) return;
     window.DungeonLife?.setPaused(data);
     return;
   }
@@ -680,16 +683,29 @@ eventSource.onmessage = function(event) {
     window.DungeonLife?.receiveDialogue(data);
     return;
   }
+  if (data.type === 'encounter_story') {
+    window.DungeonLife?.receiveEncounter(data);
+    return;
+  }
   if (data.type === 'action_notice') {
     window.DungeonActionNotices?.receive(data);
     return;
   }
+  if (data.type === 'life_status') { window.CombatLifeUi?.receive(data); return; }
   if (data.type === 'campaign_memory') {
     window.DungeonCampaignMemory?.receive(data);
     return;
   }
-  if (data.type === 'realtime_combat_result') {
+  if (data.type === 'realtime_combat_result' || data.type === 'quest_scene_result' || data.type === 'economy_result' || data.type === 'spell_result') {
     Promise.resolve(window.applyRealtimeCombatResult?.(data)).catch(error=>console.warn('[EncounterResult]',error.message));
+    return;
+  }
+  if (data.type === 'quest_writing') {
+    if(data.runId!==window.dungeonRunId||data.geoKey!==currentDungeon?.geoKey)return;
+    if(window.QuestWritings?.install(currentDungeon,data)) {
+      currentDungeon._meta={...currentDungeon._meta,geometryStamp:data.geometryStamp};
+      scheduleLodCachePersist();renderDungeonView();
+    }
     return;
   }
   if (data.type === 'combat_health') {
@@ -2043,6 +2059,7 @@ class MainScene extends Phaser.Scene {
         const npcs = data?.npcs || "None";
         const inventory = data?.inventory || "Empty";
         const inventoryProperties = data?.inventoryProperties || "None";
+        const silverPieces = Math.max(0, Number(data?.silverPieces ?? window.silverPieces) || 0);
         const monsters = data?.monsters || "None";
         window._combatMonsterSheets = monsters;
         const monstersState = data?.monstersState || "None";
@@ -2109,7 +2126,7 @@ class MainScene extends Phaser.Scene {
             }
         
             // Wrap the PC block in a div with a class for indentation
-            pcHtml = `<div class="pc-block">${updatedPcBlock}</div>`;
+            pcHtml = `<div class="pc-block">${window.PartyRoster.displaySheet(updatedPcBlock)}</div>`;
         }
         
         let npcsHtml = npcs;
@@ -2143,7 +2160,7 @@ class MainScene extends Phaser.Scene {
                 }
         
                 // Wrap the updated NPC block in a div with a class for indentation
-                indentedNpcBlocks.push(`<div class="npc-block">${updatedNpcBlock}</div>`);
+                indentedNpcBlocks.push(`<div class="npc-block">${window.PartyRoster.displaySheet(updatedNpcBlock)}</div>`);
             }
         
             // Combine the indented NPC blocks with the NPCs header
@@ -2166,7 +2183,7 @@ class MainScene extends Phaser.Scene {
                 const updatedMonsterBlock = monsterBlock.replace(monsterName, clickableMonsterName);
         
                 // Wrap the updated monster block in a div with a class for indentation
-                indentedMonsterBlocks.push(`<div class="monster-block" data-monster-name="${escapedText(monsterName)}" data-monster-hp="${sheet.hp}" data-monster-state="${characterState(sheet, 'monster', monstersState)}">${updatedMonsterBlock}</div>`);
+                indentedMonsterBlocks.push(`<div class="monster-block" data-monster-name="${escapedText(monsterName)}" data-monster-hp="${sheet.hp}" data-monster-state="${characterState(sheet, 'monster', monstersState)}">${window.PartyRoster.displaySheet(updatedMonsterBlock)}</div>`);
             }
         
             // Hidden sheets must not leave newline text nodes in the preformatted console.
@@ -2191,6 +2208,8 @@ Objects in Room Properties: <span data-room-object-properties>None in view</span
 
 Objects in Room Remaining: <span data-room-object-count>${window.ObjectDiscovery?.countRemaining(objects) ?? 0}</span>
 
+Silver Pieces: ${silverPieces}
+
 Inventory: ${inventoryHtml}
 
 Inventory Properties: ${inventoryProperties}
@@ -2209,6 +2228,10 @@ Puzzle: ${puzzle.inRoom}
 Solution: ${puzzle.solution}
 
 Current Quest: ${currentQuest}
+${data?.region || window.campaignRegion ? `\nRegion: ${escapedText(data?.region || window.campaignRegion)}\n` : ''}
+${data?.patronage || window.campaignPatronage ? `\nPatronage: ${escapedText(data?.patronage || window.campaignPatronage)}\n` : ''}
+${data?.community || window.campaignCommunity ? `\nCommunity: ${escapedText(data?.community || window.campaignCommunity)}\n` : ''}
+${data?.localMissions && data.localMissions !== 'None' || window.localMissionsText && window.localMissionsText !== 'None' ? `\nLocal Missions: ${escapedText(data?.localMissions || window.localMissionsText)}\n` : ''}
 ${questProgress && questProgress !== 'None' ? `\nQuest Progress: ${escapedText(questProgress)}\n` : ''}
 ${currentQuest !== 'None' && questRequirements && questRequirements !== 'None' ? `\nQuest Requirements: ${escapedText(questRequirements)}\n` : ''}
 
@@ -2235,7 +2258,7 @@ Adjacent Rooms:
         contentDiv.dataset.roomObjects=objects;
         window.refreshDungeonConsoleStates?.();
         window.ObjectDiscovery?.refreshConsole();
-        window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs });
+        window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs, silverPieces });
         const consoleCoordNumbers = String(coordinates).match(/-?\d+/g);
         window.DungeonActionNotices?.observeItems({ geoKey: consoleCoordNumbers?.length === 3 ? consoleCoordNumbers.join(',') : null,
           objects, objectsProperties: objectsInRoomProperties, inventory, inventoryProperties });
@@ -2245,7 +2268,13 @@ Adjacent Rooms:
           : null;
     
         // Add event listener to clickable objects inside contentDiv
-        contentDiv.addEventListener('click', (event) => {
+        for (const handler of contentDiv._consoleActionHandlers || []) contentDiv.removeEventListener('click', handler);
+        contentDiv._consoleActionHandlers = [];
+        const onConsoleAction = handler => {
+            contentDiv._consoleActionHandlers.push(handler);
+            contentDiv.addEventListener('click', handler);
+        };
+        onConsoleAction((event) => {
             const target = event.target;
             if (target.classList.contains('clickable-object')) {
                 const objectName = target.getAttribute('data-object');
@@ -2290,7 +2319,7 @@ Adjacent Rooms:
         });
         
                 // Add event listener to clickable objects inside contentDiv
-        contentDiv.addEventListener('click', (event) => {
+        onConsoleAction((event) => {
             const target = event.target;
             if (target.classList.contains('clickable-inventory')) {
                 const objectName = target.getAttribute('data-object');
@@ -2317,6 +2346,8 @@ Adjacent Rooms:
                 // Append the popup to the body
                 document.body.appendChild(popup);
                 window.WorldInteractionUi?.addReadAction(popup, objectName);
+                window.CommerceUi?.addDrinkAction(popup, objectName);
+                window.SpellUi?.addItemAction(popup, objectName);
         
                 // Add event listeners for buttons
                 document.getElementById('drop-button').addEventListener('click', () => {
@@ -2384,7 +2415,7 @@ Adjacent Rooms:
             }
         });
        
-        contentDiv.addEventListener("click", (event) => {
+        onConsoleAction((event) => {
             const target = event.target;
             if (target.classList.contains("clickable-equipped")) {
                 const itemName = target.getAttribute("data-item");
@@ -2435,7 +2466,7 @@ Adjacent Rooms:
                 });
             }
         });
-        contentDiv.addEventListener("click", (event) => {
+        onConsoleAction((event) => {
             const target = event.target;
             if (target.classList.contains("clickable-npc")) {
                 const npcName = target.getAttribute("data-npc");
@@ -2475,7 +2506,7 @@ Adjacent Rooms:
             }
         });
        
-        contentDiv.addEventListener("click", (event) => {
+        onConsoleAction((event) => {
             const target = event.target;
             if (target.classList.contains("clickable-monster")) {
                 const monsterName = target.getAttribute("data-monster");
@@ -2495,6 +2526,7 @@ Adjacent Rooms:
                 `;
                 document.body.appendChild(popup);
 
+                if (window.PantheonCharacters && !window.PantheonCharacters.canRecruit({ name: monsterName })) document.getElementById('add-button').hidden = true;
                 document.getElementById("add-button").addEventListener("click", () => {
                     const chatInput = document.getElementById("chatuserinput");
                     chatInput.value = `add ${monsterName} to party`; // Command to add monster
@@ -2508,6 +2540,8 @@ Adjacent Rooms:
                     popup.remove();
                 });
                 document.getElementById('give-item-button').addEventListener('click', () => window.ItemGiveUi?.open(monsterName));
+                window.QuestSceneUi?.addAction(document.getElementById('give-item-button').closest('.popup-container'),monsterName);
+                window.CommerceUi?.addAction(document.getElementById('give-item-button').closest('.popup-container'),monsterName);
                 document.getElementById("cancel-button").addEventListener("click", () => popup.remove());
             }
         });
@@ -2687,7 +2721,7 @@ Adjacent Rooms:
                 this.currentCoordinates = currentCoords;
                 this.combatInitialized = true;
                 combatCharactersString = JSON.stringify(window.combatCharacters || []); // Ensure this is set
-                console.log("Reset and initialized CombatScene with default positions:", characters);
+                if (window.DEBUG_LOGS) console.log("Reset and initialized CombatScene with default positions:", characters);
             } catch (e) {
                 console.error("Error initializing CombatScene:", e);
             }
@@ -2850,6 +2884,8 @@ function drawCombatTextureOnRT(scene, texKey, frameName, x, y, size, character) 
     const temp = scene.make.sprite({ x: x + size / 2, y: y + size / 2, key: texKey, frame, add: false });
     temp.setOrigin(0.5, 0.5);
     temp.setDisplaySize(size, size);
+    const down = window.DungeonInhabitants?.isDown(character) || character?.type === 'pc' && window.DungeonInhabitants?.isDown((window.combatCharacters || []).find(a => a.type === 'pc'));
+    if (down) temp.setAngle?.(90);
     if (typeof temp.setFlipX === 'function') temp.setFlipX(flipped);
     target.draw(temp);
     temp.destroy();
@@ -2961,7 +2997,7 @@ window.updateCombatScene = function(characters) {
     }
     let combatScene = window.combatGame.scene.getScene('CombatScene');
     if (combatScene) {
-        console.log("Updating CombatScene with characters:", characters);
+        if (window.DEBUG_LOGS) console.log("Updating CombatScene with characters:", characters);
         combatScene.updateCharacters(characters);
         combatCharactersString = JSON.stringify(window.combatCharacters);
     } else {
@@ -2976,7 +3012,7 @@ class CombatScene extends Phaser.Scene {
       }
     
       create(data) {
-        console.log("CombatScene.create called with data:", data);
+        if (window.DEBUG_LOGS) console.log("CombatScene.create called with data:", data);
     
 
         this.PIXEL_SCALE = 2;
@@ -3015,6 +3051,7 @@ class CombatScene extends Phaser.Scene {
             const f=this.textures.getFrame(t.texKey,t.frameName),w=f?.cutWidth||96,h=f?.cutHeight||96;
             return this.textures.getPixelAlpha(Math.min(w-1,Math.floor(u*w)),Math.min(h-1,Math.floor(v*h)),t.texKey,t.frameName);
           });
+          if(window.CombatTacticalUi?.click(actor,this._lastDungeonDraw,point.x,point.y,this.PIXEL_SCALE))return;
           if(actor)window.CombatCharacterUi.open(actor);
         });
     
@@ -3134,7 +3171,7 @@ class CombatScene extends Phaser.Scene {
     this.input.keyboard.on('keydown', (event) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'q', 'e', 'W', 'A', 'S', 'D', 'Q', 'E', 'Shift'].includes(event.key)) return;
       if (isTypingTarget(event)) return;
-      if (window.gamePaused) return;
+      if (window.gamePaused || window._gameOver) return;
       if (event.preventDefault) event.preventDefault();
       if (event.stopPropagation) event.stopPropagation();
       setMoveKey(event, true);
@@ -3226,7 +3263,7 @@ class CombatScene extends Phaser.Scene {
         // shrunk down for walls, pillars, customs etc. on the grid.
         // Player-centered, rotates with facing, smooth frac movement, thick grid on top.
         const pos = getPlayerPosForMap();
-        const combatAngle = getCombatMapRotationAngle();  // egocentric map: player forward is screen-up.
+        const combatAngle = window.CombatTacticalUi?.angle(getCombatMapRotationAngle()) ?? getCombatMapRotationAngle();
         const cs = this.RT_CELL;
         const half = Math.floor(this.gridSize / 2);
         const centerX = (half + 0.5) * cs;
@@ -3285,11 +3322,15 @@ class CombatScene extends Phaser.Scene {
                 baseGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
 
                 // holodek-1 overlay style: only true blockers — NOT includes('stone'|'brick') (those are often elevated floors)
-                const isWallCell = isBlockedDungeonCell(cell) || tile === 'wall' || tile === 'door' || tile === 'torch' || tileLower === 'wall' || tileLower.endsWith('_wall');
+                const isWallCell = isBlockedDungeonCell(cell) || tile === 'wall' || tile === 'door' && !cell.door?.isOpen || tile === 'torch' || tileLower === 'wall' || tileLower.endsWith('_wall');
 
                 if (isWallCell) {
                     // Full cell size + drawn after grid = solid walls, no gaps or lines showing through
                     wallGfx.fillRect(localX - cs/2, localY - cs/2, cs, cs);
+                }
+                if (cell.secretDoorId && currentDungeon.secretDoors?.doors.some(d => d.id === cell.secretDoorId && d.discovered && !d.open)) {
+                    torchGfx.lineStyle(Math.max(1, cs * .05), 0xddbb73, 1);
+                    torchGfx.strokeRect(localX - cs * .4, localY - cs * .4, cs * .8, cs * .8);
                 }
 
                 // 3D renders steep floor-height transitions as vertical faces. Mark those
@@ -3424,6 +3465,7 @@ class CombatScene extends Phaser.Scene {
         gridGfx.setRotation(+combatAngle);
         this.renderRT.draw(gridGfx);
         gridGfx.destroy();
+        window.CombatTacticalUi?.draw(this, this._lastDungeonDraw);
         drawDungeonExitMapMarkers(this, this._lastDungeonDraw);
 
         // NPCs + room monsters: draw into the rotating RT at maze-relative cells (same path as items).
@@ -4303,7 +4345,7 @@ saveRoomConversationHistory(currentCoordinates, roomHistory, roomEquipment, obje
   // Log all prompts, assistant prompt, system prompt, response, and personal narrative in the console
   getPromptsAndResponsesForConversation(conversationId)
     .then((promptsAndResponses) => {
-      console.log("All prompts, assistant prompt, system prompt, response, and personal narrative for conversation " + conversationId + ":", promptsAndResponses);
+      if (window.DEBUG_LOGS) console.log("All prompts, assistant prompt, system prompt, response, and personal narrative for conversation " + conversationId + ":", promptsAndResponses);
     })
     .catch((error) => {
       console.error(error);
@@ -5635,7 +5677,7 @@ let monstersInRoomString = monstersInRoom.length > 0
     : "None";
 
 let monstersEquippedPropertiesString = monstersEquippedProperties.length > 0
-    ? monstersEquippedProperties.map(equip => `{name: "${equip.name}", type: "${equip.type}", attack_modifier: ${equip.attack_modifier}, damage_modifier: ${equip.damage_modifier}, ac: ${equip.ac}, magic: $equip.magic}}`).join(', ')
+    ? monstersEquippedProperties.map(equip => JSON.stringify(equip)).join(', ')
     : "None";
 
     console.log("Monsters in Room:", monstersInRoomString);
@@ -5711,6 +5753,11 @@ npcs.forEach(npc => {
         if (currentQuestMatch) currentQuest = currentQuestMatch[1];
         window.questProgressText = serverGameConsole.match(/^Quest Progress:[ \t]*([^\r\n]*)/m)?.[1] || '';
         window.questRequirementsText = serverGameConsole.match(/^Quest Requirements:[ \t]*([^\r\n]*)/m)?.[1] || '';
+        window.silverPieces = Math.max(0, Number(serverGameConsole.match(/^Silver Pieces:[ \t]*(\d+)/m)?.[1]) || 0);
+        window.campaignRegion = serverGameConsole.match(/^Region:[ \t]*([^\r\n]*)/m)?.[1] || 'Tartarus';
+        window.campaignPatronage = serverGameConsole.match(/^Patronage:[ \t]*([^\r\n]*)/m)?.[1] || 'None recorded';
+        window.campaignCommunity = serverGameConsole.match(/^Community:[ \t]*([^\r\n]*)/m)?.[1] || 'None nearby';
+        window.localMissionsText = serverGameConsole.match(/^Local Missions:[ \t]*([^\r\n]*)/m)?.[1] || 'None';
 
         let nextArtifactMatch = serverGameConsole.match(/Next Artifact: (.+)/);
         if (nextArtifactMatch) nextArtifact = nextArtifactMatch[1];
@@ -5800,9 +5847,9 @@ npcs.forEach(npc => {
     // Serialize with full fidelity
     roomNameDatabaseString = JSON.stringify(mapToPlainObject(roomNameDatabase), null, 2);  // Pretty-print for debug
   
-  console.log("roomNameDatabase:", roomNameDatabase);
-  console.log("roomNameDatabasePlainObject:", roomNameDatabasePlainObject)
-  console.log("roomNameDatabaseString:", roomNameDatabaseString);
+  if (window.DEBUG_LOGS) console.log("roomNameDatabase:", roomNameDatabase);
+  if (window.DEBUG_LOGS) console.log("roomNameDatabasePlainObject:", roomNameDatabasePlainObject)
+  if (window.DEBUG_LOGS) console.log("roomNameDatabaseString:", roomNameDatabaseString);
 
         generateMonstersForRoom(roomKey, serverGameConsole);
         monstersInRoom = monstersInVisitedRooms.get(roomKey) || [];
@@ -6197,6 +6244,7 @@ if (roomEquipment.length < 1) {
 let character = null;
 
 
+if (serverGameConsole && !/^\s*(?:equip|unequip)\b/i.test(userInput || '')) window.SpellUi?.hydrate(serverGameConsole);
 // Construct a string to represent all characters in the characters array
 let charactersString = characters.map((char, index) => {
     // Ensure char.Equipped is defined and is an object
@@ -6710,8 +6758,14 @@ Boss Room Coordinates: ${bossCoordinates}
 Current Quest: ${currentQuest}
 Quest Progress: ${window.questProgressText || 'None'}
 Quest Requirements: ${window.questRequirementsText || 'None'}
+Silver Pieces: ${window.silverPieces || 0}
+Region: ${window.campaignRegion || 'Tartarus'}
+Patronage: ${window.campaignPatronage || 'None recorded'}
+Community: ${window.campaignCommunity || 'None nearby'}
+Local Missions: ${window.localMissionsText || 'None'}
 Inventory: ${inventoryString}
 Inventory Properties: ${inventoryPropertiesString}
+Party Equipped Properties: ${[...characters, ...npcs].flatMap(a => Object.entries(a.Equipped || {}).filter(([, item]) => item && typeof item === 'object' && item.name).map(([slot, item]) => JSON.stringify({ ...item, owner: a.Name, slot }))).join(', ') || 'None'}
 Turns: ${turns}
 PC: ${charactersString}
 NPCs in Party: ${npcsString}
@@ -8098,7 +8152,8 @@ function registerPartyCharacter(character, role = 'npc') {
     Race: character.Race || character.race || '',
     Class: character.Class || character.class || '',
     Level: character.Level || character.level || 1,
-    role: role
+    role: role,
+    ...(character.voiceSpec ? { voiceSpec: character.voiceSpec } : {})
   };
   const sprite = cloneSpritePayload(character.sprite);
   if (sprite && sprite.dataUrl) {
@@ -8106,10 +8161,21 @@ function registerPartyCharacter(character, role = 'npc') {
   }
 }
 
+// round3: voice spec assigned once at creation and saved with the character (stable voice across rooms / sessions)
+function ensureCharacterVoiceSpec(character) {
+  if (!character || character.voiceSpec || !window.HolodekSfx || typeof window.HolodekSfx.voiceSpecOf !== 'function') return;
+  try {
+    const name = character.Name || character.name;
+    character.voiceSpec = window.HolodekSfx.voiceSpecOf({ name, race: character.Race || character.race, class: character.Class || character.class, sex: character.Sex || character.sex,
+      personality: character.Personality || character.personality, sprite: character.sprite });
+  } catch (e) { console.warn('[Voice] voice spec failed', e); }
+}
+
 function ensureCharacterSpriteData(character, options = {}) {
   if (!character) return null;
   if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character);
   const regenerate = !!options.regenerate;
+  ensureCharacterVoiceSpec(character);
   if (!character._rerollSeed || regenerate) {
     character._rerollSeed = Math.random();
   }
@@ -8228,6 +8294,16 @@ window.getReadableItemMetadata = name => {
   return null;
 };
 window.getInventoryGiveItems = () => window.InventoryUi?.inventoryItems(inventory, inventoryProperties) || [];
+window.getQuestSceneParticipants = () => {
+  const names=[];
+  for(const room of roomNameDatabase.values())for(const [id,record] of Object.entries(room.questScenes||{})) {
+    if(record.completed)continue;
+    const story=room.questStories?.[id],stage=story?.stages?.find(s=>s.id===record.stage);
+    if(stage?.actor)names.push(stage.actor);
+    for(const successor of room.deliverySuccessors||[])if(successor.recipient===stage?.actor)names.push(successor.name);
+  }
+  return names;
+};
 window.persistDungeonObjectDiscoveries = dungeon => {
   if(dungeon===currentDungeon)scheduleLodCachePersist();
 };
@@ -8449,6 +8525,7 @@ function applyCombatMazeStep(data) {
   entry.moveTweenMs = data.duration || 200;
   advanceWalkFrame(entry, Date.now(), NPC_WALK_FRAME_MS);
   if (entry.type === 'pc') {
+    entry.mazePoint = { x: data.x + 0.5, y: data.y + 0.5 };
     playerDungeonX = data.x;
     playerDungeonY = data.y;
     playerPosX = data.x + 0.5;
@@ -8504,7 +8581,7 @@ function proceduralNameKey(name) {
 
 function proceduralSheetSignature(sheet) {
   if (!sheet) return '';
-  return [sheet.race, sheet.class, sheet.sex, sheet.isMonster ? 1 : 0]
+  return [sheet.race, sheet.class, sheet.sex]
     .map(v => String(v || '').toLowerCase().trim()).join('|');
 }
 
@@ -8529,7 +8606,7 @@ function updateCharacterSheetsFromConsole(text) {
 }
 
 // Debounced batch POST /character-traits. Re-requests a name when its sheet changed (e.g. a name-only
-// monster later gets its full console sheet) and re-polls pending names every 45s (the server retries the
+// monster later gets its full console sheet before approval) and re-polls pending names every 45s (the server retries the
 // LLM itself; this just catches pushes we missed).
 function requestCharacterTraitSpecs(sheets) {
   window._traitRequestQueue = window._traitRequestQueue || new Map();
@@ -8541,7 +8618,7 @@ function requestCharacterTraitSpecs(sheets) {
     const sig = proceduralSheetSignature(sheet);
     const known = window._characterTraitSpecs[key];
     const last = window._traitRequested[key];
-    if (known && known.source === 'llm' && last && last.sig === sig) return;
+    if (known && known.source === 'llm' && known.traits) return;
     if (last && last.sig === sig && now - last.at < 45000) return;
     window._traitRequestQueue.set(key, sheet);
   });
@@ -8577,7 +8654,8 @@ function applyCharacterTraitSpecs(map) {
     if (prev && prev.source === 'llm' && entry.source !== 'llm') return; // never downgrade
     if (prev && prev.source === entry.source && prev.salt === entry.salt && prev.variant === entry.variant
       && JSON.stringify(prev.traits || null) === JSON.stringify(entry.traits || null)
-      && JSON.stringify(prev.stature || null) === JSON.stringify(entry.stature || null)) return;
+      && JSON.stringify(prev.stature || null) === JSON.stringify(entry.stature || null)
+      && JSON.stringify(prev.appearance || null) === JSON.stringify(entry.appearance || null)) return;
     window._characterTraitSpecs[key] = entry;
     changed = true;
   });
@@ -8590,8 +8668,13 @@ function buildProceduralSheetForEntry(entry) {
   const key = proceduralNameKey(entry.name);
   const sheet = window._characterSheetIndex[key];
   const isMonster = entry.type === 'monster';
+  const previous = entry.sprite?.spec?.kind === 'procedural' ? entry.sprite.spec : window._proceduralSpriteCache[key]?.sprite?.spec;
+  const appearance = window._characterTraitSpecs[key]?.appearance || (previous?.kind === 'procedural' ? previous : null);
+  const preserveAppearance = current => appearance ? { ...current,
+    race: appearance.race ?? current.race, class: appearance.class ?? current.class, sex: appearance.sex ?? current.sex,
+    isMonster: appearance.isMonster ?? current.isMonster, role: appearance.role || current.role } : current;
   if (sheet) {
-    return { ...sheet, isMonster: isMonster || !!sheet.isMonster, role: entry.type || sheet.role };
+    return preserveAppearance({ ...sheet, isMonster: isMonster || !!sheet.isMonster, role: entry.type || sheet.role });
   }
   let reg = null;
   try { reg = getPartyCharacterRegistry()[entry.name] || null; } catch (e) { reg = null; }
@@ -8599,7 +8682,7 @@ function buildProceduralSheetForEntry(entry) {
   if (!reg && pending && proceduralNameKey(pending.Name || pending.name) === key) reg = pending;
   const pick = (a, b) => (reg && (reg[a] || reg[b])) || entry[a] || entry[b] || '';
   // name-only monsters: the LLM still gets the name (+ "monster") and invents a fitting creature
-  return {
+  return preserveAppearance({
     name: entry.name,
     sex: pick('Sex', 'sex'),
     race: pick('Race', 'race'),
@@ -8607,7 +8690,7 @@ function buildProceduralSheetForEntry(entry) {
     level: pick('Level', 'level') || 1,
     isMonster,
     role: entry.type || (isMonster ? 'monster' : 'npc')
-  };
+  });
 }
 
 function createSpritePlaceholder(entry) {
@@ -8629,7 +8712,8 @@ function getProceduralSpriteFor(entry) {
   requestCharacterTraitSpecs([sheet]);
   const server = window._characterTraitSpecs[key] || null;
   const ready = !!(server && server.source === 'llm' && server.traits);
-  const sig = (ready ? [server.salt, server.variant, sheet.level, hashCharacterName(JSON.stringify([server.traits,server.stature])).toString(36)].join(':') : 'placeholder');
+  const sig = (ready ? [server.salt, server.variant, sheet.level,
+    hashCharacterName(JSON.stringify([server.traits,server.stature,proceduralSheetSignature(sheet),sheet.isMonster,sheet.role])).toString(36)].join(':') : 'placeholder');
   const cached = window._proceduralSpriteCache[key];
   if (cached && cached.sig === sig) return cached.sprite;
   let sprite;
@@ -9330,6 +9414,7 @@ function updatePartyMazeLocomotion(force = false) {
   let anyMoved = false;
 
   orderedEntries.forEach(entry => {
+    if (window.DungeonInhabitants?.isDown(entry)) { resetWalkFrame(entry); return; }
     if (window.DungeonLife?.isWaitingToSpeak?.(entry.name)) { resetWalkFrame(entry); return; }
     const behavior = getPartyNpcBehavior(entry, now);
     const cadence = partyFollowCadence(entry, behavior.cadenceMs);
@@ -9401,6 +9486,44 @@ if (typeof window !== 'undefined') {
 window.getDungeonLifeContext = () => ({ dungeon: currentDungeon, roomName: roomNameDatabase.get(currentDungeon?.geoKey)?.name,
   actors: window.combatCharacters || [],
   player: { x: playerPosX, y: playerPosY }, busy: isCombatRoundActive() || !!window._characterStartupPending || !!window.GameCommandGate?.busy() });
+window.applySpellEquipment = text => {
+  const api = window.DungeonInhabitants; if (!api || typeof text !== 'string') return;
+  const carried = text.match(/^Inventory:[ \t]*([^\r\n]*)/m);
+  if (carried) {
+    inventory = carried[1].split(/,\s*/).map(name => name.trim()).filter(name => name && !/^(none|empty)$/i.test(name));
+    inventoryProperties = window.InventoryUi.parseProperties(text.match(/^Inventory Properties:[ \t]*([^\r\n]*)/m)?.[1] || '')
+      .map(item => JSON.stringify(item));
+    window.inventory = inventory.slice();
+  }
+  const sheets = ['PC', 'NPCs in Party', 'Monsters in Room'].flatMap(label => api.parseSheets(text, label));
+  const props = window.InventoryUi.parseProperties(text.match(/^Party Equipped Properties:[ \t]*([^\r\n]*)/m)?.[1] || '');
+  for (const actor of [...characters, ...npcs, ...(monstersInVisitedRooms.get(currentDungeon?.geoKey) || [])]) {
+    const sheet = sheets.find(s => s.name === actor.Name); if (!sheet) continue;
+    Object.assign(actor, { HP: sheet.hp, MaxHP: sheet.maxHp, Magic: sheet.magic, Attack: sheet.attack, Damage: sheet.damage, Armor: sheet.armor,
+      AC: sheet.type === 'monster' ? sheet.ac : sheet.ac - sheet.armor });
+    if (sheet.type !== 'monster') actor.Equipped = Object.fromEntries(Object.entries(api.parseEquipment(sheet.lines[9])).map(([slot, name]) => [slot,
+      name === 'None' ? null : { ...(props.find(p => p.owner === sheet.name && p.slot === slot && p.name === name) || {}), name }]));
+  }
+};
+window.getEconomyResidentInfo = name => {
+  const room = roomNameDatabase.get(currentDungeon?.geoKey);
+  if (room?.inhabitants?.actors?.[name]?.deityId) return { kind: 'divine' };
+  const service = Object.values(room?.services || {}).find(s => s.operator === name);
+  if (service) return { kind: service.kind };
+  return Object.values(room?.minorMissions || {}).some(m => (m.recipient === name || m.patron === name) && m.status !== 'completed') ? { kind: 'mission' } : null;
+};
+window.prepareEconomyState = async () => {
+  const conversationId = localStorage.getItem('conversationId');
+  const rows = conversationId ? await getPromptsAndResponsesForConversation(conversationId) : [];
+  const saved = rows.slice().reverse().find(row => typeof row.gameConsole === 'string' && row.gameConsole.includes('Coordinates:'))?.gameConsole;
+  const text = saved || window.lastServerGameConsole;
+  if (!text) throw Error('The current console is not ready.');
+  if (window.DungeonInhabitants.roomKey(text.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]) !== currentDungeon?.geoKey) throw Error('Wait for the current room console to finish updating.');
+  try {
+    await syncGameStateBeforeCommand({ updatedGameConsole: text, roomNameDatabaseString: JSON.stringify(Object.fromEntries(roomNameDatabase)),
+      combatCharactersString: JSON.stringify(window.combatCharacters || []) });
+  } finally { window.GameCommandGate?.end(); }
+};
 window.persistDungeonPopulation = population => {
   const record = roomNameDatabase.get(population.geoKey);
   if (record) record.inhabitants = population;
@@ -9517,6 +9640,7 @@ window.applyLiveCombatHealth = event => {
   window._partyInfoPCString = window.latestUpdatedData.pc;
   window._partyInfoNPCString = window.latestUpdatedData.npcs;
   window._combatMonsterSheets = window.latestUpdatedData.monsters;
+  window.SpellUi?.hydrate(text);
   if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
   window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
   window.combatGame?.scene?.getScene('CombatScene')?.updatePositions(window.combatCharacters || []);
@@ -9535,7 +9659,14 @@ window.applyRealtimeCombatResult = async event => {
   }
   realtimeCombatResultsSeen.add(event.eventId);
   if (realtimeCombatResultsSeen.size > 32) realtimeCombatResultsSeen.delete(realtimeCombatResultsSeen.values().next().value);
-  window._combatCommandPending = false; window._combatRoundActiveUntil = 0;
+  if (!event.passive) { window._combatCommandPending = false; window._combatRoundActiveUntil = 0; }
+  if(['quest_scene_result', 'economy_result', 'spell_result'].includes(event.type)&&event.roomNameDatabaseString) {
+    const database=JSON.parse(event.roomNameDatabaseString);
+    roomNameDatabaseString=event.roomNameDatabaseString;roomNameDatabasePlainObject=database;roomNameDatabase.clear();
+    for(const [key,room] of Object.entries(database))roomNameDatabase.set(key,room);
+  }
+  if (event.type === 'economy_result' || event.type === 'spell_result') roomDatabaseSyncClient.reset();
+  if (event.type === 'economy_result' && Array.isArray(event.sceneObjects)) currentDungeon.sceneObjects = event.sceneObjects;
   window.lastServerGameConsole = text;
   updateCharacterSheetsFromConsole(text);
   if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
@@ -9547,12 +9678,19 @@ window.applyRealtimeCombatResult = async event => {
   generateMonstersForRoom(event.geoKey, text);
   updateGameConsole('', currentCoordinates, text, null, text);
   window.latestUpdatedData = window.DungeonInhabitants.consoleView(text, window.latestUpdatedData);
+  window.SpellUi?.hydrate(text);
   window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
   const entry = document.createElement('p'); entry.style.whiteSpace = 'pre-wrap'; entry.textContent = event.content;
   document.getElementById('chatlog')?.appendChild(entry);
   const conversationId = localStorage.getItem('conversationId');
   if (conversationId) await addPromptAndResponse('[Encounter]', '', '', event.content, '', conversationId, text);
   window.renderPartyIconDock?.(); renderDungeonView();
+};
+window.appendDungeonEncounterLog = event => {
+  const entry = document.createElement('p'); entry.style.whiteSpace = 'pre-wrap'; entry.textContent = event.content;
+  document.getElementById('chatlog')?.appendChild(entry);
+  const conversationId = localStorage.getItem('conversationId');
+  if (conversationId) return addPromptAndResponse('[Encounter]', '', '', event.content, '', conversationId, event.consoleText);
 };
 window.appendDungeonDialogueLog = (speaker, line) => {
   const entry = document.createElement('p'); entry.textContent = `${speaker}: "${line}"`;
@@ -9777,6 +9915,7 @@ function equipItem(itemName, targetCharacterName = null) {
     // Remove the item from inventory and inventoryProperties
     inventory.splice(itemIndex, 1);
     inventoryProperties.splice(itemPropertyIndex, 1);
+    window.SpellUi?.equipmentChanged?.();
 
     return `${itemName} has been equipped to ${slot} of ${character.Name}.`;
 }
@@ -9834,10 +9973,11 @@ function unequipItem(itemName, targetCharacterName = null) {
 
     // Add the item back to inventory and inventoryProperties
     inventory.push(item.name);
-    inventoryProperties.push(`{name: "${item.name}", type: "${item.type}", attack_modifier: ${item.attack_modifier}, damage_modifier: ${item.damage_modifier}, ac: ${item.ac}, magic: ${item.magic}}`);
+    inventoryProperties.push(JSON.stringify(item));
 
     // Remove the item from the character's equipped slot
     character.Equipped[slot] = null;
+    window.SpellUi?.equipmentChanged?.();
 
     return `${item.name} has been unequipped from ${slot} of ${character.Name}.`;
 }
@@ -10003,13 +10143,13 @@ function createRandomNPC() {
 
 // Define keywords to include
 const includeKeywords = [ 
-  "Coordinates:", "Exits:", "Objects in Room:", "Inventory:", "Turns:", // Add any other keywords you want to include
+  "Coordinates:", "Exits:", "Turns:",
 ];
 
 // Function to filter lines to include only those with the specified keywords
 function includeOnlySpecifiedLines(text) {
   const lines = text.split('\n');
-  const includedLines = lines.filter(line => includeKeywords.some(keyword => line.includes(keyword)));
+  const includedLines = lines.filter(line => includeKeywords.some(keyword => line.trimStart().startsWith(keyword)));
   return includedLines.join('\n');
 }
 // Define keywords to exclude
@@ -10088,6 +10228,16 @@ let gameMode = [];
 // const retort = require('retort-js').retort;
 // const run = require('retort-js').run;  // Server-side only, commented for browser
 
+function displayLocalCommandResult(chatLog, chatHistory, input, message) {
+  clearInterval(window.keepAliveInterval);
+  window.keepAliveInterval = null;
+  const escape = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  chatLog.innerHTML = chatHistory + '<br><br><b> &gt; </b>' + escape(input) + '<br><br>' + escape(message).replace(/\n/g, '<br>');
+  if (typeof syncGameLogTranscript === 'function') syncGameLogTranscript();
+  if (typeof syncBackgroundChatLog === 'function') syncBackgroundChatLog();
+  scrollToBottom();
+}
+
 // Function to handle the "Still Loading..." interval
 function startKeepAliveInterval(chatLog) {
   // Clear any existing interval
@@ -10151,6 +10301,8 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
   }
   console.info('[StateSyncAccepted]', { geoKey });
   roomDatabaseSyncClient.acknowledge(payload.roomNameDatabaseString, acknowledgement.roomDatabaseSyncToken);
+  if (acknowledgement.economyResult) await window.applyRealtimeCombatResult?.(acknowledgement.economyResult);
+  if (acknowledgement.spellResult) await window.applyRealtimeCombatResult?.(acknowledgement.spellResult);
   return acknowledgement;
   } catch (error) {
     window.GameCommandGate?.end();
@@ -10159,6 +10311,7 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
 }
 
 async function chatbotprocessinput(textin) {
+  if (window._gameOver) { updateChatLog('<br>This adventure has ended. Start a new game.<br>'); return; }
   if (window.gamePaused) { updateChatLog('<br>The game is paused. Press P outside the command prompt to resume.<br>'); return; }
   const completedStartResult = textin?.completedStartResult;
   if (window._characterStartupPending && !completedStartResult) {
@@ -10173,6 +10326,17 @@ async function chatbotprocessinput(textin) {
   
     let userInput = completedStartResult ? '' : document.getElementById("chatuserinput").value;
   if (!completedStartResult) document.getElementById("chatuserinput").value = "";
+  const divineRefusal = window.PantheonCharacters?.recruitmentRefusal(userInput, window.combatCharacters || []);
+  if (!completedStartResult && divineRefusal) { updateChatLog('<br>' + divineRefusal + '<br>'); return; }
+  if (!completedStartResult && /^\s*(?:take|pick\s+up|collect)\b/i.test(userInput)) {
+    const pickup = window.ObjectDiscovery?.takeRequest(currentDungeon, userInput);
+    if (!pickup || pickup.error || !window.CommerceUi) {
+      updateChatLog('<br>' + (pickup?.error || 'The current object view is not ready. Please try again.') + '<br>');
+      return;
+    }
+  }
+  if (!completedStartResult && userInput && await window.CommerceUi?.handleCommand(userInput)) return;
+  if (!completedStartResult && userInput && await window.SpellUi?.handleCommand(userInput)) return;
   
   if (!userInput) {
     if (window._skipStartMenu) {
@@ -10390,10 +10554,7 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
         const msg = invSet.has(norm(exit.key))
           ? `Please specify the key with your command, e.g., "unlock door with ${exit.key}".`
           : `The ${direction} exit is ${exit.status}. The ${exit.key} is required to unlock it.`;
-        updateChatLog(`<br><b>${msg}</b><br>`);
-        chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +
-          "<br><br><b></b>" + msg.replace(/\n/g, "<br>");
-        scrollToBottom();
+        displayLocalCommandResult(chatLog, chatHistory, userInput, msg);
         return; // HARD STOP
       }
 
@@ -10414,7 +10575,7 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
           refreshConsoleExitStatus();
           
           // Debug log to verify contents
-          console.log("Updated roomNameDatabaseString:", roomNameDatabaseString);
+          if (window.DEBUG_LOGS) console.log("Updated roomNameDatabaseString:", roomNameDatabaseString);
 
           // Push to server (don't call sharedState here; it's server-side)
    /*       try {
@@ -10429,17 +10590,11 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
 
           const statusMessage = (prevStatus === "sealed" ? "unsealed" : "unlocked");
           const msg = `The ${direction} exit has been ${statusMessage} using the ${keyName}.`;
-          updateChatLog(`<br><b>${msg}</b><br>`);
-          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +
-            "<br><br><b></b>" + msg.replace(/\n/g, "<br>");
-          scrollToBottom();
+          displayLocalCommandResult(chatLog, chatHistory, userInput, msg);
           return; // HARD STOP
         } else {
           const msg = `The ${keyName} cannot unlock the ${direction} exit. The correct key is ${exit.key}.`;
-          updateChatLog(`<br><b>${msg}</b><br>`);
-          chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +
-            "<br><br><b></b>" + msg.replace(/\n/g, "<br>");
-          scrollToBottom();
+          displayLocalCommandResult(chatLog, chatHistory, userInput, msg);
           return; // HARD STOP
         }
       }
@@ -10449,19 +10604,13 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
 
   if (!foundLockedExit) {
     const msg = "There is no locked exit here that needs a key.";
-    updateChatLog(`<br><b>${msg}</b><br>`);
-    chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +
-      "<br><br><b></b>" + msg.replace(/\n/g, "<br>");
-    scrollToBottom();
+    displayLocalCommandResult(chatLog, chatHistory, userInput, msg);
     return; // HARD STOP
   } else {
     const msg = keyName
       ? `No locked exit can be unlocked with the ${keyName} in this room.`
-      : `Please specify a key, e.g., "unlock door with &lt;keyname&gt;".`;
-    updateChatLog(`<br><b>${msg}</b><br>`);
-    chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +
-      "<br><br><b></b>" + msg.replace(/\n/g, "<br>");
-    scrollToBottom();
+      : `Please specify a key, e.g., "unlock door with <keyname>".`;
+    displayLocalCommandResult(chatLog, chatHistory, userInput, msg);
     return; // HARD STOP
   }
 }
@@ -12851,9 +13000,9 @@ const taskRequest = {
     // Start polling /poll-task/:taskId every 5 seconds
     let pollInterval = null;
     const handlePollResponse = function(pollResponse) {
-          console.log('Poll response:', pollResponse); // Debug the raw response
+          if (window.DEBUG_LOGS) console.log('Poll response:', pollResponse); // Debug the raw response
           if (pollResponse.status === 'processing') {
-            console.log('Task still processing...');
+            if (window.DEBUG_LOGS) console.log('Task still processing...');
           } else {
             clearInterval(pollInterval); // Stop polling on complete/error
         
@@ -12943,7 +13092,7 @@ const taskRequest = {
                 }
 
               console.log("serverGameConsole:", serverGameConsole);
-              console.log("combatCharactersString from server:", newCombatCharactersString);
+              if (window.DEBUG_LOGS) console.log("combatCharactersString from server:", newCombatCharactersString);
               console.log("musicArrangement:", musicArrangement);
               console.log("isNewRoom:", isNewRoom);
         
@@ -13119,13 +13268,13 @@ const taskRequest = {
     
             window.DungeonLife?.receiveTurnDialogue(content, { dialogue: result.dialogue, consoleText: serverGameConsole,
               geoKey: coordsKey, runId: window.dungeonRunId });
-            console.log("Server response content:", content);
-            console.log("Formatted content:", formattedContent);
+            if (window.DEBUG_LOGS) console.log("Server response content:", content);
+            if (window.DEBUG_LOGS) console.log("Formatted content:", formattedContent);
     
             addPromptAndResponse(userInput, messages[0].content, messages[1].content, content, personalNarrative, conversationId, updatedGameConsole);
     
             updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString, serverGameConsole);
-            console.log(updatedGameConsole);
+            if (window.DEBUG_LOGS) console.log(updatedGameConsole);
             conversationHistory = conversationHistory + "\n" + updatedGameConsole;
             turns++;
     

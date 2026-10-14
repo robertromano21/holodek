@@ -61,6 +61,7 @@ class ActionDice {
 
   end() {
     if (!this.active) return;
+    delete this.moveCombatant;
     if (this.pending) this.finish(null);
     const broadcast = this.active.broadcast;
     this.active = null;

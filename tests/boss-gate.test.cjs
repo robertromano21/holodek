@@ -558,11 +558,12 @@ test('the real client status check and typed unlock flow require the specific se
     mapToPlainObject: map => Object.fromEntries(map), gameConsoleData: consoleText(), inventory: ['old brass key'],
     userInput: 'unlock door with old brass key', chatLog: { innerHTML: '' }, chatHistory: '',
     updateChatLog() {}, scrollToBottom() {}, console: { log() {} }, updatedGameConsole: consoleText(),
-    window: { DungeonInhabitants: require('../assets/dungeonInhabitants') },
+    window: { DungeonInhabitants: require('../assets/dungeonInhabitants') }, clearInterval() {},
     document: { getElementById: () => null }, syncDungeonExitNavigation() {}
   };
   const exitLabels = source.slice(source.indexOf('function consoleAdjacentRooms('), source.indexOf('function consoleExitDestinationName('));
-  vm.runInNewContext(`${traversal}\n${exitLabels}\nfunction typedUnlock() {\n${unlock}\n}`, context);
+  const localResult = source.slice(source.indexOf('function displayLocalCommandResult('), source.indexOf('// Function to handle the "Still Loading..." interval'));
+  vm.runInNewContext(`${localResult}\n${traversal}\n${exitLabels}\nfunction typedUnlock() {\n${unlock}\n}`, context);
   assert.equal(context.isExitTraversable(context.currentCoordinates, 'east').traversable, false);
   context.typedUnlock();
   assert.equal(db['0,0,0'].exits.east.status, 'locked');

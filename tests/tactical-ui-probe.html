@@ -1,0 +1,69 @@
+<!doctype html><html><head><meta charset="utf-8"><style>__GAME_CSS__</style>
+<script src="/assets/combatTacticalUi.js"></script><script src="/assets/combatTurnUi.js"></script>
+<script src="/assets/partyRoster.js"></script><script src="/assets/partySpellbookUi.js"></script><script src="/assets/commandGate.js"></script></head><body>
+<div id="combat-popup" style="display:none"><div id="combat-header">Combat Mode</div><div id="combat-container"><canvas width="775" height="775"></canvas></div></div>
+<div id="chatbotcontainer"><nav id="command-library-menu"><button data-read-only-reference onclick="PartySpellbookUi.open()">Spellbook</button></nav><textarea id="chatuserinput">unfinished draft</textarea><button id="ordinary-command-button">Command</button></div>
+<pre id="results"></pre><script>
+window.dungeonRunId='ui-run'; const realFetch=window.fetch.bind(window), posts=[], checks={}, errors=[];
+window.getDungeonLifeContext=()=>({dungeon:{geoKey:'1,0,0'},player:{x:4.5,y:4.5},actors:[]});
+window.drawPartySpriteCanvas=(canvas)=>{const ctx=canvas.getContext('2d');ctx.fillStyle='#e5bd72';ctx.fillRect(8,4,12,28);};
+let prepared=['missile'], magic=3;
+const spells=()=>({runId:'ui-run',revision:1,casters:[{name:'Wizard of the Cistern',type:'pc',classCaster:true,className:'Wizard',level:3,castingLevel:3,hp:20,magic,capacity:6,slots:2,
+  prepared:prepared.slice(),bookRequired:true,bookPresent:true,initialized:true,groups:[{level:1,spells:[{id:'missile',name:'Magic Missile',casts:prepared.includes('missile')?magic:0,status:prepared.includes('missile')?'Prepared':'Not prepared',cost:1,range:8,source:'Spellbook',description:'A force dart.'},
+  {id:'rune_shell',name:'Runic Shell',casts:prepared.includes('rune_shell')?magic:0,status:prepared.includes('rune_shell')?'Prepared':'Not prepared',cost:1,range:3,source:'Spellbook',description:'A force shield.'}]},
+  {level:3,spells:[{id:'fireball',name:'Fireball',casts:0,status:'Scroll required',cost:3,range:8,source:'Spellbook',description:'A burst.'}]}]},
+  {name:'Mortacia',type:'npc',classCaster:true,className:'Necromancer',level:50,castingLevel:1,hp:100,magic:5,capacity:5,slots:2,prepared:[],groups:[{level:1,spells:[{id:'mend',name:'Grave Mending',casts:0,status:'Scroll required',cost:1,range:3,source:'Spellbook',description:'Ancestral healing.'}]}]}]});
+window.fetch=async(url,options)=>{const body=JSON.parse(options.body);posts.push({url,body});
+  if(url==='/spellbook/view')return{ok:true,json:async()=>{const data=spells();data.casters.forEach(c=>c.groups.forEach(g=>g.spells.forEach(s=>{s.classSource=true;s.memorizeCost=0;})));return data;}};
+  if(url==='/spells/prepare'){prepared=body.spellIds;return{ok:true,json:async()=>({type:'spell_result'})};}
+  if(url==='/combat/move')return{ok:true,json:async()=>({turn:window.actionDiceState.active.turn})};
+  return{ok:true,json:async()=>({})};};
+window.applyRealtimeCombatResult=async()=>{};
+document.addEventListener('DOMContentLoaded',async()=>{
+  try {
+    const box=document.getElementById('combat-popup');
+    for(const zoom of [1,1.3125,1.75,2]){
+      document.body.style.zoom=zoom;
+      const saved=box.style.cssText;
+      const prompt={turnId:'turn-'+zoom,actionId:'battle',combatant:'Wizard of the Cistern',round:1,targets:['Guard'],attackTargets:['Guard'],allowRetreat:true,tactical:true,
+        runId:'ui-run',geoKey:'1,0,0',spells:[],initiative:[],movement:{remaining:6,total:6,revision:0,busy:false,position:{x:4.5,y:4.5},tiles:[{x:4,y:3,cost:1}]}};
+      window.actionDiceState={active:{kind:'combat',id:'battle',turn:prompt},paused:false};
+      CombatTacticalUi.receive(window.actionDiceState);CombatTurnUi.receive(prompt);
+      checks['hasAnimation-'+zoom]=box.getAnimations().length>0;
+      await new Promise(r=>setTimeout(r,360));
+      const r=box.getBoundingClientRect(), map=document.getElementById('combat-container').getBoundingClientRect(),controls=document.getElementById('combat-turn-popup').getBoundingClientRect();
+      checks['expandedFits-'+zoom]=r.left>=0&&r.top>=0&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1;
+      checks['centered-'+zoom]=Math.abs((r.left+r.right)/2-innerWidth/2)<2&&Math.abs((r.top+r.bottom)/2-innerHeight/2)<2;
+      checks['controlsSeparate-'+zoom]=map.right<=controls.left+1||map.bottom<=controls.top+1;
+      await PartySpellbookUi.open();
+      let book=document.getElementById('party-spellbook-popup'),br=book.getBoundingClientRect();
+      checks['bookFits-'+zoom]=br.left>=0&&br.top>=0&&br.right<=innerWidth+1&&br.bottom<=innerHeight+1;
+      checks['bookCounts-'+zoom]=book.textContent.includes('Magic Missile (3)')&&book.textContent.includes('Fireball (0)');
+      checks['bookCostColumns-'+zoom]=book.textContent.includes('Memorize MP')&&book.textContent.includes('Cast MP')&&book.querySelector('.spellbook-magic-cost').textContent==='0';
+      checks['allPortraitTabs-'+zoom]=book.querySelectorAll('[role=tab] canvas').length===2;
+      book.querySelectorAll('[role=tab]')[1].click();
+      checks['pageSwitch-'+zoom]=book.querySelector('[role=tabpanel]').textContent.includes('Grave Mending (0)')&&!book.querySelector('[role=tabpanel]').textContent.includes('Magic Missile');
+      book.querySelectorAll('[role=tab]')[0].click();checks['combatPreparationDisabled-'+zoom]=[...book.querySelectorAll('.spellbook-prepare')].every(b=>b.disabled);
+      PartySpellbookUi.close();CombatTurnUi.receive(null);CombatTacticalUi.receive({active:null});
+      checks['restored-'+zoom]=box.style.cssText===saved&&!box.classList.contains('combat-expanded');
+    }
+    window.actionDiceState={active:null};window.gamePaused=true;await PartySpellbookUi.open();
+    checks.readablePaused=document.getElementById('party-spellbook-popup').textContent.includes('Magic Missile (3)');
+    checks.pausedCannotPrepare=[...document.querySelectorAll('.spellbook-prepare')].every(b=>b.disabled);
+    PartySpellbookUi.close();window.gamePaused=false;GameCommandGate.begin();
+    const reference=document.querySelector('[data-read-only-reference]');reference.click();await new Promise(r=>setTimeout(r,5));
+    checks.commandLockDoesNotDisableReading=!reference.disabled&&!!document.getElementById('party-spellbook-popup')&&document.getElementById('ordinary-command-button').disabled;
+    PartySpellbookUi.close();GameCommandGate.end();await PartySpellbookUi.open();
+    let book=document.getElementById('party-spellbook-popup');const shell=[...book.querySelectorAll('.spellbook-prepare')].find(b=>b.textContent.startsWith('Runic Shell'));
+    shell.click();await new Promise(r=>setTimeout(r,20));
+    checks.clickSpellFillsSlot=prepared.includes('rune_shell')&&document.getElementById('party-spellbook-popup').textContent.includes('Runic Shell (3)');
+    const fullBook=document.getElementById('party-spellbook-popup');
+    [...fullBook.querySelectorAll('.party-spellbook-slots button')].find(b=>b.textContent==='Runic Shell').click();await new Promise(r=>setTimeout(r,20));
+    checks.clickSlotForgets=prepared.length===1&&!prepared.includes('rune_shell');
+    checks.readDoesNotPrepare=posts.filter(p=>p.url==='/spells/prepare').length===2;
+    checks.draftPreserved=document.getElementById('chatuserinput').value==='unfinished draft';
+  }catch(error){errors.push(error.stack);}
+  const report={pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors};document.getElementById('results').textContent=JSON.stringify(report);
+  await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)});
+});
+</script></body></html>

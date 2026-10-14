@@ -34,6 +34,8 @@
         (next.epoch === state.epoch && next.revision < state.revision)) return;
     state = next;
     window.actionDiceState = state;
+    window.CombatTacticalUi?.receive(state);
+    window.PartySpellbookUi?.refresh();
     window.CombatTurnUi?.receive(state.active?.turn || null);
     const turn = state.active?.turn;
     if (turn && !turn.allowRetreat) {
@@ -52,7 +54,7 @@
   };
 
   window.showCombatTargetPrompt = function(prompt) {
-    if (prompt.allowRetreat) { targetPrompt = null; window.CombatTurnUi?.receive(prompt); return; }
+    if (prompt.allowRetreat || prompt.spells?.length) { targetPrompt = null; window.CombatTurnUi?.receive(prompt); return; }
     targetPrompt = prompt;
     targetSubmitting = false;
     targetError = '';

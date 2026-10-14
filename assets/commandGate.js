@@ -13,6 +13,7 @@
     const loading = busy();
     document.body.classList.toggle('game-command-loading', loading);
     for (const button of document.querySelectorAll('#chatbotcontainer button')) {
+      if (button.hasAttribute?.('data-read-only-reference')) continue;
       if (loading) {
         if (!disabled.has(button)) {
           disabled.set(button, button.disabled); button.setAttribute('aria-busy', 'true');
@@ -51,11 +52,12 @@
     // Guard the public command entry, leaving its delicate parser and state pipeline untouched.
     if (typeof root.chatbotprocessinput === 'function') root.chatbotprocessinput = wrap(root.chatbotprocessinput);
     document.addEventListener('click', event => {
+      if (event.target.closest?.('[data-read-only-reference]')) return;
       if (!busy() || !event.target.closest?.('#phaser-container a, #phaser-container [class*="clickable-"], #chatbotcontainer button')) return;
       event.preventDefault(); event.stopImmediatePropagation();
     }, true);
     const style = document.createElement('style');
-    style.textContent = '.game-command-loading #chatbotcontainer button{opacity:.5;cursor:wait}.game-command-loading #phaser-container [class*="clickable-"]{cursor:wait;text-decoration:none;opacity:.65}';
+    style.textContent = '.game-command-loading #chatbotcontainer button:not([data-read-only-reference]){opacity:.5;cursor:wait}.game-command-loading #phaser-container [class*="clickable-"]{cursor:wait;text-decoration:none;opacity:.65}';
     document.head.appendChild(style);
     if (root.jQuery) root.jQuery(document)
       .on('ajaxSend.commandGate', (_event, _xhr, settings) => transportStarted(settings.url))

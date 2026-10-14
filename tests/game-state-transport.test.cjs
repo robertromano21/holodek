@@ -18,6 +18,7 @@ test('normal-play state over 100 KB reaches the real state-update route before t
   const setters = {
     setPersonalNarrative: v => { state.narrative = v; },
     setUpdatedGameConsole: v => { state.console = v; },
+    getUpdatedGameConsole: () => state.console || '',
     setRoomNameDatabase: v => { state.rooms = v; },
     getRoomNameDatabase: () => state.rooms,
     setCombatCharactersString() {}, setCombatMode() {}, setDungeonTestingMode: v => { state.testMode = v; },
@@ -26,7 +27,8 @@ test('normal-play state over 100 KB reaches the real state-update route before t
   app.use(createGameJsonParser());
   const start = server.indexOf("app.post('/updateState7'");
   const end = server.indexOf('// NEW: Endpoint to get room music', start);
-  vm.runInNewContext(server.slice(start, end), { app, sharedState: setters, roomDatabaseReceiver: createRoomDatabaseReceiver(), inputTaskInFlight: false, console: quietConsole });
+  vm.runInNewContext(server.slice(start, end), { app, sharedState: setters, roomDatabaseReceiver: createRoomDatabaseReceiver(), inputTaskInFlight: false, console: quietConsole,
+    Economy: { preserveInventory: (_old, incoming) => incoming, preserve: (_old, incoming) => incoming, refresh() {} } });
   app.post('/processInput7', (req, res) => res.json({ console: state.console, testMode: state.testMode }));
   app.use(gameJsonErrorHandler);
   const listener = app.listen(0, '127.0.0.1');

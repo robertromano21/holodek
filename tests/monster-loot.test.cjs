@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const I = require('../assets/dungeonInhabitants');
+const GeneratedNames = require('../retort/generatedNames');
 const { createPopulationService } = require('../retort/roomPopulation');
 const Sync = require('../retort/monsterConsoleSync');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
@@ -37,7 +38,7 @@ test('name generation uses its own schema and retries malformed model output at 
   const results = [modifiers, '{"name":""}', '{"name":"Emberfang Glaive"}'], requests = [];
   const assistant = () => {};
   assistant.generation = async options => { requests.push(options); return { content: results.shift() }; };
-  const context = { Inhabitants: I, console: { warn() {} } };
+  const context = { Inhabitants: I, GeneratedNames, console: { warn() {} } };
   vm.runInNewContext(nameSource, context);
   assert.equal(await context.generateMonsterEquipmentName({ assistant }, 'weapon', 'Guard'), 'emberfang glaive');
   assert.equal(requests.length, 3);
@@ -52,7 +53,7 @@ test('persistent bad equipment names cannot hang spawning', async () => {
   let requests = 0;
   const assistant = () => {};
   assistant.generation = async () => { requests++; return { content: modifiers }; };
-  const context = { Inhabitants: I, console: { warn() {} } };
+  const context = { Inhabitants: I, GeneratedNames, console: { warn() {} } };
   vm.runInNewContext(nameSource, context);
   assert.equal(await context.generateMonsterEquipmentName({ assistant }, 'armor', 'Boss'), null);
   assert.equal(requests, 3);
@@ -142,7 +143,7 @@ test('spawned gear properties survive population save and proximity omission, th
 test('final room-population snapshot carries generated sheets and modifiers instead of its earlier None defaults', () => {
   const begin = source.indexOf('    // Keep freshly generated sheets and modifiers together'), end = source.indexOf('    persistRoomDb(roomNameDatabasePlain);', begin);
   const blade = item('guard blade'), sheets = sheet('Guard', 'Weapon: guard blade, Armor: None, Shield: None, Other: None');
-  const context = { currentRoomData: { monsters: { inRoom: 'None', equippedProperties: 'None' } }, monstersInRoom: sheets, coordKey: '1,0,0',
+  const context = { Economy: require('../retort/economy'), currentRoomData: { monsters: { inRoom: 'None', equippedProperties: 'None' } }, monstersInRoom: sheets, coordKey: '1,0,0',
     updatedGameConsole: `Monsters Equipped Properties: ${legacy(blade)}\nMonsters State: Hostile`, sharedState: { getRoomPopulation: () => ({ equipmentProperties: legacy(blade) }) } };
   vm.runInNewContext(source.slice(begin, end), context);
   assert.equal(context.currentRoomData.monsters.inRoom, sheets);

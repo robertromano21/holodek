@@ -165,7 +165,7 @@ test('normal narrative and quest processing remain after physical actions; no se
   const source = fs.readFileSync('retort/retortWithUserInput.js', 'utf8');
   assert.match(source, /if \(physicalPuzzleResult\) currentSituation = physicalPuzzleResult/);
   assert.match(source, /physicalPuzzleResult \? \{ runSimulation: false \}/);
-  assert.match(source, /seedAndManageQuest\(\$, updatedGameConsole, userInput\)/);
+  assert.match(source, /seedAndManageQuest\(\$, updatedGameConsole, userInput, broadcast\)/);
   assert.doesNotMatch(fs.readFileSync('assets/index.html', 'utf8'), /livingEnvironmentUi\.js/);
   const interactions=fs.readFileSync('assets/worldInteractionUi.js','utf8');
   assert.doesNotMatch(interactions,/living-environment\/interact/);

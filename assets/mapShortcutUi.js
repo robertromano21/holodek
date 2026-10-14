@@ -13,22 +13,34 @@
     const button = document.getElementById('dungeon-map-shortcut'), command = document.getElementById('chatbotcontainer');
     if (!button || !command) return;
     const inventory = document.getElementById('dungeon-inventory-shortcut');
+    const journal = document.getElementById('dungeon-journal-shortcut');
+    const spellbook = document.getElementById('dungeon-spellbook-shortcut');
     const log = document.getElementById('game-log-popup');
     const position = () => {
       const bounds = button.getBoundingClientRect(), zoom = button.offsetWidth ? bounds.width / button.offsetWidth : 1;
-      const p = placement(command.getBoundingClientRect(), button.offsetWidth, { width: root.innerWidth, height: root.innerHeight },
-        log?.getBoundingClientRect(), zoom);
-      if (inventory) p.bottom = Math.min(p.bottom, Math.max(2, root.innerHeight / zoom - button.offsetHeight - inventory.offsetHeight - 14));
-      button.style.left = p.left + 'px'; button.style.bottom = p.bottom + 'px';
-      if (inventory) {
-        inventory.style.left = p.left + 'px'; inventory.style.bottom = (p.bottom + button.offsetHeight + 6) + 'px';
+      const commandBounds = command.getBoundingClientRect(), logBounds = log?.getBoundingClientRect();
+      const p = placement(commandBounds, button.offsetWidth, { width: root.innerWidth, height: root.innerHeight }, logBounds, zoom);
+      const stack = [button, journal, inventory].filter(Boolean);
+      if (spellbook && inventory && p.left * zoom > commandBounds.right) {
+        const lowerHeight = button.offsetHeight + (journal?.offsetHeight || 0) + (journal ? 12 : 6);
+        p.bottom = Math.max(2, (root.innerHeight - commandBounds.top) / zoom + 6 - lowerHeight);
       }
+      p.bottom = Math.min(p.bottom, Math.max(2, root.innerHeight / zoom - stack.reduce((h, b) => h + b.offsetHeight, 0) - stack.length * 6 - 2));
+      const stackLeft = Math.max(p.left, spellbook ? spellbook.offsetWidth + 14 : 8);
+      button.style.left = stackLeft + 'px'; button.style.bottom = p.bottom + 'px';
+      let bottom = p.bottom + button.offsetHeight + 6;
+      for (const element of [journal, inventory].filter(Boolean)) {
+        element.style.left = stackLeft + 'px'; element.style.bottom = bottom + 'px'; bottom += element.offsetHeight + 6;
+      }
+      if (spellbook) { spellbook.style.left = (stackLeft - spellbook.offsetWidth - 6) + 'px'; spellbook.style.bottom = (inventory ? parseFloat(inventory.style.bottom) : p.bottom) + 'px'; }
     };
     button.addEventListener('click', () => root.DungeonExplorationMap?.toggle());
+    journal?.addEventListener('click', () => root.AdventureJournalUi?.toggle());
+    spellbook?.addEventListener('click', () => root.PartySpellbookUi?.open());
     position(); root.addEventListener('resize', position);
     if (root.ResizeObserver) {
       const observer = new root.ResizeObserver(position);
-      for (const element of [command, button, log].filter(Boolean)) observer.observe(element);
+      for (const element of [command, button, inventory, spellbook, log].filter(Boolean)) observer.observe(element);
     }
     if (root.MutationObserver) {
       const observer = new root.MutationObserver(position);

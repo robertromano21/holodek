@@ -234,7 +234,7 @@ async function callModel(input) {
   let problems = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const r = await c.chat.completions.create({ model: MODEL, messages: buildMessages(input, problems), response_format: { type: 'json_object' }, temperature: 0.6, max_tokens: 1800 });
+      const r = await require('./modelTransport').complete(c, { model: MODEL, messages: buildMessages(input, problems), response_format: { type: 'json_object' }, temperature: 0.6, max_tokens: 1800 });
       const raw = JSON.parse(r.choices[0].message.content || '{}');
       const found = validate(raw);
       if (!found.length) return normalize(raw);

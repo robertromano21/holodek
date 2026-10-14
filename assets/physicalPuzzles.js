@@ -20,8 +20,14 @@
     return (h >>> 0).toString(16);
   };
   function compile(raw) {
-    if (!raw || !KINDS.includes(raw.kind) || !clean(raw.title, 70) || !clean(raw.context, 300) ||
-        !clean(raw.lore, 320) || !Array.isArray(raw.controls) || raw.controls.length < 2 || raw.controls.length > 4) throw Error('Invalid physical puzzle design.');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw Error('Invalid physical puzzle design: expected one JSON object.');
+    const issues = [];
+    if (!KINDS.includes(raw.kind)) issues.push(`kind must be one of ${KINDS.join(', ')}`);
+    for (const [field, limit] of [['title', 70], ['context', 300], ['lore', 320]]) {
+      if (!clean(raw[field], limit)) issues.push(`${field} must be nonempty single-line text, max ${limit} characters (received ${typeof raw[field] === 'string' ? raw[field].trim().length + ' characters' : typeof raw[field]})`);
+    }
+    if (!Array.isArray(raw.controls) || raw.controls.length < 2 || raw.controls.length > 4) issues.push('controls must contain 2-4 controls');
+    if (issues.length) throw Error(`Invalid physical puzzle design: ${issues.join('; ')}.`);
     const controls = raw.controls.map((c, i) => {
       const suffix = Modules.mechanics[raw.kind].suffix;
       if (!c || ['plaque', 'receiver'].includes(c.id) || !/^[a-z][a-z0-9_]{0,23}$/.test(c.id) || !clean(c.label, 45) ||
@@ -86,7 +92,7 @@
     const kit = Object.entries(Modules.kits).filter(([,kit])=>kit.kinds.includes(kind))[(n >>> 8) % Object.values(Modules.kits).filter(kit=>kit.kinds.includes(kind)).length];
     return compile({ kind, title: ({sequence:'The Procession Lock',alignment:'The Surveyor\'s Instrument',channels:'The Sluice Regulator',
       interlock:'The Linked Ward',sliding:'The Track Relief',balance:'The Oath Scales',harmonics:'The Echo Score'})[kind],
-      context: `An ancient ${kit[0].replace(/_/g,' ')} in ${String(roomName).replace(/[<>\r\n]/g, ' ').slice(0, 90)} links carved controls through stone, timber and metal.`,
+      context: `In ${String(roomName).replace(/[<>\r\n]/g, ' ').slice(0, 90)}, an ancient mechanism uses ${kit[0].replace(/_/g,' ')} to link its carved controls.`,
       lore: `The awakened mechanism reveals a preserved record of ${String(roomName).replace(/[<>\r\n]/g,' ').slice(0,90)}: its builders maintained this place, and their marks survive.`,
       moduleKit:kit[0],arrangement:Modules.arrangements[(n>>>10)%4],clueStyle:Modules.clueStyles[(n>>>13)%5],material:kit[1].material,
       ...(kind === 'interlock' ? { couplings: marks.map((_,i)=>[`control_${i}`]) } : {}),

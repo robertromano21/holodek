@@ -30,9 +30,9 @@ for (const indoor of [true, false]) test(`${indoor ? 'indoor' : 'outdoor'} speec
   const reach = I.dialogueReach(d, roster[1], player);
   assert.equal(reach.lineOfSight, false);
   assert.equal(reach.canHear, true); assert.equal(reach.canSpeak, true);
-  assert.equal(reach.distance, 2); assert.equal(reach.range, 3);
+  assert.equal(reach.distance, 2); assert.equal(reach.range, 10);
   assert.equal(createCombatSpace(d, roster, d.geoKey).canAttack(roster[0], roster[1]), false);
-  roster[1].mazeX = 8;
+  roster[1].mazeX = 15;
   assert.equal(I.dialogueReach(d, roster[1], player).canHear, false);
 });
 

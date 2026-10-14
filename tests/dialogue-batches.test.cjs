@@ -9,6 +9,7 @@ const Campaign = require('../retort/campaignMemory');
 const Memory = require('../retort/dialogueMemory');
 const Journey = require('../retort/journeyMemory');
 const Grounding = require('../retort/dialogueGrounding');
+const edran = require('./fixtures/edran-dialogue.cjs');
 const { describeCharacters, generateCharacterDialogue } = require('../retort/characterDialogue');
 const { createPopulationService } = require('../retort/roomPopulation');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
@@ -53,6 +54,63 @@ function agent(result) {
       `The keeper's warning lingers. [[CHARACTER_DIALOGUE]]${json}[[/CHARACTER_DIALOGUE]]` : json };
   } } };
 }
+
+test('live speech removes shortened echoes from future idle caches and later refreshes', () => {
+  const f = fixture(), fresh = 'We should ask the ferryman about the missing burial register.';
+  const rows = [{ speaker: 'Noria', lines: [...edran.replies, fresh] }];
+  I.applyReplies(f.population, rows, f.actors);
+  I.noteSpoken(f.population, [{ speaker: 'Noria', line: edran.speech }]);
+  assert.deepEqual(f.population.companions.Noria.dialogue, [fresh]);
+  assert.equal(f.population.companions.Noria.dialogueIndex, 0);
+  I.applyReplies(f.population, rows, f.actors);
+  assert.deepEqual(f.population.companions.Noria.dialogue, [fresh]);
+  I.applyReplies(f.population, [{ speaker: 'Zharok', lines: [edran.replies[0]] }], f.actors);
+  assert.deepEqual(f.population.companions.Zharok.dialogue, [edran.replies[0]], 'Speech history is individual.');
+  f.population.lastCannedSpeechAt = 0;
+  assert.deepEqual(f.visit().dialogue, [{ speaker: 'Zharok', line: edran.replies[0], kind: 'canned' }]);
+  f.population.lastCannedSpeechAt = 0;
+  assert.deepEqual(f.visit().dialogue, [{ speaker: 'Noria', line: fresh, kind: 'canned' }]);
+});
+
+test('spoken-cache cursor is preserved while unread repeats and stale paired exchanges are removed', () => {
+  const f = fixture(), first = 'I know the name Mortacia.', fresh = 'The harbor needs another watchman.';
+  I.applyReplies(f.population, [{ speaker: 'Noria', lines: [first, edran.replies[0], fresh] }], f.actors,
+    { exchanges: [{ lines: [{ speaker: 'Noria', line: edran.replies[0] }, exchange.lines[1]] }] });
+  I.noteSpoken(f.population, [{ speaker: 'Noria', line: first }]);
+  I.noteSpoken(f.population, [{ speaker: 'Noria', line: edran.speech }]);
+  assert.equal(f.population.companions.Noria.dialogueIndex, 1);
+  assert.deepEqual(f.population.companions.Noria.dialogue, [first, fresh]);
+  assert.deepEqual(f.population.dialogueQueue, []);
+  assert.equal(f.ledger.records.length, 0, 'Dedup history does not fabricate performed campaign events.');
+});
+
+test('live and queued dialogue retain individual voices without the added public-lore directive', () => {
+  const characters = [{ name: 'Edran Bellworn', job: 'temple custodian', background: {
+    history: 'Repaired the harbor bell with his daughter.', voice: 'Warm practical observations.', motivation: 'Finish the memorial.' } }];
+  for (const mode of ['narrative', 'cache']) {
+    const prompt = Grounding.prompt(characters, [], null, { mode });
+    assert.doesNotMatch(prompt, /PUBLIC UNDERWORLD CULTURE|Local public context|Hades has fallen to Arithus|before asking a character-driven question/);
+    assert.match(prompt, /Repaired the harbor bell with his daughter/);
+    assert.match(prompt, /Warm practical observations/); assert.match(prompt, /Finish the memorial/);
+    assert.match(prompt, /concerns, questions or practical observations/);
+    assert.match(prompt, /characters can disagree, reminisce/);
+    assert.match(prompt, /including the live speech in this very response/);
+    assert.match(prompt, /If heardCurrentConversation is false/);
+  }
+  assert.match(Campaign.prompt({}), /No relevant record means unknown, not permission to fabricate earlier events/);
+  assert.doesNotMatch(Campaign.prompt({}), /ignorance of the original canonical backstory/);
+});
+
+test('five-minute dialogue keeps the authored character context without the added lore emphasis', async () => {
+  const f = fixture(), a = agent({ spoken: [], replies: [] });
+  const characters = describeCharacters(f.actors, f.population);
+  characters[0].background = { history: 'Carved the old bridge with her sister.', voice: 'Quick and good-humored.' };
+  await generateCharacterDialogue(a, { characters });
+  assert.equal(a.requests.length, 1);
+  const prompt = a.prompts.find(value => value.startsWith('Queued dialogue planning'));
+  assert.match(prompt, /Carved the old bridge with her sister/); assert.match(prompt, /Quick and good-humored/);
+  assert.doesNotMatch(a.prompts.join('\n'), /PUBLIC UNDERWORLD CULTURE|before asking a character-driven question/);
+});
 
 test('batch planning favors companions and discovered residents while keeping a hard room budget', () => {
   assert.deepEqual(Grounding.batchPlan([{ name: 'Noria', partyMember: true }, { name: 'Mason', encountered: true }, { name: 'Unseen' }]),
@@ -176,7 +234,7 @@ test('normal player narration generates the queued batch in its existing request
   await vm.runInNewContext(`(async()=>{${entryCode}})()`, context);
   assert.equal(a.requests.length, 1); assert.ok(Date.now() - f.population.lastDialogueRefreshAt < 1000);
   assert.equal(f.population.companions.Noria.dialogue.length, 6); assert.equal(f.population.dialogueQueue.length, 1);
-  const prompt = a.prompts.find(text => text.startsWith('Queued dialogue planning'));
+  const prompt = a.prompts.find(text => text.startsWith('Live story continuation'));
   assert.match(prompt, /I promised the keeper/); assert.match(prompt, /Find the keeper/); assert.match(prompt, /1\/2/);
   assert.match(prompt, /"Noria","lines":6/); assert.match(prompt, /Cached alternatives have NOT happened/);
   assert.match(prompt, /flooded quarry/); assert.match(prompt, /Quiet and skeptical/);

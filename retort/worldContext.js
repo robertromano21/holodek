@@ -2,6 +2,7 @@
 const { ensureContinuation, coordinates, keyOf, exitEntries, resolveExit, coordinateKeys, indexDatabase, indoor } = require('../assets/outdoorRoutes');
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = value => typeof value === 'string' ? value : '';
+const Campaign = require('./campaignSetting');
 const normalize = raw => [...new Set(exitEntries(raw).map(entry => entry.direction).filter(Boolean))].slice(0, 10);
 
 function cloneMetadata(value, budget = { remaining: 16000, nodes: 1024 }, depth = 0, seen = new Set()) {
@@ -111,6 +112,9 @@ function buildRoomWorldContext(database, coords, options = {}) {
     outdoorDepth: Number.isSafeInteger(room.outdoorRegionDepth) ? room.outdoorRegionDepth : null, neighbors,
     quest: cloneQuest(options.quest),
     environmentIntent: room.environmentIntent ? cloneMetadata(room.environmentIntent) : null,
+    settlement: Campaign.snapshot(room),
+    factionMemory: require('./factionMemory').project(database),
+    regionalSite: room.regionalSite ? { flavor: room.regionalSite.flavor, storyId: room.regionalSite.storyId } : null,
     campaign: { origin: 'Ruined Temple Entrance in Tartarus', destination: 'Hades, the City of the Dead',
       finale: 'Throne Room of Hades: confrontation with Arithus', progression: 'Existing quests, artifacts and victory checks remain authoritative.' } };
 }
@@ -134,6 +138,9 @@ function supplementOutdoorRoutes(database, coords, exits, consoleText, options =
   const report = ensureContinuation(view.rooms, parsed, exits, { ...options, visitedKeys, protectedKeys });
   if (report.added) {
     const rawKey = view.keys.get(report.targetKey) ?? report.targetKey, target = view.rooms.get(report.targetKey);
+    if (process.env.CAMPAIGN_SETTING !== 'off' && !target.campaignSetting) target.campaignSetting = Campaign.plan({
+      database: view.isMap ? Object.fromEntries(view.rooms) : view.database, sourceKey: keyOf(parsed), targetKey: report.targetKey,
+      seed: options.seed, template: 'wasteland' });
     if (view.isMap) view.database.set(rawKey, target);
     else view.database[rawKey] = target;
   }

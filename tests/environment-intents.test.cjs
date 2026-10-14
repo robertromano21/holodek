@@ -42,7 +42,8 @@ test('one optional tagged call retains model creativity and returns only canonic
   assert.equal($.temperature, 0.7);
   assert.equal(plan.intents.east.narrativeHint, choices.directions.east.hint);
   assert.deepEqual(Object.keys(plan.intents.east).sort(), ['template', 'indoor', 'biome', 'architecture', 'physicalDescription',
-    'nameGuidance', 'narrativeHint', 'evidence', 'targetKey'].sort());
+    'nameGuidance', 'narrativeHint', 'evidence', 'targetKey', 'campaignSetting'].sort());
+  assert.equal(plan.intents.east.campaignSetting.siteKind, 'dead_grove');
   assert.equal(plan.intents.east.indoor, false);
   assert.equal(plan.intents.north.architecture, 'basilica');
   assert.equal(plan.intents.east.evidence.source, 'model');

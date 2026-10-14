@@ -11,7 +11,7 @@
   const AMB_TAGS = ['wind', 'sandstorm', 'drips', 'fire', 'howls', 'chant', 'rumble', 'water'];
   const KEY = 'holodekAudioSettings';
   // Defaults = the owner's tuned ♫ panel (Oct 2026): Music 0.20, Effects 0.80, Voices 0.85, Ambience 0.10, Stereo width 1.0, Swap off, SID 2x, Mute off.
-  const DEF = { muted: false, sfx: 0.8, amb: 0.1, music: 0.2, width: 1, swapLR: false, voice: 0.85, sidMode: '2x' };
+  const DEF = { muted: false, sfx: 0.8, amb: 0.1, music: 0.2, width: 1, swapLR: false, voice: 0.85, sidMode: '2x', voiceChip: '8580', voiceNotch: false };
   const saved = (() => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; } })();
   const settings = Object.assign({}, DEF, saved || {}, saved ? {} : { v: 4, touched: {} });
   if (saved) {
@@ -31,6 +31,10 @@
   const postSidMode = () => fetch('/sid-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: sidMode() }) })
     .then(r => r.json()).then(j => console.info('[SidMode]', j)).catch(e => console.warn('[SidMode] server switch failed', e && e.message));
   postSidMode();
+  const voiceChip = () => settings.voiceChip === '10582' ? '10582' : '8580', voiceNotch = () => voiceChip() === '10582' && !!settings.voiceNotch; // voice-only chip (music/ambience stay 8580)
+  const postVoiceChip = () => fetch('/voice/chip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chip: voiceChip(), notch: voiceNotch() }) })
+    .then(r => r.json()).then(j => console.info('[VoiceChip]', j)).catch(e => console.warn('[VoiceChip] server switch failed', e && e.message));
+  postVoiceChip();
 
   let ctx = null, sfxBus = null, ambBus = null, voiceBus = null, master = null, swapG = null;
   const buffers = new Map(), loading = new Map(), lastPlayed = new Map();
@@ -473,7 +477,21 @@
   // sight, pain, death, attack, plus signature sounds (laugh, sigh, grunt, hiss); every play is pitch-varied.
   const VOWELS = { a: [730, 1090], e: [530, 1840], i: [300, 2200], o: [570, 840], u: [330, 870], ae: [660, 1720], uh: [520, 1190] };
   const actorByName = name => (window.getDungeonLifeContext?.()?.actors || []).find(x => x && x.name === name);
-  function voiceProfile(nameOrActor) {
+  // round3 voice spec: assigned once at character creation (game.js ensureCharacterSpriteData) and stored on the actor
+  // (character.voiceSpec, also kept in the party registry), so a character sounds the same in every room even when the room's
+  // actor data lacks personality/traits. Seeded deterministically from name + race + personality.
+  const specOf = a => (a && a.voiceSpec) || (window._partyCharacterRegistry && a && window._partyCharacterRegistry[a.name] && window._partyCharacterRegistry[a.name].voiceSpec) || null;
+  function accentFor(P, a) { const sp = (a && a.sprite && a.sprite.spec) || {}, s = [P.name, sp.race || a.race || a.Race, sp.class || a.class || a.Class, P.kind].join(' ').toLowerCase();
+    if (/mortacia/.test(s)) return 'midatl'; if (P.kind === 'undead' || /necro|wraith|shade|ghost|lich/.test(s)) return 'shade'; if (/\b(orc|ogre|troll|brute)/.test(s)) return 'orc';
+    if (/goblin|kobold|snake|lizard|naga|serpent/.test(s)) return 'hiss'; if (/elf|elven|fae|fey|sylph/.test(s)) return 'elf'; if (/dwar|giant|north/.test(s)) return 'northern';
+    if (P.kind === 'regal') return 'regal'; if (/\b(old|farmer|peasant|innkeep)/.test(s)) return 'rural'; return 'party'; }
+  function voiceSpecOf(actor) { const a = actor || {}, base = voiceProfileRaw(a), sp = (a.sprite && a.sprite.spec) || {};
+    const seed = hash([base.name, sp.race || a.race || a.Race || '', a.personality || a.Personality || ''].join('|')), j = i => (((seed >>> (i * 4)) & 15) / 15 - 0.5);
+    return { v: 1, accent: accentFor(base, a), kind: base.kind, f0: +(base.f0 * (1 + 0.06 * j(0))).toFixed(1), fs: +base.fs.toFixed(3), range: +(base.range * (1 + 0.1 * j(1))).toFixed(2),
+      rate: +(base.rate * (1 + 0.06 * j(2))).toFixed(2), breath: +base.breath.toFixed(3), rasp: +base.rasp.toFixed(3) }; }
+  function voiceProfile(nameOrActor) { const a = typeof nameOrActor === 'object' && nameOrActor ? nameOrActor : (actorByName(nameOrActor) || { name: nameOrActor }), P = voiceProfileRaw(a), S = specOf(a);
+    return S ? Object.assign(P, { kind: S.kind || P.kind, f0: S.f0, fs: S.fs || P.fs, range: S.range, rate: S.rate, breath: S.breath, rasp: S.rasp, accent: S.accent }) : P; }
+  function voiceProfileRaw(nameOrActor) {
     const a = typeof nameOrActor === 'object' && nameOrActor ? nameOrActor : (actorByName(nameOrActor) || { name: nameOrActor });
     const name = String(a.name || ''), sp = a.sprite?.spec || {}, tr = sp.traits || {};
     const race = sp.race || a.race || '', cls = sp.class || a.class || '', sex = sp.sex || a.sex || '';
@@ -662,11 +680,11 @@
   }
   // --- SID speech (server: Piper analysis -> 64-SID vocoder WAV per sentence; see retort/sidVoice) ---
   const speechBufs = new Map(); let speechNow = null, profileSig = '';
-  function speechKey(who, text) { return sidMode() + '|' + who + '|' + text; }
+  function speechKey(who, text) { return sidMode() + '|' + voiceChip() + (voiceNotch() ? 'n' : '') + '|' + who + '|' + text; }
   function fetchSpeech(who, text) {
     const k = speechKey(who, text); if (speechBufs.has(k)) return speechBufs.get(k);
     const t0 = performance.now();
-    const p = fetch('/voice/line.wav?speaker=' + encodeURIComponent(who) + '&text=' + encodeURIComponent(text) + '&clock=' + sidMode())
+    const p = fetch('/voice/line.wav?speaker=' + encodeURIComponent(who) + '&text=' + encodeURIComponent(text) + '&clock=' + sidMode() + '&chip=' + voiceChip() + '&notch=' + (voiceNotch() ? 1 : 0))
       .then(r => { if (!r.ok) throw new Error('voice ' + r.status); return r.arrayBuffer(); })
       .then(b => new Promise((res, rej) => audio().decodeAudioData(b, res, rej)))
       .then(buf => { speechLog.push({ who, text: text.slice(0, 50), fetchMs: Math.round(performance.now() - t0), dur: +buf.duration.toFixed(2) }); if (speechLog.length > 30) speechLog.shift(); return buf; });
@@ -705,7 +723,7 @@
   function postProfiles() { // room entered / roster changed: send voice mappings so the server can pre-synthesize in character
     const actors = (window.getDungeonLifeContext?.()?.actors || []).filter(a => a && a.name && a.type !== 'pc');
     const sig = currentRoomKey() + '|' + actors.map(a => a.name).sort().join(','); if (!actors.length || sig === profileSig) return; profileSig = sig;
-    const profiles = actors.map(a => { const P = voiceProfile(a); return { name: P.name, kind: P.kind, f0: P.f0, fs: P.fs, breath: P.breath, rasp: P.rasp, range: P.range, rate: P.rate }; });
+    const profiles = actors.map(a => { const P = voiceProfile(a); return { name: P.name, kind: P.kind, f0: P.f0, fs: P.fs, breath: P.breath, rasp: P.rasp, range: P.range, rate: P.rate, ...(P.accent ? { accent: P.accent } : {}) }; });
     fetch('/voice/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profiles }) }).catch(() => {});
   }
   setInterval(() => { try { postProfiles(); } catch {} }, 1000);
@@ -951,6 +969,8 @@
       '<label>Stereo width <input type="range" min="0" max="1.5" step="0.05" data-k="width"></label>' +
       '<label><input type="checkbox" data-k="swapLR"> Swap L/R</label>' +
       '<label>SID chip <select data-k="sidMode" title="Stock = real C64 SID clock; 2x/4x = same SID clocked 2x/4x (oscillators to ~7.8/15.6 kHz) for voices, music, ambience and effects"><option value="1x">1x (1 MHz stock)</option><option value="2x">2x (2 MHz)</option><option value="4x">4x (4 MHz)</option></select></label>' +
+      '<label>Voice chip <select data-k="voiceChip" title="Speech only: 8580 = standard SID bank; 10582 = extended voice chip (level, mute, formant). Music and ambience stay 8580"><option value="8580">8580</option><option value="10582">10582</option></select></label>' +
+      '<label><input type="checkbox" data-k="voiceNotch"> 10582 /l/ notch</label>' +
       '<label><input type="checkbox" data-k="muted"> Mute all</label></div>';
     const st = document.createElement('style');
     st.textContent = '#holodek-audio-panel{position:fixed;left:8px;bottom:8px;z-index:1300;pointer-events:auto;font:12px Georgia,serif;color:#ead29d}#holodek-audio-panel>button{width:30px;height:30px;border-radius:15px;border:1px solid #a48d62;background:#141210e6;color:#ead29d;cursor:pointer;font-size:15px}#holodek-audio-panel>div{margin-bottom:4px;padding:8px 10px;background:#141210f2;border:1px solid #a48d62;border-radius:6px;position:absolute;bottom:34px;left:0;white-space:nowrap}#holodek-audio-panel>div[hidden]{display:none}#holodek-audio-panel label{display:block;margin:3px 0}#holodek-audio-panel input[type=range]{width:110px;vertical-align:middle;margin-left:6px}' +
@@ -978,6 +998,9 @@
     box.querySelectorAll('select[data-k="sidMode"]').forEach(sel => { sel.value = sidMode();
       sel.addEventListener('change', () => { settings.sidMode = ['1x', '2x', '4x'].includes(sel.value) ? sel.value : '1x'; save();
         buffers.clear(); loading.clear(); speechBufs.clear(); postSidMode(); unlock(); play('notice'); }); });
+    box.querySelectorAll('select[data-k="voiceChip"]').forEach(sel => { sel.value = voiceChip();
+      sel.addEventListener('change', () => { settings.voiceChip = sel.value === '10582' ? '10582' : '8580'; save(); speechBufs.clear(); postVoiceChip(); unlock(); play('notice'); }); });
+    box.querySelectorAll('input[data-k="voiceNotch"]').forEach(inp => inp.addEventListener('change', () => { speechBufs.clear(); postVoiceChip(); }));
     paint();
     // Anchor the button just right of the compass and above the command prompt; reposition on any layout change.
     const place = () => {
@@ -1048,6 +1071,6 @@
   }
   const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length,
     music: musicEls().map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused })) });
-  window.HolodekSfx = { speakLine, stopSpeech, voicePrefetch, speechLog: () => speechLog.slice(), stereo: stereoInfo, listener, ctxNow: () => ctx && ctx.currentTime, speakVoice, voiceSound, voiceProfile, renderVoiceDemo, voices: () => voiceLog.slice(), play, onServerEvent, setAmbience, keywordAmbience, settings, applyVolumes, state, musicPlay, musicPause, rewind, fastForward, queueRoomMusic, roomShown, songKeyNow, rhythm: () => ({ mode: rhythmMode, clkOff, evLog: evLog.slice(-200) }), ambLayersInfo: () => ambLayers.map(l => ({ tag: l.tag, keyed: l.keyed || null, rate: l.src ? +l.src.playbackRate.value.toFixed(4) : null })) };
+  window.HolodekSfx = { voiceSpecOf, speakLine, stopSpeech, voicePrefetch, speechLog: () => speechLog.slice(), stereo: stereoInfo, listener, ctxNow: () => ctx && ctx.currentTime, speakVoice, voiceSound, voiceProfile, renderVoiceDemo, voices: () => voiceLog.slice(), play, onServerEvent, setAmbience, keywordAmbience, settings, applyVolumes, state, musicPlay, musicPause, rewind, fastForward, queueRoomMusic, roomShown, songKeyNow, rhythm: () => ({ mode: rhythmMode, clkOff, evLog: evLog.slice(-200) }), ambLayersInfo: () => ambLayers.map(l => ({ tag: l.tag, keyed: l.keyed || null, rate: l.src ? +l.src.playbackRate.value.toFixed(4) : null })) };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

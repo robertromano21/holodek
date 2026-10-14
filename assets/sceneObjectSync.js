@@ -39,11 +39,11 @@
   function propertyFields(text, items) {
     const result = new Map();
     for (const match of text.matchAll(/\{([^}]*)\}/g)) {
-      const body = match[1], name = body.match(/name:\s*"([^"]+)"/);
+      const body = match[1], name = body.match(/"?name"?:\s*"([^"]+)"/);
       if (!name) continue;
-      const magic = body.match(/(?:^|,)\s*magic:\s*(-?\d+)(?=\s*(?:,|$))/);
+      const magic = body.match(/(?:^|,)\s*"?magic"?:\s*(-?\d+)(?=\s*(?:,|$))/);
       result.set(items.normName(name[1]), {
-        type: /(?:^|,)\s*type:\s*"[^"]*"/.test(body),
+        type: /(?:^|,)\s*"?type"?:\s*"[^"]*"/.test(body),
         magic: !!magic && Number.isSafeInteger(Number(magic[1]))
       });
     }

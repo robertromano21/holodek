@@ -1,4 +1,5 @@
 const Inhabitants = require('../assets/dungeonInhabitants');
+const Gear = require('../assets/equipmentRules');
 function roomKey(value) {
   const numbers = String(value || '').match(/-?\d+/g);
   return numbers?.length === 3 ? numbers.map(Number).join(',') : null;
@@ -57,14 +58,22 @@ function createCombatSpace(dungeon, roster, geoKey) {
     return p && q ? Math.hypot(p.x - q.x, p.y - q.y) : Infinity;
   }
   function reachOf(a) {
-    const weapon = String(a.equipped?.Weapon || a.equipped?.weapon || '');
-    return /\b(bow|longbow|shortbow|crossbow|sling)\b/i.test(weapon) ? 8 : /\b(spear|pike|halberd)\b/i.test(weapon) ? 2 : 1.5;
+    return Gear.reach(a);
   }
   function canAttackFrom(a, p, b) {
     const q = point(b);
     return p && q && Math.hypot(p.x - q.x, p.y - q.y) <= reachOf(a) && lineClear(dungeon, p, q);
   }
   const canAttack = (a, b) => !!canAttackFrom(a, point(a), b);
+  const canStrikeFrom = (a, p, q) => !!(p && q && !Gear.ranged(a) && Math.hypot(p.x - q.x, p.y - q.y) <= reachOf(a) && lineClear(dungeon, p, q));
+  const canStrike = (a, b) => canStrikeFrom(a, point(a), point(b));
+  function rangedPenalty(a) {
+    if (!Gear.ranged(a)) return 0;
+    const friendly = a.type === 'pc' || a.type === 'npc' || Inhabitants.allegiance(a) === 'Friendly';
+    return [...actors.values()].some(b => (b.hp ?? 1) > 0 && b.name !== a.name &&
+      (friendly ? Inhabitants.allegiance(b) === 'Hostile' : b.type === 'pc' || b.type === 'npc' || Inhabitants.allegiance(b) === 'Friendly') &&
+      distance(a, b) <= 1.5 && lineClear(dungeon, point(a), point(b))) ? 4 : 0;
+  }
   function setHealth(combatants) {
     combatants.forEach(actor => { const c = entry(actor); if (c) c.hp = actor.hp; });
   }
@@ -111,7 +120,7 @@ function createCombatSpace(dungeon, roster, geoKey) {
     if(c.type==='pc')c.mazePoint={x:step.x+0.5,y:step.y+0.5};
     return true;
   }
-  return { dungeon, distance, canAttack, point, pursuitPath, move, syncRoster, setHealth };
+  return { dungeon, roster, distance, canAttack, canStrike, canStrikeFrom, rangedPenalty, point, pursuitPath, move, syncRoster, setHealth };
 }
 
 module.exports = { roomKey, position, solid, lineClear, createCombatSpace };

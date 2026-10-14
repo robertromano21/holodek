@@ -51,15 +51,19 @@
   function validate(rows){
     if(rows===undefined)return[];
     if(!Array.isArray(rows)||rows.length>6)throw Error('At most six room artworks, plus the permanent puzzle diagram.');
-    return rows.map(a=>{
-      if(!kinds.includes(a?.kind)||!['wall','floor','object'].includes(a.surface)||typeof a.label!=='string'||!a.label.trim()||a.label.length>70||
-        /[<>\r\n]/.test(a.label)||typeof a.description!=='string'||a.description.length>220||/[<>\r\n]/.test(a.description)||
-        !Array.isArray(a.motifs)||a.motifs.length<1||a.motifs.length>6||a.motifs.some(m=>typeof m!=='string'||!m.trim()||m.length>28||/[<>\r\n]/.test(m))||
-        a.text!==undefined&&(typeof a.text!=='string'||a.text.length>120||/[<>\r\n]/.test(a.text))||
-        a.composition!==undefined&&!compositions.includes(a.composition)||
-        a.format!==undefined&&!['panel','mural'].includes(a.format)||
-        a.pigments!==undefined&&!Object.hasOwn(pigmentPalettes,a.pigments)||
-        a.aspectRatio!==undefined&&(![1.5,2,2.5].includes(a.aspectRatio)||a.kind!=='fresco'))throw Error('Invalid selective artwork.');
+    return rows.map((a,index)=>{
+      const issues=[];
+      if(!kinds.includes(a?.kind))issues.push('kind must be fresco, relief, inscription or mosaic');
+      if(!['wall','floor','object'].includes(a?.surface))issues.push('surface must be wall, floor or object');
+      if(typeof a?.label!=='string'||!a.label.trim()||a.label.length>70||/[<>\r\n]/.test(a.label))issues.push('label is required (not name), single line, max70 characters');
+      if(typeof a?.description!=='string'||a.description.length>220||/[<>\r\n]/.test(a.description))issues.push('description is required, single line, max220 characters');
+      if(!Array.isArray(a?.motifs)||a.motifs.length<1||a.motifs.length>6||a.motifs.some(m=>typeof m!=='string'||!m.trim()||m.length>28||/[<>\r\n]/.test(m)))issues.push('motifs is required: 1-6 short strings, each max28 characters');
+      if(a?.text!==undefined&&(typeof a.text!=='string'||a.text.length>120||/[<>\r\n]/.test(a.text)))issues.push('text must be single-line text, max120 characters');
+      if(a?.composition!==undefined&&!compositions.includes(a.composition))issues.push(`composition must be ${compositions.join('/')}`);
+      if(a?.format!==undefined&&!['panel','mural'].includes(a.format))issues.push('format must be panel or mural');
+      if(a?.pigments!==undefined&&(typeof a.pigments!=='string'||!Object.hasOwn(pigmentPalettes,a.pigments)))issues.push('pigments must be ONE string: vermilion/lapis/verdigris/ochre, not an array');
+      if(a?.aspectRatio!==undefined&&(![1.5,2,2.5].includes(a.aspectRatio)||a.kind!=='fresco'))issues.push('aspectRatio is fresco-only: 1.5, 2 or 2.5');
+      if(issues.length)throw Error(`Invalid selective artwork at roomArt[${index}]: ${issues.join('; ')}.`);
       return{kind:a.kind,surface:a.surface,label:a.label,description:a.description,motifs:[...a.motifs],text:a.text||'',composition:a.composition||'procession',
         format:a.format||(a.kind==='fresco'&&a.surface==='wall'?'mural':'panel'),pigments:a.pigments||'vermilion',
         ...(a.aspectRatio!==undefined?{aspectRatio:a.aspectRatio}:{}),

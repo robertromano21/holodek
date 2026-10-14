@@ -1,4 +1,8 @@
 const Inhabitants = require('../assets/dungeonInhabitants');
+const Pantheon = require('../assets/pantheonCharacters');
+const SpellRules = require('../assets/spellRules');
+const GeneratedNames = require('./generatedNames');
+const Contracts = require('./generationContracts');
 
 function needsQuestIntroduction(quest, rooms, geoKey, taskIndex = 0) {
   const text = String(quest || '').trim();
@@ -7,18 +11,28 @@ function needsQuestIntroduction(quest, rooms, geoKey, taskIndex = 0) {
   return !Object.values(rooms || {}).some(room => room?.inhabitants?.questIntroduction?.questId === questId);
 }
 
-async function generateInhabitants($, { roomName, roomDescription, geoKey, indoor, partyNames = [], usedNames = [], quest = '', questSeed = false }, rules) {
+async function generateInhabitants($, { roomName, roomDescription, geoKey, indoor, campaignSetting, partyNames = [], usedNames = [], quest = '', questSeed = false }, rules) {
   questSeed = questSeed && geoKey !== '0,0,0' && !!String(quest).trim() && !/^none$/i.test(String(quest).trim());
-  const count = indoor ? 8 : 16;
+  const starting = geoKey === '0,0,0';
+  const count = starting ? rules.random(1, 5) : indoor ? 8 : 16;
+  const hostileTemple = !starting && require('./campaignSetting').hostileTemple(campaignSetting, roomName);
   const slots = Array.from({ length: count }, (_, i) => ({ slot: i,
-    allegiance: i < 3 ? 'Neutral' : i < 6 ? 'Hostile' : i === 6 ? 'Friendly' : i < 10 ? 'Hostile' : 'Neutral',
+    allegiance: starting ? 'Friendly' : hostileTemple ? 'Hostile' : i < 3 ? 'Neutral' : i === 6 ? 'Friendly' : campaignSetting?.inhabited ?
+      campaignSetting.faction?.allegiance === 'Hostile' || i === count - 1 ? 'Hostile' : 'Neutral' : i < 6 || i < 10 && i > 6 ? 'Hostile' : 'Neutral',
     encounterId: i === 0 && questSeed ? 'quest-contact' : i < 3 ? 'workers' : i < 6 ? 'guards' : i === 6 ? 'pilgrim' : i < 10 ? 'raiders' : i < 13 ? 'wayfarers' : 'keepers' }));
   $.model = 'gpt-4.1-mini';
   $.temperature = 0.85;
   await $.user`Create the inhabitants of this ${indoor ? 'indoor dungeon complex' : 'outdoor biome'} in Children of the Grave.
 Room: ${roomName}. Description: ${roomDescription}. Current quest: ${quest || 'None'}.
-Return only JSON: {"inhabitants":[{"slot":0,"name":"unique exact name","race":"race","class":"class","job":"occupation","activity":"what this individual is doing at their own site","personality":"brief temperament and manner of speaking","history":"two short sentences about this individual's life or origins before meeting the party","motivation":"one personal desire or worry","routine":"guard|patrol|work|forage|wander|rest","dialogue":["first encounter greeting or threat","remark about their work or this place","another short personal remark"]}]}.
-Produce one individual for every slot below. Each has a distinct name, race, occupation and voice. Names must not duplicate party members ${partyNames.join(', ') || 'None'}.
+These are ordinary residents, never gods or goddesses. The engine alone stages persistent divine visitors; do not use names or aliases from this reserved pantheon: ${Pantheon.names.join(', ')}. Arithus never appears outside the final throne-room encounter.
+Regional community facts (read-only): ${JSON.stringify(campaignSetting || {})}. Fit occupations, relationships and worries to the real water source, trades, authority and guilds. Residents of a settled place are not automatically enemies; the engine's allegiance slots below are authoritative. Never invent a payable contract, money, shop inventory or quest outcome; the engine supplies these separately.
+When the faction is explicitly Hostile, its non-service guards and cult members follow ${campaignSetting?.hostilePatron || 'Arithus'}. Use that evil patron for their oaths, symbols and loyalties, rather than making them servants of an unrelated benevolent god. The three neutral workers remain neutral independent businesses. A friendly slot in such territory may be a dissident. In peaceful communities, hostiles are outside threats, not the government. Temples follow the saved religion patron; do not invent another patron or physically summon one.
+${hostileTemple ? 'This is an EVIL TEMPLE: every slot is Hostile, including workers and priests. Intruders face attacks from its guards and cult, not neutral shop or healing services. The neutral-worker and friendly-slot exceptions do NOT apply here.' : ''}
+Return only JSON: {"inhabitants":[{"slot":0,"name":"unique exact name","race":"race","class":"custom class title","combatRole":"Warrior|Spellcaster","combatArchetype":"Fighter|Wizard|Witch|Sorcerer|Warlock|Necromancer|Cleric","spellPreferences":["preferred canonical spell id"],"job":"occupation","activity":"what this individual is doing at their own site","personality":"brief temperament and manner of speaking","voice":"distinct manner of speaking","history":"two short sentences about this individual's life or origins before meeting the party","motivation":"one personal desire or worry","routine":"guard|patrol|work|forage|wander|rest","dialogue":["first encounter greeting or threat","remark about their work or this place","another short personal remark"]}]}.
+First decide per individual whether this is a Warrior or a Spellcaster. Warriors must use Fighter rules and empty spellPreferences; only Spellcasters choose a magical archetype. A Warrior never receives innate Magic, even if its flavorful title includes priestly or magical words.
+Keep flavorful custom class names, but choose exactly one combatArchetype that justifies their abilities. Fighters have no innate spells (charged equipment still works). Wizards use runes and force; Witches ritual, restoration and hexes; Sorcerers light-weave healing; Warlocks destructive dark weave; Necromancers bone and death; Clerics priestly healing and sanctuary. A scholar or guard is not automatically a caster. The engine fixes Magic, spellbooks, spell lists and level requirements; do not invent class mechanics or mixed archetypes.
+Choose spellPreferences individually from this archetype's catalog, suiting this character's methods, not identical choices for every caster. Fighter preferences must be empty. Unknown, cross-tradition and above-level spells are rejected by the engine; these are preferences, never a permission to bypass costs or slots. Supported catalogs: ${JSON.stringify(Object.fromEntries(SpellRules.archetypes.map(name => [name, SpellRules.catalog(name).map(id => ({ id, name: SpellRules.templates[id].name, level: SpellRules.templates[id].minLevel, cost: SpellRules.templates[id].cost, effect: SpellRules.templates[id].effect }))])))}.
+Produce one individual for every slot below. Each has a distinct name, race, occupation and voice. Names must not duplicate party members ${partyNames.join(', ') || 'None'} or existing residents ${usedNames.join(', ') || 'None'}. ${GeneratedNames.instructions}
 The engine assigns allegiances and separate encounter groups: ${JSON.stringify(slots)}.
 Neutrals have work or business of their own, tolerate looting and stand aside during combat. Friendlies help the party against hostiles; only recruited companions follow the player. Hostiles guard, patrol or hunt locally and threaten intruders, not the entire level at once.
 Make occupations fit the described room: ferrymen, grave masons, mourners, scavengers, custodians, traders, scholars, gardeners, miners, sentries or stranger underworld professions. Use the quest as context without inventing quest completion, new keys, rewards, exits or facts the speaker cannot know.
@@ -26,34 +40,56 @@ ${questSeed ? 'Slot 0 is the single NEUTRAL or FRIENDLY quest contact near the a
 Nearby hostiles confront intruders with threatening, scornful trash talk in their own distinct voices. A warning or taunt is dialogue, not an automatic attack or a combat outcome.
 Each dialogue line is at most 24 words. No combat stats, items, geometry, markdown or extra prose.`;
   await $.user`Each individual needs a UNIQUE short history and personality that suit their race, occupation and allegiance. History <=55 words. Connect it to a personal relationship, choice, regret or achievement, not an identical death story for everyone. Native creatures need not have been human or mortal. These are character background memories, not completed campaign events, current inventory, puzzle answers or privileged knowledge about the party.`;
-  const reply = await $.assistant.generation({ maxTokens: indoor ? 3200 : 6200 });
-  let rows = [];
+  let response = '', descriptors;
+  console.info('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'requested', slots: count, starting }));
   try {
-    const raw = String(reply?.content || '');
-    rows = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)).inhabitants;
-  } catch { console.warn('[RoomPopulation] Invalid inhabitant response; using bounded local residents.'); }
-  const used = new Set([...partyNames, ...usedNames, '__proto__', 'constructor', 'prototype'].map(name => String(name).toLowerCase()));
-  const descriptors = slots.map(slot => {
-    const raw = Array.isArray(rows) ? rows.find(row => Number(row?.slot) === slot.slot) : null;
-    let name = String(raw?.name || '').replace(/[:{}\[\]"<>\r\n]/g, '').trim().slice(0, 70);
-    if (!name || used.has(name.toLowerCase())) {
-      const base = `Ash ${slot.allegiance === 'Hostile' ? 'Warden' : 'Pilgrim'} ${Inhabitants.hash(geoKey + ':' + slot.slot).toString(36)}`;
-      name = base;
-      for (let suffix = 2; used.has(name.toLowerCase()); suffix++) name = `${base} ${suffix}`;
+    const reply = await $.assistant.generation({ maxTokens: indoor ? 3200 : 6200, strictParameters: true,
+      parameters: { inhabitants: Contracts.list({ slot: { type: Number, minimum: 0, maximum: count - 1 }, name: Contracts.text(70),
+        race: Contracts.text(55), class: Contracts.text(80), combatRole: Contracts.choice(['Warrior', 'Spellcaster']),
+        combatArchetype: Contracts.choice(SpellRules.archetypes), spellPreferences: [String],
+        job: Contracts.text(70), activity: Contracts.text(140), personality: Contracts.text(220), voice: Contracts.text(140),
+        history: Contracts.text(600), motivation: Contracts.text(180), routine: Contracts.choice(['guard', 'patrol', 'work', 'forage', 'wander', 'rest']),
+        dialogue: [String], allegiance: { ...Contracts.choice(['Friendly', 'Neutral', 'Hostile']), optional: true } }) } });
+    response = String(reply?.content || '').trim().replace(/^```(?:json)?\s*|\s*```$/gi, '');
+    const rows = JSON.parse(response).inhabitants;
+    if (!Array.isArray(rows) || rows.length !== count) throw Error(`Expected exactly ${count} inhabitants.`);
+    const used = new Set([...partyNames, ...usedNames, '__proto__', 'constructor', 'prototype'].map(name => String(name).toLowerCase()));
+    const bySlot = new Map();
+    for (const row of rows) {
+      if (!Number.isInteger(row?.slot) || !slots[row.slot] || bySlot.has(row.slot)) throw Error('Unknown or duplicate inhabitant slot: ' + String(row?.slot));
+      for (const field of ['name', 'race', 'class', 'job', 'activity', 'personality', 'voice', 'history', 'motivation'])
+        if (typeof row[field] !== 'string' || !row[field].trim()) throw Error(`Slot ${row.slot}.${field} must be nonempty text.`);
+      if (row.history.trim().split(/\s+/).length > 55) throw Error(`Slot ${row.slot}.history exceeds 55 words.`);
+      if (!Array.isArray(row.dialogue) || row.dialogue.length !== 3 || row.dialogue.some(line =>
+        typeof line !== 'string' || !line.trim() || line.trim().split(/\s+/).length > 24))
+        throw Error(`Slot ${row.slot}.dialogue requires three nonempty remarks, each at most 24 words.`);
+      if (!['Warrior', 'Spellcaster'].includes(row.combatRole) || !SpellRules.archetypes.includes(row.combatArchetype) || !Array.isArray(row.spellPreferences))
+        throw Error(`Slot ${row.slot} has an invalid combat role or archetype.`);
+      const name = GeneratedNames.clean(row.name).slice(0, 70).trim();
+      if (!name || used.has(name.toLowerCase()) || Pantheon.name(name)) throw Error(`Slot ${row.slot} has an empty, duplicate or reserved name: ${name}`);
+      used.add(name.toLowerCase());
+      bySlot.set(row.slot, { ...row, name });
     }
-    used.add(name.toLowerCase());
-    const allegiance = questSeed && slot.slot === 0 && raw?.allegiance === 'Friendly' ? 'Friendly' : slot.allegiance;
-    return { ...raw, ...slot, name, allegiance, state: allegiance,
-      dialogue: raw?.dialogue || [slot.allegiance === 'Hostile' ? 'Keep your hands away from our work, trespasser.' :
-        questSeed && slot.slot === 0 ? 'There is trouble on the road ahead. Ask me before you venture farther.' : 'There is still work to do, even here.'] };
-  });
-  const normalized = Inhabitants.normalizeDescriptors(descriptors, { limit: indoor ? 10 : 20, excluded: partyNames });
+    descriptors = slots.map(slot => {
+      const row = bySlot.get(slot.slot);
+      const allegiance = !hostileTemple && questSeed && slot.slot === 0 && row.allegiance === 'Friendly' ? 'Friendly' : slot.allegiance;
+      return { ...row, ...slot, allegiance, state: allegiance, profile: { name: row.name,
+        personality: row.personality, voice: row.voice, history: row.history, motivation: row.motivation, source: 'llm' } };
+    });
+  } catch (error) {
+    console.error('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'failed', reason: error.message, response: response.slice(0, 2000) }));
+    throw new Error(`Inhabitant generation failed in ${roomName}: ${error.message}`, { cause: error });
+  }
+  const normalized = Inhabitants.normalizeDescriptors(descriptors, { limit: starting ? 4 : indoor ? 10 : 20, starting, excluded: partyNames });
   const characters = [], equipment = [];
   for (const descriptor of normalized) {
-    const level = rules.level(), hp = Array.from({ length: level }, () => rules.random(1, 11)).reduce((a,b) => a+b, 0);
+    const level = rules.level(), hp = Array.from({ length: level }, () => rules.random(1, SpellRules.nativeHp[descriptor.combatArchetype] + 1)).reduce((a,b) => a+b, 0);
     const actor = { Name: descriptor.name, Sex: rules.sex(), Race: descriptor.race, Class: descriptor.className,
-      Level: level, AC: 10 + Math.floor(level / 10), XP: rules.xp(level), HP: hp, MaxHP: hp, State: descriptor.allegiance,
-      Equipped: { Weapon: null, Armor: null, Shield: null, Other: null }, Attack: 0, Damage: 0, Armor: 0, Magic: 0 };
+      Level: level, AC: 10 + Math.floor(level / 10), XP: rules.xp(level, descriptor.combatArchetype), HP: hp, MaxHP: hp, State: descriptor.allegiance,
+      Equipped: { Weapon: null, Armor: null, Shield: null, Other: null },
+      Attack: Math.floor(level / (descriptor.combatArchetype === 'Fighter' ? 2 : 4)),
+      Damage: descriptor.combatArchetype === 'Fighter' ? Math.floor(level / 3) : 0, Armor: 0,
+      Magic: SpellRules.classSettings(descriptor.className, level)?.capacity || 0 };
     // The larger cast shares one generation request; equipment retains the existing modifier rules.
     if (descriptor.allegiance === 'Hostile' && equipment.length < 4) {
       const item = await rules.equipment(actor);
@@ -62,11 +98,12 @@ Each dialogue line is at most 24 words. No combat stats, items, geometry, markdo
     characters.push(actor);
   }
   const sheets = characters.map(actor => `${actor.Name}\n      ${actor.Sex}\n      ${actor.Race}\n      ${actor.Class}\n      Level: ${actor.Level}\n      AC: ${actor.AC}\n      XP: ${actor.XP}\n      HP: ${actor.HP}\n      MaxHP: ${actor.MaxHP}\n      Equipped: ${Object.entries(actor.Equipped).map(([slot,item]) => `${slot}: ${item?.name || 'None'}`).join(', ')}\n      Attack: ${actor.Attack}\n      Damage: ${actor.Damage}\n      Armor: ${actor.Armor}\n      Magic: ${actor.Magic}\n      State: ${actor.State}`).join('\n');
-  const population = Inhabitants.createPopulation(geoKey, normalized, { indoor });
+  const population = Inhabitants.createPopulation(geoKey, normalized, { indoor, starting });
   Inhabitants.sync(population, Inhabitants.parseBlocks(sheets));
   if (questSeed && ['Neutral', 'Friendly'].includes(normalized[0]?.allegiance)) population.questIntroduction = {
     questId: String(Inhabitants.hash(String(quest).trim())), speaker: normalized[0].name, status: 'pending',
     hook: String(normalized[0].dialogue[0] || '').slice(0, 400) };
+  console.info('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'generated', names: normalized.map(actor => actor.name), starting }));
   return { population, sheets, equipment };
 }
 

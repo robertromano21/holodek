@@ -122,7 +122,9 @@ test('commits preserve partial puzzle outcomes as evidence, not completed quests
   assert.match(C.prompt(C.context(f.state, 'mirrors', f.text(), task)), /cannot override the CURRENT Game Console/);
 });
 test('origin profiles are stable, private, run-persistent memory metadata rather than sheet fields', () => {
-  const f = fixture(), events = [], profile = Profiles.create({ Name: 'Zharok', Race: 'Elf', Class: 'Mason' }, 'run');
+  const f = fixture(), events = [], profile = Profiles.create({ Name: 'Zharok', Race: 'Elf', Class: 'Mason',
+    personality: 'Patient and curious.', voice: 'Warm practical observations.',
+    history: 'Restored the old quarry bridge. Trained three apprentices.', motivation: 'Rebuild the bridge.' }, 'run');
   C.rememberProfiles(f.state, [profile], event => events.push(event));
   const before = JSON.stringify(C.exportRecords(f.state));
   f.setText(f.text().replace('Turns: 10', 'Turns: 11')); C.rememberProfiles(f.state, [profile]);
@@ -140,13 +142,39 @@ test('room history remains first-class retrieved evidence with its original room
   assert.equal(context.evidence[0].source, 'room-turn-narrative');
   assert.ok(JSON.stringify(context).length <= M.MAX_CONTEXT);
 });
-test('chatbotprocessinput preserves its baseline except travel detection, attack camera facing and unlock-label refresh', () => {
+
+test('pending and legacy template biographies are not archived as truth, and old archived templates can be upgraded', () => {
+  const f = fixture(), name = 'Zharok';
+  const legacy = { name, personality: 'Wary.', voice: 'Challenges easy answers.',
+    history: "Zharok's past is tied to a forgotten harbor. That memory still shapes how this individual treats strangers and obligations.",
+    motivation: 'Resolve the regret associated with a forgotten harbor, while avoiding another betrayal.' };
+  assert.deepEqual(C.rememberProfiles(f.state, [Profiles.create({ name }), legacy]), []);
+  C.add(f.state, [row(`profile:${M.hash(name)}`, legacy.history, { kind: 'biography', authority: 'background', actors: [name], witnesses: [name], profile: legacy })]);
+  const profile = Profiles.create({ name, personality: 'Patient.', voice: 'Warm observations.',
+    history: 'Restored the quarry bridge. Taught apprentices to carve.', motivation: 'Finish the memorial.' });
+  assert.equal(C.rememberProfiles(f.state, [profile]).length, 1);
+  assert.equal(C.exportRecords(f.state).length, 1);
+  assert.equal(C.context(f.state, 'Zharok', f.text()).profiles[0].background.history, profile.history);
+  assert.deepEqual(C.rememberProfiles(f.state, [{ ...profile, history: 'A different life.' }]), [], 'A real authored biography stays stable.');
+});
+test('chatbotprocessinput preserves its baseline except travel, camera, lock feedback and view-checked economy commands', () => {
   const source = fs.readFileSync('assets/game.js', 'utf8'), start = source.indexOf('async function chatbotprocessinput(');
   const end = start + 1 + source.slice(start + 1).search(/^(?:async )?function /m);
   const body = source.slice(start, end).replace('let validDirection = window.CommandIntent.travelDirection(userInput);',
     'let validDirection = validDirections.find(direction => userWords.includes(direction));')
     .replace(/^    const target=\/\^\\s\*attack.*\r?\n    if\(target\)window\.faceDungeonCombatTarget\?\.\(target\);\r?\n/m,'')
-    .replace(/^          refreshConsoleExitStatus\(\);\r?\n/m, '');
-  assert.equal(require('node:crypto').createHash('sha256').update(body).digest('hex'),
+    .replace(/^          refreshConsoleExitStatus\(\);\r?\n/m, '')
+    .replace(/^  const divineRefusal = window\.PantheonCharacters\?\.recruitmentRefusal[^\r\n]*\r?\n  if \(!completedStartResult && divineRefusal\)[^\r\n]*\r?\n/m, '')
+    .replace(/^  if \(!completedStartResult && \/\^\\s\*\(\?:take\|pick[\s\S]*?^  }\r?\n/m, '')
+    .replace(/^  if \(!completedStartResult && userInput && await window\.CommerceUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
+    .replace(/^  if \(!completedStartResult && userInput && await window\.SpellUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
+    .replace(/^  if \(window\._gameOver\)[^\r\n]*\r?\n/m, '')
+    .replace(/^([ \t]*)displayLocalCommandResult\(chatLog, chatHistory, userInput, msg\);/gm, (_, indent) => [
+      'updateChatLog(`<br><b>${msg}</b><br>`);',
+      'chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +',
+      '  "<br><br><b></b>" + msg.replace(/\\n/g, "<br>");', 'scrollToBottom();'
+    ].map(line => indent + line).join(source.includes('\r\n') ? '\r\n' : '\n'))
+    .replace('unlock door with <keyname>', 'unlock door with &lt;keyname&gt;');
+  assert.equal(require('node:crypto').createHash('sha256').update(body.replace(/if \(window\.DEBUG_LOGS\) (?=console\.log\()/g, '')).digest('hex'),
     '4e7cd886c605d1093585b51fe3399810656a6f440f5086bb0aa9f6e041e1dfc4');
 });

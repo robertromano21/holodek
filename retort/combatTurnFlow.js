@@ -1,14 +1,18 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
 const I = require('../assets/dungeonInhabitants');
+const Spells = require('./spellSystem');
+const Life = require('./combatLife');
 
 function create(dice, state) {
   return {
     round: 0, teams: null, pc: null, retreated: false,
     startRound() {
+      if (state.getRoomNameDatabase) { Spells.synchronize(state); Spells.advance(state); }
       this.round++; dice.results.clear(); dice.active.round = this.round; dice.publish();
     },
-    canContinue() { return !this.retreated && this.pc?.hp > 0 && this.teams?.hostiles.some(a => a.hp > 0); },
+    canContinue() { return !this.retreated && !(state.getRoomNameDatabase && Life.status(state).gameOver) &&
+      this.teams?.friends.some(I.canAct) && this.teams?.hostiles.some(I.canAct); },
     async initiative(actor) {
       const roll = await dice.roll({ actor: actor.name, label: 'Initiative' });
       return roll?.total ?? 0;
@@ -16,6 +20,8 @@ function create(dice, state) {
     prompt(combatant, targets, positions, allowRetreat = true) {
       const prompt = { type: 'target_prompt', actionId: dice.active.id, turnId: randomUUID(), round: this.round,
         combatant: combatant.name, targets: targets.map(a => a.name), positions, allowRetreat,
+        spells: state.getRoomNameDatabase ? Spells.choices(state, combatant.name, targets.map(a => a.name)) : [],
+        care: state.getRoomNameDatabase ? Life.careChoices(state, combatant.name) : [],
         initiative: this.teams.combatants.filter(a => a.hp > 0).map(a => ({ name: a.name, roll: a.initiative })).sort((a, b) => b.roll - a.roll) };
       dice.active.turn = prompt; dice.publish(); return prompt;
     },
@@ -28,14 +34,34 @@ function create(dice, state) {
 // Re-evaluate after every strike so another enemy cannot choose a just-killed party member.
 function opportunityTargets(attacker, party, space) {
   if (attacker.hp <= 0 || I.allegiance(attacker) !== 'Hostile') return [];
-  return party.filter(actor => actor.hp > 0 && (actor.type === 'pc' || actor.type === 'npc') &&
-    (space ? space.canAttack(attacker, actor) : Number.isFinite(attacker.x) && Number.isFinite(actor.x) &&
+  return party.filter(actor => I.isAlive(actor) && (actor.type === 'pc' || actor.type === 'npc') &&
+    (space ? (space.canStrike || space.canAttack)(attacker, actor) : Number.isFinite(attacker.x) && Number.isFinite(actor.x) &&
       Math.hypot(attacker.x - actor.x, attacker.y - actor.y) <= 1.5));
+}
+
+function turnPath(space, actor, source, roster, maxSteps = 2) {
+  const at = space?.point(actor), from = space?.point(source); if (!at || !from) return [];
+  const occupied = new Set(roster.filter(a => a.name !== actor.name && (a.hp ?? 1) > 0 && space.point(a)).map(a => {
+    const p = space.point(a); return `${Math.floor(p.x)},${Math.floor(p.y)}`;
+  }));
+  const distance = p => Math.hypot(p.x + .5 - from.x, p.y + .5 - from.y);
+  const start = { x: Math.floor(at.x), y: Math.floor(at.y), path: [] }, queue = [start], seen = new Set([`${start.x},${start.y}`]);
+  let best = start;
+  for (let i = 0; i < queue.length && i < 128; i++) {
+    const current = queue[i]; if (current.path.length >= maxSteps) continue;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const next = { x: current.x + dx, y: current.y + dy }, key = `${next.x},${next.y}`;
+      if (seen.has(key) || occupied.has(key) || distance(next) <= distance(current) || !I.canTraverse(space.dungeon, current, next)) continue;
+      seen.add(key); const entry = { ...next, path: [...current.path, next] }; queue.push(entry);
+      if (distance(entry) > distance(best)) best = entry;
+    }
+  }
+  return best.path;
 }
 
 function escapePaths(space, party, hostiles, roster, maxSteps = 4) {
   if (!space) return null;
-  const pc = party.find(a => a.type === 'pc' && a.hp > 0), p = pc && space.point(pc);
+  const pc = party.find(a => a.type === 'pc' && I.canAct(a)) || party.find(I.canAct), p = pc && space.point(pc);
   if (!p) return null;
   const occupied = new Set(roster.filter(a => (a.hp ?? 1) > 0 && space.point(a)).map(a => {
     const at = space.point(a); return `${Math.floor(at.x)},${Math.floor(at.y)}`;
@@ -63,7 +89,7 @@ function escapePaths(space, party, hostiles, roster, maxSteps = 4) {
     const reserved = new Set(occupied), plans = [{ actor: pc, path: landing.path }];
     occupied.delete(`${initial.x},${initial.y}`); occupied.add(`${landing.x},${landing.y}`);
     let fits = true;
-    for (const companion of party.filter(a => a !== pc && a.hp > 0)) {
+    for (const companion of party.filter(a => a !== pc && I.isAlive(a))) {
       const at = space.point(companion); if (!at) { fits = false; break; }
       const available = routes(companion, maxSteps + 4).filter(tile => Math.hypot(tile.x - landing.x, tile.y - landing.y) <= 3)
         .sort((a, b) => a.path.length - b.path.length || danger(b) - danger(a));
@@ -76,4 +102,4 @@ function escapePaths(space, party, hostiles, roster, maxSteps = 4) {
   }
   return null;
 }
-module.exports = { create, opportunityTargets, escapePaths };
+module.exports = { create, opportunityTargets, escapePaths, turnPath };

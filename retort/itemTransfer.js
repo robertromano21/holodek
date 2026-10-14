@@ -44,10 +44,11 @@ function give(state, service, input) {
   const bound = bindings.find(b => key(b.item) === key(name) && b.coords === geoKey &&
     key(Q.deliveryRecipient(task, database, b).name) === key(recipient.name));
   const questHandoff = task?.status !== 'Completed' && !!bound;
+  const magicFailure = questHandoff && bound.minimumMagic > 0 && Number(metadata.magic || 0) < bound.minimumMagic;
   const receipt = { id: randomUUID(), source: 'engine-give-item-v1', item: questHandoff ? bound.item : name,
     recipient: questHandoff ? bound.recipient : recipient.name, giver: pc.name, roomKey: geoKey,
     ...(questHandoff && bound.recipient !== recipient.name ? { acceptedBy: recipient.name, successorId: record.deliverySuccessorId } : {}),
-    at: Date.now(), taskBinding: questHandoff ? Q.taskBinding(task) : null };
+    at: Date.now(), magic: Number(metadata.magic) || 0, taskBinding: questHandoff ? Q.taskBinding(task) : null };
   names.splice(index, 1);
   text = setField(text, 'Inventory', names.join(', ') || 'Empty');
   text = setField(text, 'Inventory Properties', properties.filter(item => names.some(n => key(n) === key(item.name))).map(item => JSON.stringify(item)).join(', ') || 'None');
@@ -56,6 +57,11 @@ function give(state, service, input) {
   database[geoKey].itemTransfers ||= []; database[geoKey].itemTransfers.push(receipt);
   database[geoKey].inhabitants = population;
   state.setRoomNameDatabase(JSON.stringify(database)); state.setUpdatedGameConsole(text); service.save(population);
+  if (magicFailure) {
+    require('./questFailure').itemDestroyed(state, name, 'Delivered item has no required Magic remaining');
+    text = state.getUpdatedGameConsole();
+    return { ...result(`You give ${name} to ${recipient.name}, but the task fails: the requested Magic is gone. A harder alternative will be staged.`), population };
+  }
   if (questHandoff) {
     const assessment = Q.evaluateTaskRequirements(task, { roomKey: geoKey, consoleText: text, database });
     task.progress = Q.mergeTaskProgress(task.progress, assessment);

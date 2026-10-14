@@ -242,6 +242,16 @@
   function renderItemPixels(item, opts) {
     const o = opts || {}; const scale = Math.max(1, o.scale | 0 || 2); const look = itemLook(item); look.name = String(item && item.name || '').toLowerCase();
     const b = new Buf(); drawKind(b, look); outline(b);
+    if (o.world) {
+      // A lit silhouette rim survives against sand/stone; inventory artwork stays unchanged.
+      const source = b.c.slice();
+      for (let y = 1; y < G - 1; y++) for (let x = 1; x < G - 1; x++) {
+        const i = y * G + x, c = source[i];
+        if (!c || Math.max(...c) > 65) continue;
+        if (!source[i - G] || !source[i - 1]) b.c[i] = [204, 186, 140];
+        else if (!source[i + G] || !source[i + 1]) b.c[i] = [75, 65, 53];
+      }
+    }
     const S = G * scale; const data = new Uint8ClampedArray(S * S * 4);
     if (look.glow) {
       const gc = rgb(look.glow); const strength = Math.min(1, 0.35 + look.magic * 0.15);
@@ -283,6 +293,9 @@
     return img.complete && img.naturalWidth > 0 ? img : null;
   }
   function normName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+  function worldHeight(distance) {
+    return 0.55 + Math.min(0.35, Math.max(0, Number(distance) - 3 || 0) * 0.035);
+  }
   /** Parse "Objects in Room:" (+ Properties) from a game-console string into [{name,type,magic}]. */
   function parseRoomObjects(consoleText) {
     const t = String(consoleText || '');
@@ -290,8 +303,13 @@
     if (!m) return null;
     const names = m[1].split(/,\s*/).map((s) => s.trim()).filter((s) => s && !/^none\.?$/i.test(s) && s.toLowerCase() !== 'nothing');
     const props = {}; const pm = t.match(/Objects in Room Properties:[ \t]*([^\n]*)/);
-    if (pm) { const re = /\{([^}]*)\}/g; let q; while ((q = re.exec(pm[1]))) { const body = q[1]; const nm = (body.match(/name:\s*"([^"]+)"/) || [])[1]; if (!nm) continue; props[normName(nm)] = { type: (body.match(/type:\s*"([^"]*)"/) || [])[1] || '', magic: +((body.match(/magic:\s*(-?\d+)/) || [])[1] || 0) }; } }
+    if (pm) { const re = /\{([^}]*)\}/g; let q; while ((q = re.exec(pm[1]))) {
+      let item; try { item = JSON.parse(q[0]); } catch {}
+      if (item?.name) { props[normName(item.name)] = item; continue; }
+      const body = q[1], nm = (body.match(/name:\s*"([^"]+)"/) || [])[1]; if (!nm) continue;
+      props[normName(nm)] = { type: (body.match(/type:\s*"([^"]*)"/) || [])[1] || '', magic: +((body.match(/magic:\s*(-?\d+)/) || [])[1] || 0) };
+    } }
     return names.map((n) => ({ name: n, type: (props[normName(n)] || {}).type || '', magic: (props[normName(n)] || {}).magic || 0 }));
   }
-  return { renderItemPixels, createItemCanvas, getItemImage, itemKind, itemLook, parseRoomObjects, normName, GRID: G };
+  return { renderItemPixels, createItemCanvas, getItemImage, itemKind, itemLook, parseRoomObjects, normName, worldHeight, GRID: G };
 });

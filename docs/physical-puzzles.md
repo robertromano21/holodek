@@ -15,3 +15,29 @@ The legacy text-puzzle adjudicator still supports discovered items/exits and a o
 Construction checks every component, visual variant, and reachable operating position. Controls are placed after architecture and decoration, away from exits, items and reserved geometry. A new indoor layout can gain a small workshop recess in plain unreserved masonry if its corridors offer no safe site. An incomplete mechanism is rejected rather than becoming a narrated but unsolvable quest obstacle. Companions are prompted to offer observations only when asked for hints, never unsolicited solution sequences.
 
 Logs: `[PuzzleDesign]`, `[PuzzleDesignBound]`, `[PuzzleConstruction]`, `[PuzzleAction]`, `[PuzzleResolution]`, `[AdjudicationApplied]`. Isolated Environment Lab exhibits `puzzle_buttons`, `puzzle_dials`, and `puzzle_channels` exercise the production geometry and mouse controls without modifying a campaign or calling an LLM.
+
+## Generation Contract Audit
+
+The October 14 run at 19:08 UTC attempted an authored "Welcome Winch" twice,
+then installed a validated fallback. Its context strings were 374 and 465
+characters (maximum 300); lore was 357 and 335 (maximum 320). Artwork also used
+`name` instead of required `label`, omitted `description` and `motifs`, and sent
+an array for the single `pigments` palette. The generic rejection did not tell
+the model what to repair. Replaying both responses with decorative metadata
+removed and short audit-only prose confirms that their original controls and
+linkages validate and each solves in two lever pulls. The full authored designs
+were still invalid: this isolated audit does not install or accept them.
+
+The prompt now explicitly specifies these limits and a valid minimal artwork
+example, with a final schema reminder. Duplicate art/sculpture enum tables are
+referenced once rather than repeated, retaining the original bounded prompt
+budget and complete canonical choices. Validators retain strict rejection but
+identify the offending fields. Each failed attempt emits a bounded
+`[PuzzleDesignAttempt]` diagnostic; final `[PuzzleDesign]` still distinguishes
+`generated` from `validated-fallback`. There are still at most two attempts,
+and the fallback remains engine-validated. Existing rooms are not regenerated.
+
+Offline contract tests reproduce the logged failures and verify actionable
+retry feedback, acceptance of corrected authored metadata and a solvable
+fallback. A fresh live room generation is still needed to measure model
+compliance after restart; no paid model request is made by these tests.

@@ -71,6 +71,19 @@ test('search and chapter reads return stable authored contents; only the bound c
   assert.equal(JSON.stringify(f.database),before);assert.equal(second.metadata.result,'observed');
   assert.equal(prepare({...f.args,input:'read chapter 99 of '+name}).allowed,false);
 });
+test('ground documents use their outdoor encounter placement rather than their original seed',()=>{
+  const f=fixture(),name=f.p.readables[0].name,input='read '+name;
+  Object.assign(f.dungeon.sceneObjects[0],{x:8,y:8});
+  f.room.inhabitants={travelDiscovery:{objects:{[name]:{status:'placed',x:3,y:2}}}};
+  const before=JSON.stringify(f.database);
+  assert.equal(prepare({...f.args,input}).allowed,true);
+  assert.equal(JSON.stringify(f.database),before,'Reading does not mutate saved discovery placements.');
+  for(const status of ['pending','exhausted']){
+    f.room.inhabitants.travelDiscovery.objects[name].status=status;
+    assert.equal(prepare({...f.args,input}).allowed,false);
+  }
+});
+
 test('dead remote obscured taken and unowned documents cannot reveal their contents',()=>{
   const f=fixture(),input='read '+f.p.readables[0].name;
   assert.equal(prepare({...f.args,input,actor:{...f.actor,hp:0}}).allowed,false);

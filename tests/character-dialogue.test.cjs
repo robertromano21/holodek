@@ -50,6 +50,34 @@ function agent(result=reply) {
       (result.spoken || []).map(row=>`${row.speaker}: "${row.line}"`).join('\n\n') + ` [[CHARACTER_DIALOGUE]]${json}[[/CHARACTER_DIALOGUE]]` : json};
   }}};
 }
+
+for (const invalid of [false, true]) test(`actual story pipeline ${invalid ? 'stops on malformed biography JSON' : 'authors missing residents before their first dialogue'}`, async () => {
+  const f = fixture(), a = agent(), names = f.actors.filter(actor => actor.type !== 'pc').map(actor => actor.name);
+  const biographyPrompts = []; let biographies = 0, saves = 0;
+  const bio = { user: (parts, ...values) => biographyPrompts.push(typeof parts === 'string' ? parts : String.raw({ raw: parts }, ...values)),
+    assistant: { generation: async () => { biographies++; return { content: invalid ? '{broken' : JSON.stringify({ profiles: names.map(name => ({ name,
+      personality: 'Patient and curious.', voice: 'Warm practical observations.', history: `Repaired the memorial at ${name}'s crossing. Taught apprentices.`, motivation: 'Rebuild the bridge.' })) }) }; } } };
+  a.run = work => work(bio);
+  f.state.setCombatCharactersString = value => f.actors.splice(0, f.actors.length, ...JSON.parse(value));
+  const sandbox = { CharacterAuthorship: require('../retort/characterProfiles'), Inhabitants: I, DialogueMemory: Memory, JourneyMemory,
+    generateCharacterDialogue, describeCharacters, sharedState: f.state, $: a, enteringRoom: true,
+    geoCoords: { x: 1, y: 0, z: 0 }, geoKey: f.d.geoKey, updatedGameConsole: f.state.getUpdatedGameConsole(),
+    roomName: 'Hall of Bells', roomDescription: 'A carved hall.', autoMax: 850, spoken: { dialogue: [], replies: [] },
+    populationService: { prepare: () => f.p, save: () => saves++ }, console: { info() {}, warn() {} } };
+  const run = () => vm.runInNewContext(`(async()=>{${entryCode}\nreturn {response};})()`, sandbox);
+  if (invalid) {
+    await assert.rejects(run(), /Character history generation failed/);
+    assert.equal(a.requests.length, 0); assert.equal(saves, 0); assert.equal(f.p.actors['Near Mason'].profile.history, '');
+  } else {
+    await run();
+    assert.equal(a.requests.length, 1); assert.equal(saves, 1);
+    assert.match(f.p.actors['Near Mason'].profile.history, /memorial/);
+    assert.match(f.actors.find(row => row.name === 'Near Mason').originProfile.history, /memorial/);
+    await run();
+    assert.equal(biographies, 1, 'Revisits do not invent a new past.');
+  }
+  assert.equal(biographies, 1);
+});
 test('entry perception includes companions and genuinely nearby residents, not distant or occluded guards',()=>{
   const f=fixture(),v=I.perceive(f.d,f.actors,f.p,true);
   assert.deepEqual(v.nearby.map(a=>a.name),['Companion','Near Mason']);
@@ -59,9 +87,10 @@ test('entry perception includes companions and genuinely nearby residents, not d
 
 for (const entry of [true, false]) test(`${entry ? 'entry' : 'ordinary turn'} keeps visible but nonconversational residents out of spoken dialogue`, async () => {
   const f = fixture(), a = agent({ spoken: [{ speaker: 'Near Mason', line: 'A whisper from several paces away.' }], replies: [] });
-  f.actors.find(a => a.name === 'Near Mason').mazeX = 8;
+  f.d.classification.indoor = f.p.indoor = false;
+  f.actors.find(a => a.name === 'Near Mason').mazeX = 15;
   const perception = I.perceive(f.d, f.actors, f.p, entry);
-  assert.ok(perception.nearby.some(a => a.name === 'Near Mason'), 'Still visible at four tiles');
+  assert.ok(perception.nearby.some(a => a.name === 'Near Mason'), 'Visible outdoors at eleven tiles, outside the ten-tile dialogue range');
   assert.ok(!perception.conversational.some(a => a.name === 'Near Mason'));
   const context = { Inhabitants: I, DialogueMemory: Memory, JourneyMemory, generateCharacterDialogue, describeCharacters, sharedState: f.state,
     geoCoords: { x: 1, y: 0, z: 0 }, geoKey: f.d.geoKey, enteringRoom: entry, updatedGameConsole: f.state.getUpdatedGameConsole(),

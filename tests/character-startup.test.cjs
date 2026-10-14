@@ -286,13 +286,15 @@ test('real room/puzzle helper accepts missing monsters using Retort template val
     ...require('../retort/worldContext'),
     ...require('../retort/environmentIntents'),
     ...require('../retort/bossGate'),
+    Economy: require('../retort/economy'),
     ReadableItems:require('../assets/readableItems'),LivingEnvironments: require('../assets/physicalPuzzles'), generatePhysicalPuzzleDesign: require('../retort/physicalPuzzleDesign').generateDesign,
     coordinatesToString: c => `${c.x},${c.y},${c.z}`,
     generateDefaultClassification: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
     classifyDungeon: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
     generateRoomObjects: async () => [], applyLevelAndHpAdjustments: value => value,
     generateMonstersForRoomUsingGPT: async () => {},
-    sharedState: { setRoomNameDatabase() {}, setUpdatedGameConsole() {}, getCurrentTasks: () => [], getLastQuestUpdate: () => '', getDungeonRunId: () => 'startup' }
+    CharacterAuthorship: require('../retort/characterProfiles'),
+    sharedState: { getRoomNameDatabase: () => context.roomNameDatabaseString, setRoomNameDatabase() {}, setUpdatedGameConsole() {}, getCurrentTasks: () => [], getLastQuestUpdate: () => '', getDungeonRunId: () => 'startup' }
   };
   vm.runInNewContext(fn, context);
   assert.equal(await context.generateMissingRoomDetails(agent), true);
@@ -317,10 +319,12 @@ function roomPopulationHarness(room, database = {}, options = {}) {
   };
   const agent = { user: tag, assistant, run: callback => callback(agent) };
   const context = {
+    CharacterAuthorship: require('../retort/characterProfiles'),
     console: { ...quiet, info: (...args) => logs.push(args) }, updatedGameConsole: room, roomNameDatabaseString: JSON.stringify(database),
     gameConsoleForPerception: () => Inhabitants.perceivedConsole(context.updatedGameConsole, []),
     parseSheets, Math: Object.assign(Object.create(Math), { random: options.random || Math.random }),
     ...require('../retort/worldContext'), ...require('../retort/environmentIntents'), ...require('../retort/bossGate'),
+    Economy: require('../retort/economy'),
     ReadableItems:require('../assets/readableItems'),LivingEnvironments: require('../assets/physicalPuzzles'), generatePhysicalPuzzleDesign: require('../retort/physicalPuzzleDesign').generateDesign,
     coordinatesToString: c => `${c.x},${c.y},${c.z}`,
     generateDefaultClassification: async () => ({ indoor: true, size: 32, biome: 'temple', features: [] }),
@@ -332,12 +336,62 @@ function roomPopulationHarness(room, database = {}, options = {}) {
       calls.push('monsters');
       context.updatedGameConsole = context.updatedGameConsole.replace(/^Monsters in Room:[^\n]*/m, 'Monsters in Room: Ash Sentinel');
     },
-    sharedState: { setRoomNameDatabase(value) { context.committedRooms = value; }, setUpdatedGameConsole(value) { calls.push('console'); context.committedConsole = value; },
+    sharedState: { getRoomNameDatabase: () => context.committedRooms || context.roomNameDatabaseString,
+      setRoomNameDatabase(value) { context.committedRooms = value; }, setUpdatedGameConsole(value) { calls.push('console'); context.committedConsole = value; },
       getCurrentTasks: () => [], getLastQuestUpdate: () => '', getDungeonRunId: () => 'startup' }
   };
   vm.runInNewContext(fn, context);
   return { context, calls, logs, prompts, run: () => context.generateMissingRoomDetails(agent) };
 }
+
+test('metadata-only starting skeleton cannot inherit a random outdoor classification', async () => {
+  const room = buildInitialWorldConsole().console.replace(/^Exits:.*$/m, 'Exits: east, west');
+  const economy = { silver: 6, runId: 'run', receipts: [] }, campaignAtlas = { regions: ['region'], source: 'saved-plan' };
+  const f = roomPopulationHarness(room, { '0,0,0': { economy, campaignAtlas } });
+  f.context.generateDefaultClassification = async () => ({ indoor: false, biome: 'wasteland', features: ['dunes'], size: 32 });
+  f.context.classifyDungeon = async () => ({ indoor: false, biome: 'wasteland' });
+  assert.equal(await f.run(), true);
+  const db = JSON.parse(f.context.committedRooms), root = db['0,0,0'];
+  assert.equal(root.indoor, true); assert.equal(root.isIndoor, true); assert.equal(root.isOutdoor, false);
+  assert.equal(root.classification.indoor, true); assert.equal(root.classification.biome, 'temple');
+  assert.deepEqual(root.economy, economy); assert.deepEqual(root.campaignAtlas, campaignAtlas);
+  assert.equal(db['1,0,0'].indoor, false, 'The first exit still leads outdoors, not the starting room');
+  assert.equal(db['-1,0,0'].indoor, true, 'Other initial exits lead deeper into the temple');
+  assert.ok(f.prompts.some(p => p.includes('[START-ROOM]') && p.includes('INDOOR temple chamber')));
+});
+
+test('contradictory saved starting flags are corrected without changing quests, contents or lighting', async () => {
+  const room = buildInitialWorldConsole().console.replace(/^Adjacent Rooms:.*$/m, 'Adjacent Rooms: north: Ash Court, down: Old Crypt');
+  const original = { name: 'Ruined Temple Entrance', populationComplete: true, indoor: false, isIndoor: true, isOutdoor: false,
+    classification: { indoor: false, biome: 'wasteland', size: 32, features: ['pillars'], floorColor: '#442200', wallColor: '#8B4513' },
+    lighting: { intensity: .25 }, objects: [{ name: 'quest relic' }], economy: { silver: 6 },
+    exits: { north: { status: 'open', targetCoordinates: '0,1,0' }, down: { status: 'locked', targetCoordinates: '0,0,-1', key: 'old key' } } };
+  const neighbor = { name: 'Ash Court', indoor: false, isIndoor: false, isOutdoor: true, classification: { indoor: false, biome: 'wasteland' }, objects: [] };
+  const crypt = { name: 'Old Crypt', indoor: true, isIndoor: true, isOutdoor: false, classification: { indoor: true, biome: 'crypt' }, objects: [] };
+  const f = roomPopulationHarness(room, { '0,0,0': original, '0,1,0': neighbor, '0,0,-1': crypt });
+  assert.equal(await f.run(), false);
+  const db = JSON.parse(f.context.committedRooms), root = db['0,0,0'];
+  assert.deepEqual(root.classification, { ...original.classification, indoor: true, biome: 'temple' });
+  assert.equal(root.indoor, true); assert.equal(root.isIndoor, true); assert.equal(root.isOutdoor, false);
+  for (const label of ['objects', 'exits', 'economy', 'lighting']) assert.deepEqual(root[label], original[label]);
+  assert.equal(root.populationComplete, true); assert.deepEqual(db['0,1,0'], neighbor); assert.deepEqual(db['0,0,-1'], crypt);
+  assert.ok(!f.calls.some(call => call.startsWith('text:')), 'A saved room does not repopulate or rewrite its description');
+});
+
+test('production and test builders reject outdoor overrides specifically for the starting temple', () => {
+  const source = read('retort/retortWithUserInput.js');
+  assert.equal((source.match(/let forcedIndoor = geoKeyString === '0,0,0' \? true : null;/g) || []).length, 2);
+  assert.equal((source.match(/if \(geoKey === '0,0,0'\) \{ sceneSpec.indoor = true; sceneSpec.biome = 'temple'; \}/g) || []).length, 2);
+  const start = source.indexOf('// Final room-entry decision'), end = source.indexOf('if (isNewGeoRoom && roomDescription && !isAutoSimAdvance)', start);
+  const gate = source.slice(start, end), text = buildInitialWorldConsole().console, input = sceneInputFromConsole(text), logs = [];
+  const context = { geoKey: '0,0,0', geoCoords: { x: 0, y: 0, z: 0 }, lastGeoKey: '0,0,0', isFirstTurn: false,
+    isAutoSimAdvance: false, updatedGameConsole: text, roomDescription: input.description, sceneInputFromConsole,
+    console: { ...quiet, info: (...args) => logs.push(args) },
+    sharedState: { getRoomDungeon: () => ({ classification: { indoor: false }, sceneSpec: { indoor: false, source: input }, cells: {}, layout: {} }) } };
+  vm.runInNewContext(gate, context);
+  assert.equal(JSON.parse(logs[0][1]).staleRoomDungeon, true);
+  assert.equal(JSON.parse(logs[0][1]).build, true);
+});
 
 test('one-exit startup with Adjacent Rooms: None runs the complete existing population pipeline', async () => {
   const room = buildInitialWorldConsole().console.replace(/^Exits:.*$/m, 'Exits: east');
@@ -348,10 +402,14 @@ test('one-exit startup with Adjacent Rooms: None runs the complete existing popu
   assert.match(context.committedConsole, /name: "ashen sword", type: "weapon", attack_modifier: 2, damage_modifier: 3/);
   assert.match(context.committedConsole, /^Monsters in Room: Ash Sentinel$/m);
   assert.match(context.committedConsole, /^Adjacent Rooms: east: Ashen Court$/m);
-  assert.match(context.committedConsole, /^Puzzle in Room: An ancient /m);
+  assert.match(context.committedConsole, /^Puzzle in Room: In Ruined Temple Entrance, an ancient mechanism /m);
   assert.match(context.committedConsole, /^Puzzle Solution: (Set|Press|Strike|Pull)/m);
   assert.equal(JSON.parse(context.roomNameDatabaseString)['1,0,0'].name, 'Ashen Court');
   assert.equal(JSON.parse(context.committedRooms)['0,0,0'].populationComplete, true);
+  const stored = JSON.parse(context.committedRooms)['0,0,0'];
+  assert.equal(stored.groundInventoryVersion, 1);
+  assert.deepEqual(stored.objects.map(o => o.name), ['ashen sword', 'chronicle of ruined temple entrance', 'keepers scroll of ruined temple entrance']);
+  assert.equal(stored.objects[0].damage_modifier, 3, 'Generated weapon modifiers survive the final puzzle snapshot');
   assert.ok(prompts.some(prompt => prompt.includes('You must store the following words into memory:')));
 });
 
@@ -633,6 +691,7 @@ test('server startup seeds a complete world and releases its lock after a task e
   const context = {
     app: { post: (url, handler) => routes.set(url, handler) }, inputTaskInFlight: false, tasks,
     console: quiet, broadcast() {}, roomDatabaseReceiver: { reset() {} }, buildInitialWorldConsole, buildInitialGameConsole,
+    Economy: { start() {}, refresh() {} },
     actionDice: { end() { values.diceEnded = true; }, setPaused(value) { assert.equal(value, false); } },
     sharedState: {
       getCombatMode: () => 'Combat Map-Based', beginDungeonRun: () => 'new-run', setCurrentPC() {},

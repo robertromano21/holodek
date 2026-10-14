@@ -2,14 +2,15 @@
   'use strict';
   const VERSION = 1;
   const DIALOGUE_REFRESH_MS = 5 * 60 * 1000;
-  const MONSTER_DIALOGUE_RANGE = 3;
+  const MONSTER_DIALOGUE_RANGE = 10;
   const COMPANION_DIALOGUE_RANGE = 8;
   const MAX_SPEECH_LENGTH = 24000;
   const collision = typeof module !== 'undefined' && module.exports ? require('./voxelCollision') : root.VoxelCollision;
   const Profiles = typeof module !== 'undefined' && module.exports ? require('./characterProfiles') : root.CharacterProfiles;
+  const SpellRules = typeof module !== 'undefined' && module.exports ? require('./spellRules') : root.SpellRules;
   const Audience = typeof module !== 'undefined' && module.exports ? require('./dialogueAudience') : root.DialogueAudience;
   const ALLEGIANCES = ['Friendly', 'Neutral', 'Hostile'];
-  const STATES = [...ALLEGIANCES, 'Dead'];
+  const STATES = [...ALLEGIANCES, 'Unconscious', 'Dying', 'Dead'];
   const ROUTINES = ['guard', 'patrol', 'work', 'forage', 'wander', 'rest'];
   const EQUIPMENT_SLOTS = ['Weapon', 'Armor', 'Shield', 'Other'];
   function equipmentName(value) {
@@ -56,7 +57,9 @@
       if (!name || !['weapon', 'armor', 'shield', 'other', 'key'].includes(type)) return [];
       const fields = ['attack_modifier', 'damage_modifier', 'ac', 'magic'];
       if (fields.some(field => typeof item[field] !== 'number' || !Number.isFinite(item[field]))) return [];
-      return [{ name, type, ...Object.fromEntries(fields.map(field => [field, item[field]])) }];
+      const extra = ['spell_item_id', 'magic_capacity', 'quest_artifact', 'artifact_recharge_turns', 'consumable_kind', 'spell_scroll', 'spell_class', 'spell_min_level', 'class_spellbook', 'readable_kind', 'owner', 'slot', 'description'];
+      return [{ name, type, ...Object.fromEntries(fields.map(field => [field, item[field]])),
+        ...Object.fromEntries(extra.filter(k => ['string', 'number', 'boolean'].includes(typeof item[k])).map(k => [k, item[k]])) }];
     });
   }
   const keyOf = name => String(name || '').trim().toLowerCase();
@@ -72,11 +75,16 @@
   }
   function state(actor, fallback = 'Neutral') {
     const hp = actor?.hp ?? actor?.HP;
+    const stored = actor?.state ?? actor?.State;
+    if (Number(hp) <= 0 && /^(unconscious|dying)$/i.test(String(stored)) && actor?.status !== 'dead') return /^dying$/i.test(stored) ? 'Dying' : 'Unconscious';
     if (hp !== undefined && Number.isFinite(Number(hp)) && Number(hp) <= 0) return 'Dead';
     if (actor?.type === 'pc') return 'Alive';
     if (keyOf(actor?.state ?? actor?.State) === 'dead' || actor?.status === 'dead') return 'Dead';
     return allegiance(actor, fallback);
   }
+  const isDown = actor => ['Unconscious', 'Dying'].includes(state(actor));
+  const isAlive = actor => !!actor && state(actor) !== 'Dead';
+  const canAct = actor => isAlive(actor) && !isDown(actor) && (actor.hp ?? actor.HP ?? 1) > 0;
   function isPresent(actor, population = null) {
     if (!actor || state(actor) === 'Dead') return false;
     const record = actor.type === 'monster' ? population?.actors?.[actor.name || actor.Name] : null;
@@ -107,11 +115,11 @@
       if (!/^Level:\s*\d+$/i.test(lines[i + 4]) || !/^Magic:/i.test(lines[i + 13])) continue;
       const read = n => Number(lines[i + n].split(':')[1]) || 0;
       const stateLine = /^State:\s*(\w+)\s*$/i.exec(lines[i + 14] || '');
-      const storedState = (type === 'pc' ? ['Alive', 'Dead'] : STATES).find(s => keyOf(s) === keyOf(stateLine?.[1]));
+      const storedState = (type === 'pc' ? ['Alive', 'Unconscious', 'Dying', 'Dead'] : STATES).find(s => keyOf(s) === keyOf(stateLine?.[1]));
       const length = stateLine ? 15 : 14;
       result.push({ name: lines[i].replace(/^Name:\s*/i, ''), type, sex: lines[i + 1], race: lines[i + 2], className: lines[i + 3],
         level: read(4), ac: read(5), xp: read(6), hp: read(7), maxHp: read(8), attack: read(10), damage: read(11),
-        armor: read(12), magic: read(13), ...(read(7) <= 0 ? { state: 'Dead' } : storedState ? { state: storedState } : {}),
+        armor: read(12), magic: read(13), ...(read(7) <= 0 ? { state: ['Unconscious', 'Dying'].includes(storedState) ? storedState : 'Dead' } : storedState ? { state: storedState } : {}),
         storedState, lines: lines.slice(i, i + length), sheet: lines.slice(i, i + length).join('\n'),
         rawSheet: raw.slice(rows[i].index, rows[i + length - 1].index + 1).join(String(block).includes('\r\n') ? '\r\n' : '\n'),
         magicIndex: rows[i + 13].index, stateIndex: stateLine ? rows[i + 14].index : null });
@@ -158,7 +166,7 @@
         const eol = block.includes('\r\n') ? '\r\n' : '\n', raw = block.split(/\r?\n/);
         for (const actor of parseBlocks(block, type).reverse()) {
           const record = type === 'monster' ? records.get(keyOf(actor.name)) : null;
-          const next = state({ ...actor, state: record?.allegiance || actor.state }, fallback);
+          const next = state({ ...actor, state: isDown(actor) ? actor.state : isDown(record) ? record.state : record?.allegiance || actor.state }, fallback);
           const indent = raw[actor.magicIndex].match(/^[ \t]*/)[0] || '      ';
           if (actor.stateIndex !== null) raw[actor.stateIndex] = `${indent}State: ${next}`;
           else raw.splice(actor.magicIndex + 1, 0, `${indent}State: ${next}`);
@@ -177,11 +185,17 @@
       if (!name || ['__proto__', 'constructor', 'prototype'].includes(keyOf(name)) || used.has(keyOf(name)) || used.size >= excluded.length + limit) return [];
       used.add(keyOf(name));
       const state = starting ? 'Friendly' : allegiance(row);
-      return [{ name, race: text(row.race, 55) || 'Restless Soul', className: text(row.className || row.class, 45) || 'Wanderer',
+      const title = text(row.className || row.class, 80) || 'Wanderer';
+      const className = !starting && SpellRules ? SpellRules.monsterClass(title, row.combatRole === 'Warrior' ? 'Fighter' : row.combatArchetype) : title;
+      return [{ name, race: text(row.race, 55) || 'Restless Soul', className,
+        combatRole: SpellRules?.classSettings(className, 1) ? 'Spellcaster' : 'Warrior',
+        combatArchetype: SpellRules?.monsterArchetype(className, row.combatArchetype) || 'Fighter',
+        spellPreferences: [...new Set(Array.isArray(row.spellPreferences) ? row.spellPreferences : [])]
+          .filter(id => typeof id === 'string' && SpellRules?.catalog(className).includes(id)).slice(0, 7),
         allegiance: state, state, encounterId: text(row.encounterId || row.encounter, 40) || `group-${Math.floor(index / 3)}`,
         job: text(row.job, 70) || (state === 'Hostile' ? 'sentinel' : 'pilgrim'),
         activity: text(row.activity, 140) || (state === 'Hostile' ? 'watching the approach' : 'studying the ruins'),
-        personality: text(row.personality, 100), motivation: text(row.motivation, 120),
+        personality: text(row.personality, 220), voice: text(row.voice, 140), motivation: text(row.motivation, 180),
         history: text(row.history, 600), profile: row.profile && Profiles ? Profiles.create({ ...row, name }, '', row.profile) : undefined,
         routine: ROUTINES.includes(row.routine) ? row.routine : state === 'Hostile' ? 'patrol' : 'work',
         dialogue: (Array.isArray(row.dialogue) ? row.dialogue : []).map(line => text(line, 220)).filter(Boolean).slice(0, 3) }];
@@ -216,7 +230,7 @@
       const names = new Set(roster.map(actor => keyOf(actor.name || actor.Name)));
       const pc = roster.find(actor => actor.type === 'pc');
       for (const sheet of residentSheets(population)) {
-        if (names.has(keyOf(sheet.name)) || sheet.hp <= 0 || state(sheet) === 'Dead' ||
+        if (names.has(keyOf(sheet.name)) || state(sheet) === 'Dead' ||
             population.actors[sheet.name]?.status !== 'present') continue;
         roster.push({ ...sheet, type: 'monster', equipped: parseEquipment(sheet.lines[9]),
           x: pc?.x ?? 15, y: pc?.y ?? 15 });
@@ -227,7 +241,7 @@
     for (const actor of roster || []) {
       const record = records.get(keyOf(actor.name || actor.Name));
       actor.allegiance = allegiance(actor.type === 'monster' && record ? { ...record, state: record.allegiance } : actor, fallback);
-      actor.state = state({ ...actor, state: actor.state === 'Dead' ? 'Dead' : actor.allegiance,
+      actor.state = state({ ...actor, state: ['Dead', 'Unconscious', 'Dying'].includes(actor.state) ? actor.state : actor.allegiance,
         status: actor.type === 'monster' ? record?.status : undefined });
       if (!record || actor.type !== 'monster') continue;
       actor.encounterId = record.encounterId;
@@ -235,10 +249,17 @@
       actor.personality=record.personality; actor.motivation=record.motivation;
       actor.originProfile = record.profile || actor.originProfile;
       actor.race ||= record.race; actor.className ||= record.className;
+      actor.combatArchetype = record.combatArchetype;
+      actor.combatRole = record.combatRole;
       actor.home = record.home;
       actor.discoveryState = record.discoveryState;
       actor.discoveryRevision = record.discoveryRevision;
       actor.pursuit = record.pursuit;
+      actor.deityId = record.deityId;
+      actor.patron = record.patron;
+      actor.factionId = record.factionId;
+      actor.recruitable = record.recruitable;
+      if (record.deityId) actor.maxHp = record.maxHp;
       if (record.discoveryRevision && actor._discoveryRevision !== record.discoveryRevision && record.position) {
         actor.mazeX = record.position.x; actor.mazeY = record.position.y; actor.mazeRoomKey = population.geoKey;
         actor.renderMazeX = actor.mazeX; actor.renderMazeY = actor.mazeY;
@@ -474,10 +495,11 @@
         // Only positive evidence (a sheet, death or recruitment) changes a resident.
         if (typeof actor.sheet === 'string') record.sheet = actor.rawSheet || actor.sheet;
         if (record.status !== 'dead') record.hp = Number(actor.hp ?? actor.HP);
-        if (actor.storedState && actor.storedState !== 'Dead') record.allegiance = allegiance({ state: actor.storedState });
-        if (record.hp <= 0 || actor.state === 'Dead') record.status = 'dead';
+        if (ALLEGIANCES.includes(actor.storedState)) record.allegiance = allegiance({ state: actor.storedState });
+        record.state = state(actor, record.allegiance);
+        if (record.state === 'Dead') record.status = 'dead';
       }
-      record.state = state({ ...record, state: record.allegiance });
+      record.state = state({ ...record, state: isDown(record) ? record.state : record.allegiance });
     }
     for (const group of population.groups) {
       if (group.members.every(name => population.actors[name]?.status !== 'present')) group.status = 'exhausted';
@@ -496,7 +518,7 @@
       if (!actor) return [];
       const hp = record.status === 'dead' ? Math.min(0, Number.isFinite(record.hp) ? record.hp : 0) :
         current ? actor.hp : Number.isFinite(record.hp) ? record.hp : actor.hp;
-      const nextState = state({ ...record, hp, state: actor.state === 'Dead' ? 'Dead' : record.allegiance });
+      const nextState = state({ ...record, hp, state: ['Dead', 'Unconscious', 'Dying'].includes(actor.state) ? actor.state : record.state || record.allegiance });
       const sheet = (actor.rawSheet || actor.sheet).replace(/^([ \t]*HP:[ \t]*)[^\r\n]*/m, (_, prefix) => prefix + hp)
         .replace(/^([ \t]*State:[ \t]*)[^\r\n]*/m, (_, prefix) => prefix + nextState);
       const parsed = parseBlocks(sheet)[0];
@@ -505,12 +527,12 @@
   }
   function teams(combatants, population, space, input = '', fallback = 'Hostile') {
     attach(combatants, population, fallback);
-    const living = combatants.filter(a => a.hp > 0 && isPresent(a, population) && a.discoveryState !== 'pending'), pc = living.find(a => a.type === 'pc');
+    const living = combatants.filter(a => isAlive(a) && isPresent(a, population) && a.discoveryState !== 'pending'), pc = living.find(a => a.type === 'pc' && canAct(a)) || living.find(a => a.type === 'npc' && canAct(a));
     const explicit = String(input).trim().match(/^attack\s+(.+)$/i)?.[1]?.trim();
     const exact = explicit ? living.filter(a => a.type === 'monster' && keyOf(a.name) === keyOf(explicit)) : [];
     const matches = exact.length ? exact : explicit ? living.filter(a => a.type === 'monster' && keyOf(a.name).startsWith(keyOf(explicit))) : [];
     const provoking = matches.length===1 && (!population || !space || pc &&
-      space.distance(matches[0],pc)<=(population.indoor ? 8 : 12) && lineClear(space.dungeon,space.point(matches[0]),space.point(pc)));
+      (space.canAttack(pc,matches[0]) || space.distance(matches[0],pc)<=(population.indoor ? 8 : 12)) && lineClear(space.dungeon,space.point(matches[0]),space.point(pc)));
     if (provoking && allegiance(matches[0]) === 'Neutral') {
       matches[0].allegiance = 'Hostile';
       matches[0].state = 'Hostile';
@@ -526,7 +548,7 @@
       const groups = population.groups.filter(g => g.status !== 'exhausted');
       const eligible = groups.filter(g => hostiles.some(a => a.encounterId === g.id &&
         (g.status === 'engaged' && space.point(a) || space.canAttack(a, pc) || space.distance(a, pc) <= range &&
-          lineClear(space.dungeon, space.point(a), space.point(pc)) || target === a && space.distance(a, pc) <= range &&
+          lineClear(space.dungeon, space.point(a), space.point(pc)) || target === a && (space.canAttack(pc,a) || space.distance(a, pc) <= range) &&
           lineClear(space.dungeon, space.point(a), space.point(pc)))));
       const selected = eligible.find(g => target && g.members.includes(target.name)) || !explicit &&
         (eligible.find(g => g.status === 'engaged') || eligible.sort((a,b) =>
@@ -539,7 +561,7 @@
       (a.type !== 'monster' || !space || !pc || space.distance(a, pc) <= (population?.indoor ? 10 : 14) &&
         lineClear(space.dungeon, space.point(a), space.point(pc))));
     const allowed = new Set([...friends, ...hostiles]);
-    return { friends, hostiles, combatants: [...allowed], targets: actor =>
+    return { friends, hostiles, combatants: [...allowed].filter(canAct), targets: actor =>
       (friends.includes(actor) ? hostiles : hostiles.includes(actor) ? friends : []).filter(a => a.hp > 0),
       spectators: living.filter(a => !allowed.has(a)) };
   }
@@ -621,10 +643,32 @@
       content += strip(prose.slice(cursor, match.index));
       let name;
       try { name = JSON.parse(match[1]); } catch { /* Malformed labels cannot identify a speaker. */ }
-      const nested = /\[\[\/?SPEECH\b/i.test(match[2]), body = strip(match[2]), start = content.length;
-      content += body;
-      spans.push({ start, end: content.length, speaker: !nested && typeof name === 'string' ? allowed.get(keyOf(name)) || null : null,
-        line: text(body, MAX_SPEECH_LENGTH) });
+      const nested = /\[\[\/?SPEECH\b/i.test(match[2]), body = strip(match[2]);
+      const speaker = !nested && typeof name === 'string' ? allowed.get(keyOf(name)) || null : null;
+      const escapedBody = body.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+      const duplicate = speaker && escapedBody && content.match(new RegExp(`(?:"${escapedBody}"|\u201c${escapedBody}\u201d)\\s*$`));
+      if (duplicate && extractAttributedSpeech(content, [...allowed.values()], [], spans).at(-1)?.speaker === speaker) {
+        // Some model responses append a labelled copy instead of tagging the existing quote.
+        content = content.trimEnd();
+        if (!spans.some(span => span.speaker === speaker && span.start <= duplicate.index && span.end >= content.length))
+          spans.push({ start: duplicate.index, end: content.length, speaker, line: text(body, MAX_SPEECH_LENGTH) });
+        cursor = match.index + match[0].length;
+        continue;
+      }
+      const start = content.length, following = prose.slice(match.index + match[0].length);
+      const outsideQuotes = /"\s*$/.test(content) && /^\s*"/.test(following) ||
+        /\u201c\s*$/.test(content) && /^\s*\u201d/.test(following);
+      const insideQuotes = /^\s*(?:"[\s\S]*"|\u201c[\s\S]*\u201d)\s*$/.test(body);
+      if (speaker && body.trim() && !outsideQuotes && !insideQuotes) {
+        // Labels identify speech even when the model forgets visible dialogue formatting.
+        const paragraph = content.split(/\r?\n[ \t]*\r?\n/).at(-1);
+        const escaped = speaker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const first = speaker.split(/\s+/)[0], uniqueFirst = [...allowed.values()].filter(n => n.split(/\s+/)[0] === first).length === 1;
+        const reference = uniqueFirst ? `(?:${escaped}|${first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})` : escaped;
+        if (!new RegExp(`(?:^|[^\\w])${reference}(?=$|[^\\w])`, 'i').test(paragraph)) content += `${speaker} says, `;
+        content += '"' + body.trim() + '"';
+      } else content += body;
+      spans.push({ start, end: content.length, speaker, line: text(insideQuotes ? body.trim().slice(1, -1) : body, MAX_SPEECH_LENGTH) });
       cursor = match.index + match[0].length;
     }
     content += strip(prose.slice(cursor));
@@ -732,7 +776,7 @@
             unknownVoice = true;
         }
         if (unknownVoice) { subject = null; blocked = true; framed = false; continue; }
-        const pronoun = /\b(?:he|she|they)\s+[\w-]+|\b(?:his|her|their)\s+(?:[\w-]+\s+){0,3}(?:voice|tone|gaze|eyes|lips|mouth|expression|face)\b/i.test(clause);
+        const pronoun = /\b(?:he|she|they)\s+[\w-]+|\b(?:his|her|their)\s+(?:[\w-]+\s+){0,3}(?:voice|tone|gaze|eyes|lips|mouth|expression|face|thumb|fingers?|hands?|palms?|knuckles?|claws?|talons?|paws?|arms?|shoulders?|head|chin|jaw|ears?|wings?|tail)\b/i.test(clause);
         if (subject && (new RegExp(`${vocal}|\\b${verb}\\b`, 'i').test(clause) || pronoun || owners.length === 1)) { framed = true; blocked = false; }
       }
       return { speaker: framed && !blocked ? subject : null, subject, blocked };
@@ -865,6 +909,47 @@
       return lines.length === 2 && lines[0].speaker !== lines[1].speaker ? [{ lines }] : [];
     });
   }
+  const RECENT_SPEECH_MS = 10 * 60 * 1000;
+  const speechWords = value => String(value || '').toLowerCase().replace(/\bcan['\u2019]t\b/g, 'can not')
+    .replace(/\bwon['\u2019]t\b/g, 'will not').replace(/n['\u2019]t\b/g, ' not').replace(/[^\p{L}\p{N}?]+/gu, ' ').trim();
+  const speechFillers = new Set(('a an the i me my we us our you your he him his she her they them their it its ' +
+    'is are was were be been being am do does did have has had can could will would should may might ' +
+    'to of in on at by for from with and or but as that this these those then than so if not no never ' +
+    'here there still same only very just say tell').split(' '));
+  function speechRepeats(line, recent) {
+    const candidate = speechWords(line), words = candidate.replace(/\?/g, '').trim();
+    if (!words) return false;
+    const tokens = new Set(words.split(' ').filter(word => !speechFillers.has(word)));
+    const passages = (recent || []).flatMap(raw => {
+      const sentences = String(raw || '').match(/[^.!?]+[.!?]*/g)?.slice(0, 32) || [];
+      return [raw, ...sentences.flatMap((_, i) => [1, 2, 3].map(size => sentences.slice(i, i + size).join(' ')))];
+    });
+    return passages.some(raw => {
+      const reference = speechWords(raw), referenceWords = reference.replace(/\?/g, '').trim();
+      if (candidate === reference) return true;
+      if (candidate.includes('?') && !reference.includes('?')) return false;
+      if (words.split(' ').length >= 4 && ` ${referenceWords} `.includes(` ${words} `)) return true;
+      if (tokens.size < 5 || /\b(?:not|no|never)\b/.test(candidate) !== /\b(?:not|no|never)\b/.test(reference)) return false;
+      const other = new Set(referenceWords.split(' ').filter(word => !speechFillers.has(word)));
+      // Only shortened lexical restatements, not general topic similarity.
+      return [...tokens].every(word => other.has(word)) && tokens.size / other.size >= 0.45;
+    });
+  }
+  function recentSpeech(record, now = Date.now()) {
+    const rows = Array.isArray(record?.recentSpeech) ? record.recentSpeech :
+      (record?.memory?.recent || []).map(line => ({ line, at: record.lastSpokeAt }));
+    return rows.slice(-8).filter(row => typeof row?.line === 'string' && row.at <= now && now - row.at < RECENT_SPEECH_MS)
+      .map(row => row.line.slice(0, 640));
+  }
+  function rememberSpeech(record, line, now = Date.now()) {
+    if (!record) return;
+    const previous = recentSpeech(record, now);
+    const chunks = splitSpeech(line, 640, 112).slice(-8).map(value => value.slice(0, 640));
+    record.recentSpeech = [
+      ...(Array.isArray(record.recentSpeech) ? record.recentSpeech : []).filter(row => previous.includes(row?.line) && !chunks.includes(row.line)),
+      ...chunks.map(value => ({ line: value, at: now }))
+    ].slice(-8);
+  }
   function applyReplies(population, rows, roster = [], options = {}) {
     if (!population) return 0;
     population.companions ||= {};
@@ -875,13 +960,16 @@
         const source=population.actors[speaker] || actor;
         Object.defineProperty(population.companions,speaker,{value:{name:speaker,dialogue:[],dialogueIndex:0,
           job:source.job,activity:source.activity,personality:source.personality,motivation:source.motivation,
-          race:source.race,className:source.className},enumerable:true,configurable:true,writable:true});
+          race:source.race,className:source.className,
+          ...(Array.isArray(source.recentSpeech) ? { recentSpeech: source.recentSpeech.slice(-8).map(row => ({ ...row })) } : {})},enumerable:true,configurable:true,writable:true});
       }
       const record = actor.type==='npc' ? population.companions[speaker] : population.actors[speaker];
       if (!record || actor.type==='monster' && record.status!=='present') continue;
-      record.dialogue = lines; record.dialogueIndex = 0; count++;
+      record.dialogue = lines.filter(line => !speechRepeats(line, recentSpeech(record)));
+      record.dialogueIndex = 0; count++;
     }
-    const exchanges = sanitizeExchanges(options.exchanges, roster.filter(a => a.type === 'npc' && (a.hp ?? 1)>0 && state(a)!=='Dead').map(a=>a.name));
+    const exchanges = sanitizeExchanges(options.exchanges, roster.filter(a => a.type === 'npc' && (a.hp ?? 1)>0 && state(a)!=='Dead').map(a=>a.name))
+      .filter(exchange => exchange.lines.every(row => !speechRepeats(row.line, recentSpeech(population.companions[row.speaker]))));
     if (count || exchanges.length) {
       population.dialogueQueue = exchanges;
       population.lastDialogueRefreshAt = Date.now(); population.replyRevision = (population.replyRevision || 0)+1;
@@ -901,9 +989,17 @@
         group.introPlayed=true;
       }
       const cache=population.companions?.[row.speaker] || record;
-      if(cache)cache.lastSpokeAt=Date.now();
       const index=cache?.dialogue?.indexOf(row.line) ?? -1;
       if (index>=0) cache.dialogueIndex=Math.max(cache.dialogueIndex,index+1);
+      if (cache) {
+        rememberSpeech(cache, row.line);
+        cache.lastSpokeAt = Date.now();
+        const cursor = cache.dialogueIndex || 0, recent = recentSpeech(cache);
+        cache.dialogue = [...(cache.dialogue || []).slice(0, cursor),
+          ...(cache.dialogue || []).slice(cursor).filter(line => !speechRepeats(line, recent))];
+        population.dialogueQueue = (population.dialogueQueue || []).filter(exchange =>
+          exchange.lines.every(part => part.speaker !== row.speaker || !speechRepeats(part.line, recent)));
+      }
     }
   }
   function perceive(dungeon, roster, population, entry = false) {
@@ -972,6 +1068,9 @@
     return { ...previous, roomName: line('Room Name'), roomDescription: line('Room Description'), coordinates: line('Coordinates'),
       objects: line('Objects in Room') || 'None', objectsInRoomProperties: line('Objects in Room Properties') || 'None',
       exits: line('Exits') || 'None', inventory: line('Inventory') || 'Empty', inventoryProperties: line('Inventory Properties') || 'None',
+      silverPieces: Math.max(0, Number(line('Silver Pieces')) || 0), region: line('Region') || 'Tartarus',
+      patronage: line('Patronage') || 'None recorded',
+      community: line('Community') || 'None nearby', localMissions: line('Local Missions') || 'None',
       pc: text.match(/PC:([\s\S]*?)(?=NPCs in Party:)/)?.[1]?.trim() || 'No PC data',
       npcs: text.match(/NPCs in Party:([\s\S]*?)(?=Monsters in Room:)/)?.[1]?.trim() || 'None',
       monsters: text.match(/Monsters in Room:([\s\S]*?)(?=Monsters Equipped Properties:)/)?.[1]?.trim() || 'None',
@@ -981,10 +1080,10 @@
       nextBoss: line('Next Boss') || 'None', nextBossRoom: line('Next Boss Room') || 'None', bossCoordinates: line('Boss Room Coordinates') || 'None',
       adjacentRooms: line('Adjacent Rooms') || 'None' };
   }
-  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach,
+  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, isDown, isAlive, canAct,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
-    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
+    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DungeonInhabitants = api;
 })(typeof window === 'undefined' ? globalThis : window);

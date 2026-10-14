@@ -2,6 +2,8 @@
   'use strict';
   const I = root.DungeonInhabitants;
   const populations = new Map(), queue = [], pendingDialogue = [], seen = new Set();
+  const recentSpeakers = new Map();
+  const encounterStories = new Set();
   let room = null, active = null, panel, portrait, caption, words, pauseButton, status, recoveryButton, recoveryStatus;
   let recoveryPending = false;
   let lastVisit = 0, lastAutonomy = 0, visitPending = false, autonomyPending = false, pausePending = false;
@@ -99,6 +101,14 @@
     if (!ctx?.dungeon || !queue.some(row => row.geoKey === ctx.dungeon.geoKey && row.speaker === name)) return false;
     return canSpeak(ctx.actors.find(actor => actor.name === name), ctx);
   }
+  function speechHistory(row) {
+    const key = `${row.geoKey}|${row.speaker}`;
+    if (!recentSpeakers.has(key)) {
+      recentSpeakers.set(key, {});
+      if (recentSpeakers.size > 64) recentSpeakers.delete(recentSpeakers.keys().next().value);
+    }
+    return recentSpeakers.get(key);
+  }
   function receiveDialogue(event) {
     const ctx = context();
     if (event.runId && event.runId !== root.dungeonRunId) return;
@@ -122,6 +132,19 @@
       if (seen.has(key) || queue.some(queued => queued.key === key)) {
         subtitleReport('duplicate', message, { reason: 'already-queued-or-displayed' }); continue;
       }
+      if ((row.kind || 'turn') !== 'turn' && I.speechRepeats(row.line, I.recentSpeech(speechHistory(message), Date.now()))) {
+        subtitleReport('skipped', message, { reason: 'recently-spoken' }); continue;
+      }
+      if ((row.kind || 'turn') === 'turn') {
+        I.rememberSpeech(speechHistory(message), row.line, Date.now());
+        for (let i = queue.length - 1; i >= 0; i--) {
+          const queued = queue[i];
+          if (queued.kind !== 'turn' && queued.geoKey === event.geoKey && queued.speaker === row.speaker &&
+              I.speechRepeats(queued.line, I.recentSpeech(speechHistory(message), Date.now()))) {
+            queue.splice(i, 1); subtitleReport('skipped', queued, { reason: 'recently-spoken' });
+          }
+        }
+      }
       queue.push({ ...message, line: row.line.trim(), kind: row.kind || 'turn', key });
       if (queue.length > 32) subtitleReport('skipped', queue.shift(), { reason: 'queue-limit' });
       subtitleReport('queued', message, reach);
@@ -140,6 +163,15 @@
       if (rows.length && typeof fetch === 'function') fetch('/voice/prefetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rows }) })
         .catch(error => console.warn('[DialogueSpeech] prefetch failed:', error?.message));
     } catch (error) { console.warn('[DialogueSpeech] prefetch', error?.message); }
+  }
+  function receiveEncounter(event) {
+    const ctx = context();
+    if (!event?.eventId || event.runId !== root.dungeonRunId || event.geoKey !== ctx?.dungeon?.geoKey || encounterStories.has(event.eventId)) return;
+    encounterStories.add(event.eventId);
+    if (encounterStories.size > 64) encounterStories.delete(encounterStories.values().next().value);
+    receivePopulation(event);
+    Promise.resolve(root.appendDungeonEncounterLog?.(event)).catch(error => console.warn('[EncounterHistory]', error.message));
+    receiveTurnDialogue(event.content, { ...event, source: 'encounter-story' });
   }
   function receiveTurnDialogue(content, event) {
     const names = [...I.parseSheets(event.consoleText), ...I.parseSheets(event.consoleText, 'NPCs in Party')].map(a => a.name);
@@ -178,6 +210,9 @@
     if (row.geoKey !== ctx.dungeon.geoKey || (row.kind !== 'turn' && !reach.canSpeak && !conversational(row, actor, ctx))) { // replies to the player always play
       subtitleReport('skipped', row, { ...reach, reason: row.geoKey !== ctx.dungeon.geoKey ? 'wrong-room' : reach.reason }); return;
     }
+    if (row.kind !== 'turn' && I.speechRepeats(row.line, I.recentSpeech(speechHistory(row), Date.now()))) {
+      subtitleReport('skipped', row, { reason: 'recently-spoken' }); return;
+    }
     const chunks = I.splitSpeech(row.line);
     active = { ...row, chunks, part: 0, until: now };
     try { root.HolodekSfx?.voicePrefetch?.(row.speaker, chunks); } catch {} // SID speech: fetch every sentence of this line now
@@ -201,6 +236,7 @@
     const reveal = (ms, why) => {
       if (revealed || !same()) return; revealed = true;
       words.textContent = line; row.revealedAt = time();
+      I.rememberSpeech(speechHistory(row), line, Date.now());
       if (!(ms > 0)) row.until = time() + speechDuration(line);
       subtitleReport('displayed', { ...row, line }, { ...speechCheck(actor, ctx), part: part + 1, parts: row.chunks.length, reason: why });
     };
@@ -315,7 +351,9 @@
       post('/room-population/visit', { geoKey, runId, player: ctx.player,
         actors: ctx.actors.map(a => ({ name: a.name, mazeX: a.mazeX, mazeY: a.mazeY, discoveryRevision: a.discoveryRevision, mazePoint: I.dialoguePoint(speakingActor(a)) })) })
         .then(result => { if (result && root.dungeonRunId === runId && context()?.dungeon?.geoKey === geoKey) {
-          receivePopulation({ population: result.population, runId }); receiveDialogue({ dialogue: result.dialogue, geoKey, runId, source: 'room-visit' });
+          receivePopulation({ population: result.population, runId });
+          if (result.story) receiveEncounter(result.story);
+          else receiveDialogue({ dialogue: result.dialogue, geoKey, runId, source: 'room-visit' });
           for (const discovery of result.discoveries || []) root.DungeonAreaTitles?.notice?.(discovery);
         } })
         .catch(error => console.warn('[RoomPopulation]', error.message)).finally(() => { visitPending = false; });
@@ -339,7 +377,7 @@
     if (subtitleReportTimer !== null && typeof clearTimeout === 'function') clearTimeout(subtitleReportTimer);
     subtitleReportTimer = null; subtitleReports.length = 0; subtitleHistory.length = 0;
     root.DungeonAreaTitles?.reset?.();
-    populations.clear(); queue.length = 0; pendingDialogue.length = 0; seen.clear(); active = null; room = null;
+    populations.clear(); queue.length = 0; pendingDialogue.length = 0; seen.clear(); recentSpeakers.clear(); active = null; room = null;
     pauseTotal = 0; pausedAt = 0; root.gamePaused = false;
     if (panel) panel.hidden = true;
     setPaused({ paused: false });
@@ -407,7 +445,7 @@
     root.addEventListener('pagehide', flushSubtitleReports);
     setInterval(tick, 500);
   }
-  root.DungeonLife = { population, receivePopulation, receiveDialogue, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
+  root.DungeonLife = { population, receivePopulation, receiveDialogue, receiveEncounter, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
     subtitleDiagnostics: () => subtitleHistory.map(report => ({ ...report })),
     actorAllegiance: actor => I.allegiance(population()?.actors?.[actor.name || actor.Name] || actor, root.latestUpdatedData?.monstersState) };
   document.addEventListener('DOMContentLoaded', init);

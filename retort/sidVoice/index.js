@@ -30,12 +30,15 @@ function run(msg, urgent) {
 // --- voice profiles (sent by the client's sfx.js voiceProfile when a room is entered; hashed default otherwise) ---
 const profiles = new Map();
 // Character overrides (named voices). Mortacia: warm maternal alto/mezzo, female formants, gentle breath, low warmth, steady legato.
-const OVERRIDES = { mortacia: { f0: 196, fs: 1.04, alpha: 1.0, breath: 0.1, rasp: 0, range: 2.6, rate: 4.0, conf: 0.85, warm: 0.3, vibAmt: 0.7, vibRate: 4.8, scale: [0, 2, 4, 5, 7, 9], pull: 0.16, accent: 2.2, decl: 2.5 } };
+const OVERRIDES = { mortacia: { f0: 182, fs: 1.04, alpha: 1.0, breath: 0.1, rasp: 0, range: 2.3, rate: 4.0, conf: 0.85, warm: 0.3, vibAmt: 0.7, vibRate: 4.8, scale: [0, 2, 4, 5, 7, 9], pull: 0, accent: 2.2, decl: 2.5 } };
 function clampProfile(P) { const o = OVERRIDES[String(P.name || '').toLowerCase().split(/\s+/)[0]] || null;
   const base = { name: P.name, kind: P.kind || 'humanoid', f0: Math.max(90, Math.min(235, +P.f0 || 130)), fs: Math.max(0.92, Math.min(1.05, +P.fs || 1)),
   rasp: (+P.rasp || 0) * 0.35, breath: Math.min(0.45, (+P.breath || 0) * 0.6), range: Math.min(4.5, Math.max(2, +P.range || 3.2)), rate: +P.rate || 4.8, ...(P.conf !== undefined ? { conf: Math.max(-1, Math.min(1, +P.conf)) } : {}) };
   // speaking scale: each character's own favoured pitch targets and accent spread (derived from name hash + pitch range)
-  Object.assign(base, { scaleIdx: hash32(String(P.name) + '#scale') % 5, pull: 0.12, accent: +(1.4 * base.range / 3.2).toFixed(2), decl: 2 });
+  Object.assign(base, { scaleIdx: hash32(String(P.name) + '#scale') % 5, pull: 0, accent: +(1.4 * base.range / 3.2).toFixed(2), decl: 2 });
+  if (P.accent) base.accent_ = String(P.accent); if (P.race) base.race = String(P.race).slice(0, 40);
+  // voicefix identity = centre pitch + range: undead/necromantic voices sit lower and narrower (contour, not scale, carries the melody)
+  if (base.kind === 'undead' && !o) { base.f0 = Math.max(90, base.f0 * 0.9); base.range = Math.max(2, base.range * 0.85); }
   return o ? Object.assign(base, o) : base; }
 function profileOf(name) {
   if (profiles.has(name)) return profiles.get(name);
@@ -56,21 +59,23 @@ const lsOf = P => +(SPEED * Math.max(0.7, Math.min(1.45, 4.8 / P.rate))).toFixed
 const guideOf = P => (process.env.SIDVOICE_GUIDE || 'auto') === 'lj' ? 'lj' : (P.f0 < 150 ? 'ryan' : 'lj');
 // accents (accent.js): phoneme-level accent + emphasis go to Piper (analysis); prosodic traits widen/shape the SID melody
 const Accent = require('./accent');
-const withAccent = P => { if ((process.env.SIDVOICE_ACCENT ?? '1') === '0') return Object.assign({}, P, { accentName: 'neutral' }); const a = Accent.accentOf(P), t = Accent.traitsOf(a);
-  return Object.assign({}, P, { accentName: a, range: P.range * t.rangeMul, pull: P.pull ?? t.pull, accentMul: (P.accentMul ?? 1) * t.accentMul, rate: P.rate * t.rateMul, arch: t.arch, emphSt: 2.2 }); };
+const withAccent = P => { if ((process.env.SIDVOICE_ACCENT ?? '1') === '0') return Object.assign({}, P, { accentName: 'neutral' }); const a = Accent.accentOf(Object.assign({}, P, { accent: P.accent_ })), t = Accent.traitsOf(a);
+  return Object.assign({}, P, { accentName: a, f0: P.f0 * (t.f0Mul || 1), rasp: Math.min(1, (P.rasp || 0) + (t.raspAdd || 0)), range: P.range * t.rangeMul, pull: P.pull ?? t.pull, accentMul: (P.accentMul ?? 1) * t.accentMul, rate: P.rate * t.rateMul, arch: t.arch, emphSt: 2.2 }); };
 function track(text, ls, urgent, ns = 1, pm = 1, voice = 'lj', acc = null) {
   const k = voice + '|' + JSON.stringify(acc) + '|' + ls + '|' + ns + '|' + pm + '|' + text; if (tracks.has(k)) return lru(tracks, k, tracks.get(k), 300);
-  const p = run({ type: 'track', text, ls, ns, pm, voice, acc }, urgent).then(m => { stats.last.push({ text: text.slice(0, 40), ...m.ms }); if (stats.last.length > 20) stats.last.shift(); return { frames: m.frames, syl: m.syl, audio: m.audio }; });
+  const p = run({ type: 'track', text, ls, ns, pm, voice, acc }, urgent).then(m => { stats.last.push({ text: text.slice(0, 40), ...m.ms }); if (stats.last.length > 20) stats.last.shift(); return { frames: m.frames, syl: m.syl, ph: m.ph, phones: m.phones, audio: m.audio }; });
   p.catch(() => tracks.delete(k)); return lru(tracks, k, p, 300);
 }
-function wavFor(speaker, text, urgent, mode, moodHint) {
-  mode = SidMode.norm(mode) || SidMode.get(); text = clean(text); const P0 = profileOf(speaker), cad = Mood.cadenceOf(text), mood = Mood.moodOf(text, P0.kind, moodHint), conf = Mood.confOf(text, P0);
+let voiceChip = String(process.env.SIDVOICE_CHIP || '8580') === '10582' ? '10582' : '8580', voiceNotch = process.env.SIDVOICE_NOTCH === '1'; /* voice chip (♫ panel, POST /voice/chip); per-request ?chip= overrides */
+const chipOf = c => String(c) === '10582' ? '10582' : String(c) === '8580' ? '8580' : null;
+function wavFor(speaker, text, urgent, mode, moodHint, chip, notch) {
+  mode = SidMode.norm(mode) || SidMode.get(); chip = chipOf(chip) || voiceChip; notch = chip === '10582' && (notch == null ? voiceNotch : !!notch); text = clean(text); const P0 = profileOf(speaker), cad = Mood.cadenceOf(text), mood = Mood.moodOf(text, P0.kind, moodHint), conf = Mood.confOf(text, P0);
   text = Mood.hesitate(text, conf);
-  const P = withAccent(Object.assign(Mood.applyMood(P0, mood, cad, conf), { guide: guideOf(P0) })), acc = { accent: P.accentName, emph: Accent.emphasisOf(text, mood) }, key = h('a1|' + JSON.stringify(acc) + '|' + 'v' + VOC_VERSION + '|' + JSON.stringify(DIGI) + '|' + mode + '|' + mood + '|' + cad + '|' + conf + '|' + JSON.stringify(P) + '|' + text);
+  const P = withAccent(Object.assign(Mood.applyMood(P0, mood, cad, conf), { guide: guideOf(P0) })), acc = { accent: P.accentName, emph: Accent.emphasisOf(text, mood) }, key = h('a1|' + JSON.stringify(acc) + '|' + 'v' + VOC_VERSION + '|' + JSON.stringify(DIGI) + '|' + mode + '|chip' + chip + (notch ? 'n' : '') + '|' + mood + '|' + cad + '|' + conf + '|' + JSON.stringify(P) + '|' + text);
   if (wavs.has(key)) { const e = lru(wavs, key, wavs.get(key), 200); if (urgent) e.urgent = true; return e.p; }
   const t0 = Date.now(), e = { urgent };
   // renders are short: always run them ahead of queued analyses
-  e.p = track(text, lsOf(P), urgent, +P.ns.toFixed(3), +(P.pause || 1).toFixed(2), P.guide, acc).then(tk => run({ type: 'render', P, frames: tk.frames, syl: tk.syl, audio: null, digi: null, mode, cad, final: /\?\s*$/.test(text) ? '?' : '.' }, true)).then(m => {
+  e.p = track(text, lsOf(P), urgent, +P.ns.toFixed(3), +(P.pause || 1).toFixed(2), P.guide, acc).then(tk => run({ type: 'render', P, frames: tk.frames, syl: tk.syl, ph: tk.ph, phones: tk.phones, audio: null, digi: null, mode, chip, notch, cad, final: /\?\s*$/.test(text) ? '?' : '.' }, true)).then(m => {
     const pcm = Buffer.from(m.pcm.buffer, m.pcm.byteOffset, m.pcm.byteLength), b = Buffer.alloc(44), SRo = m.sr || 22050;
     b.write('RIFF', 0); b.writeUInt32LE(36 + pcm.length, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
     b.writeUInt32LE(SRo, 24); b.writeUInt32LE(SRo * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(pcm.length, 40);
@@ -97,11 +102,13 @@ function install(app, express) {
   app.get('/voice/line.wav', async (req, res) => {
     const speaker = String(req.query.speaker || ''), text = String(req.query.text || '').slice(0, 400); if (!speaker || !text) return res.status(400).end();
     const t0 = Date.now();
-    try { const r = await wavFor(speaker, text, true, req.query.clock);
+    try { const r = await wavFor(speaker, text, true, req.query.clock, undefined, req.query.chip, req.query.notch == null ? undefined : req.query.notch === '1');
       res.set({ 'X-Voice-Mood': r.mood, 'X-Voice-Cadence': r.cad, 'X-Voice-Confidence': String(r.conf), 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Voice-Dur': r.dur.toFixed(3), 'X-Voice-Wait-Ms': String(Date.now() - t0), 'X-Voice-Synth-Ms': String(r.ms) }); res.end(r.wav);
     } catch (e) { res.status(503).json({ error: e.message }); }
   });
-  app.get('/voice/status', (req, res) => res.json({ mode: SidMode.get(), disabled, queue: queue.length, busy, cachedLines: wavs.size, profiles: [...profiles.keys()], ...stats }));
+  app.get('/voice/chip', (req, res) => res.json({ chip: voiceChip, notch: voiceNotch }));
+  app.post('/voice/chip', express.json({ limit: '1kb' }), (req, res) => { const c = chipOf(req.body && req.body.chip); if (c) voiceChip = c; if (req.body && 'notch' in req.body) voiceNotch = !!req.body.notch; console.info('[SidVoice] voice chip', voiceChip, voiceNotch ? '+notch' : ''); res.json({ chip: voiceChip, notch: voiceNotch }); });
+  app.get('/voice/status', (req, res) => res.json({ mode: SidMode.get(), chip: voiceChip, notch: voiceNotch, disabled, queue: queue.length, busy, cachedLines: wavs.size, profiles: [...profiles.keys()], ...stats }));
   // warm Piper at server start so the first line is not slowed by model loading
   setTimeout(() => { startWorker(); if (worker && !stats.warmed) { stats.warmed = true; run({ type: 'warm' }, false).catch(e => console.warn('[SidVoice] warm failed', e.message)); } }, 1500);
 }

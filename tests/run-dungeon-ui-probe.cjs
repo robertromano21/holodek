@@ -43,6 +43,7 @@ scripts.splice(scripts.indexOf('frescoFigures'),0,'frescoSerpents');
 scripts.splice(scripts.indexOf('surfaceArt')+1,0,'artPresentation');
 scripts.push('combatCharacterUi');
 scripts.push('combatTurnUi', 'itemGiveUi', 'actionDiceUi');
+scripts.push('gameModelUi');
 const page = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
 ${scripts.map(name => `<script src="/assets/${name}.js"></script>`).join('')}
 </head><body>${menu}<button id="play-music-btn" style="display:none">Play Music</button>
@@ -90,7 +91,7 @@ ${consoleStateRefresh}
 const commands = [], contentDiv = document.getElementById('phaser-container');
 const detectTravel = new Function('userInput','window',${JSON.stringify('return ' + travelDetection)});
 const renderMonsterSection = new Function('monsters', 'monstersState', 'escapedText', ${JSON.stringify(monsterRendering + '\nreturn `' + monsterSection + '`;')});
-const renderQuestSection = new Function('currentQuest', 'questProgress', 'questRequirements', 'escapedText', ${JSON.stringify('return `' + questSection + '`;')});
+const renderQuestSection = new Function('currentQuest', 'questProgress', 'questRequirements', 'escapedText', 'data', ${JSON.stringify('return `' + questSection + '`;')});
 function sheet(character) { return [character.Name, 'Female', 'Human', 'Adventurer', 'Level: 1', 'AC: 10', 'XP: 0',
   'HP: ' + character.HP, 'MaxHP: ' + character.MaxHP, 'Equipped: ' + Object.entries(character.Equipped).map(([slot, item]) => slot + ': ' + (item?.name || 'None')).join(', '),
   'Attack: ' + character.Attack, 'Damage: ' + character.Damage, 'Armor: ' + character.Armor, 'Magic: ' + character.Magic].join('\n'); }
@@ -1124,7 +1125,94 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 </script></body></html>`;
 
-for (const [, script] of page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) if (script.trim()) new vm.Script(script);
+const journalStart=index.indexOf('<section id="journal-popup"'),journalMarkup=index.slice(journalStart,index.indexOf('</section>',journalStart)+10);
+const journalPage=String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}
+#chatbotcontainer{position:fixed;left:25%;bottom:8px;width:45%;padding:8px}#game-log-popup{position:fixed;right:8px;top:12px;width:20%}
+</style><script src="/assets/adventureJournalUi.js"></script><script src="/assets/mapShortcutUi.js"></script></head><body>
+<div id="chatbotcontainer"><textarea id="chatuserinput">unfinished draft</textarea><button>Command</button></div><div id="game-log-popup">Game Log</div>
+<button id="dungeon-map-shortcut"><img src="/assets/adventurers-map.svg" alt=""></button>
+<button id="dungeon-journal-shortcut"><img src="/assets/adventurers-journal.svg" alt=""></button>
+<button id="dungeon-spellbook-shortcut" aria-label="Open party spellbook"><img src="/assets/adventurers-spellbook.svg" alt=""></button>
+<button id="dungeon-inventory-shortcut"><img src="/assets/adventurers-pack.svg" alt=""></button>${journalMarkup}
+<script>
+window.dungeonRunId='journal-probe';window.gamePaused=true;const realFetch=window.fetch.bind(window),posts=[];
+let spellbookClicks=0;window.PartySpellbookUi={open(){spellbookClicks++;}};
+window.fetch=async(url,options)=>{posts.push({url,body:JSON.parse(options.body)});return{ok:true,json:async()=>({runId:'journal-probe',step:1,quest:'The Water Debt',
+objective:{title:'Rescue the keeper',description:'Escort the keeper alive to Amber Spring Gardens.',requirements:'Actual arrival and faction resolution required.'},
+route:[{status:'Current',room:'Amber Spring Gardens',roomKey:'1,1,0',actor:'Senna'}],facts:[{title:'Burial record',text:'The keeper refused the levy.',room:'Crown Graves'}],
+rumors:[{source:'Edrin',text:'The keeper sold the well.',status:'Unverified'}],factions:{factions:[{name:'Cistern Compact',standing:'Trusted',score:2}],decisions:[]},contracts:[],history:[]})};};
+document.addEventListener('DOMContentLoaded',async()=>{
+  const checks={},errors=[];
+  try {
+    for(const zoom of [1,1.75,2]) {
+      document.body.style.zoom=zoom;window.dispatchEvent(new Event('resize'));
+      await window.AdventureJournalUi.toggle(true);
+      const popup=document.getElementById('journal-popup'),r=popup.getBoundingClientRect();
+      checks['journalFits-'+zoom]=r.left>=0&&r.top>=0&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1;
+      checks['journalContent-'+zoom]=popup.textContent.includes('Confirmed Facts')&&popup.textContent.includes('Unverified')&&popup.textContent.includes('Trusted (+2)');
+      await window.AdventureJournalUi.toggle(false);
+      const map=document.getElementById('dungeon-map-shortcut').getBoundingClientRect(),journal=document.getElementById('dungeon-journal-shortcut').getBoundingClientRect(),pack=document.getElementById('dungeon-inventory-shortcut').getBoundingClientRect();
+      checks['shortcutStack-'+zoom]=pack.top>=0&&pack.bottom<journal.top&&journal.bottom<map.top&&Math.abs(pack.left-map.left)<1;
+      const book=document.getElementById('dungeon-spellbook-shortcut').getBoundingClientRect(),command=document.getElementById('chatbotcontainer').getBoundingClientRect();
+      checks['upsideDownL-'+zoom]=Math.abs(book.top-pack.top)<1&&book.right<pack.left&&book.bottom<=command.top&&book.left>=0&&pack.right<=innerWidth;
+      checks['iconsUnchanged-'+zoom]=Math.abs(book.width-pack.width)<1&&Math.abs(book.height-pack.height)<1;
+    }
+    document.getElementById('dungeon-spellbook-shortcut').click();checks.spellbookOpens=spellbookClicks===1;
+    checks.readOnly=posts.every(p=>p.url==='/journal/view'&&p.body.runId==='journal-probe');
+    checks.draftPreserved=document.getElementById('chatuserinput').value==='unfinished draft';
+  }catch(error){errors.push(error.stack);}
+  await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
+});
+</script></body></html>`;
+const tacticalPage=fs.readFileSync(path.join(__dirname,'tactical-ui-probe.html'),'utf8').replace('__GAME_CSS__',css);
+const modelPage = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
+<script src="/assets/gameMenuUi.js"></script><script src="/assets/gameModelUi.js"></script></head><body>${menu}
+<textarea id="draft">unfinished command</textarea><script>
+const originalFetch=window.fetch.bind(window), checks={}, errors=[], posts=[];
+let current={id:'original',name:'Original settings',revision:0},rejectNext=false;
+const models=[{id:'gpt-6-luna',name:'GPT-6 Luna',description:'Efficient model'}, {id:'gpt-4.1-mini',name:'GPT-4.1 Mini',description:'Original model',shutdownDate:'2027-01-14'}];
+window.fetch=async(url,options={})=>{
+  if(String(url).startsWith('/game-models')){
+    if(options.method==='POST'){
+      posts.push(JSON.parse(options.body));
+      if(rejectNext){rejectNext=false;return new Response(JSON.stringify({error:'Access no longer verified.'}),{status:409});}
+      const id=JSON.parse(options.body).id;
+      current={id,name:models.find(row=>row.id===id)?.name||'Original settings',revision:current.revision+1};
+      return new Response(JSON.stringify({current}));
+    }
+    return new Response(JSON.stringify({current,models,reasoning:'off'}));
+  }
+  return originalFetch(url,options);
+};
+window.addEventListener('error',event=>errors.push(event.message));
+document.addEventListener('DOMContentLoaded',async()=>{
+  const wait=async predicate=>{for(let i=0;i<200&&!predicate();i++)await new Promise(resolve=>setTimeout(resolve,10));if(!predicate())throw Error('UI wait timed out.');};
+  try{
+    const panel=document.getElementById('game-model-popup'),select=document.getElementById('game-model-select'),apply=document.getElementById('game-model-apply'),status=document.getElementById('game-model-status');
+    document.getElementById('game-menu-toggle').click();
+    checks.hamburgerContainsModel=!document.getElementById('game-menu').hidden&&!!document.getElementById('open-game-model-button');
+    document.getElementById('open-game-model-button').click();await wait(()=>!select.disabled);
+    checks.modal=panel.open&&panel.matches(':modal')&&document.getElementById('game-menu').hidden;
+    checks.originalDefault=select.value==='original'&&apply.disabled;
+    checks.availableModels=select.options.length===3&&select.options[1].value==='gpt-6-luna';
+    const bounds=panel.getBoundingClientRect();checks.fitsViewport=bounds.left>=0&&bounds.top>=0&&bounds.right<=innerWidth+1&&bounds.bottom<=innerHeight+1;
+    select.value='gpt-6-luna';select.dispatchEvent(new Event('change'));checks.canApply=!apply.disabled;
+    apply.click();await wait(()=>status.textContent.includes('selected.'));
+    checks.appliesNextAction=posts.length===1&&posts[0].revision===0&&current.id==='gpt-6-luna'&&status.textContent.includes('next action');
+    checks.menuReflectsSelection=document.getElementById('open-game-model-button').textContent.includes('GPT-6 Luna');
+    select.value='gpt-4.1-mini';select.dispatchEvent(new Event('change'));rejectNext=true;apply.click();await wait(()=>status.textContent.includes('no longer verified'));
+    checks.failedSelectionRetainsCurrent=current.id==='gpt-6-luna'&&select.value==='gpt-6-luna';
+    select.value='original';select.dispatchEvent(new Event('change'));apply.click();await wait(()=>current.id==='original'&&!select.disabled);
+    checks.rollback=current.id==='original'&&posts.at(-1).id==='original';
+    select.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+    await wait(()=>!panel.open&&document.activeElement.id==='game-menu-toggle');
+    checks.escapeCloses=!panel.open&&document.activeElement.id==='game-menu-toggle';
+    checks.draftUnchanged=document.getElementById('draft').value==='unfinished command';
+  }catch(error){errors.push(error.stack);}
+  await originalFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
+});
+</script></body></html>`;
+for (const html of [page,journalPage,tacticalPage,modelPage])for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) if (script.trim()) new vm.Script(script);
 
 (async () => {
   let receiveReport;
@@ -1139,10 +1227,10 @@ for (const [, script] of page.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) 
       });
       return;
     }
-    if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(page); return; }
-    if (['/assets/adventurers-map.svg', '/assets/adventurers-pack.svg'].includes(request.url)) { response.setHeader('Content-Type', 'image/svg+xml'); response.end(fs.readFileSync(path.join(root, request.url.slice(1)))); return; }
+    if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(process.argv.includes('--model-only')?modelPage:process.argv.includes('--tactical-only')?tacticalPage:process.argv.includes('--journal-only')?journalPage:page); return; }
+    if (['/assets/adventurers-map.svg', '/assets/adventurers-pack.svg','/assets/adventurers-journal.svg','/assets/adventurers-spellbook.svg'].includes(request.url)) { response.setHeader('Content-Type', 'image/svg+xml'); response.end(fs.readFileSync(path.join(root, request.url.slice(1)))); return; }
     const name = /^\/assets\/(\w+)\.js$/.exec(request.url)?.[1];
-    if (!scripts.includes(name) && !['partyRecovery','rendererWebGPU','objectDiscovery'].includes(name)) { response.writeHead(404); response.end(); return; }
+    if (!scripts.includes(name) && !['partyRecovery','rendererWebGPU','objectDiscovery','adventureJournalUi','combatTacticalUi','partySpellbookUi'].includes(name)) { response.writeHead(404); response.end(); return; }
     response.setHeader('Content-Type', 'application/javascript'); response.end(fs.readFileSync(path.join(root, 'assets', name + '.js')));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

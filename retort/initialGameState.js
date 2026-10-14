@@ -17,7 +17,7 @@ function buildInitialWorldConsole(state = {}) {
     Coordinates: 'X: 0, Y: 0, Z: 0', 'Objects in Room': 'None', 'Objects in Room Properties': 'None',
     Exits: exits.length ? exits.join(', ') : 'north, down', Score: '0', 'Puzzle in Room': 'None', 'Puzzle Solution': 'None',
     'Artifacts Found': '0/15', 'Quests Achieved': '0/21', 'Next Artifact': 'None', 'Next Boss': 'None', 'Next Boss Room': 'None',
-    'Current Quest': 'None', Inventory: 'Empty', 'Inventory Properties': 'None', Turns: '0',
+    'Current Quest': 'None', 'Silver Pieces': '0', Inventory: 'Empty', 'Inventory Properties': 'None', Turns: '0',
     'Monsters in Room': 'None', 'Monsters Equipped Properties': 'None', 'Monsters State': 'None', 'Rooms Visited': '1', 'Adjacent Rooms': 'None'
   };
   for (const [label, fallback] of Object.entries(defaults)) {

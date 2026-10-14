@@ -32,6 +32,28 @@ test('inventory metadata reads JSON and existing object-literal text without exe
   delete globalThis.inventoryUnsafeEvaluated;
 });
 
+test('legacy capitalized equipment types still use their correct inventory categories', () => {
+  const rows = ['Weapon', 'Armor', 'Shield', 'Other'].map(type => ({ name: type + ' item', type }));
+  const items = Inventory.inventoryItems(rows.map(r => r.name), rows);
+  for (const item of items) assert.equal(item.type, item.name.split(' ')[0].toLowerCase());
+});
+
+test('server result hydration updates the actual equip-command arrays, including duplicate and empty inventories', () => {
+  const source = fs.readFileSync('assets/game.js', 'utf8');
+  const start = source.indexOf('window.applySpellEquipment = text => {'), end = source.indexOf('window.getEconomyResidentInfo', start);
+  const context = { window: { DungeonInhabitants: require('../assets/dungeonInhabitants'), InventoryUi: Inventory },
+    currentDungeon: { geoKey: '0,0,0' }, characters: [], npcs: [], monstersInVisitedRooms: new Map(),
+    inventory: ['stale loot'], inventoryProperties: ['stale metadata'] };
+  vm.runInNewContext(source.slice(start, end), context);
+  const item = { name: 'veilbreaker aegis', type: 'shield', magic: 3, ac: 2 };
+  context.window.applySpellEquipment(`Inventory: ${item.name}, ${item.name}\nInventory Properties: ${JSON.stringify(item)}`);
+  assert.deepEqual(Array.from(context.inventory), [item.name, item.name]);
+  assert.deepEqual(Array.from(context.window.inventory), [item.name, item.name]);
+  assert.equal(JSON.parse(context.inventoryProperties[0]).ac, 2);
+  context.window.applySpellEquipment('Inventory: Empty\nInventory Properties: None');
+  assert.equal(context.inventory.length, 0); assert.equal(context.inventoryProperties.length, 0); assert.equal(context.window.inventory.length, 0);
+});
+
 test('slot occupancy reads the original text sheet for all four slots', () => {
   const sheet = 'Mortacia\nEquipped: Weapon: bronze sword, Armor: moon robe, Shield: None, Other: red ring\nMagic: 2';
   assert.equal(Inventory.equippedName(sheet, 'weapon'), 'bronze sword');
@@ -71,6 +93,16 @@ test('closed doors and walls prevent pickup through them', () => {
   assert.equal(Pickup.nearby(dungeon, [item], player), item);
   dungeon.cells['2,2'].tile = 'wall';
   assert.equal(Pickup.nearby(dungeon, [item], player), null);
+});
+
+test('walk-over confirmation reaches beyond one tile in every direction and stays local', () => {
+  const dungeon = ground(), item = { name: 'bronze sword', x: 2, y: 2 };
+  assert.equal(Pickup.PROXIMITY_RANGE, 1.25);
+  for (let i = 0; i < 8; i++) {
+    const angle = i * Math.PI / 4;
+    assert.equal(Pickup.nearby(dungeon, [item], { x: 2.5 + Math.cos(angle) * 1.2, y: 2.5 + Math.sin(angle) * 1.2 }), item);
+    assert.equal(Pickup.nearby(dungeon, [item], { x: 2.5 + Math.cos(angle) * 1.3, y: 2.5 + Math.sin(angle) * 1.3 }), null);
+  }
 });
 
 test('click and drag pickup reach extends to 2.5 tiles without widening automatic proximity prompts', () => {

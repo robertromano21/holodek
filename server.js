@@ -7,9 +7,18 @@ const { retortWithUserInput, runNpcAutonomyTick, generatePartyCharacterProfiles 
 const sharedState = require('./sharedState');
 const Inhabitants = require('./assets/dungeonInhabitants');
 const PhysicalPuzzles = require('./assets/physicalPuzzles');
+const QuestScenes = require('./retort/questScenes');
+const Economy = require('./retort/economy');
+const AdventureJournal = require('./retort/adventureJournal');
+const SpellSystem = require('./retort/spellSystem');
+const ClassMagic = require('./retort/classMagic');
+const CombatLife = require('./retort/combatLife');
+const PartySpellbook = require('./retort/partySpellbook');
+const GameLogContent = require('./assets/gameLogContent');
 const CampaignMemory = require('./retort/campaignMemory');
 const DialogueTurns = require('./retort/dialogueTurns');
 const { createPopulationService } = require('./retort/roomPopulation');
+const { narrateEncounter } = require('./retort/encounterNarration');
 const populationService = createPopulationService(sharedState);
 DialogueTurns.install(sharedState, Inhabitants);
 const fs = require('fs');
@@ -21,6 +30,7 @@ const characterTraits = require('./retort/characterTraitSpec');
 const { summarizeDungeon } = require('./dungeonDiagnostics');
 const { actionDice } = require('./retort/actionDice');
 const { finalizeRoomDungeon } = require('./retort/retortWithUserInput');
+const SecretDoors = require('./retort/secretDoors');
 const { buildEnvironmentLab, descriptions: environmentLabKinds } = require('./retort/environmentLab');
 const { buildInitialWorldConsole, buildInitialGameConsole } = require('./retort/initialGameState');
 const app = express();
@@ -30,6 +40,7 @@ const roomDatabaseReceiver = createRoomDatabaseReceiver();
 // Middleware
 app.use(createGameJsonParser());
 app.use(cors());
+require('./retort/gameModels').install(app);
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
 // Stock / Enhanced SID switch (♫ panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
 const SidMode = require('./retort/sidMode');
@@ -79,6 +90,7 @@ app.get('/combat-updates2', (req, res) => {
     client.send({ type: 'campaign_memory', runId: sharedState.getDungeonRunId(), records: CampaignMemory.exportRecords(sharedState).slice(-128) });
     client.send(actionDice.snapshot());
     client.send({ type: 'game_pause', paused: sharedState.getGamePaused(), runId: sharedState.getDungeonRunId() });
+    client.send({ type: 'life_status', ...CombatLife.status(sharedState) });
     const coords = sharedState.getLastCoords();
     const population = coords && sharedState.getRoomPopulation(`${coords.x},${coords.y},${coords.z}`);
     if (population) client.send({ type: 'room_population', population, runId: sharedState.getDungeonRunId() });
@@ -103,6 +115,8 @@ function broadcast(data) {
     }
     clients.forEach(client => client.send(data));
 }
+sharedState.emitter.on('combat_life', status => broadcast({ type: 'life_status', ...status }));
+require('./retort/campaignPlanningLog').watch(sharedState);
 
 app.post('/debug/dungeon-rendering', (req, res) => {
     const report = req.body;
@@ -228,20 +242,30 @@ app.post('/set-dungeon-testing-mode', (req, res) => {
 
 app.post('/submit-target2', (req, res) => {
     if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before choosing a target.' });
-    const { combatant, target, cancelled, actionId, turnId, action } = req.body;
+    const { combatant, target, cancelled, actionId, turnId, action, itemId, spellId, kind, item } = req.body;
     if (!actionDice.active || actionDice.active.kind !== 'combat' || actionDice.active.id !== actionId) {
       return res.status(409).json({ error: 'That combat turn is no longer active.' });
     }
     const turn = actionDice.active.turn;
     const validAction = turn && (action === 'attack' && !cancelled && turn.targets.includes(target) ||
       action === 'retreat' && turn.allowRetreat && !cancelled ||
-      action === 'hold' && !turn.allowRetreat && cancelled === true);
+      action === 'cast' && !cancelled && turn.spells?.some(s => s.itemId === itemId && s.spellId === spellId && s.target === target) ||
+      action === 'care' && !cancelled && turn.care?.some(c => c.kind === kind && c.item === item && c.target === target) ||
+      action === 'hold' && cancelled === true);
     if (!turn || turn.turnId !== turnId || turn.combatant !== combatant || !validAction) {
       return res.status(409).json({ error: 'That player turn or target is no longer available.' });
     }
+    if (turn.movement?.busy || turn.tactical && action === 'attack' && !turn.attackTargets.includes(target))
+      return res.status(409).json({ error: 'Movement is resolving or that enemy is out of range or sight.' });
     console.log(`Received target selection: ${combatant} targets ${target}`);
-    sharedState.emitter.emit(`target_response_${combatant}`, { target, cancelled: cancelled === true, actionId, turnId, action });
+    sharedState.emitter.emit(`target_response_${combatant}`, { target, cancelled: cancelled === true, actionId, turnId, action, itemId, spellId, kind, item });
     res.json({ status: 'success' });
+});
+
+app.post('/combat/move', async (req, res) => {
+  if (sharedState.getGamePaused() || !actionDice.moveCombatant) return res.status(409).json({ error: 'No player movement is available.' });
+  try { res.json(await actionDice.moveCombatant(req.body || {})); }
+  catch (error) { res.status(409).json({ error: error.message }); }
 });
 
 const tasks = new Map();  // { taskId: { status: 'processing', result: null } }
@@ -287,6 +311,7 @@ let lastAutonomyAt = 0;
 
 app.post('/game/pause', (req, res) => {
   if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That game is no longer active.' });
+  if (typeof CombatLife !== 'undefined' && CombatLife.status(sharedState).gameOver) return res.status(409).json({ error: 'This adventure has ended. Start a new game.' });
   if (typeof req.body.paused !== 'boolean') return res.status(400).json({ error: 'A pause setting is required.' });
   sharedState.setGamePaused(req.body.paused);
   actionDice.setPaused(req.body.paused);
@@ -294,13 +319,191 @@ app.post('/game/pause', (req, res) => {
   broadcast(event); res.json(event);
 });
 
-app.post('/room-population/visit', (req, res) => {
+function prepareQuestScene(req) {
+  if (typeof CombatLife !== 'undefined' && CombatLife.status(sharedState).gameOver) return { error: 'This adventure has ended. Start a new game.', status: 409 };
+  if (inputTaskInFlight || actionDice.active || sharedState.getGamePaused() || npcAutonomyTickInFlight)
+    return {error:'The current action is resolving or the game is paused.',status:409};
+  return populationService.visit(req.body || {});
+}
+app.post('/journal/view', (req, res) => {
+  if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That journal belongs to another game.' });
+  try { res.json(AdventureJournal.project(sharedState)); }
+  catch (error) { console.warn('[AdventureJournal]', error.message); res.status(503).json({ error: 'The journal could not be read.' }); }
+});
+app.post('/spellbook/view', (req, res) => {
+  if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That spellbook belongs to another game.' });
+  try { res.json(PartySpellbook.project(sharedState)); }
+  catch (error) { console.warn('[PartySpellbook]', error.message); res.status(503).json({ error: 'The spellbook could not be read.' }); }
+});
+app.post('/quest-scenes/view', (req,res) => {
+  const ready=prepareQuestScene(req); if(ready.error)return res.status(ready.status).json({error:ready.error});
+  const result=QuestScenes.view(sharedState,req.body.actor);
+  if(result.error)return res.status(409).json(result);
+  res.json(result);
+});
+app.post('/quest-scenes/choose', (req,res) => {
+  const ready=prepareQuestScene(req); if(ready.error)return res.status(ready.status).json({error:ready.error});
+  inputTaskInFlight=true;
+  try {
+    const result=QuestScenes.choose(sharedState,populationService,req.body);
+    if(result.error)return res.status(result.status||409).json({error:result.error});
+    const coords=sharedState.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`;
+    const event={...result,type:'quest_scene_result',eventId:require('node:crypto').randomUUID(),runId:sharedState.getDungeonRunId(),geoKey,
+      updatedGameConsole:sharedState.getUpdatedGameConsole(),roomNameDatabaseString:sharedState.getRoomNameDatabase(),
+      combatCharactersString:sharedState.getCombatCharactersString(),population:sharedState.getRoomPopulation(geoKey)};
+    if(!result.command)broadcast(event);
+    console.info('[QuestScene]',JSON.stringify({storyId:req.body.storyId,stageId:req.body.stageId,optionId:req.body.optionId,geoKey}));
+    res.json(event);
+  } catch(error) {console.warn('[QuestScene]',error.message);res.status(503).json({error:'The scene could not resolve.'});}
+  finally {inputTaskInFlight=false;}
+});
+
+function economyStateEvent(geoKey, update) {
+  return { type: 'economy_result', passive: true, eventId: require('node:crypto').randomUUID(), runId: sharedState.getDungeonRunId(), geoKey,
+    content: update?.notices?.join('\n') || 'Party inventory and currency synchronized.',
+    updatedGameConsole: sharedState.getUpdatedGameConsole(), roomNameDatabaseString: sharedState.getRoomNameDatabase(),
+    combatCharactersString: sharedState.getCombatCharactersString(), population: sharedState.getRoomPopulation(geoKey),
+    sceneObjects: sharedState.getRoomDungeonForSimulation(sharedState.getLastCoords())?.sceneObjects };
+}
+function spellStateEvent(geoKey, result = {}, passive = false) {
+  return { ...result, type: 'spell_result', passive, eventId: require('node:crypto').randomUUID(), runId: sharedState.getDungeonRunId(), geoKey,
+    updatedGameConsole: sharedState.getUpdatedGameConsole(), roomNameDatabaseString: sharedState.getRoomNameDatabase(),
+    combatCharactersString: sharedState.getCombatCharactersString(), population: sharedState.getRoomPopulation(geoKey),
+    sceneObjects: sharedState.getRoomDungeonForSimulation(sharedState.getLastCoords())?.sceneObjects };
+}
+app.post('/spells/view', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  try {
+    const data = SpellSystem.view(sharedState, req.body.caster), text = sharedState.getUpdatedGameConsole();
+    const targets = SpellSystem.allActors(text).filter(a => Inhabitants.allegiance(a) === 'Hostile' && a.hp > 0).map(a => a.name);
+    for (const caster of data.casters) caster.choices = SpellSystem.choices(sharedState, caster.name, targets);
+    const names = SpellSystem.field(text, 'Inventory').split(/,\s*/);
+    data.scrolls = require('./assets/inventoryUi').parseProperties(SpellSystem.field(text, 'Inventory Properties')).filter(p => names.includes(p.name) && SpellSystem.Rules.templates[p.spell_scroll] && p.magic > 0);
+    res.json({ ...data, spellResult: spellStateEvent(req.body.geoKey, { content: '' }, true) });
+  }
+  catch (error) { console.warn('[Spells]', error.message); res.status(503).json({ error: 'Spell records could not be read.' }); }
+});
+app.post('/spells/prepare', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  inputTaskInFlight = true;
+  try {
+    if (!/^[\w:-]{8,100}$/.test(req.body.nonce || '')) return res.status(400).json({ error: 'A spell preparation transaction ID is required.' });
+    const result = ClassMagic.action(sharedState, req.body); if (result.error) return res.status(409).json(result);
+    const event = spellStateEvent(req.body.geoKey, result); broadcast(event); res.json(event);
+  } catch (error) { console.warn('[Spells]', error.message); res.status(503).json({ error: 'Spell preparation could not resolve.' }); }
+  finally { inputTaskInFlight = false; }
+});
+app.post('/spells/cast', async (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  inputTaskInFlight = true;
+  try {
+    SpellSystem.synchronize(sharedState);
+    const previous = JSON.parse(sharedState.getRoomNameDatabase())['0,0,0'].spellSystem.receipts.find(r => r.nonce === req.body.nonce);
+    if (previous) {
+      if (JSON.stringify(previous.request) !== JSON.stringify([req.body.runId, req.body.geoKey, req.body.caster, req.body.itemId, req.body.spellId, req.body.target])) return res.status(409).json({ error: 'That spell transaction was already used.' });
+      return res.json(spellStateEvent(req.body.geoKey, { ...previous.result, duplicate: true }));
+    }
+    const c = SpellSystem.context(sharedState, req.body, { combat: true });
+    if (req.body.revision !== c.pool.revision || !/^[\w:-]{8,100}$/.test(req.body.nonce || '')) return res.status(409).json({ error: 'That spell selection is stale.' });
+    let result;
+    if (!['heal', 'ward'].includes(c.spell.effect)) {
+      SpellSystem.queue(sharedState, req.body);
+      result = await retortWithUserInput('attack ' + c.target.name, broadcast, sharedState.getCombatMode(), { spellOpening: true });
+    } else {
+      result = SpellSystem.cast(sharedState, populationService, req.body);
+      if (result.error) return res.status(409).json(result);
+      if (!result.duplicate) SpellSystem.advance(sharedState);
+    }
+    const event = spellStateEvent(req.body.geoKey, result); broadcast(event); res.json(event);
+  } catch (error) { console.warn('[Spells]', error.message); res.status(409).json({ error: error.message }); }
+  finally { SpellSystem.clearOpening(sharedState); inputTaskInFlight = false; }
+});
+app.post('/combat/care/view', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  const care = SpellSystem.party(sharedState.getUpdatedGameConsole()).flatMap(a => CombatLife.careChoices(sharedState, a.name).map(c => ({ ...c, actor: a.name })));
+  res.json({ care });
+});
+app.post('/secret-doors/action', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  inputTaskInFlight = true;
+  try {
+    const result = SecretDoors.act(sharedState, req.body);
+    if (result.error) return res.status(409).json(result);
+    if (!result.duplicate) {
+      const dungeon = finalizeRoomDungeon(req.body.geoKey, result.dungeon, result.dungeon.customTiles);
+      sharedState.setRoomDungeon(sharedState.getLastCoords(), dungeon, dungeon.customTiles); SecretDoors.persist(sharedState, dungeon);
+      broadcast({ type: 'dungeonCellUpdate', geoKey: req.body.geoKey, previousStamp: result.previousStamp,
+        geometryStamp: dungeon._geometryStamp, cells: result.cells, secretDoors: dungeon.secretDoors });
+      if (req.body.kind === 'search') SpellSystem.advance(sharedState);
+    }
+    const { dungeon, cells, previousStamp, ...message } = result;
+    const event = spellStateEvent(req.body.geoKey, message); broadcast(event); res.json(event);
+  } finally { inputTaskInFlight = false; }
+});
+app.post('/combat/wait', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  const result = CombatLife.wait(sharedState, req.body); if (result.error) return res.status(409).json(result);
+  if (!result.duplicate) SpellSystem.advance(sharedState);
+  const event = spellStateEvent(req.body.geoKey, result); broadcast(event); res.json(event);
+});
+app.post('/combat/care', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  inputTaskInFlight = true;
+  try {
+    const result = CombatLife.care(sharedState, req.body);
+    if (result.error) return res.status(409).json(result);
+    if (!result.duplicate) SpellSystem.advance(sharedState);
+    const event = spellStateEvent(req.body.geoKey, result); broadcast(event); res.json(event);
+  } finally { inputTaskInFlight = false; }
+});
+app.post('/economy/view', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  try {
+    const update = Economy.refresh(sharedState);
+    const book = Economy.project(sharedState);
+    const result = req.body.actor ? Economy.view(sharedState, req.body.actor) : { silver: book.silver, revision: book.revision };
+    if (result.error) return res.status(409).json(result);
+    res.json({ ...result, ...(update.changed ? { economyResult: economyStateEvent(req.body.geoKey, update) } : {}) });
+  } catch (error) { console.warn('[Economy]', error.message); res.status(503).json({ error: 'The economy records could not be read.' }); }
+});
+app.post('/economy/action', (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  inputTaskInFlight = true;
+  try {
+    const result = Economy.action(sharedState, populationService, req.body);
+    if (result.error) {
+      if (req.body.kind === 'take') console.warn('[PickupRejected]', JSON.stringify({ geoKey: req.body.geoKey,
+        item: req.body.item, player: req.body.player, reason: result.error }));
+      return res.status(409).json(result);
+    }
+    if (['equip', 'unequip'].includes(req.body.kind) && typeof SpellSystem !== 'undefined') SpellSystem.synchronize(sharedState);
+    const event = { ...result, type: 'economy_result', eventId: require('node:crypto').randomUUID(), runId: sharedState.getDungeonRunId(),
+      geoKey: req.body.geoKey, updatedGameConsole: sharedState.getUpdatedGameConsole(), roomNameDatabaseString: sharedState.getRoomNameDatabase(),
+      combatCharactersString: sharedState.getCombatCharactersString(), population: sharedState.getRoomPopulation(req.body.geoKey) };
+    broadcast(event); res.json(event);
+  } catch (error) { console.warn('[Economy]', error.message); res.status(503).json({ error: 'The transaction could not resolve.' }); }
+  finally { inputTaskInFlight = false; }
+});
+
+app.post('/room-population/visit', async (req, res) => {
   if (inputTaskInFlight || actionDice.active) return res.status(409).json({ error: 'The current action is resolving.' });
-  const result = populationService.visit(req.body || {});
+  let result = populationService.visit({ ...req.body, deferIntroductions: true });
   if (result.error) return res.status(result.status).json({ error: result.error });
+  if (result.encounters?.length) {
+    inputTaskInFlight = true;
+    try { result = await narrateEncounter({ state: sharedState, service: populationService, visit: result,
+      isCurrent: () => !actionDice.active }); }
+    catch (error) {
+      console.warn('[EncounterNarration]', error.message);
+      return res.status(503).json({ error: 'Encounter narration failed; its introduction remains available to retry.' });
+    } finally { inputTaskInFlight = false; }
+  }
   if (result.dialogue.length) console.info('[RoomPopulation]', JSON.stringify({ phase: 'speech', geoKey: req.body.geoKey,
     speakers: result.dialogue.map(row => row.speaker), player: req.body.player, speech: result.speech, nearby: true }));
-  if (result.dialogue.length) broadcast({ type: 'character_dialogue', dialogue: result.dialogue,
+  if (result.story) {
+    broadcast({ type: 'encounter_story', ...result.story });
+    broadcast({ type: 'campaign_memory', runId: sharedState.getDungeonRunId(), records: CampaignMemory.exportRecords(sharedState).slice(-32) });
+  } else if (result.dialogue.length) broadcast({ type: 'character_dialogue', dialogue: result.dialogue,
     geoKey: req.body.geoKey, runId: sharedState.getDungeonRunId() });
   res.json(result);
 });
@@ -352,8 +555,14 @@ app.post('/room-population/autonomy', async (req, res) => {
 
 app.use('/processInput7', (req, res, next) => DialogueTurns.run(req.body?.userInput, next));
 app.post('/processInput7', async (req, res) => {
+  if (typeof CombatLife !== 'undefined' && CombatLife.status(sharedState).gameOver) return res.status(409).json({ error: 'This adventure has ended. Start a new game.' });
   if (sharedState.getGamePaused()) return res.status(409).json({ error: 'Resume the game before issuing a command.' });
   if (inputTaskInFlight) return res.status(409).json({ error: 'The previous action is still resolving.' });
+  // Pickup is mechanical and view-validated by /economy/action, never adjudicated by narration.
+  if (/^\s*(?:take|pick\s+up|collect)\b/i.test(req.body?.userInput || ''))
+    return res.status(409).json({ error: 'Take only objects currently shown in Objects in Room. Refresh the page to use the current pickup controls.' });
+  if (/^\s*(?:cast|scribe|prepare\s+spells)\b/i.test(req.body?.userInput || ''))
+    return res.status(409).json({ error: 'Use Spells or the scroll Scribe option; spell effects are engine-verified, not narrated.' });
   // If we're still in the character generation / review phase, don't let the main Retort flow
   // (which triggers full dungeon creation) run yet. The client should be showing the Save/Reroll menu.
   if (sharedState.isCharacterGenerationInProgress && sharedState.isCharacterGenerationInProgress()) {
@@ -389,7 +598,9 @@ app.post('/processInput7', async (req, res) => {
       const result = await retortWithUserInput(req.body.userInput, broadcast, combatMode, physicalPuzzleCommand ? {
         onPhysicalPuzzlePrepared: result => resolvePuzzleNarration(!result || result.completed)
       } : {});
-      console.log(`retortWithUserInput completed for taskId ${taskId}, result:`, result);
+      console.log(`retortWithUserInput completed for taskId ${taskId}:`, {
+        responseChars: result.content?.length || 0, dialogue: (result.dialogue || []).map(row => row.speaker), actionOnly: !!result.actionOnly });
+      Economy.refresh(sharedState);
       let updatedGameConsole = sharedState.getUpdatedGameConsole();
         if (!updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/)) {
             console.log('No coordinates in updatedGameConsole, adding default');
@@ -402,7 +613,7 @@ app.post('/processInput7', async (req, res) => {
       const roomNameDatabaseString = sharedState.getRoomNameDatabase(); // Add this
       const currentQuest = sharedState.getCurrentQuest(); // New: Include current quest
       const finalResult = { 
-        response: result.content, 
+        response: GameLogContent.withoutLootLists(result.content),
         updatedGameConsole, 
         combatCharactersString,
         roomNameDatabaseString, // Include in response
@@ -418,7 +629,8 @@ app.post('/processInput7', async (req, res) => {
         status: 'complete', 
         result: finalResult 
       });
-      console.log(`Task ${taskId} completed, result set:`, finalResult);
+      console.log(`Task ${taskId} completed:`, { responseChars: finalResult.response?.length || 0,
+        consoleChars: updatedGameConsole.length, rosterChars: combatCharactersString?.length || 0, roomDatabaseChars: roomNameDatabaseString?.length || 0 });
     } catch (err) {
       console.error('Background task error for taskId ' + taskId + ':', err);
       tasks.set(taskId, { status: 'error', result: err.message });
@@ -501,6 +713,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
       sharedState.setRoomNameDatabase(initialWorld.roomNameDatabaseString);
       sharedState.setPersonalNarrative('');
       sharedState.setUpdatedGameConsole(buildInitialGameConsole(initialWorld.console, characterData, partyNpcData));
+      Economy.start(sharedState, characterData, partyNpcData);
       const profiles = typeof generatePartyCharacterProfiles === 'function' ? await generatePartyCharacterProfiles([characterData, ...partyNpcData], runId) : [];
       if (profiles.length) CampaignMemory.rememberProfiles(sharedState, profiles, broadcast);
       if (profiles.length) {
@@ -515,6 +728,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
 
       const result = await retortWithUserInput(specialInput, broadcast, combatMode);
       CampaignMemory.rememberRoomHistory(sharedState, '', result.content, sharedState.getUpdatedGameConsole(), broadcast);
+      Economy.refresh(sharedState);
 
       let updatedGameConsole = sharedState.getUpdatedGameConsole();
       if (!updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/)) {
@@ -712,14 +926,13 @@ app.get('/poll-task2/:taskId', (req, res) => {
     return res.status(404).json({ error: 'Task not found' });
   }
   if (task.status === 'complete' || task.status === 'error') {
-    console.log(`Returning task ${req.params.taskId} with status ${task.status}:`, task);
+    console.log(`Returning task ${req.params.taskId} with status ${task.status}`);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.json(task);
     tasks.delete(req.params.taskId); // Cleanup
   } else {
-    console.log(`Task ${req.params.taskId} still processing`);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -739,12 +952,28 @@ app.post('/updateState7', async (req, res) => {
       return res.status(status).json({ error: error.message, code: error.code });
     }
 
+    let consoleSnapshot, roomSnapshot, rosterSnapshot = combatCharactersString;
+    try {
+      if (updatedGameConsole !== undefined && typeof updatedGameConsole !== 'string') throw Error('The game console must be text.');
+      if (updatedGameConsole !== undefined) consoleSnapshot = Economy.preserveInventory(sharedState.getUpdatedGameConsole(), updatedGameConsole, sharedState.getRoomNameDatabase());
+      if (roomSync) roomSnapshot = Economy.preserve(sharedState.getRoomNameDatabase(), roomSync.json);
+      if (roomSnapshot !== undefined && typeof SecretDoors !== 'undefined') roomSnapshot = SecretDoors.preserve(sharedState.getRoomNameDatabase(), roomSnapshot);
+      if (typeof SpellSystem !== 'undefined') {
+        const protectedSpells = SpellSystem.preserve(sharedState, consoleSnapshot, roomSnapshot);
+        consoleSnapshot = protectedSpells.text; roomSnapshot = protectedSpells.database;
+      }
+      if (typeof CombatLife !== 'undefined') {
+        const life = CombatLife.preserve(sharedState, consoleSnapshot, roomSnapshot, rosterSnapshot);
+        consoleSnapshot = life.text; roomSnapshot = life.database; rosterSnapshot = life.roster;
+      }
+      if (combatCharactersString !== undefined) Economy.validateDivineRoster?.(combatCharactersString);
+    } catch (error) { return res.status(400).json({ error: 'Invalid economy state: ' + error.message }); }
     if (personalNarrative !== undefined) sharedState.setPersonalNarrative(personalNarrative);
-    if (updatedGameConsole !== undefined) sharedState.setUpdatedGameConsole(updatedGameConsole);
-    if (roomSync) sharedState.setRoomNameDatabase(roomSync.json);
+    if (consoleSnapshot !== undefined) sharedState.setUpdatedGameConsole(consoleSnapshot);
+    if (roomSnapshot !== undefined) sharedState.setRoomNameDatabase(roomSnapshot);
     if (combatCharactersString !== undefined) {
-        sharedState.setCombatCharactersString(combatCharactersString);
-        console.log("Updated combatCharactersString:", combatCharactersString);
+        sharedState.setCombatCharactersString(rosterSnapshot);
+        console.log('Combat roster synchronized:', { payloadChars: combatCharactersString?.length || 0 });
     }
     if (combatMode !== undefined) {
         sharedState.setCombatMode(combatMode); // Update combatMode
@@ -761,12 +990,16 @@ app.post('/updateState7', async (req, res) => {
     if (liveWorldState !== undefined) {
         sharedState.setLiveWorldState(liveWorldState);
     }
+    const economyUpdate = Economy.refresh(sharedState);
+    const spellUpdate = typeof SpellSystem !== 'undefined' ? SpellSystem.synchronize(sharedState) : null;
 
     const coordinates = String(updatedGameConsole || '').match(/Coordinates:\s*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
     const geoKey = coordinates ? `${coordinates[1]},${coordinates[2]},${coordinates[3]}` : null;
     console.info('[StateSyncAccepted]', JSON.stringify({ geoKey, bytes: Number(req.get('Content-Length')) || null,
       roomDatabaseMode: roomSync?.mode || 'unchanged', changedRooms: roomSync?.changedRooms || 0 }));
-    res.json({ message: 'State updated successfully', geoKey, roomDatabaseSyncToken: roomSync?.token });
+    res.json({ message: 'State updated successfully', geoKey, roomDatabaseSyncToken: roomSync?.token,
+      ...(economyUpdate?.changed ? { economyResult: economyStateEvent(geoKey, economyUpdate) } : {}),
+      ...(spellUpdate?.changed ? { spellResult: spellStateEvent(geoKey, { content: '' }, true) } : {}) });
     // Revisit pre-render: the client syncs the new room's coordinates before the turn runs. If that room already has a
     // saved song (no LLM needed) and it is not in a slot, render it into the free slot now and announce it; the browser
     // queues it and switches when the room is on screen. The turn's own render then reuses the slot.

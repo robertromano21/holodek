@@ -34,7 +34,7 @@ function harness({ exhausted = false, completed = false, consoleText = text() } 
   if (completed) room.puzzleCompletions = { [Rewards.identity(consoleText)]: { completedAt: 1000, contributors: ['Benedict'], xp: { Benedict: 250 } } };
   let database = JSON.stringify({ '0,0,0': room });
   const prompts = [], requests = [], responses = [];
-  const context = { PuzzleRewards: Rewards, AdjudicationMetadata: Metadata, parseSheets, evaluateTaskRequirements,
+  const context = { PuzzleRewards: Rewards, AdjudicationMetadata: Metadata, parseSheets, evaluateTaskRequirements, GeneratedNames: require('../retort/generatedNames'),
     console: quiet, Math: Object.assign(Object.create(Math), { random: () => .99 }),
     generateObjectModifiers: async () => ({ attack_modifier: 0, damage_modifier: 0, ac: 1, magic: 0 }),
     sharedState: { getRoomNameDatabase: () => database, setRoomNameDatabase: value => database = value, setUpdatedGameConsole() {} } };

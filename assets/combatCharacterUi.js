@@ -20,7 +20,7 @@
     const type=actor.type;
     document.querySelectorAll('.popup-container').forEach(p=>p.remove());
     root.openCombatCharacterSheet(actor);
-    if(actor.type==='pc')return true;
+    if(actor.type==='pc'){root.CombatLifeUi?.addAction(document.getElementById('party-popup'),actor.name);return true;}
     const popup=document.createElement('div');popup.className='popup-container combat-character-actions';
     popup.style.cssText='position:static;transform:none;width:calc(100% - 16px);margin:8px;padding:8px';
     const text=document.createElement('p');text.textContent=actor.type==='npc'?'Remove '+actor.name+' from the party?':'What would you like to do with '+actor.name+'?';popup.appendChild(text);
@@ -39,10 +39,14 @@
     };
     if(actor.type==='npc')button('Remove','remove '+actor.name+' from party');
     else{
-      button('Add to Party','add '+actor.name+' to party');button('Attack','attack '+actor.name);
+      if (actor.recruitable !== false && (root.PantheonCharacters?.canRecruit(actor) ?? true)) button('Add to Party','add '+actor.name+' to party');
+      button('Attack','attack '+actor.name);
       const give=document.createElement('button');give.className='popup-button';give.textContent='Give Item';
       give.addEventListener('click',()=>root.ItemGiveUi?.open(actor.name));popup.appendChild(give);
     }
+    root.QuestSceneUi?.addAction(popup,actor.name);
+    root.CommerceUi?.addAction(popup,actor.name);
+    root.CombatLifeUi?.addAction(popup,actor.name);
     button('Cancel');document.getElementById('party-popup')?.appendChild(popup);root.centerPartySheet?.();
     return true;
   }

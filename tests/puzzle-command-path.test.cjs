@@ -72,7 +72,7 @@ test('the real physical command path returns reads turns invalid settings and re
 });
 
 test('mechanical dispatch occurs before both quest generation and the main Retort session', () => {
-  assert.ok(source.indexOf('// Mechanical puzzle commands') < source.indexOf('    return await run(retort(async ($) => {'));
+  assert.ok(source.indexOf('// Mechanical puzzle commands') < source.indexOf('    return await run(gameRetort(async ($) => {'));
   assert.ok(source.indexOf('// Mechanical puzzle commands') < source.indexOf('await $.run($ => generateQuest($))'));
   assert.equal((source.match(/await tryPhysicalPuzzleAction\(userInput\)/g) || []).length, 1);
   assert.match(source, /if \(!physicalPuzzleResult && !roomDescriptionGenerated/);

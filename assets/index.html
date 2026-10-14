@@ -16,6 +16,7 @@
  <script src="/assets/puzzleModules.js"></script>
  <script src="/assets/puzzleMotion.js"></script>
  <script src="/assets/shrineIconography.js"></script>
+ <script src="/assets/pantheonCharacters.js"></script>
  <script src="/assets/artCharacters.js"></script>
  <script src="/assets/sculptureAnatomy.js"></script>
  <script src="/assets/sculptureForms.js"></script>
@@ -36,9 +37,13 @@
  <script src="/assets/renderCharacterSprite.js"></script>
  <script src="/assets/combatCharacterUi.js"></script>
  <script src="/assets/itemGiveUi.js"></script>
+<script src="/assets/questSceneUi.js"></script>
  <script src="/assets/objectDiscovery.js"></script>
+ <script src="/assets/gameLogContent.js"></script>
+<script src="/assets/writingDiscovery.js"></script>
  <script src="/assets/partyRoster.js"></script>
  <script src="/assets/combatTurnUi.js"></script>
+ <script src="/assets/combatTacticalUi.js"></script>
  <script src="/assets/actionDiceUi.js"></script>
  <script src="/assets/roomDatabaseSync.js"></script>
  <script src="/assets/characterStartup.js"></script>
@@ -54,12 +59,23 @@
 <script src="/assets/compassUi.js"></script>
 <script src="/assets/explorationMapUi.js"></script>
 <script src="/assets/inventoryUi.js"></script>
+<script src="/assets/adventureJournalUi.js"></script>
+<script src="/assets/equipmentRules.js"></script>
+<script src="/assets/economyRules.js"></script>
+<script src="/assets/commerceUi.js"></script>
+<script src="/assets/combatLifeUi.js"></script>
+<script src="/assets/secretDoorsUi.js"></script>
+<script src="/assets/spellRules.js"></script>
+<script src="/assets/spellUi.js"></script>
+<script src="/assets/partySpellbookUi.js"></script>
 <script src="/assets/itemInteractionUi.js"></script>
 <script src="/assets/mapShortcutUi.js"></script>
 <script src="/assets/gameMenuUi.js?v=scoped-relief-300-v2"></script>
+<script src="/assets/gameModelUi.js"></script>
 <script src="/assets/characterProfiles.js"></script>
 <script src="/assets/dialogueAudience.js"></script>
 <script src="/assets/dungeonInhabitants.js"></script>
+<script src="/assets/questWritings.js"></script>
 <script src="/assets/dialogueHistory.js"></script>
 <script src="/assets/campaignMemory.js"></script>
 <script src="/assets/campaignMemoryUi.js"></script>
@@ -238,6 +254,7 @@ function toggleCombatMode() {
       let combatOffsetY = 0;
 
       combatHeader.addEventListener('mousedown', (e) => {
+        if (window.CombatTacticalUi?.active()) return;
         combatIsDragging = true;
         combatOffsetX = e.clientX - combatPopup.offsetLeft;
         combatOffsetY = e.clientY - combatPopup.offsetTop;
@@ -376,6 +393,7 @@ function toggleCombatMode() {
     }
 
     function toggleCombatPopup() {
+        if (window.CombatTacticalUi?.active()) { window.CombatTacticalUi.layout(); return; }
         const combatPopup = document.getElementById('combat-popup');
         combatPopup.style.display = combatPopup.style.display === 'block' ? 'none' : 'block';
         if (combatPopup.style.display === 'block') {
@@ -680,7 +698,7 @@ function toggleCombatMode() {
     }
 
     function formatPartySheetHtml(entry) {
-      const rawHtml = String(entry && entry.html ? entry.html : '');
+      const rawHtml = window.PartyRoster.displaySheet(entry && entry.html ? entry.html : '');
       if (!rawHtml) return '';
       return rawHtml
         .replace(/<div class="npc-data">/gi, '<div class="party-sheet-content">')
@@ -908,7 +926,7 @@ function toggleCombatMode() {
 
     function updateChatLog(newContent) {
       var chatLog = document.getElementById("chatlog");
-      chatLog.innerHTML += newContent;
+      chatLog.innerHTML += window.GameLogContent.withoutLootLists(newContent);
       syncGameLogTranscript();
       syncBackgroundChatLog();
       scrollToBottom();
@@ -918,6 +936,8 @@ function toggleCombatMode() {
       const chatLog = document.getElementById('chatlog');
       const gameLog = document.getElementById('game-log-container');
       if (!chatLog || !gameLog) return;
+      const cleanLog = window.GameLogContent.withoutLootLists(chatLog.innerHTML);
+      if (cleanLog !== chatLog.innerHTML) chatLog.innerHTML = cleanLog;
       gameLog.innerHTML = chatLog.innerHTML;
       gameLog.scrollTop = gameLog.scrollHeight;
     }
@@ -926,7 +946,7 @@ function toggleCombatMode() {
       const chatLog = document.getElementById('chatlog');
       const backgroundLog = document.getElementById('chatlog-background-content');
       if (!chatLog || !backgroundLog) return;
-      backgroundLog.innerHTML = chatLog.innerHTML;
+      backgroundLog.innerHTML = window.GameLogContent.withoutLootLists(chatLog.innerHTML);
       const panel = document.getElementById('chatlog-background-panel');
       if (panel) {
         panel.scrollTop = panel.scrollHeight;
@@ -963,7 +983,7 @@ function toggleCombatMode() {
       bottom: 2px;
       left: 50%;
       transform: translateX(-50%);
-      width: min(440px, 42vw);
+      width: min(420px, 40vw);
       min-width: 280px;
       text-align: center;
       z-index: 1210;
@@ -1066,8 +1086,8 @@ function toggleCombatMode() {
     }
     
     #chatbotbutton {
-      font-size: 12px;
-      padding: 4px 8px;
+      font-size: 11px;
+      padding: 3px 7px;
       border-radius: 0;
       border: 1px solid #8f8f8f;
       background: #f2f2f2;
@@ -1232,6 +1252,17 @@ function toggleCombatMode() {
     #game-menu #combat-mode-toggle { padding: 5px; }
     #game-menu #combat-mode-select { width: 100%; }
     .game-menu-button { background: #444; color: white; padding: 5px 10px; border: none; cursor: pointer; }
+    #game-model-popup { box-sizing: border-box; width: min(460px, calc(100vw / var(--game-ui-scale, 1) - 24px));
+      max-height: calc(100vh / var(--game-ui-scale, 1) - 24px); overflow-y: auto; padding: 0;
+      border: 1px solid #a48d62; border-radius: 9px; background: #171511; color: #eee; font: 15px Georgia, serif; }
+    #game-model-popup::backdrop { background: rgba(0,0,0,.65); }
+    #game-model-popup .model-settings-content { padding: 14px; }
+    #game-model-popup p { line-height: 1.45; overflow-wrap: anywhere; }
+    #game-model-popup label { display: block; color: #e5bd72; margin-bottom: 8px; }
+    #game-model-select { width: 100%; box-sizing: border-box; padding: 9px; background: #302b22; color: #eee; font: inherit; }
+    #game-model-popup .model-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    #game-model-popup button:disabled { opacity: .55; cursor: default; }
+    #game-model-status { color: #e5bd72; }
     .combat-target-controls { width: 100%; padding: 6px; box-sizing: border-box; background: rgba(0, 0, 0, 0.9); color: white; border: 1px solid white; border-radius: 8px; font: 14px Arial, sans-serif; text-align: center; }
     .combat-target-controls select { width: 100%; margin: 4px 0; }
     @media (max-width: 480px) {
@@ -1551,12 +1582,20 @@ function toggleCombatMode() {
     .compass-exit-readout { display: block; color: #e6bd75; padding: 3px 0; }
     .compass-exit-select { width: 100%; background: #333; color: #eee; border: 1px solid #777;
       font: 10px Arial, sans-serif; pointer-events: auto; }
-    #dungeon-map-shortcut, #dungeon-inventory-shortcut { position: fixed; left: 8px; bottom: 8px; width: 38px; height: 40px; padding: 2px;
+    #dungeon-map-shortcut, #dungeon-inventory-shortcut, #dungeon-journal-shortcut, #dungeon-spellbook-shortcut { position: fixed; left: 8px; bottom: 8px; width: 38px; height: 40px; padding: 2px;
       background: rgba(0,0,0,.75); border: 1px solid #8f8f8f; border-radius: 6px; z-index: 1210; cursor: pointer; }
-    #dungeon-map-shortcut img, #dungeon-inventory-shortcut img { display: block; width: 100%; height: 100%; }
-    #dungeon-map-shortcut:hover, #dungeon-inventory-shortcut:hover { border-color: #e6bd75; background: rgba(38,28,13,.9); }
+    #dungeon-map-shortcut img, #dungeon-inventory-shortcut img, #dungeon-journal-shortcut img, #dungeon-spellbook-shortcut img { display: block; width: 100%; height: 100%; }
+    #dungeon-map-shortcut:hover, #dungeon-inventory-shortcut:hover, #dungeon-journal-shortcut:hover, #dungeon-spellbook-shortcut:hover { border-color: #e6bd75; background: rgba(38,28,13,.9); }
     #dungeon-map-shortcut:hover img { transform: rotate(-4deg); }
-    #dungeon-map-shortcut:focus-visible, #dungeon-inventory-shortcut:focus-visible { outline: 2px solid #e6bd75; outline-offset: 2px; }
+    #dungeon-map-shortcut:focus-visible, #dungeon-inventory-shortcut:focus-visible, #dungeon-journal-shortcut:focus-visible, #dungeon-spellbook-shortcut:focus-visible { outline: 2px solid #e6bd75; outline-offset: 2px; }
+    #journal-popup { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%); width: min(620px,calc(100vw - 32px));
+      max-height: 80vh; overflow-y: auto; box-sizing: border-box; background: #111; color: #eee; border: 1px solid #8f8f8f;
+      border-radius: 8px; z-index: 1601; font: 13px Georgia,serif; }
+    #journal-popup[hidden] { display: none; }
+    #journal-close { color: white; background: none; border: none; cursor: pointer; font-size: 16px; }
+    #journal-content { padding: 4px 14px 12px; }
+    #journal-content h3 { color: #e6bd75; margin-bottom: 6px; }
+    #journal-content p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; }
     #inventory-popup { position: fixed; width: 390px; max-height: 70vh; overflow-y: auto; box-sizing: border-box;
       background: #111; color: #eee; border: 1px solid #8f8f8f; border-radius: 8px; z-index: 1600; font: 12px Arial,sans-serif; }
     #inventory-popup[hidden] { display: none; }
@@ -1572,6 +1611,7 @@ function toggleCombatMode() {
     .inventory-item-name { width: 100%; font: 9px Arial,sans-serif; line-height: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
     .inventory-item:hover, .inventory-item:focus-visible, .inventory-selected { border-color: #e6bd75; outline: 1px solid #e6bd75; }
     .inventory-quantity { position: absolute; right: 3px; top: 2px; color: #ffe8b5; font: bold 10px monospace; pointer-events: none; }
+    .inventory-potency { color: #e6bd75; font: bold 10px monospace; line-height: 13px; pointer-events: none; }
     .inventory-category-empty { color: #888; padding: 3px 0; font-size: 10px; }
     #inventory-detail { min-height: 28px; margin: 7px 10px 2px; line-height: 15px; }
     .inventory-footer { padding: 0 5px 5px; text-align: right; }
@@ -1732,6 +1772,29 @@ function toggleCombatMode() {
       image-rendering: pixelated;
       image-rendering: crisp-edges;
     }
+  #combat-popup.combat-expanded #combat-container { width: calc(100% - 230px); height: calc(100% - 40px); }
+  #combat-popup.combat-expanded #combat-turn-popup { position: absolute !important; left: auto !important; right: 0; top: 40px !important; bottom: 0; transform: none !important; width: 230px !important; max-height: none !important; padding: 12px !important; border-radius: 0 !important; box-shadow: none !important; font-size: 14px !important; }
+  #combat-popup.combat-expanded #combat-turn-popup[hidden] { display: none; }
+  #combat-popup.combat-expanded #combat-turn-popup .popup-button { font-size: 13px; padding: 7px; margin: 5px 0; }
+  #combat-popup.combat-stacked #combat-container { width: 100%; height: 55%; }
+  #combat-popup.combat-stacked #combat-turn-popup { top: calc(55% + 40px) !important; left: 0 !important; width: 100% !important; }
+  #party-spellbook-popup { position: fixed; transform: translate(-50%, -50%); z-index: 17500; background: linear-gradient(135deg, #29231e, #111); color: #eee; border: 1px solid #a48d62; border-radius: 10px; overflow: auto; box-shadow: 0 10px 45px #000b; font: 15px Georgia, serif; }
+  .party-spellbook-content { padding: 14px; overflow-wrap: anywhere; }
+  .party-spellbook-content h3 { color: #e5bd72; margin-bottom: 8px; }
+  .party-spell-entry { padding: 10px; border-left: 2px solid #a48d62; background: #ffffff08; margin: 10px 0; }
+  .party-spell-entry p { margin-bottom: 0; }
+  .party-spellbook-tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid #a48d62; padding-bottom: 10px; }
+  .party-spellbook-tabs button { display: flex; align-items: center; gap: 7px; max-width: 220px; padding: 6px 9px; background: #1c1915; color: #eee; border: 1px solid #796b53; border-radius: 6px; font: 14px Georgia, serif; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+  .party-spellbook-tabs button[aria-selected="true"] { border-color: #e5bd72; background: #423526; color: #e5bd72; }
+  .party-spellbook-tabs canvas { width: 36px; height: 36px; flex-shrink: 0; image-rendering: pixelated; }
+  .party-spellbook-slots { display: flex; flex-wrap: wrap; gap: 6px; }
+  .party-spellbook-slots button, .spellbook-prepare { background: #302b22; color: #e5bd72; border: 1px solid #796b53; border-radius: 4px; padding: 6px 9px; font: bold 14px Georgia, serif; cursor: pointer; }
+  .party-spellbook-slots button:disabled, .spellbook-prepare:disabled { cursor: default; opacity: .6; }
+  .spellbook-cost-columns, .party-spell-entry { display: grid; grid-template-columns: minmax(0, 1fr) 70px 55px; gap: 8px; align-items: start; }
+  .spellbook-cost-columns { color: #c9b18a; font-size: 12px; padding: 0 10px; }
+  .spellbook-cost-columns span:not(:first-child), .spellbook-magic-cost { text-align: center; }
+  .spellbook-magic-cost { color: #e5bd72; padding: 6px 0; }
+  .party-spell-entry p { grid-column: 1 / -1; }
 
   #combat-container::-webkit-scrollbar {
     width: 50px; /* Width of the vertical scrollbar */
@@ -1885,7 +1948,7 @@ function toggleCombatMode() {
 <div id="combat-popup">
     <div id="combat-header">
         <span>Combat Mode</span>
-        <button onclick="document.getElementById('combat-popup').style.display = 'none';" style="background: none; color: white; border: none; font-size: 16px; cursor: pointer;">X</button>
+        <button onclick="if (!window.CombatTacticalUi?.active()) document.getElementById('combat-popup').style.display = 'none';" title="The tactical map stays open during combat" style="background: none; color: white; border: none; font-size: 16px; cursor: pointer;">X</button>
     </div>
     <div id="combat-container"></div>
 </div>
@@ -1948,12 +2011,19 @@ function toggleCombatMode() {
   </div>
   <div id="party-icon-dock"></div>
   <button id="dungeon-map-shortcut" title="Exploration map" aria-label="Open exploration map" aria-expanded="false" aria-controls="exploration-map-popup"><img src="/assets/adventurers-map.svg" alt=""></button>
+  <button id="dungeon-journal-shortcut" title="Adventurers' Journal" aria-label="Open adventurers' journal" aria-expanded="false" aria-controls="journal-popup"><img src="/assets/adventurers-journal.svg" alt=""></button>
+  <button id="dungeon-spellbook-shortcut" title="Spellbook" aria-label="Open party spellbook" aria-expanded="false" aria-controls="party-spellbook-popup"><img src="/assets/adventurers-spellbook.svg" alt=""></button>
   <button id="dungeon-inventory-shortcut" title="Inventory" aria-label="Open inventory" aria-expanded="false" aria-controls="inventory-popup"><img src="/assets/adventurers-pack.svg" alt=""></button>
   <section id="inventory-popup" aria-label="Inventory" hidden>
     <div class="inventory-header"><span>Inventory</span><button id="inventory-close" aria-label="Close inventory">X</button></div>
+    <p id="inventory-silver" style="margin:8px 10px;color:#e6bd75" aria-live="polite">Silver Pieces: 0</p>
     <div id="inventory-groups"></div>
     <p id="inventory-detail" role="status">Drag an item onto a party icon, or select it and click a character.</p>
     <div class="inventory-footer"><button id="inventory-equip" class="popup-button" disabled>Equip...</button></div>
+  </section>
+  <section id="journal-popup" role="dialog" aria-label="Adventurers' Journal" hidden>
+    <div class="inventory-header"><span>Adventurers' Journal</span><button id="journal-close" aria-label="Close journal">X</button></div>
+    <div id="journal-content" aria-live="polite"></div>
   </section>
   
     <button id="game-menu-toggle" class="game-menu-button" aria-expanded="false" aria-controls="game-menu" aria-label="Open game menu"><span class="game-menu-bars" aria-hidden="true"><i></i><i></i><i></i></span>Menu</button>
@@ -1961,11 +2031,27 @@ function toggleCombatMode() {
       <button id="open-popup-button" class="game-menu-button" onclick="togglePopup()">Game Console</button>
       <button id="open-game-log-button" class="game-menu-button" onclick="toggleGameLogPopup()">Game Log</button>
       <button id="open-party-button" class="game-menu-button" onclick="togglePartyPopup()">Party</button>
+      <button id="open-spells-button" class="game-menu-button" onclick="window.SpellUi.open()">Spells</button>
+      <button id="open-spellbook-button" class="game-menu-button" onclick="window.PartySpellbookUi.open()">Spellbook</button>
+      <button id="open-inventory-button" class="game-menu-button" onclick="window.InventoryUi.toggle()">Inventory</button>
+      <button id="open-journal-button" class="game-menu-button" aria-expanded="false" aria-controls="journal-popup" onclick="window.AdventureJournalUi.toggle()">Adventurers' Journal</button>
       <button id="open-exploration-map-button" class="game-menu-button" aria-expanded="false" aria-controls="exploration-map-popup" onclick="window.DungeonExplorationMap.toggle()">Map</button>
       <button id="environment-lab-button" class="game-menu-button" onclick="window.open('/assets/environment-lab.html', '_blank', 'noopener')">Environment Lab</button>
+      <button id="open-game-model-button" class="game-menu-button" aria-expanded="false" aria-controls="game-model-popup">Game Model</button>
       <button id="carved-stonework-toggle" class="game-menu-button" aria-pressed="true" title="Toggle compatible stone and wood architectural carvings and statue refinements; OFF restores the previous geometry without changing the dungeon">Carved Stonework: ON</button>
       <button id="stonework-fill-toggle" class="game-menu-button" title="Cycle 0%, 50%, 100%, 300% and 500%; above 100%, uncut stone within carving fields projects outward while grooves stay recessed, including pillar bases. Shafts, rims and backing stay at 100%. Below 100% is the older surface-repair trial and may show gaps. Lighting stays unchanged">Stonework Relief: 300%</button>
     </div>
+    <dialog id="game-model-popup" aria-labelledby="game-model-title">
+      <div class="inventory-header"><span id="game-model-title">Game Model</span><button id="game-model-close" aria-label="Close model settings">X</button></div>
+      <div class="model-settings-content">
+        <label for="game-model-select">Non-reasoning model</label>
+        <select id="game-model-select" aria-describedby="game-model-details" disabled></select>
+        <p id="game-model-details"></p>
+        <p>Try different storytelling styles without restarting. Models vary in quality, speed and API cost. Changing this shared game setting affects future text generation, not existing rooms, characters or progress. Images and voices are unchanged.</p>
+        <p id="game-model-status" role="status" aria-live="polite">Open the panel to check model access.</p>
+        <div class="model-settings-actions"><button id="game-model-apply" class="popup-button" disabled>Use Model</button><button id="game-model-refresh" class="popup-button">Refresh List</button></div>
+      </div>
+    </dialog>
     <!-- Physically placed combat mode toggle -->
     <div id="exploration-map-popup" role="dialog" aria-label="Exploration map">
       <div class="exploration-map-header"><span>Exploration Map</span><button id="exploration-map-close" aria-label="Close map">X</button></div>
@@ -2182,7 +2268,7 @@ function toggleCombatMode() {
       const stats = [
         `Sex: ${character.Sex || character.sex || '?'}`,
         `Race: ${character.Race || character.race || '?'}`,
-        `Class: ${character.Class || character.class || '?'}`,
+        `Class: ${window.PartyRoster.displaySheet(character.Class || character.class || '?')}`,
         `Level: ${character.Level || character.level || 1}`,
         `HP: ${character.HP || character.hp || 0} / ${character.MaxHP || character.maxHP || character.HP || 0}`,
         `AC: ${character.AC || character.ac || 10}`,

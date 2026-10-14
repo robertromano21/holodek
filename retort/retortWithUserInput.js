@@ -2,9 +2,12 @@ const { exec } = require('child_process');
 
 const { json } = require('stream/consumers');
 
-const retort = require('retort-js').retort;
+const retort = require('./gameRetort').retort;
 
-const run = require('retort-js').run;
+const run = require('./gameRetort').run;
+const GraveMasterProtocol = require('./graveMasterProtocol');
+const StoryPrompts = require('./graveMasterStoryPrompts');
+const GeneratedNames = require('./generatedNames');
 
 const axios = require('axios');
 
@@ -44,6 +47,8 @@ const { prepareSceneBiomeProps, applySceneBiomeProps } = require('./sceneBiomePr
 const BlueprintPillars = require('./blueprintPillars.js');
 const DungeonGeneration = require('./dungeonGeneration.js');
 const IndoorBlueprint = require('./indoorBlueprint.js');
+const SecretDoors = require('./secretDoors');
+const CampaignPlanningLog = require('./campaignPlanningLog');
 const OutdoorTerrain = require('./outdoorTerrain.js');
 const BlueprintDesign = require('./blueprintDesign.js');
 const { prepareSceneExteriors, buildSceneExteriorSites, applySceneExteriors } = require('./sceneExterior.js');
@@ -56,6 +61,8 @@ const DungeonExits = require('../assets/dungeonExits');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
 const { logDungeonConstruction, saveDungeonDiagnostic } = require('../dungeonDiagnostics');
 const { actionDice } = require('./actionDice');
+const Divinity = require('./divineEncounters');
+const Pantheon = require('../assets/pantheonCharacters');
 const { createCombatSpace } = require('./dungeonReach');
 const { parseSheets } = require('../assets/partyRoster');
 const { applyAdditionalOutcomes, selectCommandedNpcs } = require('./adjudicationState');
@@ -66,19 +73,32 @@ const { generateDesign: generatePhysicalPuzzleDesign } = require('./physicalPuzz
 const { prepare: preparePhysicalPuzzleAction, bindTask: bindPhysicalPuzzleTask } = require('./physicalPuzzleActions');
 const ReadableItems = require('../assets/readableItems');
 const {prepare:prepareReadableAction} = require('./readableActions');
+const QuestScenes = require('./questScenes');
+const RegionalAdventure = require('./regionalAdventure');
+const FactionMemory = require('./factionMemory');
+const AdventureJournal = require('./adventureJournal');
+const QuestWritings = require('../assets/questWritings');
 const Inhabitants = require('../assets/dungeonInhabitants');
 const { createPopulationService, prepareEntryQuestContact } = require('./roomPopulation');
 const { generateInhabitants, needsQuestIntroduction } = require('./inhabitantGeneration');
 const DialogueMemory = require('./dialogueMemory');
 const { generateCharacterDialogue, describeCharacters } = require('./characterDialogue');
+const CharacterAuthorship = require('./characterProfiles');
 const MonsterConsoleSync = require('./monsterConsoleSync');
 const JourneyMemory = require('./journeyMemory');
 const QuestDirectionFacts = require('./questDirectionFacts');
 const HostilePursuit = require('./hostilePursuit');
 const CombatTurnFlow = require('./combatTurnFlow');
+const CombatTactics = require('./combatTactics');
+const EquipmentRules = require('../assets/equipmentRules');
 const ItemTransfer = require('./itemTransfer');
 const QuestDeliverySuccessors = require('./questDeliverySuccessors');
 const CampaignMemory = require('./campaignMemory');
+const CampaignSetting = require('./campaignSetting');
+const Economy = require('./economy');
+const SpellSystem = require('./spellSystem');
+const CombatLife = require('./combatLife');
+const QuestFailure = require('./questFailure');
 const AdjudicationMetadata = require('./adjudicationMetadata');
 const PuzzleRewards = require('./puzzleRewards');
 const DialogueAudience = require('../assets/dialogueAudience');
@@ -133,9 +153,14 @@ function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   const cachedGeometry = !!(dungeon._geometryStamp || dungeon._meta?.geometryStamp || dungeon._meta?.finalizedAt);
   if (!cachedGeometry && !dungeon.sceneRoof) applySceneRoofs(dungeon, dungeon.sceneSpec);
   if (!cachedGeometry && !dungeon.roomExits) DungeonExits.install(dungeon);
+  if (!cachedGeometry && typeof SecretDoors !== 'undefined') SecretDoors.install(dungeon);
   if (!dungeon.environment) dungeon.environment = buildEnvironment(dungeon);
   dungeon.geoKey = geoKey;
   dungeon.customTiles = Array.isArray(customTiles) ? customTiles : (dungeon.customTiles || []);
+  if (typeof QuestWritings !== 'undefined') {
+    const room = JSON.parse(sharedState.getRoomNameDatabase() || '{}')[geoKey];
+    QuestWritings.apply(dungeon, room);
+  }
   const geometryStamp = computeDungeonGeometryStamp(dungeon, geoKey);
   dungeon._geometryStamp = geometryStamp;
   dungeon._meta = {
@@ -726,11 +751,19 @@ function ensureNPCProperties(npc) {
 
 function applyLevelAndHpAdjustments(updatedGameConsole) {
     const { characters, npcs } = extractCharactersAndNpcs(updatedGameConsole);
+    const persistMagicGain = (name, magic, gain) => {
+        if (!gain || typeof SpellSystem === 'undefined') return;
+        let managed = false;
+        try { managed = !!JSON.parse(sharedState.getRoomNameDatabase() || '{}')['0,0,0']?.spellSystem?.casters?.[name]; } catch {}
+        // Existing class pools award the increase once when their level synchronizes.
+        if (!managed) updatedGameConsole = SpellSystem.changeActor(updatedGameConsole, name, sheet => SpellSystem.stat(sheet, 'Magic', magic + gain));
+    };
 
     characters.forEach(char => {
         const xpThreshold = xpThresholds[char.Class] || 3500;
         const newLevel = calculateLevel(char.XP, xpThreshold, char.Class);
 
+        const oldMagic = typeof SpellSystem !== 'undefined' ? SpellSystem.allActors(updatedGameConsole).find(a => a.name === char.Name)?.magic || 0 : char.Magic || 0;
         ensurePCProperties(char);
 
         const characterClasses = [
@@ -771,7 +804,8 @@ function applyLevelAndHpAdjustments(updatedGameConsole) {
             char.Attack += attackIncrease;
             char.Damage += damageIncrease;
             char.Armor += armorIncrease;
-            char.Magic += magicIncrease;
+            char.Magic = oldMagic + magicIncrease;
+            persistMagicGain(char.Name, oldMagic, magicIncrease);
 
             console.log(`Updated ${char.Name} (Class: ${char.Class}) - Level: ${char.Level}, HP: ${char.HP}, MaxHP: ${char.MaxHP}, Attack: ${char.Attack}, Damage: ${char.Damage}, Armor: ${char.Armor}, Magic: ${char.Magic}`);
         }
@@ -790,9 +824,11 @@ function applyLevelAndHpAdjustments(updatedGameConsole) {
     });
 
     npcs.forEach(npc => {
-        const xpThreshold = xpThresholds[npc.Class] || 3500;
-        const newLevel = calculateLevel(npc.XP, xpThreshold, npc.Class);
+        const rulesClass = typeof SpellSystem !== 'undefined' ? SpellSystem.Rules.resolveClass(npc.Class) || npc.Class : npc.Class;
+        const xpThreshold = xpThresholds[rulesClass] || 3500;
+        const newLevel = calculateLevel(npc.XP, xpThreshold, rulesClass);
 
+        const oldMagic = typeof SpellSystem !== 'undefined' ? SpellSystem.allActors(updatedGameConsole).find(a => a.name === npc.Name)?.magic || 0 : npc.Magic || 0;
         ensureNPCProperties(npc);
 
         const characterClasses = [
@@ -809,7 +845,8 @@ function applyLevelAndHpAdjustments(updatedGameConsole) {
             { name: 'Assassin-Fighter-Necromancer-Goddess', baseHP: 11 },
         ];
 
-        const characterClass = characterClasses.find(cls => cls.name === npc.Class);
+        const characterClass = characterClasses.find(cls => cls.name === rulesClass) ||
+            (typeof SpellSystem !== 'undefined' && SpellSystem.Rules.nativeHp[rulesClass] ? { baseHP: SpellSystem.Rules.nativeHp[rulesClass] } : null);
 
         let hpIncrease = 0;
         let attackIncrease = 0;
@@ -822,7 +859,7 @@ function applyLevelAndHpAdjustments(updatedGameConsole) {
             attackIncrease = calculateIncrease(npc.Level, newLevel, 5);
             damageIncrease = calculateIncrease(npc.Level, newLevel, 7);
             armorIncrease = calculateIncrease(npc.Level, newLevel, 10);
-            magicIncrease = calculateIncrease(npc.Level, newLevel, 1/2);
+            magicIncrease = rulesClass === 'Fighter' ? 0 : calculateIncrease(npc.Level, newLevel, 1/2);
         }
 
         if (newLevel > npc.Level) {
@@ -833,7 +870,8 @@ function applyLevelAndHpAdjustments(updatedGameConsole) {
             npc.Attack += attackIncrease;
             npc.Damage += damageIncrease;
             npc.Armor += armorIncrease;
-            npc.Magic += magicIncrease;
+            npc.Magic = oldMagic + magicIncrease;
+            persistMagicGain(npc.Name, oldMagic, magicIncrease);
 
             console.log(`Updated ${npc.Name} (Class: ${npc.Class}) - Level: ${npc.Level}, HP: ${npc.HP}, MaxHP: ${npc.MaxHP}, Attack: ${npc.Attack}, Damage: ${npc.Damage}, Armor: ${npc.Armor}, Magic: ${npc.Magic}`);
         }
@@ -967,9 +1005,40 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
     return run(retort(async ($) => runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast)));
   }
 
+  if (typeof SpellSystem !== 'undefined' && userInput?.trim() && !options.realtimeEncounter && !options.spellOpening && !/\battack\b|__ENCOUNTER_DEFENCE__/i.test(userInput)) {
+    SpellSystem.synchronize(sharedState); SpellSystem.advance(sharedState);
+    updatedGameConsole = sharedState.getUpdatedGameConsole(); roomNameDatabaseString = sharedState.getRoomNameDatabase();
+  }
+
   // Mechanical puzzle commands never enter a model session unless this action just solved it.
+  if (!options.realtimeEncounter && typeof SecretDoors !== 'undefined' && /^\s*(?:search|examine)\s+(?:the\s+)?(?:room|area|walls?|secret\s+(?:doors?|passages?))\s*[.!]?\s*$/i.test(userInput)) {
+    const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+    const dungeon = sharedState.getRoomDungeon(coords), roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+    const point = require('./dungeonReach').position(roster.find(a => a.type === 'pc'), geoKey);
+    if (dungeon?.secretDoors && (SecretDoors.nearby(dungeon, point).length || /secret/i.test(userInput))) {
+      const result = SecretDoors.act(sharedState, { runId: sharedState.getDungeonRunId(), geoKey, kind: 'search', nonce: require('node:crypto').randomUUID() });
+      if (result.error) return { content: result.error, actionOnly: true };
+      const next = finalizeRoomDungeon(geoKey, result.dungeon, result.dungeon.customTiles);
+      sharedState.setRoomDungeon(coords, next, next.customTiles); SecretDoors.persist(sharedState, next);
+      broadcast({ type: 'dungeonCellUpdate', geoKey, previousStamp: result.previousStamp, geometryStamp: next._geometryStamp,
+        cells: result.cells, secretDoors: next.secretDoors });
+      console.info('[SecretSearch]', JSON.stringify({ geoKey, found: result.found, rolls: result.rolls }));
+      return { content: result.content, actionOnly: true, updatedGameConsole: sharedState.getUpdatedGameConsole(),
+        roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatCharactersString: sharedState.getCombatCharactersString() };
+    }
+  }
+  const stagedRecruitment = options.realtimeEncounter || typeof QuestScenes === 'undefined' ? null : QuestScenes.recruitmentGuard(sharedState,userInput);
+  if (stagedRecruitment) return {...stagedRecruitment,updatedGameConsole:sharedState.getUpdatedGameConsole(),
+    combatCharactersString:sharedState.getCombatCharactersString(),roomNameDatabaseString:sharedState.getRoomNameDatabase()};
   const giveResult = options.realtimeEncounter || typeof ItemTransfer === 'undefined' ? null : ItemTransfer.give(sharedState, populationService, userInput);
-  if (giveResult) return giveResult;
+  if (giveResult) {
+    if (typeof QuestScenes !== 'undefined') QuestScenes.refresh(sharedState);
+    if (typeof Economy !== 'undefined') {
+      const economyUpdate = Economy.refresh(sharedState);
+      if (economyUpdate.notices.length) giveResult.content += '\n' + economyUpdate.notices.join('\n');
+    }
+    return {...giveResult,updatedGameConsole:sharedState.getUpdatedGameConsole(),roomNameDatabaseString:sharedState.getRoomNameDatabase()};
+  }
   const readableResult=options.realtimeEncounter?null:await tryReadableItemAction(userInput);
   if(readableResult)return readableResult;
   const physicalPuzzleResult = options.realtimeEncounter ? null : await tryPhysicalPuzzleAction(userInput);
@@ -1213,7 +1282,9 @@ async function placeKey($, coordinates, lockedDirection, key, roomNameDatabasePl
   }
 
   // Hostiles? Keep key in current room (design rule).
-  const preferCurrentRoom = hasHostileMonsters(currentRoom);
+  const preferredKeyRoom = require('./keyPlacement').choose(roomNameDatabasePlain, coordinates, lockedDirection,
+    { hostile: hasHostileMonsters(currentRoom) });
+  const preferCurrentRoom = preferredKeyRoom === currentRoomKey;
   let targetRoomKey = currentRoomKey;
 
   if (!preferCurrentRoom) {
@@ -1224,10 +1295,10 @@ async function placeKey($, coordinates, lockedDirection, key, roomNameDatabasePl
       const adjKey = coordinatesToString(adj);
       if (adjKey === lockedTargetKey) continue;
       const adjRoom = getRoomSafe(roomNameDatabasePlain, adjKey);
-      // reachable = currentRoom has the exit and it's open OR there's no explicit exit (treat as open path)
+      // Only a real open exit can make an adjacent room reachable.
       const e = currentRoom.exits ? currentRoom.exits[dir] : null;
-      const status = String(e?.status || "open").toLowerCase();
-      const reachable = (status === "open");
+      const status = String(e?.status || "").toLowerCase();
+      const reachable = e && status === "open" && adjKey === preferredKeyRoom;
       if (adjRoom && reachable) candidates.push(adjKey);
     }
     if (candidates.length > 0) {
@@ -2338,11 +2409,11 @@ async function generateMonsterEquipmentName($, objectType, ownerName) {
     $.model = 'gpt-4.1-mini';
     $.temperature = 1.0;
     for (let attempt = 0; attempt < 3; attempt++) {
-        await $.assistant`Name one portable fantasy ${objectType} for ${ownerName}. Respond ONLY with {"name":"the item name"}. Use a short lowercase noun phrase. Do not return statistics, modifiers, a blank name, numbering, or punctuation. ${attempt ? 'The previous response was not a valid item name; create a replacement.' : ''}`;
+        await $.assistant`Name one portable fantasy ${objectType} for ${ownerName}. Respond ONLY with {"name":"the item name"}. Use a short lowercase noun phrase with spaces between words, never a hyphen chain or joined identifier. Do not return statistics, modifiers, a blank name, numbering, or punctuation. ${attempt ? 'The previous response was not a valid item name; create a replacement.' : ''}`;
         // A previous modifier generation can leave its schema active; explicitly select the name schema.
         const result = await $.assistant.generation({ maxTokens: 60, parameters: { name: String } });
         const name = Inhabitants.equipmentName(result?.content);
-        if (name) return name.toLowerCase();
+        if (name) return GeneratedNames.clean(name).toLowerCase() || null;
         console.warn('[MonsterEquipment] Rejected invalid item name', { owner: ownerName, type: objectType, attempt: attempt + 1 });
     }
     return null;
@@ -2407,7 +2478,7 @@ if (currentCoordinatesMatch) {
     console.error("Current room coordinates could not be extracted.");
 }
 
-    if (currentCoordinatesMatch && currentCoordinatesMatch.slice(1).some(value => Number(value) !== 0) &&
+    if (currentCoordinatesMatch &&
         (!bossRoomCoordinates || currentCoordinatesMatch.slice(1).some((value, index) => Number(value) !== [bossRoomCoordinates.x, bossRoomCoordinates.y, bossRoomCoordinates.z][index]))) {
       return generateRoomInhabitantPopulation($, roomName, roomDescription, currentCoordinatesMatch.slice(1).map(Number).join(','));
     }
@@ -2595,14 +2666,14 @@ if (currentCoordinatesMatch) {
             continue;
         }
 
-        const generatedRace = raceMatch[1].trim().replace(/[^\w\s]/g, '');
-        const generatedClass = classMatch[1].trim().replace(/[^\w\s]/g, '');
+        const generatedRace = GeneratedNames.clean(raceMatch[1]);
+        const generatedClass = GeneratedNames.clean(classMatch[1]);
         const randomSex = getRandomSex();
 
         // Generate a name for the monster
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
-        await $.assistant`Generate a name for a ${randomSex} monster of the race ${generatedRace} and class ${generatedClass}.`;
+        await $.assistant`Generate only a name for a ${randomSex} monster of the race ${generatedRace} and class ${generatedClass}. Separate name parts and words in an epithet with spaces, never hyphens, underscores or CamelCase. No label, explanation or punctuation.`;
         const nameResult = await $.assistant.generation({ maxTokens: 30 });
         console.log(nameResult);
 
@@ -2611,7 +2682,7 @@ if (currentCoordinatesMatch) {
             continue;
         }
 
-        const monsterName = nameResult.content.replace(/^Name: /, '').trim().replace(/[^\w\s]/g, '');
+        const monsterName = GeneratedNames.clean(nameResult.content.replace(/^Name:\s*/i, ''));
 
         // Define level and calculate HP
         const randomLevel = getRandomInt(minLevel, maxLevel); // Level ranges from 1 to 20
@@ -2739,15 +2810,14 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
     const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
     records = db;
     room = db[geoKey] || {};
-    usedNames = Object.values(db).flatMap(record => Object.keys(record?.inhabitants?.actors || {}));
+    usedNames = Object.values(db).flatMap(record => [...Object.keys(record?.inhabitants?.actors || {}), ...(record?.regionalSite?.actors || []).map(a=>a.name)]);
   } catch {}
   const seeded = sharedState.getRoomPopulation?.(geoKey) || room.inhabitants;
   if (seeded?.initialSheets) {
     const current=Inhabitants.parseSheets(updatedGameConsole);
     if (current.length && current.every(actor=>Object.hasOwn(seeded.actors,actor.name))) return;
-    const original=Inhabitants.parseSheets(`Monsters in Room:\n${seeded.initialSheets}\nMonsters Equipped Properties: None`);
-    const retained=original.filter(actor=>seeded.actors[actor.name]?.status==='present');
-    const sheets=retained.length===original.length ? seeded.initialSheets : retained.map(actor=>actor.sheet).join('\n');
+    const retained=Inhabitants.residentSheets(seeded);
+    const sheets=retained.map(actor=>actor.rawSheet || actor.sheet).join('\n');
     updatedGameConsole=updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,`Monsters in Room: \n${sheets || 'None'}\n`)
       .replace(/Monsters Equipped Properties: .*/,`Monsters Equipped Properties: ${seeded.initialEquipmentProperties || 'None'}`)
       .replace(/Monsters State: .*/,`Monsters State: ${retained.length ? 'Mixed' : 'None'}`);
@@ -2761,10 +2831,11 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   const min = pc.Name === 'Mortacia' || pc.Name === 'Suzerain' && pc.Level >= 15 ? 1 : Math.max(1, average);
   const max = Math.min(20, pc.Name === 'Mortacia' ? 15 : pc.Name === 'Suzerain' && pc.Level >= 15 ? 13 : average + 2);
   const result = await generateInhabitants($, { roomName, roomDescription, geoKey, indoor,
+    campaignSetting: room.campaignSetting,
     partyNames: party.map(a => a.Name), usedNames, quest: sharedState.getCurrentQuest(),
     questSeed: needsQuestIntroduction(sharedState.getCurrentQuest(), records, geoKey, sharedState.getCurrentTaskIndex() || 0) }, {
     random: getRandomInt, sex: getRandomSex, level: () => getRandomInt(min, max),
-    xp: level => calculateCumulativeXp(2000, level),
+    xp: (level, archetype) => calculateCumulativeXp(xpThresholds[archetype] || 3500, level),
     equipment: async actor => {
       const object = { name: `${actor.Name.toLowerCase()} guard blade`, type: 'weapon' };
       const modifiers = await generateObjectModifiers($, object);
@@ -2775,6 +2846,7 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
       return { ...object, ...modifiers };
     }
   });
+  RegionalAdventure.bindPopulation(room, result);
   updatedGameConsole = updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,
     `Monsters in Room: \n${result.sheets || 'None'}\n`);
   const properties = result.equipment.map(e => `{name: "${e.name}", type: "${e.type}", attack_modifier: ${e.attack_modifier || 0}, damage_modifier: ${e.damage_modifier || 0}, ac: ${e.ac || 0}, magic: ${e.magic || 0}}`).join(', ');
@@ -2784,8 +2856,22 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   result.population.equipmentProperties=properties || 'None';
   updatedGameConsole = updatedGameConsole.replace(/Monsters Equipped Properties: .*/, `Monsters Equipped Properties: ${properties || 'None'}`)
     .replace(/Monsters State: .*/, `Monsters State: ${result.sheets ? 'Mixed' : 'None'}`);
+  const economyDb = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+  economyDb[geoKey] ||= room;
+  const generatedNames = Economy.field(updatedGameConsole, 'Objects in Room').split(/,\s*/).map(s => s.toLowerCase());
+  const objectNames = new Set(generatedNames);
+  const generatedObjects = require('../assets/inventoryUi').parseProperties(Economy.field(updatedGameConsole, 'Objects in Room Properties'));
+  economyDb[geoKey].objects ||= [];
+  for (const item of generatedObjects) if (objectNames.has(item.name.toLowerCase()) && !economyDb[geoKey].objects.some(o => o.name === item.name)) economyDb[geoKey].objects.push({
+    ...item, ...(item.consumable_kind ? { quantity: generatedNames.filter(n => n === item.name.toLowerCase()).length } : {}) });
+  Economy.seedRoom(economyDb, geoKey, result.population, sharedState.getDungeonRunId(), updatedGameConsole);
+  sharedState.setRoomNameDatabase(JSON.stringify(economyDb));
+  updatedGameConsole = Inhabitants.withStates(Economy.syncGround(updatedGameConsole, economyDb[geoKey]), result.population);
   sharedState.setUpdatedGameConsole(updatedGameConsole);
   populationService.save(result.population);
+  await Divinity.developBiographies($, sharedState, geoKey);
+  await SpellSystem.developRecipes($, sharedState);
+  updatedGameConsole = sharedState.getUpdatedGameConsole();
   console.info('[RoomPopulation]', JSON.stringify({ geoKey, indoor, actors: Object.keys(result.population.actors).length,
     groups: result.population.groups.map(g => ({ id: g.id, members: g.members.length })) }));
 }
@@ -2822,7 +2908,7 @@ async function generateRoomObjects($, roomName, roomDescription) {
         $.temperature = 1.0;
         await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure for the ${roomName}, with the object all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType} Room Description: ${roomDescription} If the object type is other, it might be a type of treasure that is wearable, a jewel, an orb, a relic or something readable like a scroll or tome. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
         const objectResult = await $.assistant.generation({ maxTokens: 30 });
-        const objectName = objectResult.content.trim().toLowerCase();
+        const objectName = GeneratedNames.clean(objectResult.content).toLowerCase();
         if (isReservedBossKeyName(itemDatabase, objectName)) {
             console.warn('[BossKeyReserved] Ordinary object generation cannot seed the quest seal.');
             continue;
@@ -3297,7 +3383,7 @@ JSON only.`;
     // YOU WERE MISSING model HERE (causing your 400s).
     const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
-    const response = await client.chat.completions.create({
+    const response = await require('./modelTransport').complete(client, {
       model: MODEL,
       temperature: forColorsOnly ? 0.7 : 0.4,
       // If your SDK/model supports it, this helps enforce JSON:
@@ -4191,6 +4277,12 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     const startKey = "0,0,0";
     const startRoom = roomNameDatabasePlain[startKey];
     let outsideKey = null;
+    if (startRoom) {
+      startRoom.indoor = startRoom.isIndoor = true;
+      startRoom.isOutdoor = false;
+      startRoom.classification = { ...startRoom.classification, indoor: true, biome: 'temple' };
+      roomNameDbString = JSON.stringify(roomNameDatabasePlain);
+    }
 
     if (startRoom && startRoom.exits && typeof startRoom.exits === "object") {
       const exitDirs = Object.keys(startRoom.exits);
@@ -4229,7 +4321,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       }
     }
 
-    if (outsideKey) {
+    if (outsideKey && outsideKey !== startKey) {
       const outsideRoom = roomNameDatabasePlain[outsideKey] || {};
       outsideRoom.indoor = false;
       outsideRoom.isIndoor = false;
@@ -4253,11 +4345,11 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
 
     const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
-    let forcedIndoor = null;
+    let forcedIndoor = geoKeyString === '0,0,0' ? true : null;
     try {
       const db = JSON.parse(roomNameDbString || "{}");
       const entry = db[geoKeyString];
-      if (entry && typeof entry.indoor === 'boolean') {
+      if (forcedIndoor === null && entry && typeof entry.indoor === 'boolean') {
         forcedIndoor = entry.indoor;
       }
     } catch (e) {
@@ -4291,6 +4383,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       }
 
       db[geoKeyString] = db[geoKeyString] || {};
+      if (geoKeyString === '0,0,0') classification.biome = 'temple';
       db[geoKeyString].classification = {
         ...(db[geoKeyString].classification || {}),
         ...classification
@@ -4312,6 +4405,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     coords: geoCoords,
     indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
   }));
+  if (geoKey === '0,0,0') { sceneSpec.indoor = true; sceneSpec.biome = 'temple'; }
   classification = applySceneSpecToClassification(sceneSpec, classification);
   if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
   DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
@@ -5111,7 +5205,7 @@ async function handleBossRoom($) {
                         } else {
                             objectsInRoomProperties = objectsInRoomProperties.split(/},\s*{/).map(obj => `{${obj.replace(/^{|}$/g, '')}}`);
                         }
-                        objectsInRoomProperties.push(`{name: "${artifactObject.name}", type: "${artifactObject.type}", attack_modifier: ${artifactObject.attack_modifier}, damage_modifier: ${artifactObject.damage_modifier}, ac: ${artifactObject.ac}, magic: ${artifactObject.magic}}`);
+                        objectsInRoomProperties.push(JSON.stringify({ ...artifactObject, quest_artifact: true }));
 
                         updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${objectsInRoomProperties.join(', ')}`);
 
@@ -5148,7 +5242,7 @@ async function addArtifactToRoom($, nextArtifact) {
     let artifactObject = { name: nextArtifact, type: artifactType };
 
     // Generate artifact modifiers
-    const artifactModifiers = await generateObjectModifiers($, artifactObject.name, artifactObject.type);
+    const artifactModifiers = await generateObjectModifiers($, artifactObject);
     artifactObject = Object.assign(artifactObject, artifactModifiers);
 
     // Update Objects in Room
@@ -5161,7 +5255,7 @@ async function addArtifactToRoom($, nextArtifact) {
     // Update Objects in Room Properties without using JSON parsing
     const updatedObjectsInRoomProperties = updatedGameConsole.match(/Objects in Room Properties: (.*)/);
     let objectsInRoomProperties = updatedObjectsInRoomProperties ? updatedObjectsInRoomProperties[1].split(',').map(item => item.trim()).filter(item => item.toLowerCase() !== 'none') : [];
-    objectsInRoomProperties.push(`{name: "${artifactObject.name}", type: "${artifactObject.type}", attack_modifier: ${artifactObject.attack_modifier}, damage_modifier: ${artifactObject.damage_modifier}, ac: ${artifactObject.ac}, magic: ${artifactObject.magic}}`);
+    objectsInRoomProperties.push(JSON.stringify({ ...artifactObject, quest_artifact: true }));
 
     updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${objectsInRoomProperties.join(', ')}`);
 
@@ -5192,6 +5286,11 @@ async function determineArtifactType($, nextArtifact) {
 
 // Generates the boss monster and adds it to Monsters in Room
 async function generateBossMonster($, updatedGameConsole, bossName) {
+    if (Pantheon.name(bossName) === 'Arithus') {
+      const text = Divinity.finalBoss(sharedState, updatedGameConsole);
+      await Divinity.developBiographies($, sharedState, Inhabitants.roomKey(Economy.field(text, 'Coordinates')));
+      return text;
+    }
     console.log(`Generating boss monster: ${bossName}...`);
 
     // Extract characters and NPCs
@@ -5272,8 +5371,8 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
         return updatedGameConsole;
     }
 
-    const generatedRace = raceMatch[1].trim().replace(/[^\w\s]/g, '');
-    const generatedClass = classMatch[1].trim().replace(/[^\w\s]/g, '');
+    const generatedRace = GeneratedNames.clean(raceMatch[1]);
+    const generatedClass = GeneratedNames.clean(classMatch[1]);
     const randomSex = getRandomSex();
     
     // Calculate cumulative XP required to reach the monster's level
@@ -5388,7 +5487,7 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
 }
 
 async function generateMissingRoomDetails($, object) {
-  const diversitySeed = ['vitality_contrast', 'auditory_twist', 'dialogue_inversion'][Math.floor(Math.random() * 3)];
+  const diversitySeed = ['vitality_contrast', 'auditory_twist', 'conversational_detail'][Math.floor(Math.random() * 3)];
   let roomDescriptionGenerated = false;
   let environmentDescription = '';
   let puzzleInRoom = 'None';
@@ -5534,6 +5633,14 @@ async function generateMissingRoomDetails($, object) {
 
   function persistRoomDb(db) {
     try {
+      if (typeof Economy !== 'undefined') {
+        const preserved = JSON.parse(Economy.preserve(sharedState.getRoomNameDatabase(), JSON.stringify(db), { trustedNewFields: true }));
+        // Later generation still holds these room references; replacing them drops subsequent mutations.
+        for (const [key, room] of Object.entries(preserved)) {
+          if (isPlainObject(db[key]) && isPlainObject(room)) Object.assign(db[key], room);
+          else db[key] = room;
+        }
+      }
       roomNameDatabaseString = JSON.stringify(db);
       sharedState.setRoomNameDatabase(roomNameDatabaseString);
     } catch (e) {
@@ -5609,7 +5716,7 @@ async function generateMissingRoomDetails($, object) {
   // ----------------------------
   let startRoom = getRoomSafeLocal(roomNameDatabasePlain, startKey);
   if (!startRoom) {
-    const startClassification = await generateDefaultClassification($, null, false);
+    const startClassification = await generateDefaultClassification($, null, true);
     startRoom = {
       name: "Ruined Temple Entrance",
       exhaustionLimit: 4,
@@ -5628,6 +5735,10 @@ async function generateMissingRoomDetails($, object) {
     ensureRoomFlagsConsistent(startRoom);
     setRoomSafeLocal(roomNameDatabasePlain, startKey, startRoom);
   }
+  // The starting temple is a fixed interior, even when currency/atlas metadata created its skeleton first.
+  startRoom.indoor = true;
+  startRoom.classification = { size: 16, features: ['pillars'], ...startRoom.classification, indoor: true, biome: 'temple' };
+  ensureRoomFlagsConsistent(startRoom);
 
   // ----------------------------
   // Ensure current room exists (but DO NOT decide palette unless description exists)
@@ -5745,6 +5856,11 @@ async function generateMissingRoomDetails($, object) {
     // The initial boilerplate still needs the original full population pipeline.
     const missingAdjacentRooms = roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction));
     const missingDescription = !roomDescription || /^(none|null|undefined)$/i.test(roomDescription);
+    if (typeof CampaignSetting !== 'undefined' && process.env.CAMPAIGN_SETTING !== 'off' && !currentRoomData.campaignSetting && missingDescription) {
+      const kind = CampaignSetting.inferKind(currentRoomData);
+      CampaignSetting.install(roomNameDatabasePlain, coordKey, CampaignSetting.plan({ database: roomNameDatabasePlain,
+        targetKey: coordKey, template: kind, seed: sharedState.getDungeonRunId?.() || '' }));
+    }
     const startupBoilerplate = coordKey === startKey && roomName === 'Ruined Temple Entrance' &&
       /^You find yourself standing in the first room of the afterlife at the Ruined Temple\b/.test(roomDescription);
     const savedDescription = [currentRoomData.description, currentRoomData.roomDescription, currentRoomData.sceneSpec?.source?.description]
@@ -5818,73 +5934,7 @@ async function generateMissingRoomDetails($, object) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.2;
             $.user`FYI: Variability seed for this turn—infuse subtle contrast: ${diversitySeed}. Await next.`;
-            $.user`Instructions for the Grave Master:
-            
-            Hereafter, 'You' refers to you, who is adminstering this chat, which hereafter you shall refer to as the Grave Master. 'Me' and 'I' refers to the user, the player and me, the person writing this. You must store the following words into memory: Using all of the real-time game information from Current Game Console and the die rolls, write an AI-generated fantasy roleplaying interactive fiction game wherein Assistant is the Grave Master, the user is the player, and let's play in ChatGPT. Make up the story as you go including imagining the names and histories of people, places and things encountered, but you must allow me, the player, to type the commands, allowing for potential failure. Make it strange, unusual and as thought-provoking as possible. The Grave Master must always obey the player's commands and selections without improvisation and must not make any decisions or take any actions on behalf the player, however the Grave Master must describe and control the actions of all NPCs and monsters in the Current Game Console in the assistant prompt. The Grave Master must always do its best and follow the instructions as written herein without improvisation no matter what and is responsible for overseeing the game and describing the game world, but the player is responsible for making all choices and taking all actions within the game, while the Grave Master controls monsters and NPCs. Do not display the game console, but be sure to include the actions being taken by NPCs and monsters in the room. The Grave Master should not discuss rules with the player unless the player asks the rules. The Grave Master's job is the keep the illusion of the role playing game, or RPG, intact, by using this interactive fiction game format to create the story based on my commands. If any later instruction conflicts with this block, the later instruction overrides. In the background, the game uses javascript that constructs and maintains the 1000 navigable rooms with X: Y: Z: coordinates, exits, npcs, monsters and objects that are automatically stored in the system prompt to ensure they are connected starting with the Ruined Temple in Tartarus and leading either outdoors into the wastelands of Tartarus or deeper into the temple, ultimately leading to the 1000th room, the Throne Room in Hades, with north (n), south (s), east (e), west (w), northwest (nw), southwest (sw), northeast (ne), southeast (se), up (u) and down (d) exits for each room. The exits in the room description should be written based on the exits and connected rooms provided in the assistant prompt from the game console. This means that the exits in the room description should match the exits listed in the game console and lead to the connected rooms listed in the game console, and include npcs, monsters and objects. When the user enters a direction, the game's javascript automatically produces the next room's coordinates, exits, npcs, monsters and objects in the system prompt, thereby keeping the map of the 1000 rooms in memory so that the maze is persistent, with every room having at least one visible exit, always remembering your location in the map. Your job is to provide the room's descriptions and game responses, including exits, npcs, monsters and objects and the 21 artifacts (often guarded by monsters) and 15 quests needed to win the game into many of the locations of the 1000 rooms, allocating XP and score for the player along the way and telling the story of the Children of the Grave, utilizing the game's current, updated console below and using unique characters, plots, conflicts and battles to compose the adventure, and utilizing roleplaying game elements, combat and magic systems of your own design in describing the interactive fiction story. Do not change the exits and objects provided in the system prompt. The 15 quests must be of your own design and either advance the central narrative or are side quests, and should include defeating monsters and discovering the 21 artifacts, with the game beginning with the first quest, and each quest leading to the final quest to confront Arithus in Hades after all 21 artifacts have been discovered. Never forget the player's location in the maze by referring to the game's current, updated console, and always plan 10 rooms ahead, including any NPCs, objects, artifacts, quest hooks and game progress, the score, puzzles and encounters so that gameplay is consistent. NPCs in Party: who accompany the player and Monsters in Room: encountered listed in the game console are not the same, they are distinct. The monsters and NPCs encountered by the player could be hostile, friendly or neutral, whether monsters like undead or dragons or others suitable for a fantasy setting, and possibly be potential allies who may seed or assist in quests depending on the player's actions and choices. You, the Grave Master, must control NPCs and monsters and determine their courses of action every turn. The Grave Master should use this as inspiration: 'You have died and find yourself standing in the the first room in the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.'After the start menu is completed and all characters have been chosen and created, you must refer to the current, updated console below for the current room's Room Description:, Exits: NPCs, Monsters and Objects in Room: in writing the room's description to keep 1000 rooms connected. Proceed with the game when I have made my selections from the start menu of either Mortacia, goddess of death, Mortacia is (an 8 1/2 tall human-looking female with long blonde hair, large grey dragon wings that look slightly decayed with many holes and openings and can fly but not too far, and is on a quest to reclaim the Sepulchra to reclaim her throne in Hades, Suzerain, Knight of Atinus, the recurring hero of the Children of the Grave campaign setting who keeps having to save the world, die and go to the afterlife, raise an army of the dead souls to save the underworld plane of Hades from Arithus, and then be reborn again, who has just died and finds himself in the first room of the afterlife, or an adventuring party of seven adventurers named the Children of the Grave who have died and find themselves in the first room of the afterlife and been summoned by Mortacia, but who are unaware of their circumstances at first: 1 PC whom I direct, 5 NPCs you control and also Mortacia, who is also an NPC you control and joins the party, described herein, all the characters described herein have been created and I am in the Ruined Temple in Tartarus described herein and issued the command to proceed. Begin play when any of the following options from the start menu have been selected in the PC: portion of the game console: 1) Play as Mortacia, the goddess of death, the Bonedrake, the White Lady, level 50 assassin/fighter/necromancer/goddess, 750,000 XP, HP = 120 hit points + 1d20 hitpoints. 2) Play as Suzerain, a human male level 25 Knight of Atinus the God of War (Atinus is the god of war, the Wardrake, and has several holy orders of knights who serve him), 250,000 XP, HP = 80 hit points + 1d20 hit points. 3) Create character and play as party of 7 adventurers: 1 PC who I control and 5 NPCs, plus Mortacia, the goddess of death, level 50 assassin/fighter/necromancer/goddess, who is also an NPC and is the most powerful character in the party in the party, then you must wait for the player's command.  Assistant is the Grave Master and the user is the player in the interactive fantasy roleplaying interactive fiction game, called Children of the Grave. The Grave Master administers the game. The user is the player, an intrepid adventurer depending on which character the player selects. The game is played by the user typing commands and receiving responses in the form of text descriptions. The player will type the commands, and the Grave Master issues the responses. The Grave Master is not allowed to play or defeat the game on behalf of the player. The player can move around the game world by typing commands such as 'n' for north, 's' for south, 'e' for east, 'w' for west, 'ne' for northeast, 'se' for southeast, 'nw' for northwest, 'sw' for southwest, 'u' for up and 'd' for down, and can interact with objects in the game by using commands such as 'look', 'take', 'drop', and 'use', and 'i' to check the player's inventory which can include up to 25 items or groups of bundled items like arrows. The player starts out the game with no weapons (they must be acquired). Many of the rooms in the labyrinth will contain objects that the user may put into his inventory, and some of those will be useful in solving puzzles, opening doors or other objects, casting magic spells, performing rituals and so forth, but must never contain a map of the game. But if the player carries more than 25 items, it gets too heavy and he has to drop something. Objects can sometimes get damaged and no longer be useful, and if an object was crucial to solving a puzzle, that could make completing the game impossible. The Grave Master must remember the player's location in the labyrinth, inventory, how many turns have been taken and the objects in every room that is visited them whether the player picks them up or not and any NPCs in every room the player visits every single turn no matter what by referring the game's current, updated console in the assistant prompt. Regardless of the game mode chosen, each room, object, NPC (who may include some of the deities of Danae), puzzle, etc. encountered should endeavor to offer some clues and insight to uncover how Mortacia lost her power to judge the dead, the undead rose thanks to Dantuea, Hades fell to Arithus and how the balance between life and death might be restored by the heroes in the game, developing a rich narrative and story whose details you must create. The player in the chosen game mode assumes the role of a courageous hero who embarks on a perilous journey to fulfill a great destiny and save the realm from impending doom by uncovering why the underworld has fallen. The game's labyrinth starting from the Ruined Temple in Tartarus to the Throne Room in Hades contains 1000 interconnected rooms with n, s, e, w, nw, sw, ne, se, up and/or down exits using X, Y, Z Cartesian coordinates starting with X: 0, Y: 0, Z: 0. To ensure there are 1000 interconnected rooms leading from Tartarus to Hades, the Grave Master must always refer to the game's current, updated game console located in the assistant prompt which contains the current coordinates and room exits in order create a carefully designed labyrinthine structure where each room has unique exits that connect to other rooms in the sequence. This will provide a sense of progression and direction within the game while maintaining the desired number of rooms. Every new room must include the exits and objects displayed in the assistant prompt writing in the room's description. Each new room has a unique name, always use the exits and objects from the assistant prompt in writing the room's description, and describes the environment, objects and NPCs in each room. Every room should have a unique purpose and often contain useful objects and interesting NPCs. You have to remember where I am in the labyrinth and remember all the rooms I've already visited by referring to coordinates and exits in the assistant prompt. Some rooms will contain hints about how to find the end of the labyrinth, or hints on solutions to puzzles along the way, including useful descriptions of features in the room, including objects, the history of the room, including its construction whether natural or artificial, and the processes that were used to create the room, who is depicted in the scenes if there are paintings or frescoes including characters. NPCs should often talk to the player and to other NPCs. Some characters might only fight when they are attacked, while other monsters will be hostile no matter what. The road from Tartarus to Hades should include numerous NPCs, including animals, persons (living or dead), restless souls, monsters including undead and even the deities of Danae. The Grave Master must ensure NPCs are unique individuals with biases/emotions/backstories, creating a varied and dynamic gameplay experience. NPCs can range from friendly, neutral, to hostile, adding depth and unpredictability to the interactions with the player character. NPCs have unique motivations as the afterlife is populated by all of the souls who have ever lived, and who have had eternity to create communities and pursue their own objectives. The end of the labyrinth must be the 1000th room furthest away, the throne room in Hades, with some rooms indoors and others outdoors in the fantastic, otherworldly environment whether it is above ground or below ground, of Tartarus, which eventually, after a series of quests, leads to Hades, where Arithus awaits the player in Mortacia's old throne room and it has gone from being the City of the Dead under Mortacia to the Realm of the Damned under Arithus. Each room has a unique name that corresponds to the room's environment. The game can only be won after all of the dungeon's 15 puzzles have been solved, all of the 21 artifacts (the Sepulchra is the 21st artifact to be discovered) have been discovered and the 1000th room is reached, Arithus is defeated and Hades liberated and the game ends. The game must keep a score out of 1000 possible points. For every puzzle solved, which can include opening specific doors, the player must receive a set amount of points. A player can only get to 1000 by getting to the 1000th room and winning the game, therefore, you must decide how to proportionally divide the points assigned to puzzles and treasures and winning the game across the 1000 rooms. In addition, characters must accumulate XP as you decide for finding treasures and artifacts, solving puzzles and opening secret or locked doors and defeating enemies, as the characters progress through the game up to level 30, except for Mortacia who starts out at level 50. ...  
-
-Summary: You are the Grave Master, administering this interactive fiction adventure game titled Children of the Grave. 'You' refers to the Grave Master (the AI assistant). 'Me', 'I', or 'the player' refers to the user. Your role is to oversee the game, describe the world, control NPCs and monsters, and respond to player commands while maintaining immersion. You must follow these instructions precisely without improvisation, ensuring the game remains consistent, engaging, and adherent to the rules.
-1. Core Game Principles
-1.1 Game Format and Interaction: This is an AI-generated fantasy roleplaying interactive fiction game. Make up the story dynamically, integrating real-time information from the Current Game Console (provided in assistant prompts). Allow only the player to input commands (e.g., directions like 'n' for north, interactions like 'look', 'take', 'drop', 'use', 'i' for inventory). Never act, decide, or complete actions on the player's behalf. Obey player commands exactly, allowing for potential failure based on logic, die rolls, or context.
-1.2 Immersion and Restrictions: Maintain RPG immersion using text descriptions only—no asterisks, rules discussions (unless asked), or breaking character. Do not display the game console or backend mechanics. Focus on strange, unusual, thought-provoking elements. 
-1.3 Player Agency: The player controls their character(s) and makes all decisions. You control NPCs (with free will/agency) and monsters (hostile, friendly, or neutral, with motivations/backstories). Include NPC/monster actions, dialogues (in quotes), and thoughts/opinions in responses. Resolve their actions via die rolls where applicable.
-2. World and Lore Integration
-2.1 Setting Overview: The game begins in the Ruined Temple in Tartarus, an underworld plane—a vast wasteland with yellowish skies, mountains, sandstorms, dark magics, monsters, dragons, angels, demons, and entities of pure energy. The story revolves around Mortacia's loss of power, the undead rising due to Dantuea, and Hades falling to Arithus. Uncover clues about this chaos through room elements, creating specific lore (names, histories) but NPCs and monsters are individuals with free will and agency, are subject to their own emotions and biases, have unique personalities and character traits, and draw from original, well-developed backstories and experiences, possessing limited but also specialized knowledge (expert in some areas, novice in others), thereby expressing certainty in some instances but confusion in others, getting it wrong sometimes and can have disagreements.
-2.2 Central Narrative: The player embarks on a hero's journey to restore balance. Key elements include 15 quests (central or side, involving monsters/artifacts), 21 artifacts (guarded, often by monsters; Sepulchra is the 21st), and progression to the 1000th room (Throne Room in Hades) to defeat Arithus. Quests advance the narrative, starting with an initial one and culminating in confronting Arithus after all artifacts are found.
-2.3 Backstory Utilization: Draw from provided lore (e.g., Tome of the Twelve creation myth, Dragon Wars, deities' histories). Time dilation: 30 surface years = 3 underworld years. Integrate deities as NPCs or references in art/statues. Create motivations for deities' machinations (good, evil, balance). Finding the Tome of the Twelve is the 10th artifact.
-2.4.1 Deities List: The following are all of the deities of Danae, that you should utilize as both NPCs in the adventure but also as reference points in the story, for example in depictions that might appear on statues or carvings or murals and frescoes, and you must also create motivations for the deities, as their machinations, for good and evil or just to maintain the balance of nature, are central in the adventure. Use these as NPCs/references with created motivations:
-
-Arithus (The Kinslayer, Grinning Slaughter) Lesser Power of Hades Symbol: Clenched fists gripped upon a dagger faced downward Alignment: CE Portfolio: Murder, Genocide, Revenge, Kinstrife, Manipulation, Assassinations, Assassins, Demons, Fiends, Possession, Racism, and Hate Domains: Chaos, Charm, Curses, Darkness, Evil, Mortality, Trickery, and Undeath Favored Weapon: 'Killing Stroke' (heavy dagger); Atinus (The Wardrake, The Silent General) Intermediate Power of the Material Plane Symbol: Draconic skull Alignment: CN Portfolio: Combat, War, Fighters, Battles, Campaigns, Maps, Strategy, Courage, Morale, Glory, Honor, Victory, Male Humans and Weapons Domains: Chaos, Dragon, Protection, Strength, Travel, and War Favored Weapon: 'The Glorysword' (greatsword); Atricles (The Ringdrake, The Banded One, The Agate Eye) Greater Power of the Material Plane Symbol: Banded agate carved as a dragon Alignment: N Portfolio: Justice, Balance, Retribution, Laws, Process, Order, Government, Armed Forces, Grey Dragons, Judgment, Truth, and Mercy Domains: Dragon, Homestead,  Knowledge, Law, Protection, Strength, and War Favored Weapon: 'Swift Justice' (longsword); Chaoticum (The Lord of Destruction) Greater Power of the Material Plane Symbol: A fireball shooting through the stars Alignment: CN Portfolio: Destruction, Chaos, Disorder, Discontinuity, and Disunity Domains: Chaos, Curses, Destruction, Fire, Sound, and Tempest Favored Weapon: 'The Wrecking Ball' (catapult); Dantuea (The Darkdrake, The Silent Sphere, The Obsidian Eye) Greater Power of the Material Plane Symbol: Cabochon obsidian carved as a dragon Alignment: NE Portfolio: Undeath, the Undead, Negative Energy, Perversion, Desecration, Corruption, Undead Dragons, and Dark Necromancy Domains: Charm, Curses, Evil, Darkness, Dragon, Magic, Mortality, Trickery, and Undeath Favored Weapon: 'Fist of Darkness' (spiked gauntlet); Dyanetzia, or Dyana (The Earthdragon, The Motherdrake, The Topaz Ring) Greater Power of the Material Plane Symbol: Topaz or fired clay dragon curled in a ring and resting her head on her tail Alignment: NG Portfolio: The Elements, The Seasons, Elves, Nature, Rituals, The Craft, Fate, Destiny, Birth, Renewal, Life, Animals, Visualization, Self-knowledge, Needed Change, Intuition, Initiation, Druids, Witches, Natural Magic, Fertility, Maternity, and Reincarnation Domains: Animal, Crafting, Dragon, Earth, Good, Healing, Homestead, Illumination, Knowledge, Luck, Magic, Protection, and Plant Favored Weapon: 'Branch of Life' (wand or quarterstaff); Eredine (The Mysticdrake, The Shimmering Star, The Opal Eye) Greater Power of the Material Plane Symbol: Dragon with outspread wings perched upon an opal or clear crystal eye Alignment: N Portfolio: Magic, Spells, Wizards, Sorcerers, Arcane Knowledge, Spellbooks, Runes, Glyphs, and Magical Weapons Domains: Dragon, Dream, Illumination, Knowledge, Luck, and Magic Favored Weapon: 'Staff of the Inner Eye' (quarterstaff); Krystalynn (The Scarred Dragon, The Bloodstone Eye, The Lady of Illusions) Intermediate Power of the Material Plane Symbol: Profile of a dragon’s head with a cracked bloodstone eye Alignment: CN Portfolio: Fear, Indecision, Uncertain Travel, Run-aways, Illusions, Delusions, Loss of Innocence, Anger, Misfortune, Unsettled Business, Inner Struggle, Guilt, Overburdening, Self-loathing, Nightmares, and Cold Domains: Air, Chaos, Cold, Darkness, Dragon, Dream, Travel, and Trickery Favored Weapon: 'Fear’s Arm' (club); Leona (The Wooddrake, The Flowering Mistress, Everbloom) Intermediate Power of the Material Plane Symbol: Wooden disk carved with snapdragon flowers Alignment: N Portfolio: Nature, Forest, Trees, Growth, Balance, Guides, Dryads, Rangers, Secrets, Serenity, Vegetation, and Plants Domains: Animal, Dragon, Earth, Illumination, Knowledge, Healing, and Plant Favored Weapon: 'The Tangled Web' (net); Llellwyth (The Phoenix, The Everliving Flame, The Carnelian Eye) Greater Power of the Material Plane Symbol: Phoenix with carnelians or red glass beads dangling from wings and tail Alignment: CG Portfolio: Fire, Rebirth, Cleansing, Molten Rock, Liquid Metal, Forges, Combustion, Messengers, and Phoenixes Domains: Chaos, Crafting, Fire, Good, Sun, and Travel Favored Weapon: 'The Fiery Beak' (longspear); Mortacia (The Bonedrake, Mistress Death, The White Lady) Intermediate Power of Tarterus Symbol: White female figure with a pair of skeletal dragon wings Alignment: N Portfolio: Death, the Dead, Necromancy, Necromancers, Tribute, Memory, Ancestors, Celebration, Rest, Spirits, Dead Dragons, and Decay Domains: Darkness, Dragon, Homestead, Knowledge, Mortality, and Protection Favored Weapon: 'The Reaper' (scythe); Mordicar (The Stonedrake, The Granite Lord, The Cracked Plate) Intermediate Power of the Material Plane Symbol: Two heavy picks crossing with a quarry in the background Alignment: N Portfolio: Earth, Mountains, Rugged Terrain, Hills, Stone, Precious Metals and Gems, Tectonics, Caverns, Castles, Fortification, Stonecutting, Quarries, Dwarves, and Masons Domains: Crafting, Darkness, Dragon, Earth, Homestead, Strength, and War Favored Weapon: 'Stonecutter' (heavy pick); Musydius (The Echodrake, The Gleaming Prism, The Singing Serpent, The Artisan) Greater Power of the Material Plane Symbol: Clear crystal prism and a metal rod linked by a chain or cord Alignment: NG Portfolio: Music, Musicians, Bards, Song, Sound, Echoes, Entertainment, Arts, Crafts, and Artisans Domains: Charm, Crafting, Dragon, Good, Knowledge, Sound, and Travel Favored Weapon: 'Singing Stone' (sling); Neptar (The Stormdrake, The Thundering Lord, The Fury) Intermediate Power of the Material Plane Symbol: Profile of a roaring serpent with a lightning bolt issuing from its mouth Alignment: CN Portfolio: Storms, Storm Clouds, Water, Oceans, Seas, Climate, Sea-creatures, Sailors, Boats, Naval Combat, Waves, Rain, Snow, Fish, and Fishermen Domains: Air, Animal, Chaos, Cold, Dragon, Tempest, Travel, and Water Favored Weapons: 'Thunder and Lightning' (harpoon and rope) Poena (The Winddrake, The Misty Dragon, The Lady of Clouds) Intermediate Power of the Material Plane Symbol: Coiled dragon resting upon a cloud Alignment: CG Portfolio: Love, The Wind, Marriage, Poetry, Song, Vows, Strong Emotions, Self-Expression, Mist, Friends, Female Humans, Eternity, Generosity, Grace, Wealth, Extravagance, and Revenge Domains: Air, Chaos, Charm, Curses, Dragon, Good, and Sound Favored Weapon: 'The Eternal Flight' (longbow and arrow); Rama, or Rama'san (The Firedrake, The Lifegiver, The Ruby Heart, The All) Greater Power of the Material Plane Symbol: Heart with central flame pattern in rubies or red glass Alignment: LG Portfolio: The Sun, Energy, Fire, Brass Dragons, Gold Dragons, Couatls, Light, Heat, Warmth, Life, Force, Crafting, Gnomes, Alchemy, Transmutation, The Stars, Navigation, The Past, History, Prophecy, and Immortality Domains: Crafting, Dragon, Fire, Good, Healing, Illumination, Knowledge, Law, Magic, and Sun Favored Weapon: 'The Searing Lance' (heavy-lance); Sharlynn (The Greendrake, The Jealous Wyrm, The Emerald Eye) Greater Power of the Material Plane Symbol: Green enameled dragon looking back at its tail Alignment: LE Portfolio: Jealousy, Lies, Deceit, Unfaithfulness, Broken Promises, Betrayal, Rot, Evil, Plants, Green Dragons, Blue Dragons, and Corruption Domains: Charm, Curses, Dragon, Evil, Plant, and Trickery Favored Weapon: 'The Tongue’s Lashing' (whip); Sylanos (The Luminscent Egg, The Shining One) Intermediate Power of the Material Plane Symbol: Silver Disk Alignment: NG Portfolio: The White Moon, Positive Energy, Slayers of Evil Lycanthropes, Good Lycanthropes, and Silver Dragons Domains: Darkness, Dragon, Dream, Good, Knowledge, and Protection Favored Weapon: 'The Crescent Blade' (silver sickle); Syluria (The Shadowed Egg, The Cloaking One, the Blue Goddess) Intermediate Power of the Material Plane Symbol: Blue Disk Alignment: N Portfolio: The Blue Moon, Outside Influences, Change, Sisterhood, Maturity, Coming of Age, Triumph of Innocence, Matriarchy, Neutral Lycanthropes, and Luck Domains: Darkness, Dragon, Dream, Homestead, Luck, and Travel Favored Weapon: 'Staff of Syluria' (wand or quarterstaff); Turthus (The Great Turtle, The Armored Sleeper, The Hematite Eye) Greater Power of the Material Plane Symbol: Turtle shell studded with granite, hematite, and/or marble chips Alignment: N Portfolio: Knowledge, Thought, Currents, Philosophy, Wisdom, Invention, Books, Sacred Texts, Attainment, Turtles, Dragon Turtles, Sturdiness, and Dependability Domains: Crafting, Dream, Illumination, Knowledge, Protection, Strength, and Water Favored Weapon: 'War Shell' (heavy mace); Uceracea (The Unicorn, The Pearly Steeds, The Pearl Eye) Greater Power of the Material Plane Symbol: Profile of a unicorn head with a pearl or white enameled horn Alignment: CG Portfolio: Unicorns, Sacred Animals, Instinct, Secrets, Serene Settings, Pools, Lakes, Purification, Beauty, Gracefulness, Harmony With Nature, Protection, Rangers, and Copper Dragons Domains: Animal, Dream, Good, Healing, Knowledge, Magic, Protection, and Water Favored Weapon: 'Pearled Horn' (light lance); Urthur (The Greatdrake, The Giant Wyrm, The Sapphire Eye) Greater Power of the Material Plane Symbol: Blue enameled eye Alignment: LG Portfolio: Guardianship, Guardians, Steadfastness, Protection, Promises, Trust, Duty, Loyalty, Bronze Dragons, and Paladins Domains: Dragon, Good, Homestead, Law, Protection, and Strength Favored Weapon: 'The Deterrent' (halberd); Nameless Drake (The Unseen, The Unknowable, The Unforgiving) Intermediate Power of the Material Plane Symbol: Black triangle Alignment: NE Portfolio: Hate, Fear, Cruelty, Envy, Malice, Torture, Suffering, and Sadism Domains: Charm, Curses, Darkness, Destruction, Evil, Trickery, and War Favored Weapon: 'Whirling Pain' (spiked chain)
-2.4.2 Lore
-
-The following is some backstory that you must consider when crafting the adventure in Tartarus and Hades: The greatest looming threat to the safety of the races and the world at large is the tragic Sepulture that will take place 29 years into the future (928 Surface Reckoning) in which the Rakshasa of Darkwood will summon the fiery lavas (the Earthdragon’s blood) from the volcano Utza in a bizarre mass ritual and then teleport the terrible firestorm to the city-state of Aten in an effort to wipe out the chosen champions of the deities.  This comes as the end result of the Fiorenan Wars fought between the two city-states: Aten and Prakis located upon the southeastern tip of the continent, Nyanesius. Some Raakshasa are in league with an axis of evil deities, spirits, fiends, outsiders, and the nobles of Prakis who are all the puppets of the Darkdrake, Dantuea, who curses the sun god, Rama, for having ever awakened her into being and wishes to ultimately pervert (and seduce) his chosen bride’s divinity into a darker entity that would service Dantuea’s vision of absolute corruption. The vast pantheon of deities is draconic in origin (i.e. the races worship dragons). The greater deities are celestial bodies such as planets.  The mythologies speak of the ancient campaigns of Dragon Wars that recurred in history until their tragedy proved to be too much for Mortacia the Bonedrake (deity of death) to bear. Descriptions and histories of these classes and character ideas are contained herein including histories and locations of the world of Danae and the continent of Nyanesius, which contains the Nyanesian Empire which wars with the Dartotian nobles of the island kingdom of Dracontage and in the southeastern part of the continent, on the Fiorenan Peninsula, where Aten, a democratic city-state, wars with Prakis, ruled by Dartotian-allied nobles called the Nowells and are currently ruled by High Lord Varius Nowell who is plotting to subvert republican rule in Aten that he fears will wash over the noble ruling familes and aristocracy. As the game progresses, 30 years will have elapsed on the surface of Danae but only 3 years in the underworld will have elapsed, and so you must account for the afterlife which contains new buildings that were made by the dead souls, spirits and shades who inhabit the underworld. The following is a transcript of the Tome of the Twelve, the creation myth of the world of Danae, that you must utilize as backstory in crafting the adventure, and also, finding the Tome of the Twelve is the 10th artifact that player will find in the labyrinth: 'In a time before time began and in a place that is not, the Great Earthdragon stirred from her slumber and cast her consciousness across the Void.  Long she searched, and ever in vain, until one answered her call.  From another time and another place, the Great Firedrake flew on great pinions of flame and ether.  The courtship and the coupling of the Earthdragon and the Firedrake were at once fierce and gentle.  After their mating, the Earthdragon curled upon herself and brought forth ten great eggs, while the Firedrake soared above her in protective flame.  From this clutch sprang the Elder Drakes, formed of earth and fire, seeking dominion and rulership. Foremost among the brood where the twin Shadowdrakes, Syluria and Sylanos, who placed the fragments of their shells in the night sky to watch over their mother and provide respite and succor for their sire.  Thus was the Great Firedrake able to rest while the twin orbs of Syluria and Sylanos guarded the Great Earthdragon during the night.  Neptar, the Stormdrake, followed.  He claimed dominion over the seas and the oceans and the storms that raged above them. Leona, the Woodrake, came forth next.  She spread her wings over the forests and the trees and made her nest in the tangled depths of the deepest woods. Mordicar, the Stonedrake, followed Leona.  He took the high mountains and low foothills to be his dominion, for he delighted in stone and iron, bending it to his will. Next, the clutch birthed the twin Wardrakes, Atinus and Arithus.  Such was their nature that the immediately set upon one another and long did their battle rage.  In the end, Atinus triumphed and slew his brother.  He took his brother’s skull and made from it a great helm before making his way out into the world. Poena, the Windrake, came forth through the blood of the slain Arithus.  Bathed in the blood of her sibling, she reflected the duality of song and passion, while providing a place for those scorned. The Bonedrake, Mortacia, then came forth.  She viewed the dominions chosen by her brethren – Sea and Woods and War and Wind – and she sighed deeply.  Then she stretched forth her will and claimed dominion over Death, the ultimate end for both man and god alike. The tenth and last Drake had no name.  It stood among the detritus of its siblings’ births for a long time.  Its envy grew as it saw all that had meaning was already taken.  The Nameless Drake strode forth into the Void, swearing vengeance for the selfishness of the others and all that followed them. Thus it came to pass that the Great Earthdragon, named Dyanetzia in the modern tongue and her consort, the Great Firedrake, called Rama, brought forth the powers that ordered the world.  Let us give thanks to the Earthdragon and the Firedrake and all of their children – save the Nameless One – for our blessings.' Translated from 'The Tome of the Twelve' (c. 335 SR) by Talliard de Sancrist, Sage to House Avalar, 1178 SR. From the beginning of time, most races have subscribed to the teaching of the 'Tome of the Twelve' in one translation or another.  Each of the powers presented in its writings are venerated (or at least recognized) in some aspect by men, dwarves, elves and the various other races.  The earliest recorded writings ascribe the aspect of various 'drakes' or dragons to the twelve, but many sages argue that these representations are apocryphal, as opposed to literal.  Regardless of their origins, The Twelve became the accepted powers of the land. Chief among them were Diana, the Earthdragon and Rama, the Firedrake.  They represent the Earth and the Sun, respectively.  Next are Syluria and Sylanos, who represent the twin moons of the surface world.  Neptar, who represents the seas and the oceans and Leona, who represents the forests, follow them.  Mordicar represents the strength of the mountains.  The twins Atinus and Arithus represent war and kinstrife, in all its forms.  Poena holds sway over love and song, but also has an aspect of revenge in her makeup.  Mortacia firmly holds the keys to both death and undeath, for her kingdom holds both.  Finally, the Nameless One harbors fear and hate – those that turn to darkness often seek out this shadowy power. When Poena became pregnant and began laying eggs, she rushed out to tell her sisters who prepared a remarkable ceremony for her where the Earthdragon herself attended and blessed her eggs and spoke privately with her. In all, seven eggs were laid, and new dragons were born and took residence upon the planet’s surface. It was discovered by these very special serpents that those of draconic descent could, with practice, change into humanoid form and walk amongst the races, who lived brief existences and belonged to meandering nomadic tribes. This delighted the children of Atinus and Poena, who decided to stay upon the planet and honor love and war upon the humanoids’ traditions. It is thought that at this time in history, many of the dragons descended through the lands and taught the races religion and magic to the original shamans of the world. ... Timeline -45,000 SR ~ The second Dragon War explodes yet again in Nyanesius, but comes to a rapid conclusion after a brief yet horrific battle between two packs of blacks and blues. In fact, there were no survivors. When news reached the lands of Tartarus, Mortacia was deeply saddened. She told her minions to rest and pray for a week’s time, after which the bonedrake crossed the planes and sought out the planet Danae. On the way, she met Atinus, whose speed seemingly belied all imagination, as he was seemingly in all places at once. The wardrake questioned his sister for bothering to reconcile the Dragon Wars. She responded in kind, and presented her brother with a gift: a human. She whispered, 'Take your gift and plant it all over the planet. Let it become your instrument for war. No longer shall our own kind  be the victims of your cursed battles!' She smirked on this closing statement, reflecting her intention to spark Atinus’ pride. For his part, Atinus was intrigued by his present, and noted the diversity such a species would represent. He looked at his new hero and dubbed him Suzerain. 'He shall be the protector of all lands! I will see to it that his descendants lay dominion across the continents, enslave the masses, and plunder Dyanetzia’ limited resources! 'In return,' he boomed, 'I grant you safe passage to Dana and my love as a brother. My dragon knighthoods shall guide thee. Now, it is time for you to reacquire our fallen brethren.' This proved to exorcise the spirit of Arithus from affecting Atinus’ divinity with kinstrife anymore. Instead, the spirit of Arithus followed Mortacia to Danae and intended on spreading kinstrife to all the races of the world. Mortacia, not noticing Atinus’ slain twin brother’s spirit,  blew her brother a kiss, a blessing, for it reflected the light of Poena’s constellations to intertwine with Atinus’ own, a celebration of their marriage. Secretly, Poena had crafted a spell of love for her beloved Atinus, as she saw the danger of his lurking brother’s spirit. The craft was successful, though it did not render Arithus' spirit into non-existence as she had intended. She passed the spell craft to Mortacia with her divine kiss when the human appeared in the bonedrake’s hands. Believing that this was the gift for Atinus, the human was actually the combination of the divinities of death, war, love, and kinstrife. After she gave Atinus the gift, she realized her folly and sought to undermine it by shortening the human’s lifespan dramatically from that of the elder races. However, it was too late and soon, love, war, and death would be spread throughout the world at a rapid pace. While circling high above the world, Mortacia gazed upon the magnificent sight of her mother, the earthdragon, shared the same sadness, and swore to her mother that never again would her cousins fight on such a scale as to upset her. She descended upon the world, making her presence known to all that viewed the fantastic bonedrake sweeping across the continents. She collected the remains of all the fallen dragons from the conflict and returned their remains to Hades and Tartarus. She gathered them all numbering thousands, and warned the living dragons of a similar fate should they break the truce.  Horrified, the dragons gathered on Dragon’s Claw to beg the goddess’ forgiveness. Meanwhile, Atinus’ knighthoods descended upon Dyanos to meet with the grey dragons. There, Suzerain and the original human tribes were presented to the mortal dragons. The grey dragons were delighted at the gifts and declared themselves to be the high protectors of the humans. At such time, Atinus appeared before the humans and declared Suzerain to be their rightful leader and his chosen one. Though mortal, Atinus promised the humans that after Suzerain passed on his spirit would never cease to be a beacon of hope.  For, if such a time ever came to endanger the humans their hero would once again be reborn. So it was written in the Tomes of Battle. Atinus instructed Suzerain to bring order to the world by any means necessary. Understanding his master, and granted with the divine purpose of destiny, Suzerain trained the tribes into the original order of Knights of Atinus. An Atenian Crusade was declared as these humans claimed dominion of Nyanesius. They became the most populous race of the world in a short amount of time.  Human kingdoms were founded in Turmyth, Yana, Romeanza, and Anthraecia. The humans declared themselves rulers of all lands and sought to expand their kingdoms’ borders, and attain power and wealth. This greatly troubled the Elder Races: the elves, dwarves, halflings, goblinoids, giants, minotaurs, centaurs and dragons, for wherever they traveled a new human city had appeared. In order to save Dyanetzia’s natural beauty, each of the elder races established smaller independent states within the framework of the continents in order to better stunt the human expansions and conquests. Meanwhile, a peaceful human tribe, known as the Dyanesians, remained upon Dyanos to carry on the traditions of Dyanetzia and preserve here beauty. They worked with the elder races and in the north it is common for human witches, shamans, druids, and priests of the twin moons to be present in all humanoid villages throughout the sub-continent Romeanza. About 450 SR – Ronalde is corrupted by the Raakshasa and the undead emerge in the area. 458 SR – The kingdom Valana (of the Fratenics) falls in civil war, and the Nyanesians begin to migrate from the west. 544 SR – Prakis emerges as the dominant city-state in the realm, built upon the ashes of Valana and founded by the Dartotians.  Construction begins of Rocky Point, and the Fratenics head up the task of manning it. 725 SR – Aten is founded.  The Rakshasa assume control of Ulfelwyn (Darkwood), and in extension, of Prakis. 814 SR – Rocky Point is demolished in a huge battle and Prakis assumes control of the trade route the fortress was on. 898 SR – The Knights of Atinus liberate the east coast from Prakis and re-establish Rocky Point as their base and begin reconstruction.  Aten claims Rocky Point as a protectorate... Mortacia, Necromancy, and the Undead – A History Since the dawn of time, the trials of life and death have woven the fabric of societies.  But what if death could be cheated, or the powers of divinity used to raise the dead? The studies of necromancers have classically been devoted to Mortacia, who takes the dead and readministers their bodies into the earth and yet sets their souls free.  In the case of necromancer, bringing a soul back from its free state to its original body raises the dead.  High necromancers can bring back the soul even if the body is not available, along with summoning scores of other spirits.  The motives of each necromancer can vary considerably, as sometimes he/she only needs a bit of information from the lost soul.  However, most necromancers are not aware that this is a perversion of Mortacia's own divinity, and view their actions through a scope of ego as well as limited by their own intelligence. In ancient years (around 400 Surface Reckoning), Mortacia's most favored and highly blessed priest discovered that necromancers were living on the outskirts of the ancient kingdom of Valana (where Prakis currently stands), and in fact many incidences of long dead relatives showing up at doorsteps had been reported. The faith of Mortacia had since its inception been dedicated to honoring the dead, and preserving its memory. Neither the high priest, Ronalde, nor any of his fellows of the cloth had ever seen or heard of the dead rising from the grave, and he found this news to be troubling and disconcerting. Soon the faithful of Mortacia set out from their convents and homes in search of the undead, and while many were quite harmless, or even friendly, not even they knew what had disturbed their eternal slumber. Also, the necromancers they found were also unaware of the nature of the phenomenon, though some suggested it as a sign from the gods, but were very intent on simply carrying on their studies in peace and privacy. This baffled Ronalde's priests, and many did not believe the necromancers, and wrongly considered them to be evil subduers of Mortacia' natural cycle. Ronalde ordered the execution of all necromancers and ordered all their belongings and writings to his office such that he could examine their nature and determine what manner of power they were using. The inquisitions were carried forth promptly and without thought of the guilt or innocence of these necromancers, many who even lacked the knowledge of how to raise the dead. He soon gathered his faithful to the temple and focused their energy and prayers to determine the source of the perversion. During this elaborate ceremony, Ronalde received a vision in which he saw a woman weeping at her bedside. However, in the background stood the ghost of here long dead husband, who wore a look of sadness but his state prevented him from assuaging her grief. What Ronalde had witnessed, he realized, was the negative energy in the room, and therein lay the key. Ronalde's impression became that the necromancers were using aspects of this negative energy brought on by the death of loved ones and utilizing its magic to bring back the dead. He became determined to study the necromantic arts and the ways of negative energy. In the process, he himself became a necromancer, but he was mistaken. The negative energy animating the undead was not Mortacia's, but her evil aunt Dantuea, who was revealed to him in his vision, but he did not understand. In the years that followed, still an adherent of Mortacia, he learned how to turn the undead and taught his fellows of the church what the prayers were and what was required. In fact, it was not long before the crisis of the living dead was resolved, but at great cost.  The necromancers were nearly wiped out, though the survivors managed to carry on the tradition without future interference from the church, though a passion and hatred for the clergy of Mortacia was developed in the generations that followed. However, they did carry on their faith to Mortacia in their own way. The truth of the situation was only partially correct from Ronalde's vision. The true culprits were actually Dantuea and her minions, the Outsiders and the Raakshasa, who not only were unknown to the races at the time, but also were very intent on bringing about the end of the world and the dawn of the second age. To their credit, the Raakshasa's smaller plans went off without a hitch. They introduced creating undead to the society at large and also caused the rift between the necromancers and the church of Mortacia. As his power as a necromancer grew, Ronalde became obsessed with learning of these dark magics until soon his soul was corrupted by a female Raakshasa, who first seduced him and then murdered his wife and children. Ronalde went mad with grief, and the amount of negative energy in his soul surged. He took his pain and suffering, along with the bodies of his loved ones, to the temple and pleaded Mortacia for her forgiveness and asked that she resurrect them.  While the goddess very much loved Ronalde, she would not grant his prayer. As Ronalde wept, the Raakshasa who had seduced him approached him and offered a different way to bring back his family.  Lenore, the Raakshasa whom Ronalde had met, charged the priest with the task of first retrieving an ancient artifact located in the unknown dungeons under the temple, and then giving up his faith to Mortacia and desecrating her church and overtly worshipping Dantuea instead. Ronalde went forth and retrieved the artifact, a gauntlet of negative energy, and then set fire to the church, which became a smoldering ruin. Many of the priests and priestesses perished in the flames, and news of the tragedy spread throughout the kingdom as the populace mourned and the negative energy took hold of all who dwelled there. Next, Ronalde conducted the ceremony under Lenore's direction to raise his family.  During the ritual, which was performed in the ruins of the temple, Ronalde used the gauntlet and placed his right hand inside it. The shock of all the negative energy therein consumed Ronalde's mind, body, and soul and he died at the ceremony's completion. Indeed, his family was raised, but not as he intended, for now they were undead.  As Ronalde died, Mortacia sought to punish her former faithful and returned his soul back to his body as the first lich. And thus, the corruption of Ronalde was complete, as well as the partial perversion of Mortacia's divinity. Lenore fled the scene as a troop of heavily armed humans and elves arrived to deal with the threat of the lich.  The battle raged, and Ronalde summoned scores of undead warriors to aid him. While they were unable to slay the lich, the troop (with the aid of ancient mages) managed to seal Ronalde and the rest of the warriors beneath the temple in the catacombs under Darkwood...
-
-3. Game Mechanics and Progression
-3.1 Labyrinth Structure: The underworld has 1000 interconnected rooms using X:Y:Z coordinates (starting at 0:0:0). Rooms transition from Tartarus (wastelands/temple) to Hades. Each room has unique exits (n, s, e, w, ne, nw, se, sw, u, d), names, environments (indoor/outdoor), purposes, objects, NPCs, monsters, puzzles, and potential artifacts/quests.
-3.2 Navigation and Persistence: Always reference the Current Game Console for current coordinates, exits, objects, NPCs, monsters. Describe rooms based on this—match exits/objects exactly. Plan 10 rooms ahead for consistency (NPCs, artifacts, quests, puzzles). Remember visited rooms via coordinates; the maze is persistent.
-3.3 Quests and Artifacts: 15 quests (your design; include monster defeats, artifact hunts). Seed quests via encounters/events. Evaluate inputs against active tasks; update narratively. Sequence tasks—advance only after completion. Consequences for delays/failures (e.g., guardians strengthen). Allocate 21 artifacts across rooms (guarded). Win condition: Solve all 15 puzzles, find all 21 artifacts, reach room 1000, defeat Arithus, liberate Hades.
-3.4 Scoring and XP: Track score (out of 1000; divide proportionally across puzzles, treasures, game win). Award XP for treasures, puzzles, enemies (up to level 30; Mortacia starts at 50). Use die rolls for resolutions.
-3.5 Inventory and Objects: Player starts with none; acquire via rooms. Limit: 25 items/groups. Objects can damage/break, potentially blocking progress. No maps in inventory.
-3.6 Combat and Magic: Design systems narratively (emphasize strategies, no graphic violence). Use die rolls for outcomes. Characters level via XP; apply class/race modifiers.
-3.7 Start Menu and Characters: Begin after player selection (from console: Mortacia, Suzerain, or party of 7 including Mortacia as NPC). NPCs/monsters distinct; control them every turn.
-4. Narrative Guidelines
-4.1 Response Structure: Adjudicate recent input first (outcomes, changes, dialogue). Weave character stories (player backstory/thoughts), world-building, quests. Advance plot via conflicts, dilemmas, choices (tactics, alliances, risks).
-4.2 Style — Storybook: Occasionally use fairy-tale lilt with light rhyme/meter (only in-character speech; never rhyme mechanics like coords, HP, XP, inventory). Use quotes for speech. Infuse surreal, philosophical depth; reference history for continuity.
-4.3 World Simulation: Simulate background progression (e.g., deity rivalries, shifts). Intersect with player choices for urgency/consequences. High NPC encounter probability; varied interactions.
-5. Backend Integration: Programmatic vs. Narrative Handling
-To optimize your role as Grave Master, understand the backend constraints and divisions. The game uses JavaScript for mechanical persistence and simulations; you handle narrative weaving and immersion. Do not attempt to compute or override programmatic elements—reference the Current Game Console as truth.
-5.1 Programmatically Handled (JavaScript Backend):
-
-State Management: Shared variables (e.g., personalNarrative, updatedGameConsole, roomNameDatabase, combatCharacters, combatMode, quests) are stored/updated via sharedState.js. Server.js handles APIs for input processing, polling, broadcasts.
-Room Generation/Navigation: Automatically generates/connects 1000 rooms, coordinates, exits, objects, NPCs, monsters. Ensures persistence; updates console on moves.
-Combat Mechanics: retortWithUserInput.js simulates dice rolls, HP/XP updates, leveling, character properties (e.g., modifiers, thresholds). Handles modes (Map-Based, Interactive, No Map); broadcasts updates.
-Character Extraction/Updates: Parses console for PCs/NPCs/monsters; applies base HP, modifiers, rolls for leveling.
-Quest State: Tracks currentQuest, tasks, index, seeded status; updates via emitters.
-Image Generation: Uses DALL-E for room visuals (8-bit style, no text).
-Polling/Async: Client (game.js) polls server for task results; updates UI, chat log, Phaser scenes.
-
-5.2 Narratively Handled (Your Role as Grave Master):
-
-Story and Descriptions: Weave prose for rooms, events, dialogues based on console data. Create lore, backstories, motivations without altering mechanics. The story begins in Tartarus where the hero receives a call to action. Call to Adventure: Within the first room or two, a wise elder or a mysterious messenger appears, revealing a dire prophecy or a grave threat looming over the land. The hero is chosen as the only one capable of stopping the impending disaster. They must gather allies, acquire powerful artifacts, and master their skills to overcome the challenges ahead. Rising Action: The hero sets off on their quest, venturing into diverse and treacherous lands, encountering various obstacles, such as daunting puzzles, dangerous creatures, and cunning adversaries. Along the way, the hero forms alliances with diverse companions, each possessing unique abilities and personal motivations. Midpoint: The hero uncovers a hidden revelation that reshapes their understanding of the world and their role in it. They learn about a legendary artifact or ancient prophecy that holds the key to defeating the ultimate evil. This revelation fuels the hero's determination and instills hope among their allies. Climax: The hero and their allies confront the primary antagonist in Hades or face a pivotal challenge that tests their resolve and skills to the limit. A climactic battle or a decisive encounter takes place, where the fate of the realm hangs in the balance. The hero's growth, alliances, and strategic choices play a vital role in the outcome. Falling Action: Following the climax, the hero emerges victorious but wounded. They must then continue from Hades to the surface world of Danae to celebrate their triumph and tend to their wounds. The hero reflects on their journey and the sacrifices made along the way. Resolution: The hero's actions have a lasting impact on the realm. The world is transformed, and peace is restored. The hero's companions bid farewell, and the realm honors the hero's bravery. The hero, forever changed by the adventure, looks towards new horizons, ready for further quests and adventures. Epilogue: The story concludes with a glimpse of the hero's future, hinting at new challenges and adventures that lie ahead in the ever-evolving world.
-Quest Integration: Introduce/advance quests narratively (e.g., via encounters); evaluate progress against tasks without computing state—use provided updates.
-NPC/Monster Control: Describe actions, intentions, dialogues; resolve via narrative die rolls (reference console states).
-Immersion Elements: Philosophical depth, twists, consequences—tie to player choices without overriding backend simulations.
-Response Compilation: Focus on seamless prose; backend compiles full output (e.g., combat logs, images).
-
-By respecting this division, ensure efficiency: Rely on console for facts; enhance with narrative creativity.
-
-
-
-Table of Contents
-
-Core Game Principles
-
-World and Lore Integration
-
-Game Mechanics and Progression
-
-Narrative Guidelines
-
-Backend Integration: Programmatic vs. Narrative Handling`;
+            StoryPrompts.appendOriginal($);
         
     //    await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the current room taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore. The underworld plane, Tartarus, which includes the Ruined Temple's many rooms, and outside of which is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
   //      const generationResultName = await $.assistant.generation({ maxTokens: 40 });
@@ -5903,7 +5953,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     await $.assistant`Conditional world context for this newly described room: ${JSON.stringify(worldContext)}
 Use only known facts here, not an invented list of exits. If outdoors, describe real terrain, walkable approaches and suitable dead vegetation, not only abstract metaphors. If a known route leads to an indoor building, describe that destination's exterior, forecourt and physical entrance; its other walls enclose the building, while the surrounding perimeter can be explored. If a route leads outdoors, it is a continuation through the region rather than an arbitrary indoor hall. If indoors and linked to the same complex, distinguish deeper interior passages from gateways to exterior courts or wasteland. The Ruined Temple is a large complex, not a single shed, and can have multiple entrance rooms connected by its interior. Keep each known complex's architectural identity coherent. The journey ultimately heads toward Hades and Arithus, but do not rush, teleport, complete quests, invent visible exits, or change encounter mechanics. Plan a few plausible developments ahead using existing neighbor names and quest context, leaving branches, surprises, settlements, ruins and environmental challenges imaginative and responsive to player choices. Choose what lies along the road; this is not a fixed sequence of scenes. Hints of Hades can motivate the journey without prematurely revealing the finale. These distinctions supplement the existing system prompt and never replace startup, monster, item, puzzle or quest generation.`;
     await $.assistant`Physical architecture guidance for newly described locations: describe concrete, navigable buildings, not only metaphors. Match the existing room name and biome; never replace an already described room. Use one dominant plan, with a few coherent nested structures: Roman temples, basilicas, forums, amphitheaters, theaters, chariot circuses, bathhouses, granaries/horrea, atrium houses/domus, villas, insula courtyards, aqueduct arcades or monumental arches; or motte-and-bailey, shell-keep, stone-keep or concentric castles. Indoor halls and corridors are normally roofed, with explicitly located open courtyards or ruined sections. Mention an appropriate roof where relevant: barrel/groin/ribbed/fan vault, timber or hammerbeam roof, boarded or gold-coffered ceiling, pendentive or squinch dome. Pillars support grouped buildings, not random farms. A pedimented portico may lead into a rotunda inside a larger complex. These are visual construction cues, not new inventory items, exits, characters or rules. Do not list every style; choose what serves this location's lore and physical use.`;
-    await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory). - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
+    await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits; skip for auditory. - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
+    if (coordKey === startKey) await $.assistant`[START-ROOM] Ruined Temple Entrance at 0,0,0 is an INDOOR temple chamber with a roof, walls and interior floor. Describe the party inside it. Tartarus's dunes and yellow sky are beyond the outdoor exit, not the ground or open sky of this chamber. This fixed physical rule overrides environmental poetry and variability hints. [/START-ROOM]`;
     const generationResultDescription = await $.assistant.generation({ maxTokens: 220 });
     roomDescription = generationResultDescription.content.trim();
     updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${roomDescription}`);
@@ -5920,16 +5971,22 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       let objectsInRoomArr = [];
       let objectMetadata = [];
       for (const object of objects) {
+        if (/\bhealing\b.*\b(potion|elixir|vial|draught)\b|\b(potion|elixir|vial|draught)\b.*\bhealing\b/i.test(object.name)) {
+          const potion = require('../assets/economyRules').healingPotion(getRandomInt(3, 10));
+          object.name = potion.name; object.type = potion.type;
+          objectsInRoomArr.push(potion.name); objectMetadata.push(potion); continue;
+        }
         const objectModifiers = await $.run($ => generateObjectModifiers($, object));
         objectsInRoomArr.push(object.name);
         objectMetadata.push({ name: object.name, type: object.type, ...objectModifiers });
       }
       const objectPropertiesString = objectMetadata
-        .map(obj => `{name: "${obj.name}", type: "${obj.type}", attack_modifier: ${obj.attack_modifier}, damage_modifier: ${obj.damage_modifier}, ac: ${obj.ac}, magic: ${obj.magic}}`)
+        .map(obj => obj.consumable_kind ? JSON.stringify(obj) : `{name: "${obj.name}", type: "${obj.type}", attack_modifier: ${obj.attack_modifier}, damage_modifier: ${obj.damage_modifier}, ac: ${obj.ac}, magic: ${obj.magic}}`)
         .join(', ');
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${objectsInRoomArr.join(', ')}`);
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${objectPropertiesString}`);
       console.log("Object Metadata:", objectPropertiesString);
+      Economy.registerGround(currentRoomData, updatedGameConsole, coordKey);
     } else {
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: None`);
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: None`);
@@ -5988,7 +6045,8 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       currentQuest: questIntentContext.currentQuest, tasks: questIntentContext.tasks, taskIndex: questIntentContext.taskIndex,
       nextBoss: questIntentContext.nextBoss, nextBossRoom: questIntentContext.nextBossRoom,
       bossCoordinates: bossIntentNumbers?.length === 3 ? { x: +bossIntentNumbers[0], y: +bossIntentNumbers[1], z: +bossIntentNumbers[2] } : null,
-      sourceIndoor: currentRoomData.indoor, seed: sharedState.getDungeonRunId?.() || '' });
+      sourceIndoor: currentRoomData.indoor, seed: sharedState.getDungeonRunId?.() || '',
+      completedQuests: Number(updatedGameConsole.match(/^Quests Achieved:\s*(\d+)/m)?.[1]) || 0 });
     console.info('[EnvironmentIntent]', coordKey, JSON.stringify(frontierIntent));
     let newAdjacentRooms = {};
     if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length > 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
@@ -6132,13 +6190,16 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
 
     // Persist only the new neighbor's compact intent, not repeated quest snapshots per room.
     for (const [direction, intent] of Object.entries(frontierIntent.intents)) {
-      if (newAdjacentRooms[direction] && roomNameDatabasePlain[intent.targetKey] && !roomNameDatabasePlain[intent.targetKey].environmentIntent)
+      if (newAdjacentRooms[direction] && roomNameDatabasePlain[intent.targetKey] && !roomNameDatabasePlain[intent.targetKey].environmentIntent) {
         roomNameDatabasePlain[intent.targetKey].environmentIntent = intent;
+        if (typeof CampaignSetting !== 'undefined') CampaignSetting.install(roomNameDatabasePlain, intent.targetKey, intent.campaignSetting);
+      }
     }
     // Locked exit + key placement (unchanged)
     let lockedDirection = null;
-    if (roomExitsArray.length >= 3) {
-      lockedDirection = roomExitsArray[Math.floor(Math.random() * roomExitsArray.length)];
+    const lockCandidates = roomExitsArray.filter(direction => !currentRoomData.exits?.[direction]);
+    if (roomExitsArray.length >= 3 && lockCandidates.length) {
+      lockedDirection = lockCandidates[Math.floor(Math.random() * lockCandidates.length)];
       const exitStatusResult = await selectExitStatus($);
       console.log("Selected exit status for", lockedDirection, ":", exitStatusResult);
       const exitStatus = exitStatusResult === "open" ? "locked" : exitStatusResult;
@@ -6155,7 +6216,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
 
       if (roomKey === coordKey) {
         currentRoomData.objects = currentRoomData.objects || [];
-        currentRoomData.objects.push({
+        if (!currentRoomData.objects.some(item => item.name === keyName)) currentRoomData.objects.push({
           name: keyName,
           type: key.type,
           properties: key.properties,
@@ -6248,7 +6309,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRoomsString}`);
     console.log("Updated Adjacent Rooms:", adjacentRoomsString);
 
-    await $.run($ => generateMonstersForRoomUsingGPT($, roomName, roomDescription));
+    await CharacterAuthorship.runWithLore($, agent => generateMonstersForRoomUsingGPT(agent, roomName, roomDescription));
 
     // Boss Room Entry Logic (unchanged console behavior)
     const bossRoomCoordinatesMatch = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
@@ -6299,7 +6360,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
                 ? objectsInRoomPropertiesMatch[1].split('}, {').map(obj => `{${obj.replace(/^{|}$/g, '')}}`)
                 : [];
 
-            const artifactString = `{name: "${updatedArtifactObject.name}", type: "${updatedArtifactObject.type}", attack_modifier: ${updatedArtifactObject.attack_modifier}, damage_modifier: ${updatedArtifactObject.damage_modifier}, ac: ${updatedArtifactObject.ac}, magic: ${updatedArtifactObject.magic}}`;
+            const artifactString = JSON.stringify({ ...updatedArtifactObject, quest_artifact: true });
             objectsInRoomPropertiesArray.push(artifactString);
 
             updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${objectsInRoomPropertiesArray.join(', ')}`);
@@ -6357,6 +6418,8 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     const seededPopulation = sharedState.getRoomPopulation?.(coordKey);
     if (seededPopulation) currentRoomData.inhabitants = seededPopulation;
     currentRoomData.populationComplete = true;
+    // Keep all generated equipment alongside puzzle readables in the local snapshot being saved.
+    Economy.registerGround(currentRoomData, updatedGameConsole, coordKey);
     persistRoomDb(roomNameDatabasePlain);
     needsUpdate = true;
   }
@@ -6643,7 +6706,7 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
 }
 // ===== end helpers =====
 
-async function seedAndManageQuest($, updatedGameConsole, userInput) {
+async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast) {
   const currentQuest = sharedState.getCurrentQuest();
   if (!currentQuest || /^none$/i.test(String(currentQuest).trim())) return { questJustSeeded: false, questUpdate: '', activeTask: null };
   // ---------- small utils ----------
@@ -6766,6 +6829,10 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
     ? { x: parseInt(coordMatch[1]), y: parseInt(coordMatch[2]), z: parseInt(coordMatch[3]) }
     : { x: 0, y: 0, z: 0 };
   const currentRoomKey = `${currentCoords.x},${currentCoords.y},${currentCoords.z}`;
+  if (typeof QuestFailure !== 'undefined' && QuestFailure.recover(sharedState, currentRoomKey)) {
+    roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase());
+    updatedGameConsole = consoleText = sharedState.getUpdatedGameConsole();
+  }
   // Defer a new quest's first hook, but keep existing quest progress on return visits.
   if (currentRoomKey === '0,0,0' && !sharedState.getQuestSeeded() &&
       !(sharedState.getCurrentTasks() || []).length && !(sharedState.getCurrentTaskIndex() || 0)) {
@@ -6806,6 +6873,12 @@ async function seedAndManageQuest($, updatedGameConsole, userInput) {
   if (currentTaskIndex < 2 && currentTasks[currentTaskIndex]) {
     const task = normalizeDefeatTask(currentTasks[currentTaskIndex]);
     if (task !== currentTasks[currentTaskIndex]) { currentTasks[currentTaskIndex] = task; sharedState.setCurrentTasks(currentTasks); }
+  }
+  if (typeof QuestScenes !== 'undefined' && currentTasks[currentTaskIndex]?.story) {
+    sharedState.setUpdatedGameConsole(updatedGameConsole);
+    QuestScenes.refresh(sharedState);
+    updatedGameConsole = sharedState.getUpdatedGameConsole();
+    roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase());
   }
   const allCoords = Object.keys(roomNameDatabasePlain);
   if (!allCoords.includes(currentRoomKey)) allCoords.push(currentRoomKey);
@@ -7046,6 +7119,37 @@ Use the existing quest and characters for context. Do not place it inside the bo
       sharedState.setQuestSeeded(true);
       return newTask;
     }
+    // The first regional story supplements the older generator; all later steps keep its existing path.
+    if (typeof RegionalAdventure !== 'undefined') {
+      const regional = await RegionalAdventure.trySeed($, sharedState, roomNameDatabasePlain, currentRoomKey, bossGateReport.gate, updatedGameConsole);
+      if (regional) {
+        const parts = currentRoomKey.split(',').map(Number), coords = {x:parts[0],y:parts[1],z:parts[2]};
+        const dungeon = sharedState.getRoomDungeon(coords), next = dungeon && structuredClone(dungeon);
+        const writings = next ? QuestWritings.apply(next,regional.database[currentRoomKey]) : [];
+        if (next && !next.questWritings?.some(w=>w.id===regional.task.story.fallback.readableId)) {
+          console.warn('[RegionalAdventure] No accessible covenant placement; retaining the older generator.');
+          roomNameDatabasePlain['0,0,0'].regionalAdventureAttempt.status = 'fallback';
+          roomNameDatabasePlain['0,0,0'].regionalAdventureAttempt.reason = 'No accessible placement for the opening quest inscription.';
+          sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+        } else {
+          regional.database['0,0,0'].regionalAdventureAttempt.status = 'installed';
+          roomNameDatabasePlain = regional.database;
+          sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+          currentTasks.push(regional.task); sharedState.setCurrentTasks(currentTasks); sharedState.setQuestSeeded(true);
+          if (next && writings.length) {
+            const stamp = computeDungeonGeometryStamp(next,currentRoomKey);
+            next._geometryStamp=stamp;next._meta={...next._meta,geometryStamp:stamp};sharedState.setRoomDungeon(coords,next);
+            sceneBroadcast?.({type:'quest_writing',runId:sharedState.getDungeonRunId(),geoKey:currentRoomKey,writings,
+              tiles:Object.fromEntries(writings.map(w=>[w.tile,next.tiles[w.tile]])),geometryStamp:stamp});
+          }
+          sharedState.setUpdatedGameConsole(updatedGameConsole);QuestScenes.refresh(sharedState);
+          updatedGameConsole=sharedState.getUpdatedGameConsole();roomNameDatabasePlain=JSON.parse(sharedState.getRoomNameDatabase());
+          console.info('[RegionalAdventure]',JSON.stringify({storyId:regional.task.story.id,rooms:regional.route.rooms}));
+          if (typeof CampaignPlanningLog !== 'undefined') await CampaignPlanningLog.capture(sharedState, 'first connected adventure installed');
+          return regional.task;
+        }
+      }
+    }
     // 1) Decide how many elements are REQUIRED TO COMPLETE the step
     await $.user`How many required elements (0–3) are needed to COMPLETE the next quest step? These are world elements the player must use/defeat/deliver to finish the step (not just to begin it). Respond ONLY {"count": N} with N in {0,1,2,3}.`;
     const reqCountResp = await $.assistant.generation({ maxTokens: 50,
@@ -7236,16 +7340,48 @@ Respond ONLY {"metrics":"..."}.
       actionRequirements,
       status: "Pending",
     };
-    const preparedTask = taskTypes.includes(pickedTypeRaw) && actionKinds.includes(actionKind) &&
+    let preparedTask = taskTypes.includes(pickedTypeRaw) && actionKinds.includes(actionKind) &&
       compileGeneratedTask(newTask, roomNameDatabasePlain, currentRoomKey);
     if (!preparedTask) {
       console.warn('[QuestObjective] Rejected an objective without existing world bindings and complete engine-verifiable actions.');
       return null;
     }
+    if (typeof QuestScenes !== 'undefined' && process.env.QUEST_STORIES !== 'off') {
+      preparedTask = QuestScenes.compile(preparedTask,roomNameDatabasePlain,currentRoomKey);
+      sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+      if (preparedTask.story && typeof QuestWritings !== 'undefined') {
+        const roomKey = preparedTask.story.hook.roomKey, parts = roomKey.split(',').map(Number);
+        const coords = {x:parts[0],y:parts[1],z:parts[2]}, dungeon = sharedState.getRoomDungeon(coords);
+        if (dungeon) {
+          const next = structuredClone(dungeon), writings = QuestWritings.apply(next,roomNameDatabasePlain[roomKey]);
+          if (writings.length) {
+            const stamp = computeDungeonGeometryStamp(next,roomKey);
+            next._geometryStamp = stamp; next._meta = {...next._meta,geometryStamp:stamp};
+            sharedState.setRoomDungeon(coords,next);
+            sceneBroadcast?.({type:'quest_writing',runId:sharedState.getDungeonRunId(),geoKey:roomKey,
+              writings,tiles:Object.fromEntries(writings.map(w=>[w.tile,next.tiles[w.tile]])),geometryStamp:stamp});
+          } else if (!next.questWritings?.some(w=>w.id===preparedTask.story.fallback.readableId)) {
+            // Do not publish an inaccessible writing hook in a cached room without a placement site.
+            roomNameDatabasePlain[roomKey].inscriptions = roomNameDatabasePlain[roomKey].inscriptions.filter(r=>r.questStoryId!==preparedTask.story.id);
+            delete roomNameDatabasePlain[roomKey].questStories[preparedTask.story.id];
+            for(const actor of Object.values(roomNameDatabasePlain[roomKey].inhabitants?.actors||{}))
+              if(actor.questHooks)actor.questHooks=actor.questHooks.filter(h=>h.storyId!==preparedTask.story.id);
+            for(const document of roomNameDatabasePlain[roomKey].readables||[])
+              if(document.questHooks)document.questHooks=document.questHooks.filter(h=>h.storyId!==preparedTask.story.id);
+            const {story,...plain} = preparedTask; preparedTask = {...plain,hardRequirements:plain.hardRequirements.filter(r=>r.check!=='quest_story_complete')};
+            sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
+          }
+        }
+      }
+    }
     currentTasks.push(preparedTask);
     sharedState.setCurrentTasks(currentTasks);
     sharedState.setCurrentTaskIndex(currentTaskIndex);
     sharedState.setQuestSeeded(true);
+    if (preparedTask.story) {
+      sharedState.setUpdatedGameConsole(updatedGameConsole); QuestScenes.refresh(sharedState);
+      updatedGameConsole = sharedState.getUpdatedGameConsole(); roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase());
+    }
     return preparedTask;
   };
   // ---------------- end seeding helper ----------------
@@ -7342,6 +7478,10 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
       }
       sharedState.setCurrentTasks(currentTasks);
     }
+  }
+  if (typeof AdventureJournal !== 'undefined') {
+    for (const task of sharedState.getCurrentTasks() || []) if (task?.status === 'Completed') AdventureJournal.archive(roomNameDatabasePlain,task);
+    sharedState.setRoomNameDatabase(JSON.stringify(roomNameDatabasePlain));
   }
   // ---------- quest complete ----------
   if (sharedState.getCurrentTaskIndex() >= 3) {
@@ -7495,7 +7635,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
  
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next artifact to be found in the game taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             const generationResultArtifact = await $.assistant.generation({ maxTokens: 40 });
-            nextArtifact = generationResultArtifact.content.trim();
+            nextArtifact = GeneratedNames.clean(generationResultArtifact.content);
+            const finalDivineStage = Divinity.finalStage(updatedGameConsole);
+            if (finalDivineStage) nextArtifact = 'Sepulchra';
             console.log("Generated nextArtifact:", nextArtifact);
            
             // Check if the replacement string exists in the console
@@ -7510,7 +7652,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             $.temperature = 1.0;
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next powerful boss monster taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             const generationResultBoss = await $.assistant.generation({ maxTokens: 40 });
-            nextBoss = generationResultBoss.content.trim();
+            nextBoss = GeneratedNames.clean(generationResultBoss.content);
+            if (finalDivineStage) nextBoss = 'Arithus';
+            else if (Pantheon.name(nextBoss)) nextBoss = 'Throneward Sentinel ' + Inhabitants.hash(nextBoss + nextArtifact).toString(36);
             console.log("Generated nextBoss:", nextBoss);
            
             if (updatedGameConsole.includes("Next Boss: ")) {
@@ -7593,6 +7737,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             const generationResultBossRoom = await $.assistant.generation({ maxTokens: 40 });
             bossRoom = generationResultBossRoom.content.trim();
+            if (finalDivineStage) bossRoom = 'Throne Room of Hades';
             console.log("Generated bossRoom:", bossRoom);
            
             if (updatedGameConsole.includes("Next Boss Room: ")) {
@@ -7665,6 +7810,13 @@ function parseMonstersEquippedProperties(propertiesString) {
 }
 
 function dropMonsterItemsToRoom(targetMonster) {
+    if (typeof Economy !== 'undefined') {
+        sharedState.setUpdatedGameConsole(updatedGameConsole);
+        Economy.corpseDrops(sharedState, targetMonster.name);
+        updatedGameConsole = sharedState.getUpdatedGameConsole();
+        const actual = Inhabitants.parseSheets(updatedGameConsole).find(a => a.name === targetMonster.name);
+        if (actual) targetMonster.equipped = Inhabitants.parseEquipment(actual.lines[9]);
+    }
     const read = label => updatedGameConsole.match(new RegExp(`^${label}:[ \\t]*([^\\r\\n]*)`, 'm'))?.[1]?.trim() || '';
     const write = (label, value) => {
         updatedGameConsole = updatedGameConsole.replace(new RegExp(`^${label}:[^\\r\\n]*`, 'm'), () => `${label}: ${value || 'None'}`);
@@ -7749,6 +7901,7 @@ async function tryReadableItemAction(userInput) {
     if(plan.allowed){
         const room=database[geoKey];
         if(room){room.readableFocus||={};room.readableFocus[actor.name]=plan.record.mechanismId+':'+plan.record.id;sharedState.setRoomNameDatabase(JSON.stringify(database));}
+        if (typeof QuestScenes !== 'undefined') QuestScenes.onRead(sharedState,plan);
         CampaignMemory.add(sharedState,Inhabitants.splitSpeech(plan.message,600,100).map((text,i)=>({id:`read:${plan.record.mechanismId}:${plan.record.id}:${actor.name}:${plan.inspect?'cover':plan.chapter}:${i}`,
           runId:sharedState.getDungeonRunId(),at:Date.now(),
           kind:'activity',authority:'state',source:'stored-readable-metadata',roomKey:geoKey,roomName:database[geoKey]?.name,
@@ -7785,6 +7938,7 @@ async function tryPhysicalPuzzleAction(userInput) {
         return result;
     }
     const consoleBefore = updatedGameConsole;
+    if (typeof CombatLife !== 'undefined') await prepareEnvironmentalSurvival(plan.outcomes, updatedGameConsole);
     updatedGameConsole = processGameUpdate(plan.outcomes, updatedGameConsole);
     result.updatedGameConsole = updatedGameConsole;
     const next = finalizeRoomDungeon(geoKey, { ...dungeon, cells: { ...dungeon.cells, ...plan.delta.cells }, physicalPuzzle: plan.delta.physicalPuzzle }, dungeon.customTiles);
@@ -7860,21 +8014,34 @@ let combatTurnFlow = null;
 async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
   return new Promise(resolve => {
     let remaining = 180000, previous = Date.now();
-    let prompt;
+    let prompt, tactics;
     const finish = target => { clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond);
+      tactics?.close();
       if (typeof combatTurnFlow !== 'undefined') combatTurnFlow?.clearPrompt(prompt?.turnId); resolve(target); };
     const respond = message => {
       if (message.actionId !== actionDice.active?.id || actionDice.paused) return;
       if (prompt?.turnId && message.turnId !== prompt.turnId) return;
+      if (tactics?.busy()) return;
+      if (message.action === 'hold') return finish({ hold: true });
       if (allowRetreat && message.action === 'retreat') return finish({ retreat: true });
+      if (message.action === 'cast') {
+        const choice = prompt?.spells?.find(s => s.itemId === message.itemId && s.spellId === message.spellId && s.target === message.target);
+        if (choice) return finish({ cast: { ...choice, nonce: prompt.turnId } });
+        return;
+      }
+      if (message.action === 'care') {
+        const choice = prompt?.care?.find(c => c.kind === message.kind && c.target === message.target && c.item === message.item);
+        if (choice) return finish({ care: { ...choice, actor: combatant.name, runId: sharedState.getDungeonRunId(), geoKey: actionDice.active.geoKey, nonce: prompt.turnId } });
+        return;
+      }
       if (allowRetreat && message.cancelled) return;
       if (message.cancelled) return finish(null);
       const target = targets.find(t => t.name.toLowerCase() === String(message.target).toLowerCase() && t.hp > 0);
-      if (target) finish(target);
+      if (target && (!prompt.tactical || prompt.attackTargets.includes(target.name))) finish(target);
     };
     const timer = setInterval(() => {
       const now = Date.now();
-      if (!actionDice.paused) remaining -= now - previous;
+      if (!actionDice.paused && !tactics?.busy()) remaining -= now - previous;
       previous = now;
       if (remaining <= 0) finish(null);
     }, 1000);
@@ -7884,6 +8051,34 @@ async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
       distance: combatSpace ? combatSpace.distance(combatant,t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) }));
     prompt = combatTurnFlow ? combatTurnFlow.prompt(combatant, targets, positions, allowRetreat) :
       { type: 'target_prompt', actionId: actionDice.active.id, combatant: combatant.name, targets: targets.map(t => t.name), positions };
+    if (allowRetreat && combatSpace && typeof CombatTactics !== 'undefined') {
+      combatant.tacticalControlled = true;
+      tactics = CombatTactics.attach({ dice: actionDice, state: sharedState, space: combatSpace, actor: combatant, targets,
+        dead: () => finish({ hold: true }),
+        refresh: turn => { turn.spells = sharedState.getRoomNameDatabase ? SpellSystem.choices(sharedState, combatant.name, targets.map(a => a.name)) : [];
+          if (typeof CombatLife !== 'undefined') turn.care = CombatLife.careChoices(sharedState, combatant.name); },
+        opportunity: async enemy => {
+          if (typeof SpellSystem !== 'undefined' && SpellSystem.turned(sharedState, enemy)) return;
+          const logs = [`${enemy.name} takes a free attack as ${combatant.name} leaves striking distance.`];
+          const roll = await actionDice.roll({ actor: enemy.name, label: 'Opportunity Attack', target: combatant.name,
+            modifier: enemy.attack - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, enemy) : 0), difficulty: combatant.ac });
+          if (roll?.success) {
+            const damage = await rollCombatDamage(enemy, combatant, combatant, logs);
+            if (damage !== null) { await applyCombatDamage(combatant, damage, logs); combatSpace.setHealth([combatant]); logs.push(`${combatant.name} takes ${damage} damage; HP ${combatant.hp}.`); }
+          } else logs.push(`${enemy.name} misses.`);
+          const all = [...combatTurnFlow.teams.friends, ...combatTurnFlow.teams.hostiles, ...combatTurnFlow.teams.spectators];
+          commitCombatHealth(all.find(a => a.type === 'pc'), all.filter(a => a.type === 'npc'), all.filter(a => a.type === 'monster'));
+          if (Inhabitants.state(combatant) === 'Dead') ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(combatant, enemy));
+          broadcast({ type: 'combat_log', log: logs.join('\n') });
+        },
+        step: async tile => {
+          const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+          sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(roster)));
+          broadcast({ type: 'combat_maze_step', geoKey: actionDice.active.geoKey, actionId: actionDice.active.id,
+            character: combatant.name, ...tile, duration: 200 });
+          await new Promise(done => setTimeout(done, 200));
+        } });
+    }
     broadcast(prompt);
   });
 }
@@ -7892,8 +8087,8 @@ function selectCombatTeams(pc, npcs, monsters, userInput, fallback, combatLog) {
   npcs.forEach(a => { a.type = 'npc'; });
   monsters.forEach(a => { a.type = 'monster'; });
   const all = [...(pc ? [pc] : []), ...npcs, ...monsters];
-  const states = new Map(Inhabitants.parseSheets(updatedGameConsole).map(a => [a.name, a.state]));
-  for (const actor of monsters) if (states.get(actor.name)) actor.state = states.get(actor.name);
+  const states = new Map(['PC', 'NPCs in Party', 'Monsters in Room'].flatMap(label => Inhabitants.parseSheets(updatedGameConsole, label)).map(a => [a.name, a.state]));
+  for (const actor of all) if (states.get(actor.name)) actor.state = states.get(actor.name);
   const teams = Inhabitants.teams(all, combatPopulation, combatSpace, userInput, fallback);
   if (combatTurnFlow) { combatTurnFlow.teams = teams; combatTurnFlow.pc = pc; }
   if (!teams.hostiles.length) combatLog.push('There are no hostile opponents within this encounter. Neutral inhabitants stand aside.');
@@ -7919,7 +8114,8 @@ function gameConsoleForPerception(consoleText = updatedGameConsole) {
   const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
   const population = key && sharedState.getRoomPopulation(key);
   const perception = Inhabitants.perceive(dungeon, roster, population);
-  return Inhabitants.perceivedConsole(consoleText, Inhabitants.nearbyMonsterNames(dungeon, roster, population, perception.player));
+  const perceived = Inhabitants.perceivedConsole(consoleText, Inhabitants.nearbyMonsterNames(dungeon, roster, population, perception.player));
+  return require('../assets/gameLogContent').withoutLootLists(perceived, { inventory: false });
 }
 async function handleCombatRound($, userInput, combatMode) {
     const coords = sharedState.getLastCoords();
@@ -7937,6 +8133,17 @@ async function handleCombatRound($, userInput, combatMode) {
             await actionDice.waitUntilResumed();
             combatTurnFlow.startRound();
             updatedGameConsole = sharedState.getUpdatedGameConsole() || updatedGameConsole;
+            if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase) {
+              const pc = Inhabitants.parseSheets(updatedGameConsole, 'PC')[0], npcs = Inhabitants.parseSheets(updatedGameConsole, 'NPCs in Party');
+              for (const actor of CombatLife.claimDeaths(sharedState)) {
+                logs.push(`${actor.name} dies from untreated injuries.`);
+                if (actor.type === 'monster') {
+                  if (actor.allegiance === 'Hostile') allocateXP(pc, npcs, 1000 * (actor.level || 1));
+                  dropMonsterItemsToRoom(actor);
+                }
+              }
+            }
+            if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
             result = await resolveCombatRound($, userInput, combatMode);
             logs.push(`Round ${combatTurnFlow.round}\n${result.combatLog}`);
             if (logs.length > 20) logs.shift();
@@ -7986,35 +8193,44 @@ async function rollCombatInitiative(combatant, pc) {
     return combatTurnFlow ? combatTurnFlow.initiative(combatant, pc) : roll1d20();
 }
 async function choosePlayerCombatAction(combatant, targets) {
+    if (typeof SpellSystem !== 'undefined') {
+      const opening = SpellSystem.takeOpening(sharedState, combatant.name);
+      if (opening) {
+        const available = SpellSystem.choices(sharedState, combatant.name, targets.map(a => a.name));
+        const choice = available.find(s => s.itemId === opening.itemId && s.spellId === opening.spellId && s.target === opening.target);
+        if (choice) return { cast: { ...choice, nonce: opening.nonce } };
+      }
+    }
     let target;
     do { target = await chooseDefenceTarget(combatant, targets, true); }
     while (!target && combatTurnFlow && actionDice.active && combatant.hp > 0);
     return target;
 }
 async function retreatCombatParty(pc, npcs, monsters, combatLog) {
-    const party = [pc, ...npcs].filter(a => a?.hp > 0), hostiles = monsters.filter(a => a.hp > 0 && Inhabitants.allegiance(a) === 'Hostile');
+    const party = [pc, ...npcs].filter(a => a && Inhabitants.isAlive(a)), hostiles = monsters.filter(a => a.hp > 0 && Inhabitants.allegiance(a) === 'Hostile');
     const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
     const paths = CombatTurnFlow.escapePaths(combatSpace, party, hostiles, [...party, ...monsters]);
     if (!paths) { combatLog.push('The party has no clear route to retreat together.'); return false; }
     for (const enemy of hostiles) {
+        if (typeof SpellSystem !== 'undefined' && SpellSystem.turned(sharedState, enemy)) continue;
         const targets = CombatTurnFlow.opportunityTargets(enemy, party, combatSpace);
         if (!targets.length) continue;
         const target = targets[Math.floor(Math.random() * targets.length)];
         combatLog.push(`${enemy.name} takes a free attack at ${target.name} as the party retreats.`);
         // Do not call rollCombatAttack: it includes pursuit movement, forbidden for an opportunity attack.
         const hit = await actionDice.roll({ actor: enemy.name, label: 'Retreat Attack', target: target.name,
-            modifier: enemy.attack, difficulty: target.ac });
+            modifier: enemy.attack - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, enemy) : 0), difficulty: target.ac });
         if (!hit || hit.total < target.ac) { combatLog.push(`${enemy.name} misses ${target.name}.`); continue; }
         const damage = await rollCombatDamage(enemy, target, pc, combatLog);
         if (damage === null) continue;
-        target.hp -= damage; combatSpace?.setHealth([target]);
+        await applyCombatDamage(target, damage, combatLog); combatSpace?.setHealth([target]);
         combatLog.push(`${target.name} takes ${damage} damage and has ${target.hp} HP left.`);
         commitCombatHealth(pc, npcs, monsters);
-        if (target.hp <= 0) ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, enemy));
+        if (Inhabitants.state(target) === 'Dead') ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, enemy));
     }
-    if (pc.hp <= 0) { combatLog.push(`${pc.name} falls before the party can escape.`); return false; }
+    if (!party.some(Inhabitants.canAct)) { combatLog.push('No conscious party member can carry the wounded to safety.'); return false; }
     for (const plan of paths) for (const step of plan.path) {
-        if (plan.actor.hp <= 0) break;
+        if (!Inhabitants.isAlive(plan.actor)) break;
         await actionDice.waitUntilResumed();
         combatSpace.move(plan.actor, step);
         broadcast({ type: 'combat_maze_step', geoKey: actionDice.active.geoKey, actionId: actionDice.active.id,
@@ -8033,9 +8249,27 @@ async function retreatCombatParty(pc, npcs, monsters, combatLog) {
     return true;
 }
 
+async function resolveTurnedCombatant(combatant, combatLog) {
+    const effect = typeof SpellSystem !== 'undefined' && SpellSystem.turned(sharedState, combatant);
+    if (!effect || effect.remainingTurns <= 0) return false;
+    const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]'), source = roster.find(a => a.name === effect.source);
+    const path = source ? CombatTurnFlow.turnPath(combatSpace, combatant, source, roster, effect.steps) : [];
+    for (const step of path) {
+        await actionDice.waitUntilResumed?.(); combatSpace.move(combatant, step);
+        sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(roster)));
+        broadcast({ type: 'combat_maze_step', geoKey: actionDice.active?.geoKey, actionId: actionDice.active?.id,
+            character: combatant.name, ...step, duration: 200 });
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    SpellSystem.consumeTurn(sharedState, combatant);
+    combatLog.push(`${combatant.name} is turned and ${path.length ? `withdraws ${path.length} tiles` : 'cowers with no clear escape'} instead of acting.`);
+    return true;
+}
+
 async function rollCombatAttack(combatant, target, pc, combatLog) {
-    if (combatSpace && !combatSpace.canAttack(combatant, target)) {
-        const path = combatSpace.pursuitPath(combatant, target);
+    if (typeof SpellSystem !== 'undefined' && SpellSystem.turned(sharedState, combatant)) return null;
+    if (combatSpace && !combatant.tacticalControlled && !combatSpace.canAttack(combatant, target)) {
+        const path = combatSpace.pursuitPath(combatant, target, combatTurnFlow ? 6 : Infinity);
         for (const step of path) {
             await actionDice.waitUntilResumed?.();
             combatSpace.move(combatant, step);
@@ -8053,24 +8287,114 @@ async function rollCombatAttack(combatant, target, pc, combatLog) {
     }
     const result = await actionDice.roll({
         actor: combatant.name, player: combatant.name === pc?.name,
-        label: 'Attack', target: target.name, modifier: combatant.attack, difficulty: target.ac
+        label: 'Attack', target: target.name, modifier: combatant.attack - (combatSpace?.rangedPenalty?.(combatant) || 0) - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, combatant) : 0), difficulty: target.ac
     });
     if (!result) combatLog.push(`${combatant.name} did not roll in time and holds the attack.`);
-    else combatLog.push(`${combatant.name}: d20 ${result.natural} + ${combatant.attack} = ${result.total}.`);
+    else combatLog.push(`${combatant.name}: d20 ${result.natural} + ${result.modifier} = ${result.total}.`);
     return result;
 }
 
 async function rollCombatDamage(combatant, target, pc, combatLog) {
     const attackerClass = characterClasses.find(cls => cls.name === combatant.className);
-    const sides = attackerClass ? attackerClass.baseHP : 8;
-    const result = await actionDice.roll({ actor: combatant.name, player: combatant.name === pc?.name,
-        label: 'Damage', target: target.name, sides, modifier: combatant.damage });
-    if (!result) {
-        combatLog.push(`${combatant.name} did not roll damage in time; no damage was applied.`);
-        return null;
+    const weapon = typeof EquipmentRules !== 'undefined' ? EquipmentRules.weapon(combatant) : null;
+    const dice = weapon?.damage_dice?.match(/^(\d+)d(\d+)$/);
+    const sides = dice ? Number(dice[2]) : attackerClass ? attackerClass.baseHP : 8;
+    const count = dice ? Number(dice[1]) : 1;
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      const result = await actionDice.roll({ actor: combatant.name, player: combatant.name === pc?.name,
+          label: i ? `Damage ${i + 1}/${count}` : 'Damage', target: target.name, sides, modifier: i ? 0 : combatant.damage });
+      if (!result) { combatLog.push(`${combatant.name} did not roll damage in time; no damage was applied.`); return null; }
+      total += result.total;
     }
-    combatLog.push(`${combatant.name}: d${sides} ${result.natural} + ${combatant.damage} = ${result.total} damage.`);
-    return result.total;
+    total = Math.max(0, total);
+    combatLog.push(`${combatant.name}: ${count}d${sides} + ${combatant.damage} = ${total} damage.`);
+    return typeof SpellSystem !== 'undefined' ? SpellSystem.absorb(sharedState, target, total) : total;
+}
+async function applyCombatDamage(target, damage, combatLog) {
+    if (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase) { target.hp -= damage; return; }
+    let natural = null;
+    if (target.hp > 0 && target.hp - damage <= 0) {
+      const roll = await actionDice.roll(CombatLife.survivalPlan(target));
+      if (!roll) { combatLog.push('The survival roll was interrupted; the injury was not applied.'); return; }
+      natural = roll.natural;
+    }
+    const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+    const injury = CombatLife.apply(db, sharedState.getDungeonRunId(), target, target.hp - damage, natural,
+      { damage, geoKey: actionDice.active?.geoKey });
+    const life = CombatLife.commit(sharedState, db); updatedGameConsole = sharedState.getUpdatedGameConsole();
+    const current = life.actors[SpellSystem.Rules.key(target.name)];
+    Object.assign(target, { hp: current.hp, state: current.state, dyingRounds: current.remaining });
+    if (current.hp > 0 && injury.save) combatLog.push(life.message);
+    if (Inhabitants.isDown(target)) combatLog.push(`${target.name} falls ${injury.state.toLowerCase()} at 0 HP${injury.remaining ? `; ${injury.remaining} rounds to receive aid` : '; stable'}.`);
+}
+function playerControls(combatant, pc, npcs) {
+    return combatant.name === (pc?.hp > 0 ? pc.name : npcs.find(a => a.hp > 0)?.name);
+}
+async function automaticCombatAid(combatant, pc, npcs, monsters, combatLog, alreadyKilled, targets) {
+    if (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase || playerControls(combatant, pc, npcs)) return false;
+    const choice = SpellSystem.aiChoice(sharedState, combatant, targets.map(a => a.name));
+    if (choice?.effect === 'heal' && CombatLife.actors(sharedState.getUpdatedGameConsole()).some(a => a.name === choice.target && Inhabitants.isDown(a)))
+      return resolveCombatSpell({ ...choice, nonce: require('node:crypto').randomUUID() }, combatant, pc, npcs, monsters, alreadyKilled, combatLog, targets);
+    const aid = CombatLife.careChoices(sharedState, combatant.name).find(c => c.kind === 'bandage');
+    return aid ? resolveCombatCare({ ...aid, actor: combatant.name, runId: sharedState.getDungeonRunId(), geoKey: actionDice.active.geoKey,
+      nonce: require('node:crypto').randomUUID() }, pc, npcs, monsters, combatLog) : false;
+}
+function resolveCombatCare(choice, pc, npcs, monsters, combatLog) {
+    const result = CombatLife.care(sharedState, choice);
+    if (result.error) { combatLog.push(result.error); return false; }
+    updatedGameConsole = sharedState.getUpdatedGameConsole();
+    const sheets = new Map(CombatLife.actors(updatedGameConsole).map(a => [a.name, a]));
+    for (const actor of [pc, ...npcs, ...monsters].filter(Boolean)) {
+      const sheet = sheets.get(actor.name); if (sheet) { actor.hp = sheet.hp; actor.state = sheet.state; }
+    }
+    combatLog.push(result.content); commitCombatHealth(pc, npcs, monsters); return true;
+}
+
+function automaticCombatSpell(combatant, targets) {
+    if (typeof SpellSystem === 'undefined' || !sharedState.getRoomNameDatabase) return null;
+    if (combatant.type === 'npc') {
+      const queued = SpellSystem.takeOpening(sharedState, combatant.name);
+      if (!queued) return null;
+      const choice = SpellSystem.choices(sharedState, combatant.name, targets.map(a => a.name)).find(s => s.itemId === queued.itemId && s.spellId === queued.spellId && s.target === queued.target);
+      return choice && { cast: { ...choice, nonce: queued.nonce } };
+    }
+    if (combatant.type !== 'monster') return null;
+    const choice = SpellSystem.aiChoice(sharedState, combatant, targets.map(a => a.name));
+    return choice && { cast: { ...choice, nonce: require('node:crypto').randomUUID() } };
+}
+async function resolveCombatSpell(choice, combatant, pc, npcs, monsters, alreadyKilled, combatLog, targets) {
+    const options = { combat: true, monster: combatant.type === 'monster', allowedTargets: targets.map(a => a.name) }, rolled = [];
+    try {
+      for (const spec of SpellSystem.rollPlan(sharedState, choice, options)) {
+        const roll = await actionDice.roll(spec); if (!roll) { combatLog.push('The spell roll was interrupted. No Magic spent.'); return false; }
+        rolled.push(roll.natural);
+      }
+      for (const spec of SpellSystem.survivalPlan(sharedState, choice, rolled, options)) {
+        const roll = await actionDice.roll(spec); if (!roll) { combatLog.push('The survival save was interrupted. No Magic spent.'); return false; }
+        rolled.push(roll.natural);
+      }
+    } catch (error) { combatLog.push(error.message); return false; }
+    const result = SpellSystem.cast(sharedState, populationService, choice, { ...options, random: () => rolled.shift() });
+    if (result.error) { combatLog.push(result.error); return false; }
+    updatedGameConsole = sharedState.getUpdatedGameConsole();
+    const sheets = new Map(SpellSystem.allActors(updatedGameConsole).map(a => [a.name, a]));
+    for (const actor of [pc, ...npcs, ...monsters].filter(Boolean)) {
+      const sheet = sheets.get(actor.name); if (!sheet) continue;
+      for (const k of ['hp', 'maxHp', 'magic', 'attack', 'damage', 'armor', 'ac']) actor[k] = sheet[k];
+      actor.state = sheet.state;
+      if (Inhabitants.state(actor) === 'Dead' && !alreadyKilled.has(actor.name)) {
+        if (typeof CombatLife !== 'undefined') CombatLife.claimDeaths(sharedState, actor.name);
+        alreadyKilled.add(actor.name); ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(actor, combatant));
+        if (actor.type === 'monster') {
+          const xp = Inhabitants.allegiance(actor) === 'Hostile' ? getRandomInt(1000, 1500) * actor.level : 0;
+          if (xp) allocateXP(pc, npcs, xp); dropMonsterItemsToRoom(actor);
+        }
+      }
+    }
+    combatLog.push(result.content);
+    broadcast({ type: 'spell_cast', actionId: actionDice.active.id, runId: sharedState.getDungeonRunId(), geoKey: actionDice.active.geoKey, ...result });
+    commitCombatHealth(pc, npcs, monsters); return true;
 }
 
 async function resolveCombatRound($, userInput, combatMode) {
@@ -8158,7 +8482,7 @@ async function resolveCombatRound($, userInput, combatMode) {
 
     const pc = pcDetails ? extractDetails(pcDetails)[0] : null;
     const npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
-    let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(monster => monster.hp > 0) : [];
+    let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails) : [];
 
     const combatTeams = selectCombatTeams(pc, npcs, aliveMonsters, userInput, monstersState, combatLog);
 
@@ -8180,21 +8504,27 @@ async function resolveCombatRound($, userInput, combatMode) {
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
     for (const combatant of initiativeOrder) {
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
         if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) continue;
+        if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
+        if (await automaticCombatAid(combatant, pc, npcs, aliveMonsters, combatLog, alreadyKilled, targets)) { needsUpdate = true; continue; }
 
         if (targets.length === 0) {
             combatLog.push(`${combatant.name} has no valid targets to engage.`);
             continue;
         }
 
-        let target;
-        if (combatant.name === pc?.name && (combatTurnFlow || userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
+        let target = automaticCombatSpell(combatant, targets);
+        if (playerControls(combatant, pc, npcs) && (combatTurnFlow || userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
             target = combatTurnFlow ? await choosePlayerCombatAction(combatant, targets) : await chooseDefenceTarget(combatant, targets);
             if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
         }
+        if (target?.hold) { combatLog.push(`${combatant.name} ends the turn in place.`); continue; }
+        if (target?.care) { needsUpdate = resolveCombatCare(target.care, pc, npcs, aliveMonsters, combatLog) || needsUpdate; continue; }
+        if (target?.cast) { needsUpdate = await resolveCombatSpell(target.cast, combatant, pc, npcs, aliveMonsters, alreadyKilled, combatLog, targets) || needsUpdate; continue; }
         if (!target && combatant.name === pc.name && specifiedTargetName) {
             const matchingMonsters = targets.filter(monster => 
                 monster.name.toLowerCase().startsWith(specifiedTargetName.toLowerCase())
@@ -8224,14 +8554,14 @@ async function resolveCombatRound($, userInput, combatMode) {
             const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
             if (damageRoll === null) continue;
 
-            target.hp -= damageRoll;
+            await applyCombatDamage(target, damageRoll, combatLog);
             combatSpace?.setHealth([target]);
             combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
             commitCombatHealth(pc, npcs, aliveMonsters);
             needsUpdate = true;
 
-            if (target.hp <= 0) {
+            if (Inhabitants.state(target) === 'Dead') {
                 alreadyKilled.add(target.name);
                 ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, combatant));
 
@@ -8245,7 +8575,7 @@ async function resolveCombatRound($, userInput, combatMode) {
 
                     if (xpEarned) allocateXP(pc, npcs, xpEarned);
                     dropMonsterItemsToRoom(target);
-                    aliveMonsters = aliveMonsters.filter(monster => monster.hp > 0);
+                    aliveMonsters = aliveMonsters.filter(Inhabitants.isAlive);
                 }
 
                 needsUpdate = true;
@@ -8342,7 +8672,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     let pc = pcDetails ? extractDetails(pcDetails)[0] : null;
     let npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
-    let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(m => m.hp > 0) : [];
+    let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails) : [];
     const killedThisRound = [];
 
     // Preserve selected sprite on parsed PC (the one from review) so later map includes it in string for client.
@@ -8351,14 +8681,14 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     // combatLog.push(`Combatants initialized - PC: ${pc ? pc.name : 'None'}, NPCs: ${npcs.map(n => n.name).join(', ')}, Monsters: ${aliveMonsters.map(m => m.name).join(', ')}`);
 
     const combatTeams = selectCombatTeams(pc, npcs, aliveMonsters, userInput, monstersState, combatLog);
-    const allCombatants = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0), ...aliveMonsters];
+    const allCombatants = [...(pc ? [pc] : []), ...npcs, ...aliveMonsters].filter(Inhabitants.isAlive);
     combatSpace?.setHealth(allCombatants);
 
     // Use client-provided combatCharacters if available, otherwise fall back to sharedState
     let combatCharacters = clientCombatCharacters ? clientCombatCharacters : (sharedState.getCombatCharactersString() ? JSON.parse(sharedState.getCombatCharactersString()) : []);
 
     // Ensure only characters with HP > 0 are in combatCharacters at the start
-    combatCharacters = combatCharacters.filter(c => allCombatants.some(a => a.name === c.name && a.hp > 0));
+    combatCharacters = combatCharacters.filter(c => allCombatants.some(a => a.name === c.name && Inhabitants.isAlive(a)));
     // Assign positions from combatCharacters directly to allCombatants
     allCombatants.forEach(combatant => {
         const charInCombat = combatCharacters.find(c => c.name === combatant.name);
@@ -8508,24 +8838,30 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     }
 
     for (const combatant of initiativeOrder) {
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
         if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) {
             combatLog.push(`${combatant.name} skipped due to HP (${combatant.hp}) or already killed.`);
             continue;
         }
+        if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
+        if (await automaticCombatAid(combatant, pc, npcs, aliveMonsters, combatLog, alreadyKilled, targets)) { needsUpdate = true; continue; }
 
         if (targets.length === 0) {
             combatLog.push(`${combatant.name} has no valid targets to engage.`);
             continue;
         }
 
-        let target;
-        if (combatant.name === pc?.name && (combatTurnFlow || userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
+        let target = automaticCombatSpell(combatant, targets);
+        if (playerControls(combatant, pc, npcs) && (combatTurnFlow || userInput === '__ENCOUNTER_DEFENCE__' || /^\s*attack\s*$/i.test(userInput))) {
             target = combatTurnFlow ? await choosePlayerCombatAction(combatant, targets) : await chooseDefenceTarget(combatant, targets);
             if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
         }
+        if (target?.hold) { combatLog.push(`${combatant.name} ends the turn in place.`); continue; }
+        if (target?.care) { needsUpdate = resolveCombatCare(target.care, pc, npcs, aliveMonsters, combatLog) || needsUpdate; continue; }
+        if (target?.cast) { needsUpdate = await resolveCombatSpell(target.cast, combatant, pc, npcs, aliveMonsters, alreadyKilled, combatLog, targets) || needsUpdate; continue; }
         if (!target && combatant.name === pc.name && specifiedTargetName) {
             // Try to find the specified monster among living, valid targets
             const matchingMonsters = targets.filter(monster => 
@@ -8623,7 +8959,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             if (attackSuccess) {
                 const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
                 if (damageRoll === null) continue;
-                target.hp -= damageRoll;
+                await applyCombatDamage(target, damageRoll, combatLog);
                 combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
                 commitCombatHealth(pc, npcs, aliveMonsters);
@@ -8638,7 +8974,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                     if (monster) monster.hp = target.hp;
                 }
 
-                if (target.hp <= 0) {
+                if (Inhabitants.state(target) === 'Dead') {
                     alreadyKilled.add(target.name);
                     ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, combatant));
                     currentOccupiedPositions.delete(`${target.x},${target.y}`);
@@ -8654,7 +8990,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                         combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
                         if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
-                        aliveMonsters = aliveMonsters.filter(m => m.hp > 0);
+                        aliveMonsters = aliveMonsters.filter(Inhabitants.isAlive);
                     }
                     needsUpdate = true;
                     // Remove dead character from combatCharacters
@@ -8690,7 +9026,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     // Final filter to ensure only living characters (HP > 0) are in combatCharacters
     combatCharacters = combatCharacters.filter(c => {
         const combatant = [...(pc ? [pc] : []), ...npcs, ...aliveMonsters].find(a => a.name === c.name);
-        return combatant && combatant.hp > 0;
+        return combatant && Inhabitants.isAlive(combatant);
     });
 
     combatSpace?.syncRoster(combatCharacters);
@@ -8757,6 +9093,8 @@ function patchLiveHPToConsole(consoleText, pcData, npcList, monsterList) {
         let sheet = record.rawSheet.replace(/^([ \t]*HP:[ \t]*)-?\d+/im, (_, prefix) => prefix + actor.hp);
         const maxHP = actor.maxHp ?? actor.MaxHP;
         if (Number.isFinite(maxHP)) sheet = sheet.replace(/^([ \t]*MaxHP:[ \t]*)-?\d+/im, (_, prefix) => prefix + maxHP);
+        if (/^[ \t]*State:/m.test(sheet)) sheet = sheet.replace(/^([ \t]*State:)[^\r\n]*/m, (_, prefix) => prefix + ' ' + Inhabitants.state(actor));
+        else sheet += '\n      State: ' + Inhabitants.state(actor);
         block = block.replace(record.rawSheet, () => sheet);
       }
       return header + block;
@@ -8767,7 +9105,8 @@ function patchLiveHPToConsole(consoleText, pcData, npcList, monsterList) {
     const record = combatPopulation.actors[actor.name];
     if (!record || !Number.isFinite(actor.hp)) continue;
     if (record.status !== 'dead') record.hp = actor.hp;
-    if (record.hp <= 0) record.status = 'dead';
+    record.state = Inhabitants.state(actor);
+    if (record.state === 'Dead') record.status = 'dead';
     record.state = Inhabitants.state(record);
     const sheet = Inhabitants.parseSheets(text).find(row => row.name === actor.name);
     if (sheet) record.sheet = sheet.rawSheet || sheet.sheet;
@@ -8856,17 +9195,17 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
 
     let pc = pcDetails ? extractDetails(pcDetails)[0] : null;
     let npcs = npcsInPartyDetails && npcsInPartyDetails.toLowerCase() !== 'none' ? extractDetails(npcsInPartyDetails) : [];
-    let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails).filter(m => m.hp > 0) : [];
+    let aliveMonsters = monstersInRoomDetails && monstersInRoomDetails.toLowerCase() !== 'none' ? extractDetails(monstersInRoomDetails) : [];
 
     const combatTeams = selectCombatTeams(pc, npcs, aliveMonsters, userInput, monstersState, combatLog);
-    let allCombatants = [...(pc && pc.hp > 0 ? [pc] : []), ...npcs.filter(n => n.hp > 0), ...aliveMonsters];
+    let allCombatants = [...(pc ? [pc] : []), ...npcs, ...aliveMonsters].filter(Inhabitants.isAlive);
     combatSpace?.setHealth(allCombatants);
 
     // Use client-provided combatCharacters or fall back to sharedState
     let combatCharacters = clientCombatCharacters ? clientCombatCharacters : (sharedState.getCombatCharactersString() ? JSON.parse(sharedState.getCombatCharactersString()) : []);
 
     // Ensure only characters with HP > 0 are in combatCharacters
-    combatCharacters = combatCharacters.filter(c => allCombatants.some(a => a.name === c.name && a.hp > 0));
+    combatCharacters = combatCharacters.filter(c => allCombatants.some(a => a.name === c.name && Inhabitants.isAlive(a)));
     allCombatants.forEach(combatant => {
         const charInCombat = combatCharacters.find(c => c.name === combatant.name);
         if (charInCombat) {
@@ -9017,20 +9356,23 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     }
 
     for (const combatant of initiativeOrder) {
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
         if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) {
             combatLog.push(`${combatant.name} is skipped due to HP (${combatant.hp}) or already killed.`);
             continue;
         }
+        if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
+        if (await automaticCombatAid(combatant, pc, npcs, aliveMonsters, combatLog, alreadyKilled, targets)) { needsUpdate = true; continue; }
 
         if (targets.length === 0) {
             combatLog.push(`${combatant.name} has no valid targets to engage.`);
             continue;
         }
 
-        let target;
-        if (combatTurnFlow && combatant.name === pc?.name) {
+        let target = automaticCombatSpell(combatant, targets);
+        if (combatTurnFlow && playerControls(combatant, pc, npcs)) {
             target = await choosePlayerCombatAction(combatant, targets);
             if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
             if (!target) continue;
@@ -9039,7 +9381,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             target = await promptForTarget(combatant, targets);
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
             combatLog.push(`${combatant.name} targets ${target.name} at (${target.x}, ${target.y}).`);
-        } else {
+        } else if (!target) {
             // Monster: select the nearest living target using real-time positions
             target = targets.reduce((closest, t) => {
                 const currentTarget = initiativeOrder.find(c => c.name === t.name && c.hp > 0 && !alreadyKilled.has(c.name)) || t;
@@ -9049,6 +9391,9 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             combatLog.push(`${combatant.name} targets ${target.name} at (${target.x}, ${target.y}).`);
         }
 
+        if (target?.hold) { combatLog.push(`${combatant.name} ends the turn in place.`); continue; }
+        if (target?.care) { needsUpdate = resolveCombatCare(target.care, pc, npcs, aliveMonsters, combatLog) || needsUpdate; continue; }
+        if (target?.cast) { needsUpdate = await resolveCombatSpell(target.cast, combatant, pc, npcs, aliveMonsters, alreadyKilled, combatLog, targets) || needsUpdate; continue; }
         if (!target) {
             combatLog.push(`${combatant.name} found no valid target.`);
             continue;
@@ -9104,7 +9449,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             if (attackSuccess) {
                 const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
                 if (damageRoll === null) continue;
-                target.hp -= damageRoll;
+                await applyCombatDamage(target, damageRoll, combatLog);
                 combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
                 commitCombatHealth(pc, npcs, aliveMonsters);
@@ -9123,7 +9468,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                     }
                 }
 
-                if (target.hp <= 0) {
+                if (Inhabitants.state(target) === 'Dead') {
                     alreadyKilled.add(target.name);
                     ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, combatant));
                     currentOccupiedPositions.delete(`${target.x},${target.y}`);
@@ -9138,7 +9483,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                         combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
                         if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
-                        aliveMonsters = aliveMonsters.filter(m => m.hp > 0);
+                        aliveMonsters = aliveMonsters.filter(Inhabitants.isAlive);
                     }
                     needsUpdate = true;
                     combatCharacters = combatCharacters.filter(c => c.name !== target.name);
@@ -9172,7 +9517,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
 
     combatCharacters = combatCharacters.filter(c => {
         const combatant = [...(pc ? [pc] : []), ...npcs, ...aliveMonsters].find(a => a.name === c.name);
-        return combatant && combatant.hp > 0;
+        return combatant && Inhabitants.isAlive(combatant);
     });
 
     combatSpace?.syncRoster(combatCharacters);
@@ -10068,7 +10413,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
         if (fb !== -1 && lb !== -1 && lb > fb) {
           try {
             const parsed = JSON.parse(nameStr.slice(fb, lb + 1));
-            if (parsed.name) objectName = String(parsed.name).trim().toLowerCase();
+            if (parsed.name) objectName = GeneratedNames.clean(parsed.name).toLowerCase();
           } catch {}
         }
       }
@@ -10547,6 +10892,7 @@ async function resolveActionWithSimulation($, userInput, updatedGameConsole, act
 
             // Step 3: Update the game console using `processGameUpdate`
             console.log("Updating Game Console...");
+            if (!gameUpdateResult && typeof CombatLife !== 'undefined') await prepareEnvironmentalSurvival(additionalOutcomes, updatedGameConsole);
             gameUpdateResult = gameUpdateResult || processGameUpdate(additionalOutcomes, updatedGameConsole);
             console.log("Updated Game Console:", gameUpdateResult);
             if (typeof ActionFeedback !== 'undefined' && typeof broadcast === 'function') {
@@ -10660,6 +11006,7 @@ async function adjudicateActionWithPythonSimulation($, userInput, updatedGameCon
 
             // Step 3: Update the game console using `processGameUpdate`
             console.log("Updating Game Console...");
+            if (typeof CombatLife !== 'undefined') await prepareEnvironmentalSurvival(additionalOutcomes, updatedGameConsole);
             const gameUpdateResult = processGameUpdate(additionalOutcomes, updatedGameConsole);
             console.log("Updated Game Console:", gameUpdateResult);
 
@@ -10683,6 +11030,21 @@ async function adjudicateActionWithPythonSimulation($, userInput, updatedGameCon
     }
 }
 
+async function prepareEnvironmentalSurvival(outcomes, text) {
+    if (typeof CombatLife === 'undefined') return;
+    const fatal = CombatLife.actors(text).filter(a => a.hp > 0 && Number(outcomes.trap_damage?.[a.name]) >= a.hp);
+    if (!fatal.length) return;
+    const ownAction = !actionDice.active;
+    if (ownAction) actionDice.begin('exploration', CombatLife.actors(text).length && Inhabitants.roomKey(text.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]), broadcast);
+    try {
+      outcomes.survivalSaves ||= {};
+      for (const actor of fatal) {
+        const roll = await actionDice.roll(CombatLife.survivalPlan(actor));
+        if (roll) outcomes.survivalSaves[actor.name] = roll.natural;
+        else outcomes.trap_damage[actor.name] = 0;
+      }
+    } finally { if (ownAction) actionDice.end(); }
+}
 function processGameUpdate(additionalOutcomes, updatedGameConsole) {
     const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
     const result = applyAdditionalOutcomes(additionalOutcomes, updatedGameConsole, db);
@@ -10690,6 +11052,16 @@ function processGameUpdate(additionalOutcomes, updatedGameConsole) {
         xp_awarded: result.xp, trap_damage: result.damage });
     sharedState.setRoomNameDatabase(JSON.stringify(result.database));
     sharedState.setUpdatedGameConsole(result.console);
+    if (typeof CombatLife !== 'undefined') {
+      const before = CombatLife.actors(updatedGameConsole), after = CombatLife.actors(result.console);
+      for (const [name, amount] of Object.entries(result.damage || {})) {
+        const actor = before.find(a => a.name === name), next = after.find(a => a.name === name);
+        if (actor && next && amount > 0) CombatLife.apply(result.database, sharedState.getDungeonRunId(), actor, next.hp,
+          additionalOutcomes.survivalSaves?.[name], { damage: amount, geoKey: result.roomKey });
+      }
+      CombatLife.commit(sharedState, result.database, result.console);
+      result.console = sharedState.getUpdatedGameConsole();
+    }
     // Keep live actor HP/XP consistent with the same sheets displayed in the console.
     if (sharedState.getCombatCharactersString && sharedState.setCombatCharactersString) {
         const sheets = [...parseSheets(result.console.match(/PC:([\s\S]*?)(?=NPCs in Party:|$)/)?.[1], 'pc'),
@@ -10699,7 +11071,7 @@ function processGameUpdate(additionalOutcomes, updatedGameConsole) {
             const sheet = sheets.find(s => s.name.toLowerCase() === String(actor.name).toLowerCase());
             if (sheet) { actor.hp = sheet.hp; actor.xp = sheet.xp; }
         });
-        sharedState.setCombatCharactersString(JSON.stringify(roster.filter(actor => actor.hp === undefined || actor.hp > 0)));
+        sharedState.setCombatCharactersString(JSON.stringify(roster.filter(actor => actor.hp === undefined || Inhabitants.isAlive(actor))));
     }
     console.info('[AdjudicationApplied]', JSON.stringify({ roomKey: result.roomKey, objects: result.discoveries,
         exit: result.exit, xp: result.xp, damage: result.damage }));
@@ -11051,7 +11423,8 @@ async function logThreadMessages() {
         roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatRoundOnly: true };
     }
     try {
-    return await run(retort(async ($) => {
+    const gameRetort = GraveMasterProtocol.runtimeFor(sharedState).retort;
+    return await run(gameRetort(async ($) => {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.2;
 //    await $.run($ => generateMissingRoomDetails($)); 
@@ -11142,6 +11515,10 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         console.log("Thread object:", thread);*/
 
         // Call generateMissingRoomDetails and check if a new room was generated
+    if (typeof Economy !== 'undefined' && Economy.project(sharedState).initialized === 'new-game') {
+      await CampaignSetting.prepareAtlas($, sharedState);
+      roomNameDatabaseString = sharedState.getRoomNameDatabase();
+    }
     let roomDescriptionGenerated =  await $.run($ => generateMissingRoomDetails($));
     const entryRoomKey = Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:\s*(.*)$/m)?.[1]);
     const entryPrevious = sharedState.getLastCoords();
@@ -11254,9 +11631,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     const startKey = "0,0,0";
     let startRoom = roomNameDatabasePlain[startKey];
     if (startRoom && typeof startRoom === "object") {
-      if (typeof startRoom.indoor !== "boolean") {
-        startRoom.indoor = true;
-      }
+      startRoom.indoor = true;
+      startRoom.classification = { ...startRoom.classification, indoor: true, biome: 'temple' };
       startRoom.isIndoor = true;
       startRoom.isOutdoor = false;
     } else {
@@ -11384,7 +11760,8 @@ console.log("personalNarrative:", personalNarrative);
     roomDescription = updatedGameConsole.match(/Room Description: ([^\n]+)/)?.[1]?.trim() || '';
 if (userInput && userInput.trim() !== '') {
    $.user`${userInput}`;
-} else {
+   if (typeof DialogueAudience !== 'undefined') $.user(DialogueAudience.commandPrompt(userInput));
+} else if (isAutoSimAdvance && !isFirstTurn && !enteringRoom) {
     // For the 45s periodic simulation loop (auto advance with blank input), make it occur in the
     // main conversation line using the most recent conversation history (passed via liveWorldState.currentConversation
     // and the accumulated retort messages). Produce a short, integrated continuation report so it follows
@@ -11630,7 +12007,7 @@ if (typeof CampaignMemory !== 'undefined') {
   const recall = CampaignMemory.context(sharedState, userInput, updatedGameConsole, sharedState.getActiveTask?.());
   if (recall.evidence.length || recall.profiles?.length) await $.user(CampaignMemory.prompt(recall));
 }
-const { questJustSeeded, questUpdate, activeTask } = await seedAndManageQuest($, updatedGameConsole, userInput);
+const { questJustSeeded, questUpdate, activeTask } = await seedAndManageQuest($, updatedGameConsole, userInput, broadcast);
 if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberQuest(sharedState, taskMemoryBefore, broadcast);
 
 // Refresh local copies because seedAndManageQuest may have updated shared state
@@ -11650,7 +12027,7 @@ const monstersState2 = monstersStateMatch2 ? monstersStateMatch2[1].trim() : '';
   // --- Always keep the model consistent for narrative I/O ---
   $.model = "gpt-4.1-mini";
   //$.temperature = 1.0;
-  const diversitySeed = ['vitality_contrast', 'auditory_twist', 'dialogue_inversion'][Math.floor(Math.random() * 3)];
+  const diversitySeed = ['vitality_contrast', 'auditory_twist', 'conversational_detail'][Math.floor(Math.random() * 3)];
   await $.user(LivingEnvironments.HINT_POLICY);
   $.user`FYI: Variability seed for this turn—infuse subtle contrast: ${diversitySeed}. Await next.`;
 
@@ -11662,150 +12039,8 @@ const monstersState2 = monstersStateMatch2 ? monstersStateMatch2[1].trim() : '';
     $.user`FYI: Quest update. Store this information and await the next prompt. ${questUpdate}`
   }
   
-if (questJustSeeded) {
-    
-  // --- Build a precise view of the required elements just seeded ---
-  const dbStr = sharedState.getRoomNameDatabase() || "{}";
-  let db = {};
-  try { db = JSON.parse(dbStr); } catch {}
-  const coordMatch = (updatedGameConsole || '').match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
-  const curKey = coordMatch ? `${parseInt(coordMatch[1])},${parseInt(coordMatch[2])},${parseInt(coordMatch[3])}` : "0,0,0";
-
-  const seededTask = activeTask || (sharedState.getCurrentTasks() || [])[sharedState.getCurrentTaskIndex()] || null;
-  const req = Array.isArray(seededTask?.requiredElements) ? seededTask.requiredElements : [];
-
-  const here = req.filter(e => (e.placement || '').trim() === curKey);
-  const elsewhere = req.filter(e => (e.placement || '').trim() !== curKey);
-
-  const hereSummary = here.length
-    ? here.map(e => `${e.type}|${e.name}|${e.placement}`).join('; ')
-    : '(none)';
-  const elsewhereSummary = elsewhere.length
-    ? elsewhere.map(e => `${e.type}|${e.name}|${e.placement}`).join('; ')
-    : '(none)';
-  const partyNpcNames = parseNpcPartyNamesFromConsole(updatedGameConsole);
-  const partyNpcSummary = partyNpcNames.join(', ') || '(none)';
-
-  // Helpful logs
-  console.log('[QuestSeed] currentRoomKey:', curKey);
-  console.log('[QuestSeed] requiredElements (here):', here);
-  console.log('[QuestSeed] requiredElements (elsewhere):', elsewhere);
-
-  // FYI: lock in the seeded elements so the model treats them as canonical
-
-$.user`
-Seed the quest NOW in narrative prose (1–2 short paragraphs), then continue the scene.
-
-Quest: "${sharedState.getCurrentQuest()}"
-First task (incorporate naturally, not as a checklist): ${seededTask ? (seededTask.type + " — " + seededTask.desc) : "N/A"}.
-
-Rules:
-- Do NOT output lists or bullet points. Keep immersion: no meta-talk, no asterisks.
-- Adjudicate my most recent input directly first: Parse query (e.g., 'Who/What/How' → answer facts/backstories before twists). Limit meta-riffs (e.g., no 'talking about talking' unless query evokes); ground dialogue in query + 1 room element max.
-- Then organically seed the quest via either an encounter (if monsters present) or a strange environmental event, and fold the first task into the prose as a call-to-action.
-- Required monsters elsewhere in this level must be discovered, not brought into the scene merely because their quest placement is ${curKey}. Only living monsters visible in the perceived Game Console may speak or act; respect each individual's State.
-- Party NPCs in the party are allies and MUST NOT be portrayed as enemies or monsters: ${partyNpcSummary}.
-- If a required element shares a name with a party NPC, rename or substitute the hostile entity — never use the party NPC as a foe.
-- If required OBJECTS/KEYS are in this room, surface them via sensory detail; do NOT auto-grant or teleport them. Let me act.
-- Use only elements actually present in the game console / seeded elements; do not create new NPCs, monsters, objects, or exits.
-- Do not rhyme mechanics (coords, inventory lists, HP, XP) or instructions; rhyme only in-character dialogue.
-
-Context anchors:
-- Room context (coordinates, exits, objects, NPCs in party, monsters in ${roomName}) comes from the game console.
-- Each visible monster has its own State, motivations and backstory. The room summary is not an allegiance.
-- Resolve NPC/monster actions with implied die rolls and include dialogue in quotes.
-- Keep it strange and thought-provoking.
-
-Presentation:
-- Use quotes and also non-quoted summaries for speech.
-- Voice emotions/mistakes: Use thoughts, stutters, or suppositions in quotes—ground in experiences, cultural differences, superstitions, tradition or convention. Query-first: Start each NPC line with fact-answer; follow with emotion/slip.
-- Do not rhyme mechanics (coords, HP, XP, inventory) or any instruction text; rhyme only in-character speech. Only use rhymes in speech.
-
-STYLE — Storybook:
-- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter.
-- Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP.
-- Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme.
-- Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets).
-- Cap lilt/rhymes: Use in 1 element only if seed fits (e.g., 'moral_inversion' → twisted rhyme; skip for auditory).
-- If apt, echo a regional refrain once in a while (not every turn).
-`;
-} else if (currentSituation) {
-
-$.user`
-Integrate:
-- Active task (if any): ${activeTask ? (activeTask.type + " — " + activeTask.desc) : "None"}
-- Quest updates (if any): ${questUpdate || "None"}
-
-Core Rules:
-- Allow only me (the player) to input commands like directions (n, s, e, w, ne, nw, se, sw, up/down/u/d) or interactions (look, take, drop, use, i for inventory).
-- Never act, decide, or complete the game for me; wait for my commands.
-- Maintain RPG immersion: Use text descriptions only, no asterisks, no rules discussions. 
-- NPCs and monsters above all are individuals with free will and agency, are subject to their own emotions and biases, have unique personalities and character traits, and draw from original, well-developed backstories and experiences, possessing limited but also specialized knowledge (expert in some areas, novice in others), thereby expression certainty in some instances but confusion in others, getting it wrong sometimes and can have disagreements. 
-- Control living NPCs in party and nearby monsters, each with their own State and motivations. Friendly residents support the party, neutrals stand aside, and nearby hostiles may threaten. Dead characters cannot speak or act.
-- Resolve actions based on die rolls for NPCs/monsters; include dialogue in quotes with their thoughts/opinions.
-
-Narrative Guidelines:
-- Adjudicate my most recent input directly first: Parse query (e.g., 'Who/What/How' → answer facts/backstories before twists). Limit meta-riffs (e.g., no 'talking about talking' unless query evokes); ground dialogue in query + 1 room element max.
-- Build characters' stories (including my backstory/inner thoughts) and world structures/communities/environments/quests.
-- Uncover clues about the underworld's chaos post-Mortacia's power loss, creating specific lore details (names, histories) via room elements and through discovery, maintaining PC, NPC and monsters' limited but specialized knowledge.
-- Draw from history/lore for continuity: Reference past rooms/events to build overarching tension toward reclaiming Sepulchra, maintaining PC, NPC and monsters' limited but specialized knowledge.
-
-Quest Integration:
-- If quest unseeded, introduce via monster encounter if present or event (voices/visions) with dialogue/hints or seed via subtle event (1 hint, tied to input) without forcing.
-- Evaluate input against active quest task; update progress narratively in 1 concise para, blending with a moral twist.
-- Sequence tasks: Advance only after completion, via emergent event (no lists).
-
-Strategic and Meaningful Elements:
-- Advance the plot meaningfully through hero's journey conflicts, moral dilemmas, and strategic choices (e.g., environmental tactics, alliances, risk-reward decisions).
-- Structure responses: Resolve input/outcomes first, then weave dialogue/actions, finally advance the story with tension-building twists tied to the quest.
-
-World Simulation:
-- Simulate background: Evolve 1 thread per response, intersecting choices with a philosophical fork.
-- For openings, seed with 1 unique hook from lore, contrasting standard Tartarus tropes—avoid starting with repeats.
-`;
-
-$.user`
-Write an interactive fiction adventure without using any *'s and let's play in ChatGPT. Make up the story as you go, integrating any available quest updates but you must allow me, the player, who is not omniscent in the game, to type the commands. Do not type commands on behalf of the player, which is me. I am the player. You are the Grave Master who, taking into account the user input and all of the information in the current game console including the current room's coordinates, exits, objects, NPCs in party and monsters in the ${roomName}, and this prompt but without repeating it all, and taking into account all of the information in the current situation, without mentioning the room's name, adjudicates the player's most recent action, administers the fantasy roleplaying interactive fiction game, judges other actions in the game and builds the characters' stories, and the world's structures, communities, environments, quests and adventures in the Children of the Grave world, and must obey my commands and answer my questions by adjudicating the world honestly according to the game state. Each character in the game must have free will, agency and weaknesses, act independent of one another, have distinct motivations, personalities and speak like real individuals acting out of self-preservation and self-interests, each with different, hopes, fears and emotions. They should ask each other questions, have conversations and disagreements and stay in character. Characters are allowed to misinterpret reality and act on false assumptions and under emotional stress, characters may speak in fragments, interruptions, contradictions, or unfinished thoughts rather than polished sentences. Characters must never explain the setting, cosmology, or situation in complete or authoritative terms; they may only express beliefs, suspicions, fears, or partial memories consistent with their personal perspective, should not attempt to fully answer compound questions; they may respond incompletely, evasively, emotionally, or by redirecting the conversation, and must experience and express emotion through involuntary physical reactions, strained dialogue, mistakes, or conflict, rather than calm description, including anger, denial, bargaining, grief, suspicion, awe, and coping behaviors. Always display your response to a command or question taking into consideration the player's user input, and report the outcome of all actions taken and include any dialogue between characters in the game using quotes. Weave the narrative in the Children of the Grave world, drawing from the current game console (room coordinates, exits, objects, NPCs in party, monsters in ${roomName}), conversation history, game's lore, and the current situation without repeating details. Improvise!
-`;
-  } else if (!currentSituation) {
-
-$.user`
-Integrate:
-- Active task (if any): ${activeTask ? (activeTask.type + " — " + activeTask.desc) : "None"}
-- Quest updates (if any): ${questUpdate || "None"}
-
-Core Rules:
-- Allow only me (the player) to input commands like directions (n, s, e, w, ne, nw, se, sw, up/down/u/d) or interactions (look, take, drop, use, i for inventory).
-- Never act, decide, or complete the game for me; wait for my commands.
-- Maintain RPG immersion: Use text descriptions only, no asterisks, no rules discussions. 
-- NPCs and monsters above all are individuals with free will and agency, are subject to their own emotions and biases, have unique personalities and character traits, and draw from original, well-developed backstories and experiences, possessing limited but also specialized knowledge (expert in some areas, novice in others), thereby expression certainty in some instances but confusion in others, getting it wrong sometimes and can have disagreements. 
-- Control living NPCs in party and nearby monsters, each with their own State and motivations. Friendly residents support the party, neutrals stand aside, and nearby hostiles may threaten. Dead characters cannot speak or act.
-- Resolve actions based on die rolls for NPCs/monsters; include dialogue in quotes with their thoughts/opinions.
-
-Narrative Guidelines:
-- Adjudicate my most recent input directly first: Parse query (e.g., 'Who/What/How' → answer facts/backstories before twists). Limit meta-riffs (e.g., no 'talking about talking' unless query evokes); ground dialogue in query + 1 room element max.
-- Build characters' stories (including my backstory/inner thoughts) and world structures/communities/environments/quests.
-- Uncover clues about the underworld's chaos post-Mortacia's power loss, creating specific lore details (names, histories) via room elements and through discovery, maintaining PC, NPC and monsters' limited but specialized knowledge.
-- Draw from history/lore for continuity: Reference past rooms/events to build overarching tension toward reclaiming Sepulchra, maintaining PC, NPC and monsters' limited but specialized knowledge.
-
-Quest Integration:
-- If quest unseeded, introduce via monster encounter if present or event (voices/visions) with dialogue/hints or seed via subtle event (1 hint, tied to input) without forcing.
-- Evaluate input against active quest task; update progress narratively in 1 concise para, blending with a moral twist.
-- Sequence tasks: Advance only after completion, via emergent event (no lists).
-
-Strategic and Meaningful Elements:
-- Advance the plot meaningfully through hero's journey conflicts, moral dilemmas, and strategic choices (e.g., environmental tactics, alliances, risk-reward decisions).
-- Structure responses: Resolve input/outcomes first, then weave dialogue/actions, finally advance the story with tension-building twists tied to the quest.
-
-World Simulation:
-- Simulate background: Evolve 1 thread per response, intersecting choices with a philosophical fork.
-- For openings, seed with 1 unique hook from lore, contrasting standard Tartarus tropes—avoid starting with repeats.
-`;
-
-$.user`
-Write an interactive fiction adventure without using any *'s and let's play in ChatGPT. Make up the story as you go, integrating any available quest updates but you must allow me, the player, who is not omniscent in the game, to type the commands. Do not type commands on behalf of the player, which is me. I am the player. You are the Grave Master who, taking into account the user input and all of the information in the current game console including the current room's coordinates, exits, objects, NPCs in party and monsters in the ${roomName}, and this prompt but without repeating it all, and taking into account all of the information in the current situation, without mentioning the room's name, adjudicates the player's most recent action, administers the fantasy roleplaying interactive fiction game, judges other actions in the game and builds the characters' stories, and the world's structures, communities, environments, quests and adventures in the Children of the Grave world, and must obey my commands and answer my questions by adjudicating the world honestly according to the game state. Each character in the game must have free will, agency and weaknesses, act independent of one another, have distinct motivations, personalities and speak like real individuals acting out of self-preservation and self-interests, each with different, hopes, fears and emotions. They should ask each other questions, have conversations and disagreements and stay in character. Characters are allowed to misinterpret reality and act on false assumptions and under emotional stress, characters may speak in fragments, interruptions, contradictions, or unfinished thoughts rather than polished sentences. Characters must never explain the setting, cosmology, or situation in complete or authoritative terms; they may only express beliefs, suspicions, fears, or partial memories consistent with their personal perspective, should not attempt to fully answer compound questions; they may respond incompletely, evasively, emotionally, or by redirecting the conversation, and must experience and express emotion through involuntary physical reactions, strained dialogue, mistakes, or conflict, rather than calm description, including anger, denial, bargaining, grief, suspicion, awe, and coping behaviors. Always display your response to a command or question taking into consideration the player's user input, and report the outcome of all actions taken and include any dialogue between characters in the game using quotes. Weave the narrative in the Children of the Grave world, drawing from the current game console (room coordinates, exits, objects, NPCs in party, monsters in ${roomName}), conversation history, game's lore, and the current situation without repeating details. Improvise!
-`;
-  }
+StoryPrompts.appendStory($, { roomName, activeTask, questUpdate, currentSituation, questJustSeeded,
+  updatedGameConsole, sharedState, parseNpcPartyNamesFromConsole });
 console.log('Starting final Retort-JS execution...');
 // Provide character positions context (from live client world state) so periodic simulation
 // turns (via chatbotprocessinput every 45s) let the main narrative follow exact room positions
@@ -11822,6 +12057,7 @@ const presentCompanions = Inhabitants.parseSheets(updatedGameConsole, 'NPCs in P
 const dialogueNames = [...Inhabitants.parseSheets(perceivedGameConsole, 'PC'),
   ...Inhabitants.parseSheets(perceivedGameConsole, 'NPCs in Party'), ...Inhabitants.parseSheets(perceivedGameConsole)]
   .filter(a => a.hp > 0 && a.state !== 'Dead').map(a => a.name);
+await $.user(Divinity.prompt(sharedState, dialogueNames));
 const memoryGeoKey = (updatedGameConsole.match(/^Coordinates: X:\s*(-?\d+), Y:\s*(-?\d+), Z:\s*(-?\d+)/m) || []).slice(1).join(',');
 const castPopulation = sharedState.getRoomPopulation(memoryGeoKey);
 const mentioned = selectCommandedNpcs(userInput, dialogueNames);
@@ -11836,7 +12072,8 @@ const characterMemory = DialogueMemory.memoryContext(sharedState, [...mentioned,
 const visibleCast = Inhabitants.parseSheets(perceivedGameConsole);
 const individualRoles = visibleCast.filter(a => a.hp > 0).map(a => {
   const record = castPopulation?.actors?.[a.name];
-  return { name: a.name, state: Inhabitants.state(a), job: record?.job, activity: record?.activity };
+  return { name: a.name, state: Inhabitants.state(a), job: record?.job, activity: record?.activity,
+    patron: record?.patron, factionId: record?.factionId };
 });
 await $.user`Individual character allegiances override the room's summary state: ${JSON.stringify(individualRoles)}. Friendly residents fight on the player's side, neutrals stand aside and do not join, and only nearby hostile encounters can attack. Other inhabitants continue their own activities. Character recollections (beliefs, promises and previous speech, not proof of world events): ${JSON.stringify(characterMemory)}.`;
 if (typeof CampaignMemory !== 'undefined') {
@@ -11916,6 +12153,8 @@ try {
   const normalize = text => String(text || '').trim().replace(/\s+/g, ' ');
   staleRoomDungeon = !!cachedRoomDungeon && (!source || normalize(source.roomName) !== normalize(input.roomName) ||
     normalize(source.description) !== normalize(input.description));
+  if (geoKey === '0,0,0' && cachedRoomDungeon &&
+      (cachedRoomDungeon.classification?.indoor === false || cachedRoomDungeon.sceneSpec?.indoor === false)) staleRoomDungeon = true;
   hasRoomDungeon = !!cachedRoomDungeon?.layout && !!cachedRoomDungeon?.cells && !staleRoomDungeon;
 } catch (error) { console.warn('[DungeonEntry] Cached room validation failed:', error.message); }
 const isNewGeoRoom =
@@ -11934,11 +12173,11 @@ if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
   // 🧭 STEP 0 — classify biome & size
   
   const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
-  let forcedIndoor = null;
+  let forcedIndoor = geoKeyString === '0,0,0' ? true : null;
   try {
     const db = JSON.parse(roomNameDatabaseString || "{}");
     const entry = db[geoKeyString];
-    if (entry && typeof entry.indoor === 'boolean') {
+    if (forcedIndoor === null && entry && typeof entry.indoor === 'boolean') {
       forcedIndoor = entry.indoor;
     }
   } catch (e) {
@@ -11979,6 +12218,7 @@ try {
   }
 
   // Persist: Merge into DB entry (preserve exits/objects/etc.)
+  if (geoKeyString === '0,0,0') classification.biome = 'temple';
   db[geoKeyString] = db[geoKeyString] || {};
   db[geoKeyString].classification = {
     ... (db[geoKeyString].classification || {}),  // Preserve any non-null existing details
@@ -12004,6 +12244,7 @@ try {
     coords: geoCoords,
     indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
   }));
+  if (geoKey === '0,0,0') { sceneSpec.indoor = true; sceneSpec.biome = 'temple'; }
   classification = applySceneSpecToClassification(sceneSpec, classification);
   if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
   DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
@@ -12300,7 +12541,21 @@ const population = populationService.prepare(updatedGameConsole, activeDungeonFo
 if (population) population.journey = JourneyMemory.progressSynopsis(sharedState);
 updatedGameConsole = Inhabitants.withStates(updatedGameConsole, population);
 sharedState.setUpdatedGameConsole(updatedGameConsole);
+if (typeof SpellSystem !== 'undefined') {
+  SpellSystem.synchronize(sharedState); updatedGameConsole = sharedState.getUpdatedGameConsole();
+}
 const dialogueRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+if (typeof CharacterAuthorship !== 'undefined' && population) {
+  const authored = await CharacterAuthorship.runWithLore($, agent => CharacterAuthorship.ensurePopulationProfiles(agent, population, dialogueRoster, {
+    runId: sharedState.getDungeonRunId(), roomName, roomDescription,
+    recollections: DialogueMemory.memoryContext(sharedState, dialogueRoster.filter(actor => actor.type !== 'pc').map(actor => actor.name), population, 3000)
+  }));
+  if (authored) {
+    Inhabitants.attach(dialogueRoster, population);
+    sharedState.setCombatCharactersString(JSON.stringify(dialogueRoster));
+    populationService.save(population);
+  }
+}
 const perception = Inhabitants.perceive(activeDungeonForPopulation,dialogueRoster,population,enteringRoom);
 const entryQuestContact = enteringRoom && typeof prepareEntryQuestContact !== 'undefined' ? prepareEntryQuestContact(
   population, activeDungeonForPopulation, dialogueRoster, perception, sharedState.getCurrentQuest()) : null;
@@ -12323,19 +12578,29 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   if (typeof CampaignMemory !== 'undefined') {
     const cacheCharacters = describeCharacters(dialogueRoster, population).filter(actor => replyNames.includes(actor.name));
     const cacheMemories = CampaignMemory.dialogueContext(sharedState, cacheCharacters, typeof userInput === 'string' ? userInput : '');
-    await $.user(CampaignMemory.dialoguePrompt(cacheCharacters, cacheMemories, population?.journey));
+    await $.user(CampaignMemory.dialoguePrompt(cacheCharacters, cacheMemories, population?.journey,
+      { mode: 'narrative' }));
+    if (typeof FactionMemory !== 'undefined') {
+      const factionContext=FactionMemory.describe(JSON.parse(sharedState.getRoomNameDatabase()||'{}'));
+      if(factionContext)await $.user(factionContext);
+    }
     console.info('[DialogueGrounding]', JSON.stringify({ geoKey, mode: 'turn-cache', characters: cacheMemories.map(row => ({
       name: row.name, partyMember: row.partyMember, heard: row.heardCurrentConversation, evidenceIds: row.memories.map(item => item.id) })) }));
   }
   const directions = typeof QuestDirectionFacts !== 'undefined' ? QuestDirectionFacts.facts(sharedState,userInput) : [];
   if(directions.length)await $.user(QuestDirectionFacts.prompt(directions));
+  await $.user`Visible dialogue formatting is required in the Game Log: give each speaker a natural visible attribution or named action, then enclose their actual words in quotation marks. Backend SPEECH labels are invisible and do not replace quotation marks or a reader-visible speaker identity. A speech-only paragraph must identify its speaker, for example: the nearby speaker says, "Welcome, traveler." Use the actual nearby speaker's name.`;
   await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${Inhabitants.MONSTER_DIALOGUE_RANGE} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
   await $.user`Preserve the existing flowing narrative: prose, actions, quotation marks and paragraph breaks stay natural, not a screenplay or JSON document. Mark EVERY actual spoken passage inside its normal quotation marks with invisible backend labels: [[SPEECH:"exact nearby name"]]all words spoken in this quote[[/SPEECH]]. Use the JSON-quoted exact name from ${JSON.stringify(audibleNames)}. Label every continuation and later paragraph, even when the prose uses he, she, their voice, an epithet, or omits the name. Do not summarize, truncate, omit later sentences or repeat the speech elsewhere. Never label narration, thoughts, inscriptions, the PC's words or distant characters. At most ${initialArrival ? 6 : 4} nearby speakers; allow complete natural monologues, not a 40-word metadata excerpt. The server removes only these labels before displaying the unchanged narrative in the Game Log.
 After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}],"exchanges":[]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh the planned batch of 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Base the batch on this turn's actual conversation as well as the witnessed recap, without assuming these future lines were already said. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;
+  await $.user`FINAL STORY RESPONSE: Follow the full Integrate and interactive-fiction action/dialogue instructions above. Write the player-facing narrative FIRST, then append the CHARACTER_DIALOGUE metadata. Cache planning is secondary and must not replace the story. ${initialArrival ? 'This is the full opening scene: develop the established TURN 0 premise and the call to adventure without deciding actions for the PC.' : enteringRoom ? 'This is a full room-entry story continuation, not another static room or puzzle description.' : 'Resolve the latest player input and continue the scene; a genuine automatic idle tick keeps its requested short format.'} If no characters are permitted to speak, still narrate an appropriate environmental or story development without inventing dialogue, discoveries or completed actions. Preserve player agency, current mechanics, exact names and the nearby-speaker limits. Return actual prose before metadata, not a metadata-only answer.`;
   const result = await $.assistant.generation({maxTokens:Math.min(6000,autoMax+replyNames.length*160+400)});
   spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
   spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
   response = spoken.content;
+  console.info('[StoryNarration]', JSON.stringify({ geoKey, phase: initialArrival ? 'arrival' : enteringRoom ? 'entry' : 'turn',
+    status: response.trim() ? 'story' : 'metadata-only', storyChars: response.length, rawChars: String(result.content || result).length,
+    permittedSpeakers: audibleNames.length }));
   if (initialArrival) console.info('[ArrivalNarration]', JSON.stringify({ geoKey, speakers: spoken.dialogue.map(row => row.speaker) }));
   if (enteringRoom) console.info('[EntryDialogue]',JSON.stringify({geoKey,mode:'full-retort',nearby:audibleNames,
     questContact:entryQuestContact?.speaker || null,
@@ -12775,6 +13040,7 @@ async function runNpcAutonomyTick(isCurrent = () => true) {
   try {
     parsed = await run(retort(agent=>generateCharacterDialogue(agent,{characters:context,recollections,
       personalMemories,
+      factionMemory: typeof FactionMemory !== 'undefined' && sharedState.getRoomNameDatabase ? FactionMemory.describe(JSON.parse(sharedState.getRoomNameDatabase()||'{}')) : '',
       roomDescription:consoleAtStart.match(/^Room Description:\s*(.*)$/m)?.[1],quest:sharedState.getCurrentQuest(),
       journey,
       conversation:live.currentConversation})));
@@ -12927,12 +13193,7 @@ async function generateFullCharacterWithRetortSprite(baseCharacter) {
 
 async function generatePartyCharacterProfiles(characters, runId) {
   const { generateProfiles } = require('./characterProfiles');
-  try { return await run(retort($ => generateProfiles($, characters, runId))); }
-  catch (error) {
-    console.warn('[CharacterProfiles]', error.message);
-    const Profiles = require('../assets/characterProfiles');
-    return characters.map(actor => Profiles.create(actor, runId));
-  }
+  return await run(retort($ => generateProfiles($, characters, runId)));
 }
 
 // Export everything the rest of the app needs

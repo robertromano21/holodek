@@ -6,6 +6,7 @@ const I = require('../assets/dungeonInhabitants');
 const { createCombatSpace } = require('../retort/dungeonReach');
 const { createPopulationService } = require('../retort/roomPopulation');
 const { generateInhabitants, needsQuestIntroduction } = require('../retort/inhabitantGeneration');
+const inhabitantReply = require('./fixtures/inhabitants.cjs');
 const { ActionDice } = require('../retort/actionDice');
 const { buildInitialWorldConsole, buildInitialGameConsole, formatStartingCharacterSheet } = require('../retort/initialGameState');
 function dungeon(size = 64) {
@@ -235,7 +236,7 @@ test('a quest introduction is claimed once outside the starting temple, not on e
 
 test('cast generation reserves one neutral quest contact only for an explicit introduction', async () => {
   const prompts = [], agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); },
-    assistant: { generation: async () => ({ content: '{"inhabitants":[]}' }) } };
+    assistant: { generation: async () => ({ content: JSON.stringify({ inhabitants: inhabitantReply(16) }) }) } };
   const rules = { level: () => 1, random: () => 5, sex: () => 'Female', xp: () => 0, equipment: async () => null };
   const context = { roomName: 'Ash Crossing', roomDescription: 'An open trail.', geoKey: '1,0,0', indoor: false,
     quest: 'Find the seal before entering the Wyrm lair.' };
@@ -249,8 +250,33 @@ test('cast generation reserves one neutral quest contact only for an explicit in
   assert.equal(ordinary.population.questIntroduction, undefined);
 });
 
+test('the LLM picks individual custom native archetypes and spell preferences, but the engine supplies birth stats', async () => {
+  const Rules = require('../assets/spellRules'), prompts = [], rolls = [];
+  const rows = [
+    { slot: 0, name: 'Keeper One', race: 'Elf', class: 'Vow Reader', combatArchetype: 'Cleric', spellPreferences: ['prayer_mending', 'fireball'], magic: 999 },
+    { slot: 1, name: 'Keeper Two', race: 'Human', class: 'Sun Seer', combatArchetype: 'Sorcerer', spellPreferences: ['dawn_mending'] },
+    { slot: 2, name: 'Keeper Three', race: 'Human', class: 'Warrior Priest', combatRole: 'Warrior', combatArchetype: 'Cleric', spellPreferences: ['prayer_mending'] },
+    { slot: 3, name: 'Keeper Four', race: 'Human', class: 'Ash Ritualist', combatArchetype: 'Witch', spellPreferences: ['curse', 'invented', 'curse'] }
+  ];
+  const agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); }, assistant: { generation: async () => ({ content: JSON.stringify({ inhabitants: inhabitantReply(8, rows) }) }) } };
+  const result = await generateInhabitants(agent, { roomName: 'Market', geoKey: '1,0,0', indoor: true },
+    { level: () => 3, random: (min, max) => { rolls.push(max); return min; }, sex: () => 'Female', xp: () => 6000, equipment: async () => null });
+  const actors = I.parseBlocks(result.sheets);
+  for (const [name, archetype, magic, die] of [['Keeper One', 'Cleric', 6, 8], ['Keeper Two', 'Sorcerer', 9, 4], ['Keeper Three', 'Fighter', 0, 10], ['Keeper Four', 'Witch', 6, 6]]) {
+    const actor = actors.find(a => a.name === name);
+    assert.equal(actor.magic, magic); assert.equal(Rules.resolveClass(actor.className), archetype);
+    assert.equal(result.population.actors[name].combatArchetype, archetype); assert.equal(actor.hp, 3);
+    assert.equal(result.population.actors[name].combatRole, archetype === 'Fighter' ? 'Warrior' : 'Spellcaster');
+    assert.ok(rolls.includes(die + 1));
+  }
+  assert.deepEqual(result.population.actors['Keeper One'].spellPreferences, ['prayer_mending']);
+  assert.deepEqual(result.population.actors['Keeper Three'].spellPreferences, []);
+  assert.deepEqual(result.population.actors['Keeper Four'].spellPreferences, ['curse']);
+  assert.match(prompts[0], /choose exactly one combatArchetype/); assert.match(prompts[0], /Choose spellPreferences individually/);
+});
+
 for(const indoor of [true,false]) test(`batched ${indoor?'indoor':'outdoor'} generation creates diverse groups using one cast request`,async()=>{
-  const prompts=[],requests=[],agent={user(parts,...values){prompts.push(String.raw({raw:parts},...values));},assistant:{generation:async options=>{requests.push(options);return {content:'{"inhabitants":[]}'}}}};
+  const prompts=[],requests=[],agent={user(parts,...values){prompts.push(String.raw({raw:parts},...values));},assistant:{generation:async options=>{requests.push(options);return {content:JSON.stringify({inhabitants:inhabitantReply(indoor?8:16)})}}}};
   const result=await generateInhabitants(agent,{roomName:'Grave Market',roomDescription:'A vaulted market.',geoKey:'1,0,0',indoor,partyNames:['Mortacia']},
     {level:()=>2,random:()=>5,sex:()=> 'Female',xp:()=>2000,equipment:async()=>null});
   assert.equal(requests.length,1);assert.equal(I.parseSheets(`Monsters in Room:\n${result.sheets}\nMonsters Equipped Properties: None`).length,indoor?8:16);

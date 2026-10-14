@@ -15,7 +15,7 @@ function compile(start, end, name, dependencies) {
 function harness(database, response) {
   const tag = () => {};
   return { agent: { user: tag, assistant: Object.assign(tag, { generation: async () => response }) },
-    dependencies: { console: { log() {}, warn() {} }, isReservedBossKeyName,
+    dependencies: { console: { log() {}, warn() {} }, isReservedBossKeyName, GeneratedNames: require('../retort/generatedNames'),
       sharedState: { getRoomNameDatabase: () => JSON.stringify(database) },
       coordinatesToString: c => `${c.x},${c.y},${c.z}`,
       Math: Object.assign(Object.create(Math), { random: () => 0 }),
@@ -55,4 +55,10 @@ test('real room-object generator keeps normal names and original item-type selec
   const h = harness({}, { content: 'Iron Sword' });
   const generate = compile('async function generateRoomObjects(', 'async function generateObjectModifiers(', 'generateRoomObjects', h.dependencies);
   assert.deepEqual(await generate(h.agent, 'Hall', 'An existing hall.'), [{ name: 'iron sword', type: 'weapon' }]);
+});
+
+test('real room-object generator preserves word boundaries before storing item names', async () => {
+  const h = harness({}, { content: 'Bone-rib Spear' });
+  const generate = compile('async function generateRoomObjects(', 'async function generateObjectModifiers(', 'generateRoomObjects', h.dependencies);
+  assert.deepEqual(await generate(h.agent, 'Hall', 'An existing hall.'), [{ name: 'bone rib spear', type: 'weapon' }]);
 });

@@ -39,7 +39,8 @@
       const id = key(name);
       if (items.has(id)) { items.get(id).quantity++; continue; }
       const props = metadata.get(id) || {};
-      const type = CATEGORIES.some(([type]) => type === props.type) ? props.type : 'other';
+      const declared = key(props.type);
+      const type = CATEGORIES.some(([type]) => type === declared) ? declared : 'other';
       items.set(id, { ...props, id, name, type, quantity: 1 });
     }
     return [...items.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
@@ -55,8 +56,10 @@
   function describeItem(item, readable) {
     if (readable?.backstory) return `${readable.title || item.name}. ${readable.backstory} Read its stored chapters to explore its contents.`;
     if (item.description || item.purpose) return String(item.description || item.purpose);
+    if (item.consumable_kind === 'healing' || /^healing potion(?: \d+ hp)?$/i.test(item.name) && item.magic >= 3 && item.magic <= 10)
+      return `Drink to restore up to ${item.magic} HP (Magic ${item.magic}) to a living party member. Consumed after use; cannot resurrect the dead.`;
     const name = key(item.name);
-    if (item.readable_kind === 'spellbook' || /\b(spellbook|grimoire)\b/.test(name)) return 'A spell-reference volume. Read its stored notes; reading does not cast or teach spells yet.';
+    if (item.readable_kind === 'spellbook' || /\b(spellbook|grimoire)\b/.test(name)) return 'Scribe real spell scrolls into this book to learn spells, then prepare them in the Spells menu. Reading alone does not cast or teach spells.';
     if (item.readable_kind === 'book' || /\b(book|tome|codex|ledger|journal|chronicle)\b/.test(name)) return 'A readable volume of history, lore or recorded instructions. Use Read to open its stored chapters.';
     if (item.readable_kind === 'scroll' || /\bscroll\b/.test(name)) return 'A portable written record. Use Read to examine its stored text and any recorded clues.';
     if (item.readable_kind === 'map' || /\bmap\b/.test(name)) return 'A readable geographic or historical document, not a guarantee of current dungeon exits.';
@@ -99,6 +102,7 @@
     }
     document.getElementById('party-icon-dock')?.classList.toggle('inventory-targeting', !!selected);
     if (equip) equip.disabled = !selected;
+    if (equip && selected && root.CommerceUi?.drinkable(selected.name)) equip.disabled = true;
     if(read){read.hidden=!selected||!root.WorldInteractionUi?.hasReadableContent(selected.name);read.disabled=!selected||busy()||root.GameCommandGate?.busy()||root.gamePaused;}
     if (!selected) { message('Drag an item onto a party icon, or select it and click a character.'); return; }
     const stats = [['Attack', 'attack_modifier'], ['Damage', 'damage_modifier'], ['Armor', 'ac'], ['Magic', 'magic']]
@@ -113,6 +117,8 @@
     inventoryLink(item.name)?.click();
     const popup = document.getElementById('equip-button')?.closest('.popup-container');
     if (!popup) return;
+    root.CommerceUi?.addDrinkAction(popup, item.name);
+    root.SpellUi?.addItemAction(popup, item.name);
     popup.dataset.inventoryDetails = 'true';
     popup.style.cssText = 'position:static;transform:none;width:auto;margin:8px 0;padding:8px';
     const description = document.createElement('p'); description.textContent = itemDescription(item);
@@ -131,6 +137,7 @@
   function requestEquip(name, targetName) {
     if (busy()) { message('Finish the current action before equipping.'); return false; }
     const item = items.find(item => item.id === key(name)), link = item && inventoryLink(item.name);
+    if (item && root.CommerceUi?.drinkable(item.name)) return !!root.CommerceUi?.drink(item.name, targetName);
     const target = targetName == null ? null : party().find(entry => key(identity(entry.label)) === key(identity(targetName)));
     if (!link || targetName != null && !target) { message('That item or character is no longer available.'); return false; }
     const oldName = target && occupiedSlot(target.label, item.type);
@@ -186,7 +193,12 @@
         const image = root.SceneItems?.createItemCanvas(item, { scale: 1 });
         if (image) canvas.getContext('2d').drawImage(image, 0, 0, 32, 32);
         name.className = 'inventory-item-name'; name.textContent = item.name;
-        button.append(canvas, name);
+        button.appendChild(canvas);
+        if (root.EconomyRules?.isHealingPotion(item)) {
+          const potency = document.createElement('span'); potency.className = 'inventory-potency'; potency.textContent = `${item.magic} HP`;
+          potency.title = `Magic ${item.magic}`; button.appendChild(potency);
+        }
+        button.appendChild(name);
         if (item.quantity > 1) { const count = document.createElement('span'); count.className = 'inventory-quantity'; count.textContent = item.quantity; button.appendChild(count); }
         button.addEventListener('click', () => showItemActions(item));
         button.addEventListener('dragstart', event => {
@@ -227,6 +239,7 @@
   }
   function update(data) {
     state = data || {};
+    const money = document.getElementById('inventory-silver'); if (money) money.textContent = 'Silver Pieces: ' + Math.max(0, Number(state.silverPieces ?? root.silverPieces) || 0);
     const next = JSON.stringify([state.inventory || '', state.inventoryProperties || '']);
     if (next !== signature) {
       signature = next; items = inventoryItems(state.inventory, state.inventoryProperties);
