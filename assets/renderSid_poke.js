@@ -183,7 +183,7 @@ const HAS_VIB = vT[0].VIB;
 function deriveFilterGlobal(vtab) {
   // $D418 bits 4..6: LP/BP/HP, low nibble: volume
   // $D417 low nibble: route V0/V1/V2/EXT, high nibble: resonance
-  // $D415/$D416: 11-bit cutoff (low 8, high 3)
+  // $D415/$D416: 11-bit cutoff (low 3 bits, high 8 bits).
   let modeBits = 0; // $D418 bits 4..6
   let routeBits = 0; // $D417 bits 0..2
   let resMax = 0;
@@ -209,8 +209,8 @@ function deriveFilterGlobal(vtab) {
 
   const cutoff = cutoffs.length ? Math.round(cutoffs.reduce((a,b)=>a+b,0)/cutoffs.length) : 0;
   const c11 = Math.max(0, Math.min(2047, cutoff));
-  const cutLo = c11 & 0xFF;
-  const cutHi = (c11 >> 8) & 0x07;
+  const cutLo = c11 & 0x07;
+  const cutHi = (c11 >> 3) & 0xFF;
 
   const d417 = ((resMax & 0x0F) << 4) | (routeBits & 0x0F);
   const volBase = modeBits & 0x70; // keep only LP/BP/HP bits; OR with volume later
@@ -355,7 +355,12 @@ v${i}_chk2:
   LDA vol_base
   ORA #$10
   STA vol_base
-  ORA #$0F
+  LDA vol_ctr
+  CMP #$10
+  BCC v${i}_filter_fade
+  LDA #$0F
+v${i}_filter_fade:
+  ORA vol_base
   STA $D418
   INY
   JMP v${i}_read

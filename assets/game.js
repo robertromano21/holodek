@@ -11342,7 +11342,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
 
                         const combinedHistory = conversationHistory + "\n" + userInput;
 
-                        let personalNarrative = await performDynamicSearch(combinedHistory);
+                        let personalNarrative = await performDynamicSearch(userInput);
 
                         const messages = [
                             { role: "assistant", content: "" },
@@ -11538,7 +11538,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
 
                 const combinedHistory = conversationHistory + "\n" + userInput;
 
-                let personalNarrative = await performDynamicSearch(combinedHistory);
+                let personalNarrative = await performDynamicSearch(userInput);
 
                 const messages = [
                     { role: "assistant", content: "" },
@@ -11763,7 +11763,7 @@ if (userWords.length > 1 && userWords[0] === "take") {
 
                     const combinedHistory = conversationHistory + "\n" + userInput;
 
-                    let personalNarrative = await performDynamicSearch(combinedHistory);
+                    let personalNarrative = await performDynamicSearch(userInput);
 
                     const messages = [
                         { role: "assistant", content: "" },
@@ -11994,7 +11994,7 @@ if (userWords.length > 1 && userWords[0] === "drop") {
         const combinedHistory = conversationHistory + "\n" + userInput;
 
         // Perform dynamic search using the Sentence Transformer model
-        let personalNarrative = await performDynamicSearch(combinedHistory);
+        let personalNarrative = await performDynamicSearch(userInput);
 
         // Construct the input message, including the previous response if it exists
         const messages = [
@@ -12161,7 +12161,7 @@ if (userWords.length > 1 && userWords[0] === "drop") {
             const combinedHistory = conversationHistory + "\n" + userInput;
 
             // Perform dynamic search using the Sentence Transformer model
-            let personalNarrative = await performDynamicSearch(combinedHistory);
+            let personalNarrative = await performDynamicSearch(userInput);
 
             // Construct the input message, including the previous response if it exists
             const messages = [
@@ -12308,7 +12308,7 @@ if (userWords.length > 1 && userWords[0] === "equip") {
     const combinedHistory = conversationHistory + "\n" + userInput;
 
     // Perform dynamic search using the Sentence Transformer model
-    let personalNarrative = await performDynamicSearch(combinedHistory);
+    let personalNarrative = await performDynamicSearch(userInput);
 
     // Construct the input message, including the previous response if it exists
     const messages = [
@@ -12453,7 +12453,7 @@ if (userWords.length > 1 && userWords[0] === "unequip") {
     const combinedHistory = conversationHistory + "\n" + userInput;
 
     // Perform dynamic search using the Sentence Transformer model
-    let personalNarrative = await performDynamicSearch(combinedHistory);
+    let personalNarrative = await performDynamicSearch(userInput);
 
     // Construct the input message, including the previous response if it exists
     const messages = [
@@ -12646,7 +12646,7 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
 
     const combinedHistory = conversationHistory + "\n" + userInput;
 
-    let personalNarrative = await performDynamicSearch(combinedHistory);
+    let personalNarrative = await performDynamicSearch(userInput);
     // Construct the input message, including the previous response if it exists
     const messages = [
         { role: "assistant", content: "" },
@@ -12836,7 +12836,7 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
 
     const combinedHistory = conversationHistory + "\n" + userInput;
 
-    let personalNarrative = await performDynamicSearch(combinedHistory);
+    let personalNarrative = await performDynamicSearch(userInput);
     // Construct the input message, including the previous response if it exists
     const messages = [
         { role: "assistant", content: "" },
@@ -12938,8 +12938,8 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
   // Combine the game console, conversation history, and user input
   const combinedHistory = conversationHistory + "\n" + userInput;
 
-  // Perform dynamic search using the Sentence Transformer model
-  let personalNarrative = completedStartResult ? '' : await performDynamicSearch(combinedHistory);
+  // Search the archive for this command, not the beginning of the accumulated transcript.
+  let personalNarrative = completedStartResult ? '' : await performDynamicSearch(userInput);
 
     const messages = [
     { role: "assistant", content: "" },
@@ -13104,9 +13104,9 @@ const taskRequest = {
                     .then(r => r && r.json ? r.json() : null)
                     .then(resp => {
                       if (resp?.ok && resp?.wav) {
-                        // We’ll actually start playback on SSE "roomMusicReady" (it includes a cache-buster),
-                        // but we can optimistic-play too:
-                        playRoomWav(resp.wav + '?cb=' + Date.now());
+                        // Use the same selector/room queue as SSE, never bypass an extended palette.
+                        if (window.HolodekSfx?.queueRoomMusic) window.HolodekSfx.queueRoomMusic({coords:coordsKey,wav:resp.wav});
+                        else playRoomWavFresh(resp.wav, resp.token || Date.now());
                       }
                     })
                     .catch(err => console.error('room-music flow failed:', err));
@@ -15623,6 +15623,7 @@ function renderDungeonView() {
   window.playerAngle = playerAngle;
   window.playerZ = playerZ;
   window.PLAYER_EYE_HEIGHT = PLAYER_EYE_HEIGHT;
+  if (!currentDungeon) return;
   if (!window.debugVoxel) {
     window.debugVoxel = function debugVoxel(tileName, voxels, size) {
       if (!voxels || !size) return;

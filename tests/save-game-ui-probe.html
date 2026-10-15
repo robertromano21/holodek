@@ -1,0 +1,94 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Save/load browser probe</title></head><body>
+<div id="game-menu"></div><div id="chatlog">The well keeper said, "Remember the spring."</div>
+<script>
+'use strict';
+const checks = {}, errors = [], calls = [], realFetch = window.fetch.bind(window);
+const records = new Map();
+let db, currentDungeon = { geoKey: '1,1,0', tiles: {}, layout: { width: 2, height: 2 }, cells: { '0,0': { tile: 'floor' } } };
+let characters = [{ Name: 'Mortacia', hp: 99 }], npcs = [], inventory = ['Spear'], inventoryProperties = [{ name: 'Spear', magic: 3 }], equippedInventory = [];
+const roomConversationHistories = { '1,1,0': ['The keeper welcomed us.'] }, roomConnections = { '1,1,0': { east: '2,1,0' } };
+const visitedRooms = new Set(['1,1,0']), unvisitedRooms = new Set(['2,1,0']), connectedRooms = new Set(), unconnectedRooms = new Set();
+const roomNameDatabase = new Map();
+const monstersInVisitedRooms = new Map(), monstersEquippedPropertiesByRoom = new Map(), monstersStateByRoom = new Map();
+let turns = 7, globalQuestsAchieved = 1, globalArtifactsFound = 1, score = 5, gameMode = ['Mortacia'];
+let roomNameDatabaseString = '', roomNameDatabasePlainObject = {}, combatCharactersString = '', currentCoordinates = { x: 1, y: 1, z: 0 };
+let lastDungeonGeoKey = '1,1,0', dungeonSwitchRequest = 0, playerPosX = .5, playerPosY = .5, playerDungeonX = 0, playerDungeonY = 0, playerAngle = 1.2;
+let playerZ = .7, playerZTarget = .7, playerZInitialized = true, pendingLodPersist = null;
+let currentQuest, nextArtifact, nextBoss, nextBossRoom, bossCoordinates;
+const roomDatabaseSyncClient = { reset() { calls.push('sync-reset'); } };
+window.dungeonRunId = 'ui-run'; window.playerAngle = playerAngle; window.playerZ = playerZ; window.roomImages = {};
+window.combatCharacters = [{ name: 'Mortacia', hp: 99, type: 'pc', sprite: { dataUrl: 'data:image/png;base64,x', spec: { seed: .2 } } }];
+window.getDungeonLifeContext = () => ({ dungeon: currentDungeon, actors: window.combatCharacters, player: { x: playerPosX, y: playerPosY }, busy: false });
+window._characterTraitSpecs = { keeper: { name: 'Keeper', source: 'llm', traits: { bodyPlan: 'humanoid' }, salt: 77, variant: 2 } };
+window._characterSheetIndex = { keeper: { name: 'Keeper', class: 'Guardian' } };
+window.DungeonExplorationMap = { flushForSave: async () => {}, reset(options) { checks.discardFutureFog = options.discard; } };
+window.DungeonLife = { reset(options) { window.gamePaused = !!options.paused; }, setPaused(event) { window.gamePaused = event.paused; } };
+window.DungeonInhabitants = { consoleView: () => ({ currentQuest: 'Restore the well', inventory: 'Spear', silverPieces: 6 }) };
+window.HolodekSfx = { settings: { voiceDetail: true, compositionChip: '10582' }, stopSpeech() {}, checkpoint: () => ({ time: 42.5, paused: true }),
+  restoreCheckpoint: async (saved, settings, audio, room, runId) => { checks.musicPosition = saved.time === 42.5 && saved.paused && audio.url === '/sid/room_A.wav' && room === '1,1,0' && runId === 'ui-run'; }, roomShown() {} };
+window.applySpellEquipment = () => {};
+function updateCharacterSheetsFromConsole() { checks.spriteRecipeRestored = window._characterTraitSpecs.keeper.salt === 77; }
+function ensureDungeonGeometryStamp(dungeon) { return dungeon; }
+function updatePlayerHeightFromCell() {}
+function ensureKnownSpritesInCombatList() {}
+function ensurePartyMazeIdleInterval() {}
+function preloadDungeonTextures() {}
+function renderDungeonView() {}
+function coordinatesToString(c) { return `${c.x},${c.y},${c.z}`; }
+function updateGameConsole() { throw Error('Loading must not award quests or invoke the narrative engine.'); }
+function open(name, version, upgrade) { return new Promise((resolve, reject) => { const r = indexedDB.open(name, version); r.onupgradeneeded = () => upgrade(r.result); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); }
+async function put(database, store, key, value) { await new Promise((resolve, reject) => { const tx = database.transaction(store, 'readwrite'), s = tx.objectStore(store); s.keyPath ? s.put(value) : s.put(value, key); tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); }); }
+async function read(database, store, key) { return new Promise((resolve, reject) => { const r = database.transaction(store).objectStore(store).get(key); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); }
+function openDungeonDB() { return open('cotg-dungeons', 2, d => { d.createObjectStore('rooms'); d.createObjectStore('inhabitants'); }); }
+function openMusicDB() { return open('cotg-music', 1, d => d.createObjectStore('rooms')); }
+async function idbSetDungeon(key, value) { const d = await openDungeonDB(); await put(d, 'rooms', window.dungeonRunId + ':' + key, value); d.close(); }
+async function getPromptsAndResponsesForConversation(id) { return new Promise((resolve, reject) => { const r = db.transaction('conversation').objectStore('conversation').index('conversationId').getAll(id); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); }); }
+window.fetch = async (url, options = {}) => {
+  calls.push(url); const body = options.body ? JSON.parse(options.body) : null;
+  if (url === '/game/pause') return Response.json({ paused: body.paused, runId: 'ui-run' });
+  if (url === '/game-saves') return Response.json({ canLoad: true, slots: Array.from({ length: 10 }, (_, i) => ({ slot: i + 1, occupied: records.has(i + 1) })) });
+  if (url === '/game-saves/1') { records.set(1, structuredClone(body.browser)); return Response.json({ saved: true, checksum: 'test-checksum' }); }
+  if (url === '/game-saves/1/load') return Response.json({ loaded: true, browser: records.get(1), runId: 'ui-run', roomKey: '1,1,0',
+    roomNameDatabaseString: JSON.stringify({ '1,1,0': { name: 'The Spring' } }), updatedGameConsole: 'Coordinates: X: 1, Y: 1, Z: 0',
+    combatCharactersString: JSON.stringify([{ name: 'Mortacia', hp: 99, type: 'pc' }]), dungeon: currentDungeon,
+    characterTraits: records.get(1).data.characterTraits, audio: { url: '/sid/room_A.wav' } });
+  throw Error('Unexpected request: ' + url);
+};
+</script><script src="/assets/saveGameTranscript.js"></script><script src="/assets/saveGameUi.js"></script><script>
+document.addEventListener('DOMContentLoaded', async () => {
+  const databases = [];
+  try {
+    db = await open('myDatabase', 1, d => { const s = d.createObjectStore('conversation', { keyPath: 'id', autoIncrement: true }); s.createIndex('conversationId', 'conversationId'); }); databases.push(db);
+    localStorage.setItem('conversationId', 'original');
+    await put(db, 'conversation', null, { conversationId: 'original', response: 'Before the checkpoint.', systemPrompt: 'The Grave Master' });
+    const fog = await open('cotg-exploration', 1, d => d.createObjectStore('rooms')); databases.push(fog);
+    await put(fog, 'rooms', 'ui-run:1,1,0', { seen: [1, 0, 0, 0] });
+    const memory = await open('DungeonCampaignMemories', 1, d => { const s = d.createObjectStore('records', { keyPath: 'key' }); s.createIndex('runId', 'runId'); s.createIndex('room', ['runId', 'roomKey']); }); databases.push(memory);
+    await put(memory, 'records', null, { key: 'm1', runId: 'ui-run', text: 'A friendly keeper.' });
+    await HolodekSaveGame.open(); checks.tenSlots = document.querySelectorAll('.save-slot').length === 10;
+    const bounds = document.querySelector('dialog').getBoundingClientRect(); checks.dialogFits = bounds.left >= 0 && bounds.right <= innerWidth + 1 && bounds.bottom <= innerHeight + 1;
+    await HolodekSaveGame.save(1, 'The Spring'); checks.saved = records.has(1) && !window.gamePaused;
+    const saved = records.get(1); checks.completeCapture = saved.conversation.rows.length === 1 && saved.memories.length === 1 && saved.exploration.length === 1 && saved.data.inventory[0] === 'Spear';
+    inventory = ['A future item']; turns = 99; window.combatCharacters[0].hp = 1; window._characterTraitSpecs.keeper.salt = 999;
+    await put(db, 'conversation', null, { conversationId: 'original', response: 'This happens in the future.' });
+    await put(fog, 'rooms', 'ui-run:1,1,0', { seen: [1, 1, 1, 1] });
+    await put(memory, 'records', null, { key: 'future-memory', runId: 'ui-run', text: 'A later betrayal.' });
+    const dungeon = await openDungeonDB(); databases.push(dungeon); await put(dungeon, 'rooms', 'ui-run:2,1,0', { future: true }); await put(dungeon, 'inhabitants', 'ui-run:2,1,0', { future: true });
+    const music = await openMusicDB(); databases.push(music); await put(music, 'rooms', '1,1,0', { __runId: 'ui-run', title: 'Future song' });
+    await HolodekSaveGame.load(1, 'test-checksum');
+    checks.inventoryAndHp = inventory[0] === 'Spear' && window.combatCharacters[0].hp === 99 && turns === 7;
+    checks.loadedPaused = window.gamePaused; checks.camera = playerPosX === .5 && playerPosY === .5 && playerAngle === 1.2 && playerZ === .7;
+    const restoredHistory = await getPromptsAndResponsesForConversation(localStorage.getItem('conversationId'));
+    checks.historyBranches = localStorage.getItem('conversationId') !== 'original' && restoredHistory.length === 1 && restoredHistory[0].response === 'Before the checkpoint.';
+    checks.fogRollback = JSON.stringify((await read(fog, 'rooms', 'ui-run:1,1,0')).seen) === '[1,0,0,0]';
+    checks.memoriesRollback = !(await read(memory, 'records', 'future-memory')) && !!(await read(memory, 'records', 'm1'));
+    checks.staleDungeonCleared = !(await read(dungeon, 'rooms', 'ui-run:2,1,0')) && !(await read(dungeon, 'inhabitants', 'ui-run:2,1,0'));
+    checks.currentDungeonRestored = !!(await read(dungeon, 'rooms', 'ui-run:1,1,0'));
+    checks.futureMusicCleared = !(await read(music, 'rooms', '1,1,0'));
+    checks.noNarrationOrQuestAwards = calls.filter(c => typeof c === 'string' && c.startsWith('/')).every(c => c.startsWith('/game-saves') || c === '/game/pause');
+    checks.logRestored = document.getElementById('chatlog').textContent.includes('Remember the spring.');
+  } catch (e) { errors.push(e.stack); }
+  for (const d of databases) d.close();
+  await realFetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pass: !errors.length && Object.values(checks).every(Boolean), checks, errors }) });
+});
+</script></body></html>

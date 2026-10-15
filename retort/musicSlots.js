@@ -31,4 +31,6 @@ function use(slot) { // mark a slot as the newest song (for /music/latest) and r
 }
 function setPlaying(slot) { if (slot === 'A' || slot === 'B') state.playing = slot; }
 function latest() { return { url: state.lastUrl, slot: state.last, coords: state.lastCoords, playing: state.playing, holds: state.holds }; }
-module.exports = { nextSlot, base, rendered, find, use, setPlaying, latest, state };
+function reset() { state.last = state.lastUrl = state.lastCoords = null;
+  for (const slot of ['A', 'B']) state.holds[slot] = state.urls[slot] = state.modes[slot] = null; }
+module.exports = { nextSlot, base, rendered, find, use, setPlaying, latest, state, reset };

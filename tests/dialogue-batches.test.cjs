@@ -258,3 +258,21 @@ test('five-minute fallback receives party progress and recent conversation recap
   assert.equal(f.population.dialogueQueue.length, 1); assert.equal(f.stored()['1,0,0'].inhabitants.dialogueQueue.length, 1);
   assert.ok(logs.some(([tag, json]) => tag === '[DialogueGrounding]' && JSON.parse(json).characters.some(row => row.evidenceIds.includes('keeper'))));
 });
+
+test('an exhausted restored cache bypasses freshness once without replaying old dialogue', async () => {
+  const f = fixture(), a = agent({ spoken: [], replies: [{ speaker: 'Noria', lines: ['Will we return to the keeper before nightfall?'] }] });
+  I.applyReplies(f.population, [{ speaker: 'Noria', lines: ['The bell remains silent.'] }], f.actors);
+  f.population.companions.Noria.dialogueIndex = 1;
+  f.population.lastDialogueRefreshAt = Date.now();
+  f.population.dialogueResumePending = true;
+  const context = { Inhabitants: I, DialogueMemory: Memory, JourneyMemory: Journey, CampaignMemory: Campaign,
+    describeCharacters, generateCharacterDialogue, sharedState: f.state,
+    populationService: { get: () => f.population, save: value => f.service.save(value) },
+    sanitizeLiveWorldStateForPrompt: value => value, run: work => work(a), retort: work => work,
+    console: { warn() {}, info() {} } };
+  vm.runInNewContext(tickCode, context);
+  assert.equal((await context.runNpcAutonomyTick()).refreshed, true);
+  assert.equal(a.requests.length, 1); assert.equal(f.population.dialogueResumePending, undefined);
+  assert.deepEqual(f.population.companions.Noria.dialogue, ['Will we return to the keeper before nightfall?']);
+  assert.equal((await context.runNpcAutonomyTick()).cached, true); assert.equal(a.requests.length, 1);
+});

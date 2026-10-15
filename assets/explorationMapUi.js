@@ -272,13 +272,14 @@
     if (changed.length) scheduleSave();
     paint();
   }
-  function reset() {
-    atlas.flushAll(); current = null; atlas.clear(); bitmap = null; bitmapRoom = null; bitmapRevision = -1;
+  function reset({ discard = false } = {}) {
+    if (timer) { root.clearTimeout(timer); timer = null; }
+    if (!discard) atlas.flushAll(); current = null; atlas.clear(); bitmap = null; bitmapRoom = null; bitmapRevision = -1;
     portraits.clear();
     discardOldRuns(root.dungeonRunId).catch(() => {});
     paint(true);
   }
-  root.DungeonExplorationMap = { update, toggle, reset, refresh() { paint(true); if (open) fit(); },
+  root.DungeonExplorationMap = { update, toggle, reset, flushForSave: () => atlas.flushAll(), refresh() { paint(true); if (open) fit(); },
     ready: geoKey => !!current?.state?.loaded && (!geoKey || current.dungeon.geoKey === geoKey),
     wasAnnounced: id => !!current?.state?.announcedLandmarks.includes(id),
     observeResident(actor) {

@@ -19,13 +19,14 @@ const catalog = Object.freeze([
   id, name, description, reasoningNone, shutdownDate: shutdownDate || null,
   documentation: 'https://developers.openai.com/api/docs/models/' + id
 })));
+const DEFAULT_MODEL = 'gpt-6-luna';
 let client;
 function getClient() {
   if (!process.env.OPENAI_API_KEY) return null;
   return client ||= new (require('openai').OpenAI)({ apiKey: process.env.OPENAI_API_KEY, timeout: 60000, maxRetries: 0 });
 }
 const problem = (message, status = 400) => Object.assign(new Error(message), { status });
-function createModelService({ clientFor = getClient, now = Date.now, initial = 'original' } = {}) {
+function createModelService({ clientFor = getClient, now = Date.now, initial = DEFAULT_MODEL } = {}) {
   const context = new AsyncLocalStorage();
   let selected = initial, revision = 0, cached = null, pending = null;
   if (initial !== 'original' && !catalog.some(row => row.id === initial)) throw problem('Unsupported initial game model.');
@@ -72,7 +73,11 @@ function createModelService({ clientFor = getClient, now = Date.now, initial = '
     if (selected !== id) { selected = id; revision++; }
     return current();
   }
-  return { current, snapshot, withSnapshot, profile, view, select, getClient: clientFor };
+  function restore(id) {
+    if (id !== 'original' && !catalog.some(row => row.id === id)) throw problem('Unsupported saved game model.');
+    selected = id; revision++; return current();
+  }
+  return { current, snapshot, withSnapshot, profile, view, select, restore, getClient: clientFor };
 }
 const service = createModelService();
 function install(app, models = service) {
@@ -93,4 +98,4 @@ function install(app, models = service) {
     '/character-traits', '/spells/cast', '/room-population/engage', '/room-population/autonomy'],
   (_req, _res, next) => models.withSnapshot(next));
 }
-module.exports = { ...service, catalog, createModelService, install };
+module.exports = { ...service, DEFAULT_MODEL, catalog, createModelService, install };

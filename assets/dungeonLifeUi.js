@@ -7,12 +7,15 @@
   let room = null, active = null, panel, portrait, caption, words, pauseButton, status, recoveryButton, recoveryStatus;
   let recoveryPending = false;
   let lastVisit = 0, lastAutonomy = 0, visitPending = false, autonomyPending = false, pausePending = false;
+  let timeline = 0;
   let pausedAt = 0, pauseTotal = 0, lastTick = 0;
   const subtitleReports = [], subtitleHistory = [];
   let subtitleReportTimer = null, subtitleReportWarned = false;
   const time = () => (root.gamePaused ? pausedAt : Date.now()) - pauseTotal;
   const context = () => root.getDungeonLifeContext?.();
   const typing = element => !!element && (element.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+  const drafting = element => typing(element) && (element.isContentEditable ? element.textContent?.trim() :
+    element.tagName === 'SELECT' || String(element.value || '').trim());
   function flushSubtitleReports() {
     subtitleReportTimer = null;
     const reports = subtitleReports.splice(0, 32);
@@ -82,6 +85,15 @@
     root.DungeonExplorationMap?.refresh?.();
   }
   function population() { return populations.get(context()?.dungeon?.geoKey) || null; }
+  function restorePopulation(event) {
+    receivePopulation(event);
+    const ctx = context(), p = population();
+    if (!ctx?.dungeon || !p || p.geoKey !== event.population?.geoKey) return;
+    const nearby = ctx.actors.filter(actor => actor.type !== 'pc' && I.hasEncountered(actor, p) && canSpeak(actor, ctx));
+    const delay = I.dialogueRefreshDelay(p, nearby);
+    lastAutonomy = time() - I.DIALOGUE_REFRESH_MS + delay;
+    console.info('[DialogueResume]', { geoKey: p.geoKey, nearby: nearby.length, refreshInMs: delay });
+  }
   function actorVisible(actor, ctx, range = 12) {
     return actor && actor.discoveryState !== 'pending' && (actor.hp ?? 1) > 0 && I.state(actor) !== 'Dead' && I.roomKey(actor.mazeRoomKey) === ctx.dungeon.geoKey &&
       Number.isFinite(actor.mazeX) && Math.hypot(actor.mazeX + 0.5 - ctx.player.x, actor.mazeY + 0.5 - ctx.player.y) <= range &&
@@ -352,26 +364,31 @@
       }
     }
     showNext(ctx, now);
-    if (ctx.busy || !ctx.actors.some(a=>a.type==='pc'&&(a.hp ?? 1)>0) || typing(document.activeElement)) return;
+    if (ctx.busy || !ctx.actors.some(a=>a.type==='pc'&&(a.hp ?? 1)>0) || drafting(document.activeElement)) return;
     if (!visitPending && now - lastVisit >= 3000) {
       visitPending = true; lastVisit = now;
-      const geoKey = ctx.dungeon.geoKey, runId = root.dungeonRunId;
+      const geoKey = ctx.dungeon.geoKey, runId = root.dungeonRunId, epoch = timeline;
       post('/room-population/visit', { geoKey, runId, player: ctx.player,
         actors: ctx.actors.map(a => ({ name: a.name, mazeX: a.mazeX, mazeY: a.mazeY, discoveryRevision: a.discoveryRevision, mazePoint: I.dialoguePoint(speakingActor(a)) })) })
-        .then(result => { if (result && root.dungeonRunId === runId && context()?.dungeon?.geoKey === geoKey) {
+        .then(result => { if (result && epoch === timeline && root.dungeonRunId === runId && context()?.dungeon?.geoKey === geoKey) {
           receivePopulation({ population: result.population, runId });
           if (result.story) receiveEncounter(result.story);
           else receiveDialogue({ dialogue: result.dialogue, geoKey, runId, source: 'room-visit' });
           for (const discovery of result.discoveries || []) root.DungeonAreaTitles?.notice?.(discovery);
         } })
-        .catch(error => console.warn('[RoomPopulation]', error.message)).finally(() => { visitPending = false; });
+        .catch(error => console.warn('[RoomPopulation]', error.message)).finally(() => { if (epoch === timeline) visitPending = false; });
     }
     if (!autonomyPending && now - lastAutonomy >= I.DIALOGUE_REFRESH_MS) {
       autonomyPending = true; lastAutonomy = now;
-      const runId=root.dungeonRunId;
+      const runId=root.dungeonRunId, epoch = timeline, geoKey = ctx.dungeon.geoKey;
       post('/room-population/autonomy', { geoKey: ctx.dungeon.geoKey, runId: root.dungeonRunId, liveWorldState: liveState(ctx) })
-        .then(result=>{if(result?.population)receivePopulation({population:result.population,runId});})
-        .catch(error => console.warn('[RoomAutonomy]', error.message)).finally(() => { autonomyPending = false; });
+        .then(result => {
+          if (epoch !== timeline || root.dungeonRunId !== runId || context()?.dungeon?.geoKey !== geoKey) return;
+          if (result?.population) receivePopulation({ population: result.population, runId });
+          if (!result?.refreshed) lastAutonomy = time() - I.DIALOGUE_REFRESH_MS + 30000;
+        })
+        .catch(error => { if (epoch === timeline) { lastAutonomy = time() - I.DIALOGUE_REFRESH_MS + 30000; console.warn('[RoomAutonomy]', error.message); } })
+        .finally(() => { if (epoch === timeline) autonomyPending = false; });
     }
     const p = population();
     const threat = ctx.actors.find(a => a.type === 'monster' && I.allegiance(a) === 'Hostile' && actorVisible(a, ctx, 3.2) &&
@@ -381,14 +398,16 @@
       root.beginEncounterCombat?.(threat.name);
     }
   }
-  function reset() {
+  function reset({ paused = false } = {}) {
+    timeline++;
+    lastVisit = lastAutonomy = lastTick = 0; visitPending = autonomyPending = pausePending = false;
     if (subtitleReportTimer !== null && typeof clearTimeout === 'function') clearTimeout(subtitleReportTimer);
     subtitleReportTimer = null; subtitleReports.length = 0; subtitleHistory.length = 0;
     root.DungeonAreaTitles?.reset?.();
     populations.clear(); queue.length = 0; pendingDialogue.length = 0; seen.clear(); recentSpeakers.clear(); active = null; room = null;
     pauseTotal = 0; pausedAt = 0; root.gamePaused = false;
     if (panel) panel.hidden = true;
-    setPaused({ paused: false });
+    setPaused({ paused });
   }
   async function reviveForTesting(event) {
     event?.stopPropagation();
@@ -453,7 +472,7 @@
     root.addEventListener('pagehide', flushSubtitleReports);
     setInterval(tick, 500);
   }
-  root.DungeonLife = { population, receivePopulation, receiveDialogue, receiveEncounter, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
+  root.DungeonLife = { population, receivePopulation, restorePopulation, receiveDialogue, receiveEncounter, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
     subtitleDiagnostics: () => subtitleHistory.map(report => ({ ...report })),
     actorAllegiance: actor => I.allegiance(population()?.actors?.[actor.name || actor.Name] || actor, root.latestUpdatedData?.monstersState) };
   document.addEventListener('DOMContentLoaded', init);

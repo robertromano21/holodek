@@ -22,9 +22,10 @@ const K = Object.assign({ gam: 0.6, gN: 0.6, gH: 4, slew: 10, rng: 1, jit: 0.002
   gNv: 0.45, apV0: 0.85, apV1: 1.0, brV: 0.1, nFloor: 0.004, vtilt: 1.6, vtF: 2600, slewV: 5, slewNv: 16, closSl: 12, tailF: 120, fadeMs: 20, bFloor: 0, consAp: 0.8, vbar: 1, stressL: 1.3, postS: 0.8, unstrS: 0.92, onW: 0.6, onMs: 20, pkPad: 10, pkVar: 0.5, relV: 3 /* ADSR release ~72 ms: harmonic chips decay into pauses instead of stepping to digital zero */ }, JSON.parse(process.env.SIDVOICE_K || '{}'));
 const VFIX = (process.env.SIDVOICE_VFIX ?? '1') !== '0'; // 0 = pre-voicefix behaviour (A/B)
 const CONTOUR = String(process.env.SIDVOICE_CONTOUR || 'b').toLowerCase(); // a = Piper F0 only, b = smooth contour (default), c = b + speaking-scale snap
-let X10 = String(process.env.SIDVOICE_CHIP || '8580') === '10582', X10F = String(process.env.SIDVOICE_X10F || 'lvl,mute,fmt'), XL = X10 && X10F.includes('lvl'), XM = X10 && X10F.includes('mute'), XN = X10 && X10F.includes('fenv'), XF = X10 && X10F.includes('fmt'); // 10582 extended chip (jsid.js), voice only: SIDVOICE_CHIP=10582 (default 8580); features SIDVOICE_X10F (default lvl,mute,fmt; fenv opt-in)
-let NOTCH = String(process.env.SIDVOICE_CHIP || '8580') === '10582' && process.env.SIDVOICE_NOTCH === '1'; const BEDGE = process.env.SIDVOICE_BURST_EDGE !== '0', BEB = +(process.env.SIDVOICE_BURST_EDGE_BIAS_MS || 0) / 1000, BFG = +(process.env.SIDVOICE_BURST_FORM_G || 1); /* 10582 NOISEFORM burst edge (default on; SIDVOICE_BURST_EDGE=0 disables) */ const NOISEFORM = process.env.SIDVOICE_NOISEFORM !== '0', LINEAR = process.env.SIDVOICE_LINEAR === '1'; /* 10582 only: NOISEFORM (default on, SIDVOICE_NOISEFORM=0 disables) = movable noise formants on bursts/frication (formant voices on noise, $1F-$23); LINEAR (default off) = 8-bit level from linear amplitude, no gamma, short release */ /* 10582 output notch on /l/ (default off) */
+let X10 = String(process.env.SIDVOICE_CHIP || '10582') === '10582', X10F = String(process.env.SIDVOICE_X10F || 'lvl,mute,fmt'), XL = X10 && X10F.includes('lvl'), XM = X10 && X10F.includes('mute'), XN = X10 && X10F.includes('fenv'), XF = X10 && X10F.includes('fmt'); // 10582 default; SIDVOICE_CHIP=8580 opts out; fenv stays opt-in for speech
+let NOTCH = String(process.env.SIDVOICE_CHIP || '10582') === '10582' && process.env.SIDVOICE_NOTCH === '1'; const BEDGE = process.env.SIDVOICE_BURST_EDGE !== '0', BEB = +(process.env.SIDVOICE_BURST_EDGE_BIAS_MS || 0) / 1000, BFG = +(process.env.SIDVOICE_BURST_FORM_G || 1); /* 10582 NOISEFORM burst edge (default on; SIDVOICE_BURST_EDGE=0 disables) */ const NOISEFORM = process.env.SIDVOICE_NOISEFORM !== '0', LINEAR = process.env.SIDVOICE_LINEAR === '1'; /* 10582 only: NOISEFORM (default on, SIDVOICE_NOISEFORM=0 disables) = movable noise formants on bursts/frication (formant voices on noise, $1F-$23); LINEAR (default off) = 8-bit level from linear amplitude, no gamma, short release */ /* 10582 output notch on /l/ (default off) */
 const CLOCKFIX = (process.env.SIDVOICE_CLOCKFIX ?? '1') !== '0'; // tick clock fix: MultiSid plays exactly HZ updates/s (was round(sr/HZ) samples per tick: 2450 instead of 2400 -> speech ~2% fast vs the analysis)
+const Articulation = require('./articulation');
 const CONS = VFIX && (process.env.SIDVOICE_CONS ?? '1') !== '0', Cons = require('./cons'); // consonant model (place cues), see cons.js
 const PULL = process.env.SIDVOICE_PULL !== undefined ? +process.env.SIDVOICE_PULL : 0; // optional scale pull in contour b (0 = off)
 const K_BASE = K, HZ_BASE = HZ;
@@ -252,7 +253,8 @@ function voice(item, opts = {}) {
       let f0 = f[0] > 0 ? f[0] * W : 0;
       // glottal-cycle clock: at each new cycle draw per-cycle jitter / shimmer and nudge upper-harmonic phases (cycle-to-cycle variation)
       if (f0) { gph += f0 / HZ; if (gph >= 1) { gph -= Math.floor(gph); cj = (rnd() + rnd() - 1) * K.cjit * (P.jitMul ?? 1); cs = 1 + (rnd() + rnd() - 1) * K.cshim; for (let k = 5; k <= 44; k++) pdn[k] = (rnd() - 0.5) * K.cphase * (K.ldisp && f0 < 140 ? K.lcph : 1) * k * 0.1; } }
-      if (f0) f0 *= 1 + cj + (P.tremAmt ? P.tremAmt * Math.sin(2 * Math.PI * (P.tremRate || 6.5) * n / HZ) : 0);// already mapped onto the character's speaking scale (intonation) vrun = f0 ? vrun + 1 : 0; ph += 2 * Math.PI * vibR / HZ;
+      if (f0) f0 *= 1 + cj + (P.tremAmt ? P.tremAmt * Math.sin(2 * Math.PI * (P.tremRate || 6.5) * n / HZ) : 0);
+      vrun = f0 ? vrun + 1 : 0; ph += 2 * Math.PI * vibR / HZ;
       if (f0) f0 *= 1 + flk * (P.jitMul ?? 1) + jw * 2 * K.jit + (rnd() - 0.5) * 2 * K.jitW + vibD * Math.min(1, Math.max(0, (vrun - 60 * R) / (80 * R))) * Math.sin(ph); // vibrato only on held vowels
       sh = (1 + sw * 2 * K.shim) * (f0 ? cs : 1);
       const voiced = f0 > 0 && !end;
@@ -330,10 +332,11 @@ function voice(item, opts = {}) {
         const ap = apAt(f, bf), a = envAt(f, bf) / G * Math.sqrt(1 - ap) * K.gH * (P.bright ?? 1) * tiltG(bf); setChip(w, c, osc, 0x20, units(a), osc * 2, 0x20); });
       // voicefix noise gate: noise opens by REAL aperiodicity (mean of the 3.7-9.3 kHz bands: fricatives, bursts, aspiration) and closes on
       // vowels; breath only adds a small gated share on voiced frames (no constant ~6 kHz floor); near-silent frames get no noise at all.
-      let gv = 1, quiet = false, nSoft = 1; if (VFIX && !end) { let am = 0; for (let q = 6; q < BANDS.length; q++) am += f[2][q]; am /= BANDS.length - 6; gv = voiced ? Math.max(0, Math.min(1, (am - K.apV0) / (K.apV1 - K.apV0))) : 1; let em = -1e9; for (const v of f[1]) em = Math.max(em, v); const rq = Math.exp(em) / G; quiet = rq < K.nFloor; nSoft = Math.min(1, Math.max(0, (rq - K.nFloor) / (3 * K.nFloor))) ** 2; } // soft downward expander (no gate clicks)
+      const noise = item.detailPlan ? Articulation.frameAt(item.noiseFrames, item.detailPlan, x, f) : f;
+      let gv = 1, quiet = false, nSoft = 1; if (VFIX && !end) { let am = 0; for (let q = 6; q < BANDS.length; q++) am += noise[2][q]; am /= BANDS.length - 6; gv = voiced ? Math.max(0, Math.min(1, (am - K.apV0) / (K.apV1 - K.apV0))) : 1; let em = -1e9; for (const v of noise[1]) em = Math.max(em, v); const rq = Math.exp(em) / G; quiet = rq < K.nFloor; nSoft = Math.min(1, Math.max(0, (rq - K.nFloor) / (3 * K.nFloor))) ** 2; } // soft downward expander (no gate clicks)
       const nm = CP && !end && cfi >= 0 ? CP.nm[cfi] : null, ng = nm ? CP.ng[cfi] : 1; if (CP && !end && cfi >= 0 && CP.vn[cfi] > gv) gv = CP.vn[cfi]; if (nm) quiet = false;
       if (NF) { let am = 0; for (let q = 6; q < BANDS.length; q++) am += f[2][q]; am /= BANDS.length - 6; const was = nfOn; inEW = !!EW && EW.some(([a, b]) => x >= a && x < b); nfOn = !end && (inEW || (!quiet && (!!nm || (!voiced && am > (K.nfAp ?? 0.6))))); // burst / fricative frames only; vowels stay on the harmonic stack
-        if (nfOn) { const L = hz => Math.log(Math.max(1e-9, envAt(f, hz))), pk = []; let mx = -1e9; // peaks of the Piper envelope (output Hz)
+        if (nfOn) { const L = hz => Math.log(Math.max(1e-9, envAt(noise, hz))), pk = []; let mx = -1e9; // peaks of the Piper envelope (output Hz)
           for (let hz = 900; hz <= Math.min(M.maxHz * 0.95, 10000); hz += 50) { const v = L(hz); if (v > mx) mx = v; if (v >= L(hz - 150) && v >= L(hz + 150)) pk.push([hz, v]); }
           pk.sort((p, q) => q[1] - p[1]); const sel = []; for (const q of pk) { if (q[1] < mx - (K.nfDr ?? 1.6)) break; if (sel.every(o => Math.abs(o[0] - q[0]) > 600)) sel.push(q); if (sel.length >= 4) break; }
           sel.sort((p, q) => p[0] - q[0]);
@@ -342,7 +345,7 @@ function voice(item, opts = {}) {
             const a = Math.exp(v) / G * Math.sqrt(Math.max(K.consAp, apAt(f, hz0))) * K.gNv * nSoft * Math.min(2, ng) * (K.nfG ?? (LIN ? 12 : 5)) * nfB[j] / 500, lv = Math.max(0, Math.min(255, Math.round(255 * units(a) / 45 * (inEW ? BFG : 1)))), hzr = Math.round(nfS[j]);
             w.push([c, 31, 1 | 1 << 1], [c, 32, hzr & 255], [c, 33, hzr >> 8], [c, 34, Math.round(nfB[j] / 4)], [c, 35, lv]); } }
         else if (was) for (let j = 0; j < 4; j++) { const c = 51 + j; w.push([c, 35, 0], [c, 31, 0], [c, 25, 255], [c, 26, 255], [c, 27, 255]); xLv[c] = -1; } }
-      BANDS.forEach((bf, j) => { const c = 51 + j, ap = nm ? Math.max(K.consAp, apAt(f, bf)) : end || quiet ? 0 : VFIX ? Math.min(1, apAt(f, bf) * gv + (voiced ? breath * 0.6 * K.brV : 0)) : Math.min(1, apAt(f, bf) + (voiced ? breath * 0.6 : 0)), a = end || quiet ? 0 : envAt(f, bf) / G * Math.sqrt(ap) * (VFIX ? K.gNv : K.gN) * (bf >= 4500 ? (VFIX ? 1 : (M.mult > 1 ? K.gNhE : K.gNh)) * (P.bright ?? 1) : 1) * (voiced ? (1 + K.asp * Math.cos(2 * Math.PI * gph)) * (bf >= 2000 ? K.nV : 1) : (hyb ? K.digiN : 1)) * nSoft;
+      BANDS.forEach((bf, j) => { const c = 51 + j, ap = nm ? Math.max(K.consAp, apAt(noise, bf)) : end || quiet ? 0 : VFIX ? Math.min(1, apAt(noise, bf) * gv + (voiced ? breath * 0.6 * K.brV : 0)) : Math.min(1, apAt(noise, bf) + (voiced ? breath * 0.6 : 0)), a = end || quiet ? 0 : envAt(noise, bf) / G * Math.sqrt(ap) * (VFIX ? K.gNv : K.gN) * (bf >= 4500 ? (VFIX ? 1 : (M.mult > 1 ? K.gNhE : K.gNh)) * (P.bright ?? 1) : 1) * (voiced ? (1 + K.asp * Math.cos(2 * Math.PI * gph)) * (bf >= 2000 ? K.nV : 1) : (hyb ? K.digiN : 1)) * nSoft;
         const a2 = nm ? Math.max(a * nm[j] * ng, K.bFloor * nm[j] * Math.min(2, ng)) : a; // place-shaped noise (bursts / fricatives)
         setChip(w, c, 3800, 0x80, units((nfOn ? a * (K.nfBr ?? 0.3) : a2) * (LIN ? (K.nLg ?? 4.5) : 1) * (inEW && bf > 4000 ? Math.pow(10, -(K.bedDb ?? 11) / 20 / (LIN ? 1 : K.gam)) : 1)), bf * alpha, 0x20); // NOISEFORM: fixed bands keep breath/room only, place cues move to the noise formants
         if (nfOn && j < 4) { w.push([c, 24, 0x20 | 15], [c, 25, 0], [c, 26, 0], [c, 27, 0]); xLv[c] = -1; } // host chip: band voices silent (LFSR keeps running as the formant's noise source), formant voice at full master volume
@@ -366,7 +369,7 @@ function stressTiming(item) { const ph = item.phones; if (!VFIX || !ph || !ph.le
   const src = []; let acc = 0; for (let i = 0; i < n; i++) { acc += fac[i]; while (src.length < Math.round(acc)) src.push(i); }
   const cum = new Float64Array(n + 1); for (let i = 0; i < n; i++) cum[i + 1] = cum[i] + fac[i];
   const tw = t => { const x = t * 400, i = Math.max(0, Math.min(n - 1, Math.floor(x))); return (cum[i] + (x - i) * fac[i]) / 400; };
-  return Object.assign({}, item, { frames: src.map(i => item.frames[i]), phones: ph.map(p => ({ c: p.c, t0: tw(p.t0), t1: tw(p.t1) })) }); }
+  return Object.assign({}, item, { frames: src.map(i => item.frames[i]), ...(item.noiseFrames ? { noiseFrames: src.map(i => item.noiseFrames[i]) } : {}), phones: ph.map(p => ({ c: p.c, t0: tw(p.t0), t1: tw(p.t1) })) }); }
 // round4 (R4B): vowel-onset sharpening. In the first ~20 ms after a stop release the analysed envelope is a smear of burst +
 // transition; bias it toward the vowel's own steady-state spectral shape (mean of its middle half), level kept, fading out.
 const STOPS = /^[ptkbdgʔ]$/, VWL = /[aeiouyæɑɒɐəɘɛɜɞɤɪʊʌɔøœɯɵɶʉɨɚɝ]/;
@@ -416,9 +419,18 @@ function burstEdges(item, d) { /* SIDVOICE_BURST_EDGE: per stop phone, closure-e
   const rise = (E, t0) => { let tm = t0 - 0.03, em = 1e9; for (let t = t0 - 0.03; t <= t0 + 0.01; t += 0.002) { const e = E(t); if (e < em) { em = e; tm = t; } } let mx = -1e9; for (let t = tm; t <= t0 + 0.06; t += 0.002) mx = Math.max(mx, E(t)); const th = em + 0.5 * (mx - em); for (let t = tm; t <= t0 + 0.06; t += 0.002) if (E(t) >= th) return t; return null; };
   for (const p of item.phones || []) if (/^[ɡgbdkpt]$/.test(p.c)) { const ta = rise(eA, p.t0), tf = rise(eF, p.t0), e = Math.min(ta ?? 1e9, tf ?? 1e9) - BEB; if (e < 1e8) W.push([e * 400, e * 400 + bw, ta, tf]); }
   return W; }
-function render0(item) { if (BEDGE && X10 && NOISEFORM && !item._ep && !item.bEdge && item.phones) { const d1 = render0(Object.assign({}, item, { _ep: 1 })), it = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))), it2 = (process.env.SIDVOICE_R4B ?? '1') !== '0' ? onsetSharpen(it) : it; const EWs = burstEdges(it2, d1); return render0(Object.assign({}, item, { _ep: 1, bEdge: EWs })); }
+function render0(item) {
+  if (X10 && process.env.SIDVOICE_DETAIL !== '0' && item.noiseFrames && item.noiseFrames.length === item.frames.length && item.phones && item.phones.length) {
+    let prepared = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null })));
+    if ((process.env.SIDVOICE_R4B ?? '1') !== '0') prepared = onsetSharpen(prepared);
+    const detailPlan = Articulation.plan(prepared.noiseFrames, prepared.phones);
+    const d = render0b(Object.assign({}, prepared, { detailPlan, bEdge: BEDGE ? detailPlan.bursts : null, _prepared: true }));
+    d.articulation = { mode: 'detail', frames: detailPlan.mix.length, activeFrames: detailPlan.mix.reduce((n, v) => n + (v > 0 ? 1 : 0), 0), bursts: detailPlan.bursts.length };
+    return d;
+  }
+  if (BEDGE && X10 && NOISEFORM && !item._ep && !item.bEdge && item.phones) { const d1 = render0(Object.assign({}, item, { _ep: 1 })), it = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))), it2 = (process.env.SIDVOICE_R4B ?? '1') !== '0' ? onsetSharpen(it) : it; const EWs = burstEdges(it2, d1); return render0(Object.assign({}, item, { _ep: 1, bEdge: EWs })); }
   return render0b(item); }
-function render0b(item) { const _bE = item.bEdge; item = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))); if ((process.env.SIDVOICE_R4B ?? '1') !== '0') item = onsetSharpen(item); if (_bE) item = Object.assign({}, item, { bEdge: _bE }); // digi disabled: SID synthesis only // -> Float32Array at 22050 Hz (DC-blocked)
+function render0b(item) { const _bE = item.bEdge; if (!item._prepared) { item = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))); if ((process.env.SIDVOICE_R4B ?? '1') !== '0') item = onsetSharpen(item); } if (_bE) item = Object.assign({}, item, { bEdge: _bE }); // digi disabled: SID synthesis only // -> Float32Array at 22050 Hz (DC-blocked)
   const Dg = item.digi && item.audio ? require('./digi') : null, Md = modeOf(item.mode);
   if (Dg && item.digi.mix === 'full') { const d = Dg.digi(item.audio, Md, item.digi); d.sr = Md.sr; const g = 0.25 / (d.unit); for (let k = 0; k < d.length; k++) d[k] *= g; return d; }
   const B = bestOf(item); if (B && !item.hz) item = Object.assign({}, item, { hz: B.hz, k: Object.assign({}, B.k, item.k || {}) });
@@ -435,4 +447,4 @@ function render0b(item) { const _bE = item.bEdge; item = stressTiming(phoneSnap(
     for (let k = 0; k < L; k++) d[k] += g[k] * gain; }
   return d;
 }
-module.exports = { stressTiming, phoneSnap, snapMeasure, STATS, voice, render, digiWeight, SR, MODES, modeOf, VERSION: (X10 ? (NOTCH ? 43 : 41) : VFIX ? (CONS ? (!CLOCKFIX ? ((process.env.SIDVOICE_SNAP ?? '1') === '0' ? 29 : 30) : (process.env.SIDVOICE_SNAP ?? '1') === '0' ? 31 : 32) : 25) : 24) + (NOISEFORM ? 100 : 0) + (NOISEFORM && BEDGE ? 100 : 0) }; // +100 burst-edge cache bump // +100: noise-formant cache bump (10582 renders keyed by chip in index.js)
+module.exports = { stressTiming, phoneSnap, snapMeasure, STATS, voice, render, digiWeight, SR, MODES, modeOf, VERSION: 1000 + (X10 ? (NOTCH ? 43 : 41) : VFIX ? (CONS ? (!CLOCKFIX ? ((process.env.SIDVOICE_SNAP ?? '1') === '0' ? 29 : 30) : (process.env.SIDVOICE_SNAP ?? '1') === '0' ? 31 : 32) : 25) : 24) + (NOISEFORM ? 100 : 0) + (NOISEFORM && BEDGE ? 100 : 0) }; // +1000: identity/vibrato/detail-analysis revision; chip and detail mode also key the speech cache.

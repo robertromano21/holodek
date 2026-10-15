@@ -2,6 +2,8 @@
 const fs = require('fs');
 const path = require('path');
 const { createCanvas } = require('canvas');
+// Keep the seed local to this synchronous renderer, not the application's RNG.
+const Math = Object.create(globalThis.Math);
 
 const BASE_SIZE = 32;
 const UPSCALE  = 10; // 320x320
@@ -1180,8 +1182,12 @@ function drawPillar(ctx, palette) {
 }
 
 // ===== Main entry point (modified to support custom tiles) =====
-function generateSpriteFromStyle(style, tileType, name = 'sprite') {
-  const outDir = path.join(__dirname, '../sid/sprites');
+function generateSpriteFromStyle(style, tileType, name = 'sprite', options = {}) {
+  if (!/^[a-z0-9_,.-]+$/i.test(name) || name.includes('..')) throw Error('Invalid sprite name.');
+  let seed = 2166136261;
+  for (const c of JSON.stringify({ style, tileType, name })) seed = globalThis.Math.imul(seed ^ c.charCodeAt(0), 16777619);
+  Math.random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; };
+  const outDir = options.directory || path.join(__dirname, '../sid/sprites');
   ensureDir(outDir);
 
   const canvas = createCanvas(BASE_SIZE * UPSCALE, BASE_SIZE * UPSCALE);

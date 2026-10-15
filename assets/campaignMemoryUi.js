@@ -111,12 +111,12 @@
     slot.imported = current === slot;
   }
   async function searchArchive(slot, query, roomKey) {
-    const options = { roomKey, limit: 6, maxChars: M.MAX_CONTEXT };
+    const options = { roomKey, limit: 6, maxChars: M.MAX_CONTEXT, maxText: 700 };
     if (slot.count <= M.MAX_RECORDS) return slot.index.search(query, options);
     // Search older pages too, keeping only top candidates in RAM when the campaign outgrows the hot index.
     const db = await database(), candidates = new Map(); let page = M.createIndex(slot.runId, [], 512);
     function finishPage() {
-      for (const row of page.search(query, options)) candidates.set(row.id, row);
+      for (const row of page.search(query, options)) candidates.set(row.id, page.get(row.id));
       if (candidates.size > 24) {
         const best = [...candidates.values()].sort((a, b) => b.score - a.score || b.turn - a.turn).slice(0, 24);
         candidates.clear(); best.forEach(row => candidates.set(row.id, row));

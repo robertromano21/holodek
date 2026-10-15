@@ -77,11 +77,12 @@ function applyConf(Q, c) {
 }
 function applyMood(P, mood, cad, conf) {
   const M = MOODS[mood] || {}, Q = Object.assign({}, P);
-  for (const k of ['moodF0', 'moodRange', 'bright', 'breathAdd', 'jitMul', 'tremAmt', 'tremRate', 'accentMul', 'declMul', 'finalAdd']) if (M[k] !== undefined) Q[k] = M[k];
+  for (const k of ['moodF0', 'moodRange', 'breathAdd', 'jitMul', 'tremAmt', 'tremRate', 'accentMul', 'declMul', 'finalAdd']) if (M[k] !== undefined) Q[k] = M[k];
+  Q.bright = (P.bright ?? 1) * (M.bright ?? 1);
   if (M.raspAdd) Q.rasp = (Q.rasp || 0) + M.raspAdd;
   Q.rate = (P.rate || 4.8) * (M.rate || 1) * (cad === 'cmd' ? 1.08 : 1);
   Q.loud = (M.loud || 1) * (cad === 'cmd' ? 1.1 : cad === 'excl' ? 1.08 : 1);
-  Q.pause = { sad: 1.3, weary: 1.35, calm: 1.25, menacing: 1.2, excited: 0.75, angry: 0.8, fearful: 0.85, joyful: 0.9 }[mood] || 1;
+  Q.pause = (P.pause ?? P.pauses ?? 1) * ({ sad: 1.3, weary: 1.35, calm: 1.25, menacing: 1.2, excited: 0.75, angry: 0.8, fearful: 0.85, joyful: 0.9 }[mood] || 1);
   Q.ns = (M.ns || 1) * (conf !== undefined && conf < 0 ? 1 - 0.15 * conf : 1); Q.mood = mood; Q.cad = cad;
   return conf === undefined ? Q : applyConf(Q, conf);
 }

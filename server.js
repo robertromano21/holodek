@@ -1,4 +1,4 @@
-require('./serverLogger').installServerLogger();
+const serverLog = require('./serverLogger').installServerLogger();
 
 const express = require('express');
 const { createGameJsonParser, gameJsonErrorHandler, createRoomDatabaseReceiver } = require('./gameStateTransport');
@@ -42,6 +42,7 @@ app.use(createGameJsonParser());
 app.use(cors());
 require('./retort/gameModels').install(app);
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
+require('./retort/audioPalette').install(app, sharedState); // same-score 8580/10582 audition pairs, rendered off-thread
 // Stock / Enhanced SID switch (♫ panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
 const SidMode = require('./retort/sidMode');
 app.get('/sid-mode', (req, res) => res.json({ mode: SidMode.get() }));
@@ -1138,8 +1139,23 @@ app.get('/get-room-dungeon', (req, res) => {
 
 app.use(gameJsonErrorHandler);
 
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+require('./saveGames').install(app, { state: sharedState,
+  isBusy: () => inputTaskInFlight || npcAutonomyTickInFlight || [...tasks.values()].some(t => t.status === 'processing'),
+  onRestored: checkpoint => { roomDatabaseReceiver.reset(); tasks.clear(); MusicSlots.reset(); lastAutonomyAt = 0;
+    const population = sharedState.getRoomPopulation(checkpoint.roomKey);
+    if (population) population.dialogueResumePending = true;
+    SidMode.set(checkpoint.settings.sidMode);
+    prerenderRoomSong(checkpoint.roomKey);
+    const audio = MusicSlots.latest();
+    if (sharedState.getRoomMusic(sharedState.getLastCoords()) && !audio.url) throw Error('Room music renderer did not produce a WAV.');
+    return audio; }
 });
+
+const lifecycle = require('./serverLifecycle').install(app, { port, state: sharedState, dice: actionDice,
+  isBusy: () => inputTaskInFlight || npcAutonomyTickInFlight || [...tasks.values()].some(t => t.status === 'processing'),
+  beforeClose: () => { for (const client of clients.slice()) client.res.end(); },
+  flush: () => serverLog?.close()
+});
+lifecycle.listen();
 
 module.exports = { broadcast };

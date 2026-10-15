@@ -83,6 +83,6 @@ test('the full opening scene is indexed as room history without treating narrati
   const rows = CampaignMemory.exportRecords(f.state);
   assert.equal(rows.length, 1); assert.equal(rows[0].roomKey, '0,0,0');
   assert.equal(rows[0].kind, 'room-history'); assert.equal(rows[0].authority, 'reported');
-  assert.equal(rows[0].speaker, ''); assert.deepEqual(rows[0].witnesses, ['New Adventurer']);
+  assert.equal(rows[0].speaker, ''); assert.deepEqual(rows[0].witnesses, ['New Adventurer', 'Mortacia']);
   assert.match(fs.readFileSync('server.js', 'utf8'), /await retortWithUserInput\(specialInput, broadcast, combatMode\);\s*CampaignMemory\.rememberRoomHistory/);
 });

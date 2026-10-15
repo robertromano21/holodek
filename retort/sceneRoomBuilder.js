@@ -583,4 +583,20 @@ function applySurfaceArt(dungeon,spec) {
   return {status:'built',count:placed.length,requested:art.length,frescoes:placed.filter(a=>a.kind==='fresco').length,
     murals:placed.filter(a=>a.kind==='fresco'&&Math.max(a.size.x,a.size.y)>1).length};
 }
-module.exports = { applySceneGraphics, applySurfaceArt, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom, layoutKey, SCENE_GFX_VERSION };
+function rebuildSceneGraphics(dungeon, geoKey) {
+  const spec = dungeon.sceneSpec;
+  if (!spec) return;
+  // applySceneGraphics also prepares tile definitions. Work on a disposable
+  // drawing copy and copy back URLs only, never overwrite gameplay/voxel state.
+  const drawing = JSON.parse(JSON.stringify({ tiles: dungeon.tiles, customTiles: dungeon.customTiles,
+    visualStyle: dungeon.visualStyle, generation: dungeon.generation }));
+  applySceneGraphics(drawing, spec, { geoKey, customTiles: drawing.customTiles });
+  for (const [name, tile] of Object.entries(drawing.tiles)) if (dungeon.tiles[name]) dungeon.tiles[name].url = tile.url;
+  for (const art of dungeon.surfaceArt || []) {
+    const glyphs = spec.puzzleMechanism?.glyphs || [];
+    const palette = art.kind === 'fresco' || art.kind === 'mosaic' && art.style ? SurfaceArt.frescoPalette(art) : dungeon.visualStyle?.palette || spec.palette || {};
+    const r = librarySprite({ kind: 'restored-art', version: 1, art, palette, glyphs }, 'scene_art', ctx => SurfaceArt.paint(ctx, createCanvas, art, palette, glyphs));
+    if (dungeon.tiles[art.tile]) dungeon.tiles[art.tile].url = r.url;
+  }
+}
+module.exports = { applySceneGraphics, applySurfaceArt, rebuildSceneGraphics, placeSceneLandmarks, placeSceneObjects, saveStoredRoom, loadStoredRoom, layoutKey, SCENE_GFX_VERSION };

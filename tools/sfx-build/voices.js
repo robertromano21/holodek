@@ -6,7 +6,8 @@
 //   vox_growl1/2          : beast growl/snarl (low saw ring-modulated by noisy tri, low-pass opening and closing)
 //   vox_whisper1/2, vox_hiss : undead/spirit breath (noise through sweeping band-pass / high-pass)
 // Run on the build box: node voices.js <outDir>
-const B = require('./buildSfx.js'), { shot, midi, ad, sr, rng } = B, off = { gate: 0 };
+module.exports = B => {
+const { shot, midi, ad, sr, rng } = B, off = { gate: 0 };
 const lerp = (a, b, x) => a + (b - a) * Math.max(0, Math.min(1, x));
 const VOW = { a: [700, 560], e: [900, 1050], i: [1250, 1400], o: [480, 380], u: [330, 280] };
 for (const [v, [c0, c1]] of Object.entries(VOW)) shot('vox_syl_' + v + '_A', 7, t => ({
@@ -26,4 +27,5 @@ for (const [v, c0, c1] of [['a', 520, 420], ['o', 360, 300]]) shot('vox_regal_' 
 [['vox_whisper1', 18, 900, 1500, 'bp'], ['vox_whisper2', 14, 1400, 800, 'bp'], ['vox_hiss', 16, 1700, 1900, 'hp']].forEach(([n, len, c0, c1, mode]) =>
   shot(n, len, t => ({ v: [{ hz: 3200 + Math.sin(t * 1.7) * 900, wave: 'noise', gate: t < len - 5, ad: ad(5, 6), sr: sr(10, 7) }, off, off],
     f: { cut: lerp(c0, c1, t / len) + Math.sin(t * 2.1) * 120, res: 9, route: 1, mode, vol: 15 } }), { tail: 0.2, gain: 0.8 }));
-console.log('voices done');
+};
+if (require.main === module) { module.exports(require('./buildSfx.js')); console.log('voices done'); }

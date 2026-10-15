@@ -324,4 +324,17 @@ function ensureTraitSpecsForConsole(consoleText, broadcast) {
   }
 }
 
-module.exports = { ensureTraitSpec, requestTraitSpecs, getCachedTraitSpecs, ensureTraitSpecsForConsole, buildMessages, CACHE_FILE };
+function restoreCachedTraitSpecs(entries) {
+  // No AI requests: restore the chosen salt, variation, proportions and trait
+  // recipe even if the disposable character-traits.json cache was cleaned up.
+  const restored = {};
+  for (const e of Object.values(entries)) {
+    if (!e?.name || e.source !== 'llm' || !e.traits) continue;
+    const sheet = PC.normalizeSheet(e.appearance || { name: e.name });
+    restored[keyOf(e.name)] = { ...e, sheet, sheetKey: sheetKeyOf(sheet) };
+  }
+  loadCache(); Object.assign(cache, restored);
+  for (const key of Object.keys(restored)) { const retry = retryState.get(key); if (retry?.timer) clearTimeout(retry.timer); retryState.delete(key); }
+  if (Object.keys(restored).length) saveCacheSoon();
+}
+module.exports = { ensureTraitSpec, requestTraitSpecs, getCachedTraitSpecs, restoreCachedTraitSpecs, ensureTraitSpecsForConsole, buildMessages, CACHE_FILE };

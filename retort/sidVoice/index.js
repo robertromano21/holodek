@@ -7,8 +7,8 @@ const { Worker } = require('worker_threads');
 const clean = s => String(s || '').replace(/([^.!?,;:\s])\s*\n+/g, '$1.\n').replace(/(\w)\s+["\u201c](?=\w)/g, '$1, ').replace(/(\w)["\u201d]\s+(?=\w)/g, '$1, ').replace(/["\u201c\u201d]/g, '').replace(/\s+/g, ' ').trim();
 const chunksOf = line => clean(line).split(/(?<=[.!?]['\u2019)\]]*)\s+(?=\S)/).map(clean).filter(Boolean);
 const h = s => crypto.createHash('sha1').update(s).digest('hex').slice(0, 16);
-const hash32 = s => { let x = 2166136261; for (const c of String(s)) x = Math.imul(x ^ c.charCodeAt(0), 16777619); return x >>> 0; };
 const Mood = require('./mood'), VOC_VERSION = require('./voc64').VERSION || 1, SidMode = require('../sidMode');
+const VoiceProfile = require('./profile');
 const stats = { jobs: 0, failures: 0, last: [] }, MAX_PREFETCH = 24;
 let worker = null, seq = 0, busy = false, disabled = null; const pending = new Map(), queue = [];
 function startWorker() {
@@ -29,24 +29,17 @@ function run(msg, urgent) {
 }
 // --- voice profiles (sent by the client's sfx.js voiceProfile when a room is entered; hashed default otherwise) ---
 const profiles = new Map();
-// Character overrides (named voices). Mortacia: warm maternal alto/mezzo, female formants, gentle breath, low warmth, steady legato.
-const OVERRIDES = { mortacia: { f0: 182, fs: 1.04, alpha: 1.0, breath: 0.1, rasp: 0, range: 2.3, rate: 4.0, conf: 0.85, warm: 0.3, vibAmt: 0.7, vibRate: 4.8, scale: [0, 2, 4, 5, 7, 9], pull: 0, accent: 2.2, decl: 2.5 } };
-function clampProfile(P) { const o = OVERRIDES[String(P.name || '').toLowerCase().split(/\s+/)[0]] || null;
-  const base = { name: P.name, kind: P.kind || 'humanoid', f0: Math.max(90, Math.min(235, +P.f0 || 130)), fs: Math.max(0.92, Math.min(1.05, +P.fs || 1)),
-  rasp: (+P.rasp || 0) * 0.35, breath: Math.min(0.45, (+P.breath || 0) * 0.6), range: Math.min(4.5, Math.max(2, +P.range || 3.2)), rate: +P.rate || 4.8, ...(P.conf !== undefined ? { conf: Math.max(-1, Math.min(1, +P.conf)) } : {}) };
-  // speaking scale: each character's own favoured pitch targets and accent spread (derived from name hash + pitch range)
-  Object.assign(base, { scaleIdx: hash32(String(P.name) + '#scale') % 5, pull: 0, accent: +(1.4 * base.range / 3.2).toFixed(2), decl: 2 });
-  if (P.accent) base.accent_ = String(P.accent); if (P.race) base.race = String(P.race).slice(0, 40);
-  // voicefix identity = centre pitch + range: undead/necromantic voices sit lower and narrower (contour, not scale, carries the melody)
-  if (base.kind === 'undead' && !o) { base.f0 = Math.max(90, base.f0 * 0.9); base.range = Math.max(2, base.range * 0.85); }
-  return o ? Object.assign(base, o) : base; }
 function profileOf(name) {
-  if (profiles.has(name)) return profiles.get(name);
-  const r = i => (hash32(name + '#' + i) % 1000) / 1000;
-  return clampProfile({ name, f0: 105 + r(1) * 110, fs: 0.94 + r(2) * 0.12, breath: 0.08 + r(5) * 0.1, rasp: r(6) * 0.2, range: 3.2, rate: 4.6 + r(9) });
+  return profiles.get(VoiceProfile.keyOf(name)) || VoiceProfile.fallback(name);
 }
 // --- caches ---
-const tracks = new Map(), wavs = new Map();
+const tracks = new Map(), trackSizes = new Map(), wavs = new Map();
+function trimTracks() {
+  let frames = [...trackSizes.values()].reduce((sum, n) => sum + n, 0);
+  while (tracks.size > 120 || frames > 60000) { const key = tracks.keys().next().value;
+    frames -= trackSizes.get(key) || 0; tracks.delete(key); trackSizes.delete(key); }
+  stats.analysisCacheFrames = frames;
+}
 const lru = (m, k, v, max) => { m.delete(k); m.set(k, v); while (m.size > max) m.delete(m.keys().next().value); return v; };
 const SPEED = +(process.env.SIDVOICE_SPEED || 0.83);
 // SID digi layer (digi.js): SIDVOICE_DIGI = hybrid (64-SID vocoder body + triangle/TEST-bit digi voice for consonants and
@@ -62,24 +55,32 @@ const Accent = require('./accent');
 const withAccent = P => { if ((process.env.SIDVOICE_ACCENT ?? '1') === '0') return Object.assign({}, P, { accentName: 'neutral' }); const a = Accent.accentOf(Object.assign({}, P, { accent: P.accent_ })), t = Accent.traitsOf(a);
   return Object.assign({}, P, { accentName: a, f0: P.f0 * (t.f0Mul || 1), rasp: Math.min(1, (P.rasp || 0) + (t.raspAdd || 0)), range: P.range * t.rangeMul, pull: P.pull ?? t.pull, accentMul: (P.accentMul ?? 1) * t.accentMul, rate: P.rate * t.rateMul, arch: t.arch, emphSt: 2.2 }); };
 function track(text, ls, urgent, ns = 1, pm = 1, voice = 'lj', acc = null) {
-  const k = voice + '|' + JSON.stringify(acc) + '|' + ls + '|' + ns + '|' + pm + '|' + text; if (tracks.has(k)) return lru(tracks, k, tracks.get(k), 300);
-  const p = run({ type: 'track', text, ls, ns, pm, voice, acc }, urgent).then(m => { stats.last.push({ text: text.slice(0, 40), ...m.ms }); if (stats.last.length > 20) stats.last.shift(); return { frames: m.frames, syl: m.syl, ph: m.ph, phones: m.phones, audio: m.audio }; });
-  p.catch(() => tracks.delete(k)); return lru(tracks, k, p, 300);
+  const k = voice + '|' + JSON.stringify(acc) + '|' + ls + '|' + ns + '|' + pm + '|' + text; if (tracks.has(k)) return lru(tracks, k, tracks.get(k), 120);
+  const p = run({ type: 'track', text, ls, ns, pm, voice, acc }, urgent).then(m => {
+    if (tracks.get(k) === p) { trackSizes.set(k, m.frames.length); trimTracks(); }
+    stats.last.push({ text: text.slice(0, 40), ...m.ms }); if (stats.last.length > 20) stats.last.shift();
+    return { frames: m.frames, noiseFrames: m.noiseFrames, syl: m.syl, ph: m.ph, phones: m.phones }; });
+  p.catch(() => { if (tracks.get(k) === p) { tracks.delete(k); trackSizes.delete(k); trimTracks(); } });
+  tracks.set(k, p); trimTracks(); return p;
 }
-let voiceChip = String(process.env.SIDVOICE_CHIP || '8580') === '10582' ? '10582' : '8580', voiceNotch = process.env.SIDVOICE_NOTCH === '1'; /* voice chip (♫ panel, POST /voice/chip); per-request ?chip= overrides */
+let voiceChip = String(process.env.SIDVOICE_CHIP || '10582') === '10582' ? '10582' : '8580', voiceNotch = process.env.SIDVOICE_NOTCH === '1', voiceDetail = process.env.SIDVOICE_DETAIL !== '0'; /* voice chip (♫ panel, POST /voice/chip); per-request ?chip= overrides */
 const chipOf = c => String(c) === '10582' ? '10582' : String(c) === '8580' ? '8580' : null;
-function wavFor(speaker, text, urgent, mode, moodHint, chip, notch) {
-  mode = SidMode.norm(mode) || SidMode.get(); chip = chipOf(chip) || voiceChip; notch = chip === '10582' && (notch == null ? voiceNotch : !!notch); text = clean(text); const P0 = profileOf(speaker), cad = Mood.cadenceOf(text), mood = Mood.moodOf(text, P0.kind, moodHint), conf = Mood.confOf(text, P0);
+function wavFor(speaker, text, urgent, mode, moodHint, chip, notch, options = {}) {
+  mode = SidMode.norm(mode) || SidMode.get(); chip = chipOf(chip) || voiceChip; notch = chip === '10582' && (notch == null ? voiceNotch : !!notch); text = clean(text);
+  const detail = chip === '10582' && (options.detail ?? voiceDetail) && process.env.SIDVOICE_DETAIL !== '0';
+  const P0 = options.profile ? VoiceProfile.normalize({ ...options.profile, name: speaker }) : profileOf(speaker), cad = Mood.cadenceOf(text), mood = Mood.moodOf(text, P0.kind, moodHint), conf = Mood.confOf(text, P0);
   text = Mood.hesitate(text, conf);
-  const P = withAccent(Object.assign(Mood.applyMood(P0, mood, cad, conf), { guide: guideOf(P0) })), acc = { accent: P.accentName, emph: Accent.emphasisOf(text, mood) }, key = h('a1|' + JSON.stringify(acc) + '|' + 'v' + VOC_VERSION + '|' + JSON.stringify(DIGI) + '|' + mode + '|chip' + chip + (notch ? 'n' : '') + '|' + mood + '|' + cad + '|' + conf + '|' + JSON.stringify(P) + '|' + text);
+  const P = withAccent(Object.assign(Mood.applyMood(P0, mood, cad, conf), { guide: guideOf(P0) })), acc = { accent: P.accentName, emph: Accent.emphasisOf(text, mood) }, key = h('a1|' + JSON.stringify(acc) + '|' + 'v' + VOC_VERSION + '|detail' + detail + '|' + JSON.stringify(DIGI) + '|' + mode + '|chip' + chip + (notch ? 'n' : '') + '|' + mood + '|' + cad + '|' + conf + '|' + JSON.stringify(P) + '|' + text);
   if (wavs.has(key)) { const e = lru(wavs, key, wavs.get(key), 200); if (urgent) e.urgent = true; return e.p; }
   const t0 = Date.now(), e = { urgent };
   // renders are short: always run them ahead of queued analyses
-  e.p = track(text, lsOf(P), urgent, +P.ns.toFixed(3), +(P.pause || 1).toFixed(2), P.guide, acc).then(tk => run({ type: 'render', P, frames: tk.frames, syl: tk.syl, ph: tk.ph, phones: tk.phones, audio: null, digi: null, mode, chip, notch, cad, final: /\?\s*$/.test(text) ? '?' : '.' }, true)).then(m => {
+  e.p = track(text, lsOf(P), urgent, +P.ns.toFixed(3), +(P.pause || 1).toFixed(2), P.guide, acc).then(tk => run({ type: 'render', P, frames: tk.frames, noiseFrames: detail ? tk.noiseFrames : null, syl: tk.syl, ph: tk.ph, phones: tk.phones, audio: null, digi: null, mode, chip, notch, cad, final: /\?\s*$/.test(text) ? '?' : '.' }, true)).then(m => {
     const pcm = Buffer.from(m.pcm.buffer, m.pcm.byteOffset, m.pcm.byteLength), b = Buffer.alloc(44), SRo = m.sr || 22050;
     b.write('RIFF', 0); b.writeUInt32LE(36 + pcm.length, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
     b.writeUInt32LE(SRo, 24); b.writeUInt32LE(SRo * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(pcm.length, 40);
-    stats.jobs++; return { mood, cad, conf, wav: Buffer.concat([b, pcm]), dur: pcm.length / 2 / SRo, ms: Date.now() - t0 }; });
+    const articulation = m.articulation || { mode: 'legacy' };
+    const renders = stats.renders || (stats.renders = []); renders.push({ speaker, chip, articulation, f0: P0.f0, fs: P0.fs, ...m.ms }); if (renders.length > 20) renders.shift();
+    stats.jobs++; return { mood, cad, conf, articulation, wav: Buffer.concat([b, pcm]), dur: pcm.length / 2 / SRo, ms: Date.now() - t0 }; });
   e.p.catch(err => { stats.failures++; wavs.delete(key); });
   lru(wavs, key, e, 200); return e.p;
 }
@@ -89,7 +90,7 @@ function prefetch(rows, urgent = false) {
       for (const c of chunksOf(row.line).slice(0, 12)) wavFor(row.speaker, c, urgent).catch(() => {}); } } catch (e) { console.warn('[SidVoice] prefetch', e.message); }
   return rows;
 }
-function setProfiles(list) { let n = 0; for (const P of Array.isArray(list) ? list : []) if (P && P.name) { profiles.set(String(P.name), clampProfile(P)); n++; }
+function setProfiles(list) { let n = 0; for (const P of Array.isArray(list) ? list : []) if (P && P.name) { profiles.set(VoiceProfile.keyOf(P.name), VoiceProfile.normalize(P)); n++; }
   startWorker(); if (worker && !stats.warmed) { stats.warmed = true; run({ type: 'warm' }, false).catch(() => {}); } return n; }
 function install(app, express) {
   app.post('/voice/profiles', express.json({ limit: '200kb' }), (req, res) => res.json({ ok: true, profiles: setProfiles(req.body && req.body.profiles) }));
@@ -99,16 +100,25 @@ function install(app, express) {
       .filter(r => r && typeof r.speaker === 'string' && typeof r.line === 'string').map(r => ({ speaker: r.speaker.slice(0, 70), line: r.line.slice(0, 4000) }));
     prefetch(rows, true); res.json({ ok: true, rows: rows.length });
   });
-  app.get('/voice/line.wav', async (req, res) => {
-    const speaker = String(req.query.speaker || ''), text = String(req.query.text || '').slice(0, 400); if (!speaker || !text) return res.status(400).end();
+  const serveLine = async (req, res) => {
+    const q = req.method === 'POST' ? req.body || {} : req.query;
+    const speaker = String(q.speaker || '').slice(0, 100), text = String(q.text || '').slice(0, 2000); if (!speaker || !text) return res.status(400).end();
+    const profile = q.profile && typeof q.profile === 'object' && !Array.isArray(q.profile) ? { ...q.profile, name: speaker } : null;
+    if (profile) profiles.set(VoiceProfile.keyOf(speaker), VoiceProfile.normalize(profile));
     const t0 = Date.now();
-    try { const r = await wavFor(speaker, text, true, req.query.clock, undefined, req.query.chip, req.query.notch == null ? undefined : req.query.notch === '1');
-      res.set({ 'X-Voice-Mood': r.mood, 'X-Voice-Cadence': r.cad, 'X-Voice-Confidence': String(r.conf), 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Voice-Dur': r.dur.toFixed(3), 'X-Voice-Wait-Ms': String(Date.now() - t0), 'X-Voice-Synth-Ms': String(r.ms) }); res.end(r.wav);
+    try { const r = await wavFor(speaker, text, true, q.clock, undefined, q.chip, q.notch == null ? undefined : q.notch === true || q.notch === '1', { profile, detail: q.detail == null ? undefined : q.detail !== false && q.detail !== '0' });
+      res.set({ 'X-Voice-Mood': r.mood, 'X-Voice-Cadence': r.cad, 'X-Voice-Confidence': String(r.conf), 'X-Voice-Articulation': r.articulation.mode,
+        'Content-Type': 'audio/wav', 'Cache-Control': 'no-store', 'X-Voice-Dur': r.dur.toFixed(3), 'X-Voice-Wait-Ms': String(Date.now() - t0), 'X-Voice-Synth-Ms': String(r.ms) }); res.end(r.wav);
     } catch (e) { res.status(503).json({ error: e.message }); }
-  });
-  app.get('/voice/chip', (req, res) => res.json({ chip: voiceChip, notch: voiceNotch }));
-  app.post('/voice/chip', express.json({ limit: '1kb' }), (req, res) => { const c = chipOf(req.body && req.body.chip); if (c) voiceChip = c; if (req.body && 'notch' in req.body) voiceNotch = !!req.body.notch; console.info('[SidVoice] voice chip', voiceChip, voiceNotch ? '+notch' : ''); res.json({ chip: voiceChip, notch: voiceNotch }); });
-  app.get('/voice/status', (req, res) => res.json({ mode: SidMode.get(), chip: voiceChip, notch: voiceNotch, disabled, queue: queue.length, busy, cachedLines: wavs.size, profiles: [...profiles.keys()], ...stats }));
+  };
+  app.get('/voice/line.wav', serveLine);
+  app.post('/voice/line.wav', express.json({ limit: '16kb' }), serveLine);
+  app.get('/voice/chip', (req, res) => res.json({ chip: voiceChip, notch: voiceNotch, detail: voiceDetail }));
+  app.post('/voice/chip', express.json({ limit: '1kb' }), (req, res) => { const c = chipOf(req.body && req.body.chip); if (c) voiceChip = c; if (req.body && 'notch' in req.body) voiceNotch = !!req.body.notch;
+    if (req.body && typeof req.body.detail === 'boolean') voiceDetail = req.body.detail && process.env.SIDVOICE_DETAIL !== '0';
+    console.info('[SidVoice] voice chip', voiceChip, voiceNotch ? '+notch' : '', voiceDetail ? 'detail' : 'legacy'); res.json({ chip: voiceChip, notch: voiceNotch, detail: voiceDetail }); });
+  app.get('/voice/status', (req, res) => res.json({ mode: SidMode.get(), chip: voiceChip, notch: voiceNotch, detail: voiceDetail, synthesis: 'oscillators-noise-filters-only', profileVersion: VoiceProfile.VERSION,
+    disabled, queue: queue.length, busy, cachedLines: wavs.size, profiles: [...profiles.values()].map(P => P.name), voiceProfiles: [...profiles.values()], ...stats }));
   // warm Piper at server start so the first line is not slowed by model loading
   setTimeout(() => { startWorker(); if (worker && !stats.warmed) { stats.warmed = true; run({ type: 'warm' }, false).catch(e => console.warn('[SidVoice] warm failed', e.message)); } }, 1500);
 }

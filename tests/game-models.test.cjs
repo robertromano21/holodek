@@ -8,6 +8,14 @@ const { createModelService, catalog, install } = require('../retort/gameModels')
 const Transport = require('../retort/modelTransport');
 const { createRuntime } = require('../retort/gameRetort');
 const noLog = () => {};
+
+test('new sessions default to Luna while explicit 4.1 and original saved selections remain restorable', () => {
+  const models = createModelService();
+  assert.equal(models.current().id, 'gpt-6-luna');
+  assert.equal(models.restore('gpt-4.1-mini').id, 'gpt-4.1-mini');
+  assert.equal(models.restore('original').id, 'original');
+  assert.equal(models.profile('gpt-4.1-mini').id, 'gpt-4.1-mini');
+});
 const packet = (delta, finish_reason = null) => ({ choices: [{ index: 0, delta, finish_reason }] });
 const text = content => [packet({ content }), packet({}, 'stop'), { choices: [], usage: { prompt_tokens: 40, completion_tokens: 5, total_tokens: 45 } }];
 function fixture(replies = [], initial = 'gpt-6-luna', timeoutMs = 500) {
@@ -38,7 +46,7 @@ test('account model discovery intersects verified capabilities, excludes retired
   const result = await Promise.all([models.view(), models.view()]);
   assert.equal(calls, 1);
   assert.deepEqual(result[0].models.map(row => row.id), ['gpt-6-luna', 'gpt-4.1-mini']);
-  assert.equal(result[0].reasoning, 'off'); assert.equal(result[0].current.id, 'original');
+  assert.equal(result[0].reasoning, 'off'); assert.equal(result[0].current.id, 'gpt-6-luna');
   now = Date.parse('2027-01-14T12:00:00Z');
   assert.deepEqual((await models.view()).models.map(row => row.id), ['gpt-6-luna']);
 });

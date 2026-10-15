@@ -44,16 +44,21 @@ const PATCHES = {
     bright_saw:  { waveform:'SAW',   pulseWidth:0,    adsr:{attack:0,decay:8,sustain:9,release:3},  filter:{type:'LP',cutoff:1280,resonance:8},  pwmSpeed:0, vibrato:1 },
     flute_tri:    { waveform:'TRI',   pulseWidth:0,    adsr:{attack:2,decay:8,sustain:11,release:6}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0, vibrato:1 },
     bright_pulse: { waveform:'PULSE', pulseWidth:2048, adsr:{attack:0,decay:7,sustain:9,release:3},  filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:40, vibrato:1 },
+    plucked_pulse:{ waveform:'PULSE', pulseWidth:640, adsr:{attack:0,decay:6,sustain:2,release:2}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:8, vibrato:0 },
+    reed_saw:    { waveform:'SAW', pulseWidth:0, adsr:{attack:1,decay:9,sustain:8,release:5}, filter:{type:'LP',cutoff:1152,resonance:5}, pwmSpeed:0, vibrato:1 },
+    bell_tri:    { waveform:'TRI', pulseWidth:0, adsr:{attack:0,decay:11,sustain:1,release:8}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0, vibrato:0 },
   },
   BASS: {
     thick_pulse:  { waveform:'PULSE', pulseWidth:1536, adsr:{attack:0,decay:9,sustain:6,release:2},  filter:{type:'LP',cutoff:768,resonance:6},  pwmSpeed:12 },
     round_tri:    { waveform:'TRI',   pulseWidth:0,    adsr:{attack:0,decay:9,sustain:8,release:2},  filter:{type:'NONE',cutoff:768,resonance:0}, pwmSpeed:0 },
     growl_saw:    { waveform:'SAW',   pulseWidth:0,    adsr:{attack:0,decay:8,sustain:5,release:2},  filter:{type:'LP',cutoff:640,resonance:10}, pwmSpeed:0 },
+    plucked_tri:  { waveform:'TRI', pulseWidth:0, adsr:{attack:0,decay:7,sustain:2,release:2}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0 },
   },
   ARP: {
     glass_tri:    { waveform:'TRI',   pulseWidth:0,    adsr:{attack:0,decay:6,sustain:3,release:3},  filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0 },
     chip_pulse:   { waveform:'PULSE', pulseWidth:768,  adsr:{attack:0,decay:5,sustain:2,release:2},  filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:30 },
     soft_pulse:   { waveform:'PULSE', pulseWidth:2048, adsr:{attack:1,decay:6,sustain:4,release:4},  filter:{type:'LP',cutoff:896,resonance:4},  pwmSpeed:16 },
+    chime_tri:    { waveform:'TRI', pulseWidth:0, adsr:{attack:0,decay:10,sustain:1,release:7}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0 },
   },
 };
 const BASS_STYLES = ['octave_pump','root_fifth','gallop','walking','pedal','lament','ostinato_fourth'];
@@ -119,7 +124,20 @@ function inRange(midi, lo, hi) { while (midi < lo) midi += 12; while (midi > hi)
 
 // ---------- rhythm ----------
 // durations in sixteenths units: 16->1, 8->2, 4->4
-const U = { 16:1, 8:2, 4:4 };
+const U = { 16:1, 8:2, 4:4, 2:8, 1:16 };
+const PHRASE_FORMS = ['sentence','period','arch','call_response','ostinato'];
+const TEXTURES = ['arpeggios','counterpoint','drone','sparse'];
+const DEVELOPMENT_TRANSFORMS = ['transpose_up','transpose_down','invert','retrograde','fragment_sequence','tail_answer'];
+const ARRANGEMENT_ARCS = {
+  gradual_reveal:['thin','thin','full','full','counterpoint','crest','full','thin'],
+  ebb_and_flow:['full','thin','counterpoint','full','thin','crest','full','thin'],
+  long_journey:['full','counterpoint','crest','thin','full','counterpoint','crest','thin']
+};
+const SUITE_FORMS = {
+  single_theme: [], room_reflection: ['reflective'], room_threat: ['danger'],
+  reflection_threat: ['reflective','danger'], threat_reflection: ['danger','reflective'],
+  pilgrimage: ['reflective','mortacia']
+};
 const RHYTHM_BANK = [
   [8,8,4,8,8,4].map(Number),          // tum-tum TAA x2
   [4,8,8,4,4],
@@ -130,6 +148,15 @@ const RHYTHM_BANK = [
   [4,8,16,16,4,4],
   [8,4,8,4,4],                        // syncopated
 ];
+function developContour(contour, operation, count, step) {
+  if(!DEVELOPMENT_TRANSFORMS.includes(operation))throw Error('Unknown motif development operation.');
+  const base=contour.map(n=>n-contour[0]);
+  const shape=operation==='invert'?base.map(n=>-n):operation==='retrograde'?[...base].reverse():
+    operation==='tail_answer'?base.slice(-Math.max(3,Math.ceil(base.length/2))):
+    operation==='fragment_sequence'?base.slice(0,Math.max(3,Math.ceil(base.length/2))):base;
+  return Array.from({length:count},(_,i)=>shape[i%shape.length]+(operation==='transpose_up'?Math.abs(step):operation==='transpose_down'?-Math.abs(step):
+    operation==='fragment_sequence'?Math.floor(i/shape.length)*step:0));
+}
 function rhythmUnits(r) { return r.reduce((a,d)=>a+(U[d]||2),0); }
 function fixRhythm(r) {
   let out = (Array.isArray(r)?r:[]).map(Number).filter(d=>U[d]);
@@ -196,6 +223,32 @@ function buildLead(ctx) {
     return out[out.length-1].midi;
   }
   const tonicPc = NOTES.indexOf(key), fifthPc = (tonicPc+7)%12;
+  if (ctx.compositionVersion === 3) {
+    const statement = { rhythm:motifR, contour:motifC }, answer = { rhythm:answerR, contour:ctx.answerC },
+      contrast = { rhythm:ctx.bR, contour:ctx.bC };
+    const phrases = {
+      sentence: [statement,statement,answer,answer,statement,statement,answer,answer,contrast,contrast,contrast,answer],
+      period: [statement,answer,statement,answer,contrast,answer,statement,answer,contrast,contrast,statement,answer],
+      arch: [statement,statement,answer,answer,contrast,contrast,contrast,answer,statement,statement,answer,answer],
+      call_response: [statement,null,answer,null,statement,null,answer,answer,contrast,null,contrast,answer],
+      ostinato: [statement,statement,statement,answer,statement,statement,contrast,answer,contrast,contrast,statement,answer]
+    }[ctx.phraseForm];
+    const anchor = tonicMidi + (ctx.startHigh ? 4 : 0);
+    phrases.forEach((phrase,i) => {
+      if (!phrase) { steps.push(REST(1)); return; }
+      if (i===8 && ctx.leitmotif==='quote') {
+        renderBar(i,LEITMOTIF.rhythm,LEITMOTIF.contour,anchor); return;
+      }
+      if (i===8 && ctx.leitmotif==='vary') {
+        renderBar(i,LEITMOTIF.rhythm,motifC,anchor); return;
+      }
+      renderBar(i,phrase.rhythm,phrase.contour,anchor+(phrase===contrast?5:0),{
+        shift: i===1||i===5?ctx.seqStep:0, breath:i===6,
+        ...(i===3?{endPc:fifthPc}:i===7?{endPc:tonicPc}:i===11?{endPc:barsChords[11].pcs[1]}:{})
+      });
+    });
+    return steps;
+  }
   const B = [];
   // Phrase A (bars 0-3): statement, sequence, statement varied, answer -> half cadence (5th)
   let a0 = tonicMidi + (ctx.startHigh ? 4 : 0);
@@ -270,10 +323,11 @@ function buildArp(barsChords, style, r, fullBars, frameArp, drums) {
     barsChords.forEach((ch, i) => {
       const R = inRange(48 + ch.root, 52, 63);
       const third = (ch.pcs[1] - ch.pcs[0] + 12) % 12, fifth = (ch.pcs[2] - ch.pcs[0] + 12) % 12;
-      const rhythm = (i % 4 === 3) ? [8,8,8,8,4,8,8] : [8,8,8,8,8,8,8,8];
+      const driving = drums === 'driving';
+      const rhythm = driving ? Array(16).fill(16) : (i % 4 === 3) ? [8,8,8,8,4,8,8] : [8,8,8,8,8,8,8,8];
       rhythm.forEach((d, k) => {
         // classic SID drums interleaved in the chord voice: noise snare on beats 2 and 4
-        if (drums && d === 8 && (k === 2 || k === 6)) steps.push({ note:'C', octave:5, duration:8, wave:'NOISE' });
+        if (drums && (driving ? k===4||k===12||i%4===3&&k===15 : d===8&&(k===2||k===6))) steps.push({ note:'C', octave:5, duration:d, wave:'NOISE' });
         else steps.push({ ...midiToStep(R, d), chord:[0, third, fifth] });
       });
     });
@@ -319,19 +373,19 @@ function normalizePlan(plan, description, seedStr) {
   p.scale = SCALES.includes(String(p.scale).toLowerCase()) ? String(p.scale).toLowerCase() : pick(r, M.scales);
   // Phrygian is reserved for dread/underworld/battle; royal/sacred/tavern/nature/throne rooms get their own colours.
   const kwMood = detectMood(description);
-  if (p.scale === 'phrygian' && (!['dread','underworld','battle'].includes(mood) || ['royal','throne','sacred','tavern','nature'].includes(kwMood))) p.scale = pick(r, M.scales.filter(x=>x!=='phrygian'));
+  if (p.compositionVersion!==3 && p.scale === 'phrygian' && (!['dread','underworld','battle'].includes(mood) || ['royal','throne','sacred','tavern','nature'].includes(kwMood))) p.scale = pick(r, M.scales.filter(x=>x!=='phrygian'));
   const minorish = ['minor','dorian','phrygian'].includes(p.scale);
   p.picardy = minorish && (p.picardy === true || ((mood==='throne'||mood==='sacred'||mood==='heroic') && p.picardy !== false));
   p.leitmotif = ['main','quote','vary','none'].includes(p.leitmotif) ? p.leitmotif : (mood==='throne' ? 'main' : (['underworld','heroic','sacred'].includes(mood) ? 'quote' : (r() < 0.35 ? 'vary' : 'none')));
   // the full theme is reserved for Mortacia / Sepulchra / Hades rooms; elsewhere it is only quoted
   if (p.leitmotif === 'main' && kwMood !== 'throne') p.leitmotif = 'quote';
   p.frameArp = typeof p.frameArp === 'boolean' ? p.frameArp : (['battle','heroic','throne','underworld','adventure','dread'].includes(mood) && r() < 0.6);
-  // Key comes from the room seed (LLMs collapse to D/A minor); a stated preferred key only wins 1/3 of the time.
+  // v2 seed diversity stays intact; validated v3 author choices are honored exactly.
   const seededKey = pick(r, NOTES);
-  p.key = (NOTES.includes(String(p.key).toUpperCase()) && r() < 0.33) ? String(p.key).toUpperCase() : seededKey;
-  // tempo: keep the LLM's choice only if it fits the mood band, else a seeded tempo from the band
-  p.bpm = M.bpm.includes(Number(p.bpm)) && r() < 0.6 ? Number(p.bpm) : pick(r, M.bpm);
-  const progOk = PROGRESSIONS[p.progression] && PROGRESSIONS[p.progression].modes.includes(p.scale) && r() < 0.6;
+  p.key = (NOTES.includes(String(p.key).toUpperCase()) && (p.compositionVersion===3 || r() < 0.33)) ? String(p.key).toUpperCase() : seededKey;
+  // v2 uses mood bands; v3 already validates the full supported tempo set.
+  p.bpm = (p.compositionVersion===3?BPM_ALLOWED.includes(Number(p.bpm)):M.bpm.includes(Number(p.bpm)) && r() < 0.6) ? Number(p.bpm) : pick(r, M.bpm);
+  const progOk = PROGRESSIONS[p.progression] && PROGRESSIONS[p.progression].modes.includes(p.scale) && (p.compositionVersion===3 || r() < 0.6);
   if (!progOk) { const cands = Object.keys(PROGRESSIONS).filter(k => PROGRESSIONS[k].modes.includes(p.scale)); const pref = M.prog.filter(k=>cands.includes(k)); p.progression = pick(r, pref.length?pref:cands); }
   p.leadPatch = PATCHES.LEAD[p.leadPatch] ? p.leadPatch : pick(r, M.lead);
   p.bassPatch = PATCHES.BASS[p.bassPatch] ? p.bassPatch : pick(r, M.bass);
@@ -342,12 +396,12 @@ function normalizePlan(plan, description, seedStr) {
   let mr = fixRhythm(p.motifRhythm);
   if (!mr || mr.length < 5 || new Set(mr).size < 2) mr = pick(r, RHYTHM_BANK).slice();
   p.motifRhythm = mr;
-  if (p.leitmotif === 'main') { p.motifRhythm = LEITMOTIF.rhythm.slice(); p.motifContour = LEITMOTIF.contour.slice(); }
+  if (p.leitmotif === 'main' && p.compositionVersion!==3) { p.motifRhythm = LEITMOTIF.rhythm.slice(); p.motifContour = LEITMOTIF.contour.slice(); }
   const n = p.motifRhythm.length;
   const c = Array.isArray(p.motifContour) ? p.motifContour.map(x=>Math.max(-5,Math.min(7,Math.round(Number(x)||0)))) : [];
   // keep LLM contour if it has shape (a leap or >=3 distinct steps); extend it to the rhythm length
   const shaped = c.length >= 3 && (new Set(c).size >= 3 || c.some(x=>Math.abs(x)>=3));
-  const base = p.leitmotif === 'main' ? LEITMOTIF.contour : (shaped ? c : seededContour(r, n));
+  const base = p.leitmotif === 'main' && p.compositionVersion!==3 ? LEITMOTIF.contour : (shaped ? c : seededContour(r, n));
   p.motifContour = Array.from({length:n}, (_,i) => i < base.length ? base[i] : base[i % base.length] + (i >= base.length ? 1 : 0));
   p.title = String(p.title || 'Room Theme').slice(0, 31);
   return { p, r };
@@ -378,11 +432,14 @@ function chantBar(ch, idx) { // martial modal chant: four quarter notes on chord
 function buildCycle(p, r, prog, opts = {}) {
   const degs = [...prog.A, ...prog.A.slice(0,2), ...(p.scale==='major'||p.scale==='mixolydian'||p.scale==='lydian' ? [4,0] : ['V',0]), ...(opts.bProg || prog.B)];
   if (p.picardy && !opts.noPicardy) degs[7] = 'I+';
+  if (p.compositionVersion===3 && p.phraseForm!=='ostinato') degs[3]=['major','mixolydian','lydian'].includes(p.scale)?4:'V';
   const chords = degs.map(d => chordFor(d, p.key, p.scale));
-  const answerR = fixRhythm([p.motifRhythm[0], p.motifRhythm[1] || 8, 4, 4, 4]) || [8,8,4,4,4];
-  const bR = opts.bR || pick(r, [[8,8,8,8,8,8,4],[16,16,8,8,8,4,4],[8,16,16,8,8,8,8,4]]).slice();
-  const bC = p.motifContour.map((x,i)=> (i%2? -x : x) ).concat([1,2]);
-  const lead = buildLead({ leitmotif: opts.leitmotif || p.leitmotif, r, key:p.key, scale:p.scale, barsChords:chords, motifR:p.motifRhythm, motifC:p.motifContour,
+  const authored = p.compositionVersion === 3;
+  const answerR = authored?p.answerRhythm:fixRhythm([p.motifRhythm[0], p.motifRhythm[1] || 8, 4, 4, 4]) || [8,8,4,4,4];
+  const bR = authored?p.contrastRhythm:opts.bR || pick(r, [[8,8,8,8,8,8,4],[16,16,8,8,8,4,4],[8,16,16,8,8,8,8,4]]).slice();
+  const bC = authored?p.contrastContour:p.motifContour.map((x,i)=> (i%2? -x : x) ).concat([1,2]);
+  const lead = buildLead({ compositionVersion:p.compositionVersion, phraseForm:p.phraseForm, answerC:p.answerContour,
+    leitmotif: opts.leitmotif || p.leitmotif, r, key:p.key, scale:p.scale, barsChords:chords, motifR:p.motifRhythm, motifC:p.motifContour,
     answerR, bR, bC, varR: opts.varR || pick(r, RHYTHM_BANK), seqStep: opts.seqStep ?? pick(r, [1,2,-1,3]), startHigh: !!opts.startHigh });
   return { chords, lead: toBars(lead) };
 }
@@ -395,18 +452,29 @@ function arrangeFromPlan(plan, description = '', seedStr = '') {
 // One theme rendered as a full section list (used alone for single-theme songs, or as a movement of a suite).
 // opts: targetBars, intro (bool), coda (bool), maxDev, feel ('half'|'normal'|'driving'), counter (bool), raw (bool)
 function themeBody(p, r, opts = {}) {
-  const prog = PROGRESSIONS[p.progression];
+  const authored = p.compositionVersion === 3;
+  const prog = authored ? { A:p.harmonyA.map(d=>d==='V'?d:Number(d)), B:p.harmonyB.map(d=>d==='V'?d:Number(d)),
+    label:PROGRESSIONS[p.progression].label+' / '+PROGRESSIONS[p.contrastProgression].label } : PROGRESSIONS[p.progression];
   const sc = scalePcs(p.key, p.scale);
   const calm = ['nature','sacred','melancholy','mystic'].includes(p.mood);
-  p.drums = p.frameArp && ['battle','heroic'].includes(p.mood);
-  const startHigh = r() < 0.5, seqStep = pick(r, [1,2,-1,3]);
+  p.drums = authored?p.percussion!=='none':p.frameArp && ['battle','heroic'].includes(p.mood);
+  const startHigh = authored?p.register==='high':r() < 0.5, seqStep = authored?p.sequenceStep:pick(r, [1,2,-1,3]);
 
   // --- material ---
   const main = buildCycle(p, r, prog, { startHigh, seqStep });                       // the loved 12-bar A A' B
   const altProgs = Object.keys(PROGRESSIONS).filter(k => k !== p.progression && PROGRESSIONS[k].modes.includes(p.scale));
-  const makeDev = (k) => buildCycle(p, r, prog, { startHigh: (k % 2 === 0) ? !startHigh : startHigh, seqStep: [2,-1,3,1][k % 4],
-      bProg: altProgs.length ? PROGRESSIONS[altProgs[k % altProgs.length]].B : prog.A.slice().reverse(),
-      leitmotif: p.leitmotif === 'none' ? (k % 2 ? 'none' : 'vary') : 'quote', noPicardy: true });
+  const makeDev = (k) => {
+    let developed=p;
+    if(authored){
+      const motifContour=developContour(p.motifContour,p.developmentPath[k%p.developmentPath.length],p.motifRhythm.length,p.sequenceStep);
+      developed={...p,motifContour,
+        answerContour:developContour(motifContour,p.answerTransform,p.answerRhythm.length,p.sequenceStep),
+        contrastContour:developContour(motifContour,p.contrastTransform,p.contrastRhythm.length,-p.sequenceStep)};
+    }
+    return buildCycle(developed, r, prog, { startHigh: (k % 2 === 0) ? !startHigh : startHigh, seqStep: authored?p.sequenceStep*(k%2?-1:1):[2,-1,3,1][k % 4],
+      bProg: authored?prog.B:altProgs.length ? PROGRESSIONS[altProgs[k % altProgs.length]].B : prog.A.slice().reverse(),
+      leitmotif: authored?p.leitmotif:p.leitmotif === 'none' ? (k % 2 ? 'none' : 'vary') : 'quote', noPicardy: true });
+  };
   // --- form: Intro | A A' B | A(var) A' Bridge | B' | A A' (return) | Coda ; loops back to Intro ---
   const sections = [];
   const add = (name, chords, lead, part) => sections.push({ name, chords, lead, part });
@@ -439,27 +507,53 @@ function themeBody(p, r, opts = {}) {
   const codaCh = [...main.chords.slice(4,7), chordFor(p.scale==='major'||p.scale==='mixolydian'||p.scale==='lydian' ? 4 : 'V', p.key, p.scale)];
   if (opts.coda !== false) add('coda', codaCh, main.lead.slice(4,8).map((b,i) => i === 3 ? [REST(4), REST(4), REST(4), REST(4)] : sparseLead(b)), 'coda');
 
+  if(authored)sections.forEach((sct,i)=>{
+    const arc=ARRANGEMENT_ARCS[p.arrangementArc];
+    sct.orchestration=['intro','coda'].includes(sct.part)?'thin':arc[Math.min(7,Math.floor(i/sections.length*8))];
+    if(sct.name==='A')sct.orchestration='full';
+    if(sct.part==='intro'||sct.part==='coda')return;
+    if(sct.orchestration==='thin')sct.lead=sct.lead.map((b,j)=>j%2?[...sparseLead(b)]:[REST(1)]);
+    if(sct.orchestration==='crest')sct.lead=sct.lead.map(b=>octaveUp(b));
+  });
+
   // --- accompaniment per section ---
   const allChords = sections.flatMap(sct => sct.chords);
   const feel = opts.feel || 'normal';
   const bassStyle = feel === 'half' ? (['pedal','lament','root_fifth'].includes(p.bassStyle) ? p.bassStyle : 'pedal')
                   : feel === 'driving' ? (['gallop','octave_pump','ostinato_fourth'].includes(p.bassStyle) ? p.bassStyle : 'gallop') : p.bassStyle;
-  const bassBars = toBars(buildBass(allChords, bassStyle, r, sc));
+  const bassBars = authored?sections.flatMap(sct=>toBars(buildBass(sct.chords,sct.orchestration==='thin'?'pedal':bassStyle,r,sc))):toBars(buildBass(allChords, bassStyle, r, sc));
   const arpBars = [];
   let prevLead = null;
   sections.forEach((sct, si) => {
     // counter-melody texture: voice 3 answers the lead one octave down, a bar behind (canon), instead of arpeggios
-    if (opts.counter && sct.part === 'A' && prevLead) {
+    if ((opts.counter || authored && (p.texture==='counterpoint'||p.texture==='arpeggios'&&sct.orchestration==='counterpoint')) && sct.part === 'A' && prevLead) {
       const src = [prevLead[prevLead.length-1], ...sct.lead.slice(0, sct.lead.length-1)];
-      arpBars.push(...src.map(b => b.map(st => st.note === 'REST' ? st : midiToStep(Math.max(48, stepMidi(st) - 12), st.duration))));
+      arpBars.push(...src.map((b,i) => {
+        let pos=0;
+        return b.map(st => {
+          const strong=pos%8===0||U[st.duration]>=4; pos+=U[st.duration];
+          if(st.note==='REST')return st;
+          const m=Math.max(48,stepMidi(st)-12);
+          return midiToStep(authored?inRange(nearestPc(m,strong?sct.chords[i].pcs:sc),48,69):m,st.duration);
+        });
+      }));
       prevLead = sct.lead; return;
     }
     prevLead = sct.lead;
-    const full = (sct.part === 'intro' || feel === 'half') ? [] : (calm && sct.part === 'A') ? [] : [0,1,2,3];
-    const useFrame = feel === 'driving' ? true : (p.frameArp && sct.part !== 'intro' && feel !== 'half');
-    const drumsOn = feel === 'driving' ? (sct.part !== 'intro' && sct.part !== 'coda' && si % 4 !== 3)          // drums drop out every 4th section
+    if(authored && p.texture==='drone') {
+      arpBars.push(...sct.chords.map(ch=>[midiToStep(inRange(48+ch.root,48,59),2),midiToStep(inRange(48+ch.root+7,48,66),2)]));
+      return;
+    }
+    if(authored && p.texture==='sparse') {
+      arpBars.push(...sct.chords.map(ch=>[midiToStep(inRange(48+ch.root,48,59),4),REST(4),midiToStep(inRange(48+ch.pcs[1],48,66),4),REST(4)]));
+      return;
+    }
+    const full = (sct.part === 'intro' || feel === 'half' || authored && sct.orchestration==='thin') ? [] : (calm && sct.part === 'A') ? [] : [0,1,2,3];
+    const useFrame = authored?p.frameArp && sct.orchestration!=='thin':feel === 'driving' ? true : (p.frameArp && sct.part !== 'intro' && feel !== 'half');
+    const drumsOn = authored ? p.percussion!=='none' && sct.orchestration!=='thin' && !['intro','coda'].includes(sct.part) &&
+      (p.percussion!=='sparse'||(sct.part==='B'&&si%2===0)) : feel === 'driving' ? (sct.part !== 'intro' && sct.part !== 'coda' && si % 4 !== 3)          // drums drop out every 4th section
                   : (p.drums && feel !== 'half' && (sct.part === 'B' || sct.part === 'bridge' || si % 2 === 0) && sct.part !== 'intro' && sct.part !== 'coda');
-    arpBars.push(...toBars(buildArp(sct.chords, p.arpStyle, r, full, useFrame, drumsOn)));
+    arpBars.push(...toBars(buildArp(sct.chords, p.arpStyle, r, full, useFrame, drumsOn&&authored&&p.percussion==='driving'?'driving':drumsOn)));
   });
   const leadBars = sections.flatMap(sct => sct.lead);
   if (opts.raw) return { sections, leadBars, bassBars, arpBars, prog, main, sc };
@@ -501,14 +595,15 @@ const ROLE_ORDER = ['room','danger','reflective','mortacia'];
 const SHARE = { room:0.30, danger:0.22, reflective:0.20, mortacia:0.13, ret:0.15 };
 
 function instCmd(patch) { return { cmd:'inst', waveform:patch.waveform, adsr:{...patch.adsr} }; }
-function initFilterCmd(patches) {
+function initFilterCmd(patches, authored = false) {
   const typed = patches.map((pt,i)=>({pt,i})).filter(o => String(o.pt.filter.type).toUpperCase() !== 'NONE');
   const avg = typed.length ? Math.round(typed.reduce((a,o)=>a+o.pt.filter.cutoff,0)/typed.length) : 0;
-  return { cmd:'filter', cutoff: ((avg>>8)&7) << 3, sweep:0, resonance: Math.max(0,...patches.map(pt=>pt.filter.resonance|0)), route: typed.map(o=>o.i) };
+  return { cmd:'filter', cutoff: authored?avg:((avg>>8)&7) << 3, sweep:0, resonance: Math.max(0,...patches.map(pt=>pt.filter.resonance|0)), route: typed.map(o=>o.i) };
 }
 
 function arrangeSuite(plan, description = '', seedStr = '', lengthScale = 1) {
   plan = plan || {};
+  if(plan.compositionVersion===3)return arrangeAuthoredSuite(plan,description,seedStr,lengthScale);
   const r0 = rng(hash32('suite|' + seedStr));
   const { themes: aiThemes, ...globalPlan } = plan;
   const room = normalizePlan(globalPlan, description, seedStr);
@@ -600,13 +695,72 @@ function arrangeSuite(plan, description = '', seedStr = '', lengthScale = 1) {
   return song;
 }
 
+// New compositions retain the proven voice-leading and tracker player, but the
+// model owns the themes, harmony, phrase structure and choice of movements.
+function arrangeAuthoredSuite(plan,description,seedStr,lengthScale){
+  const home=normalizePlan(plan,description,seedStr).p,roles=SUITE_FORMS[plan.suiteForm];
+  if(!roles)throw Error('Unknown authored suite form.');
+  const movements=[{role:'room',p:home},...roles.map(role=>{
+    const raw=plan.themes.find(t=>t.role===role);
+    if(!raw)throw Error('Missing authored '+role+' movement.');
+    const p=normalizePlan({...home,...raw,key:NOTES[(NOTES.indexOf(home.key)+raw.keyShift+12)%12],bpm:home.bpm},description,seedStr+'|'+role).p;
+    return{role,p};
+  })];
+  if(roles.length)movements.push({role:'return',p:home});
+  const V=[[],[],[]],forms=[],bar=()=>V[0].reduce((n,b)=>n+b.filter(s=>!s.cmd).reduce((u,s)=>u+U[s.duration],0)/16,0);
+  const totalBars=Math.round(home.bpm*10*lengthScale/16)*4;
+  for(const [i,m]of movements.entries()){
+    const p=m.p,patches=[PATCHES.LEAD[p.leadPatch],PATCHES.BASS[p.bassPatch],PATCHES.ARP[p.arpPatch]];
+    if(i){
+      // Prepare the incoming tonic with two shared-grid bars; no free-text modulation.
+      const sc=scalePcs(p.key,p.scale),major=['major','mixolydian','lydian'].includes(p.scale);
+      const ch=[chordFor(3,p.key,p.scale),chordFor(major?4:'V',p.key,p.scale)],run=[];
+      let pitch=inRange(60+NOTES.indexOf(p.key),64,75);
+      for(let k=0;k<8;k++){pitch--;while(!sc.includes(((pitch%12)+12)%12))pitch--;run.unshift(pitch);}
+      V[0].push([REST(1)],run.map(n=>midiToStep(n,8)));
+      V[1].push(...toBars(buildBass(ch,'pedal',rng(hash32(seedStr+'|transition|'+i)),sc)));
+      V[2].push(...toBars(buildArp(ch,'updown',null,[],false,false)));
+    }
+    V.forEach((v,j)=>v.push(j===0?[instCmd(patches[j]),initFilterCmd(patches,true)]:[instCmd(patches[j])]));
+    const start=bar(),remaining=movements.length-i;
+    // Rebalance remaining movements after phrase rounding. Eight bars selects
+    // the nearest 16-bar development boundary rather than always rounding down.
+    const budget=Math.max(32,Math.round((totalBars-start-(remaining-1)*2)/remaining/4)*4);
+    const raw=themeBody(p,rng(hash32(seedStr+'|'+m.role)),{
+      raw:true,intro:i===0,coda:i===movements.length-1,targetBars:budget+8,maxDev:Math.ceil(budget/16)+1
+    });
+    [raw.leadBars,raw.bassBars,raw.arpBars].forEach((rows,j)=>V[j].push(...rows));
+    forms.push({role:m.role,startBar:start,bars:bar()-start,key:p.key,scale:p.scale,phraseForm:p.phraseForm,texture:p.texture,
+      sections:raw.sections.map(s=>s.name),orchestration:raw.sections.map(s=>s.orchestration),
+      motifRhythm:p.motifRhythm,motifContour:p.motifContour,harmonyA:p.harmonyA,harmonyB:p.harmonyB});
+  }
+  const voices=V.map((rows,i)=>{
+    const patterns=[],order=[],seen=new Map();
+    for(const b of rows){const k=JSON.stringify(b);if(!seen.has(k)){seen.set(k,patterns.length);patterns.push(b);}order.push(seen.get(k));}
+    const patch=[PATCHES.LEAD[home.leadPatch],PATCHES.BASS[home.bassPatch],PATCHES.ARP[home.arpPatch]][i];
+    return{role:['LEAD','BASS','ARP_OR_DRUMS'][i],waveform:patch.waveform,adsr:{...patch.adsr},pulseWidth:patch.pulseWidth,
+      filter:{...patch.filter},pwmSpeed:patch.pwmSpeed||0,vibrato:patch.vibrato||0,patterns,order};
+  });
+  if(voices.some(v=>v.patterns.length>250)){
+    throw Error('Authored score exceeds SID pattern memory. Simplify the development path or suite; do not shorten the exploration score.');
+  }
+  const bars=bar(),song={bpm:home.bpm,key:home.key,scale:home.scale,title:home.title,author:'AI composition / Holodek SID arrangement',voices,
+    plan:{compositionVersion:3,suite:true,suiteForm:home.suiteForm,mood:home.mood,leitmotif:home.leitmotif,
+      motifRhythm:home.motifRhythm,motifContour:home.motifContour,phraseForm:home.phraseForm,texture:home.texture,
+      progression:home.progression,contrastProgression:home.contrastProgression,
+      progressionLabel:PROGRESSIONS[home.progression].label+' / '+PROGRESSIONS[home.contrastProgression].label,
+      themes:forms,form:forms.map(m=>m.role+': '+m.sections.join(' / ')).join(' || '),bars,seconds:Math.round(bars*4*60/home.bpm)}};
+  song.analysis=analyze(song);return song;
+}
+
 function planPromptSpec() {
   return {
     moods: Object.keys(MOODS), scales: SCALES, keys: NOTES, bpm: BPM_ALLOWED,
     progressions: Object.fromEntries(Object.entries(PROGRESSIONS).map(([k,v])=>[k, `${v.label}; modes: ${v.modes.join('/')}`])),
     leadPatches: Object.keys(PATCHES.LEAD), bassPatches: Object.keys(PATCHES.BASS), arpPatches: Object.keys(PATCHES.ARP),
     bassStyles: BASS_STYLES, arpStyles: ARP_STYLES, leitmotif:['main','quote','vary','none'],
+    phraseForms:PHRASE_FORMS,textures:TEXTURES,suiteForms:SUITE_FORMS,developmentTransforms:DEVELOPMENT_TRANSFORMS,arrangementArcs:Object.keys(ARRANGEMENT_ARCS),
   };
 }
 
-module.exports = { arrangeSuite, themeBody, expandVoice, LEITMOTIF, arrangeFromPlan, normalizePlan, planPromptSpec, detectMood, analyze, hash32, PROGRESSIONS, MOODS };
+module.exports = { arrangeSuite, themeBody, expandVoice, LEITMOTIF, arrangeFromPlan, normalizePlan, planPromptSpec, detectMood, analyze, hash32, PROGRESSIONS, MOODS, developContour };

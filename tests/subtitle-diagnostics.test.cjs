@@ -7,6 +7,7 @@ const C = require('../assets/dungeonCartography');
 const continued = require('./fixtures/continued-dialogue.cjs');
 const zharok = require('./fixtures/zharok-dialogue.cjs');
 const edran = require('./fixtures/edran-dialogue.cjs');
+const tarn = require('./fixtures/tarn-recall-dialogue.cjs');
 
 function fixture() {
   let now = 1000;
@@ -476,4 +477,16 @@ test('logged speech can be displayed before a known sheet has a positioned world
     consoleText: 'NPCs in Party: None\nMonsters in Room: None' });
   assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, line);
   assert.equal(f.nodes.get('dungeon-dialogue').hidden, false);
+});
+
+test('all action-led Tarn recollections reach subtitles even across the room with no structured speech labels', () => {
+  const f = fixture();
+  f.ctx.actors = tarn.rows.map((row, index) => ({ ...f.actor, name: row.speaker, type: 'npc', mazeX: 25, mazeY: 20 + index }));
+  f.root.DungeonLife.receiveTurnDialogue(tarn.prose, { ...f.event, dialogue: [], consoleText: '' });
+  for (let i = 0; i < 12; i++) { f.advance(20000); f.root.DungeonLife.tick(); }
+  const displayed = f.reports.filter(row => row.stage === 'displayed');
+  assert.deepEqual([...new Set(displayed.map(row => row.speaker))], tarn.rows.map(row => row.speaker));
+  for (const row of tarn.rows) assert.equal(displayed.filter(part => part.speaker === row.speaker).map(part => part.line).join(' '), row.line);
+  assert.ok(displayed.every(row => row.distance > row.range));
+  assert.ok(!f.reports.some(row => row.stage === 'skipped'));
 });

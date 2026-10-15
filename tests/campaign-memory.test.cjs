@@ -176,5 +176,5 @@ test('chatbotprocessinput preserves its baseline except travel, camera, lock fee
     ].map(line => indent + line).join(source.includes('\r\n') ? '\r\n' : '\n'))
     .replace('unlock door with <keyname>', 'unlock door with &lt;keyname&gt;');
   assert.equal(require('node:crypto').createHash('sha256').update(body.replace(/if \(window\.DEBUG_LOGS\) (?=console\.log\()/g, '')).digest('hex'),
-    '4e7cd886c605d1093585b51fe3399810656a6f440f5086bb0aa9f6e041e1dfc4');
+    '77e3c1828a00dbe7611de17788e2797754289e5371f9aa86933c819598c98153');
 });

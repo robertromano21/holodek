@@ -739,7 +739,7 @@
     const normalized = value => String(value || '').replace(/\s+/g, ' ').trim();
     const witnesses = (Array.isArray(evidence) ? evidence : []).filter(row => allowed.includes(row?.speaker) && typeof row.line === 'string');
     const vocal = '\\b(?:voice|tone|gaze|eyes|lips|mouth|expression|face)\\b';
-    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed)';
+    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed|gives?|gave|shrugs?|shrugged|grunts?|grunted)';
     // Resolve the narrative subject clause by clause, rather than requiring a
     // name immediately beside every quote or possessive voice/gaze reference.
     function narrativeOwner(prefix, previous) {
@@ -750,7 +750,7 @@
         return { speaker: owners.length === 1 ? owners[0] : null, subject: owners.length === 1 ? owners[0] : null, blocked: owners.length !== 1 };
       }
       for (const clause of prefix.match(/[^.!?;\n]+[.!?;]?/g) || []) {
-        if (/\b(?:inscription|engraving|plaque|written|reads|reading|carved words|thinks|thought to|wonders to|silently recalls)\b/i.test(clause)) {
+        if (/\b(?:inscription|inscribed|engraving|engraved|plaque|written|reads|reading|carved words|thinks|thought to|wonders to|silently recalls)\b/i.test(clause)) {
           blocked = true; framed = false; continue;
         }
         if (new RegExp(`\\b(?:you|the player|the narrator)\\s+(?:${verb}|say|tell|answer|respond|reply|ask|speak)\\b|\\byour\\s+(?:voice|words)\\b`, 'i').test(clause)) {
@@ -1102,7 +1102,18 @@
       nextBoss: line('Next Boss') || 'None', nextBossRoom: line('Next Boss Room') || 'None', bossCoordinates: line('Boss Room Coordinates') || 'None',
       adjacentRooms: line('Adjacent Rooms') || 'None' };
   }
-  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, dialogueRecipient, isDown, isAlive, canAct,
+  function dialogueRefreshDelay(population, actors, now = Date.now()) {
+    const nearby = (actors || []).filter(canAct), names = new Set(nearby.map(actor => actor.name));
+    const unread = nearby.some(actor => {
+      const record = actor.type === 'npc' ? population?.companions?.[actor.name] : population?.actors?.[actor.name];
+      return record?.dialogue?.slice(Math.max(0, record.dialogueIndex || 0)).some(line => typeof line === 'string' && line.trim());
+    });
+    const exchange = population?.dialogueQueue?.some(row => row.lines?.length && row.lines.every(line => names.has(line.speaker)));
+    if (nearby.length && !unread && !exchange) return 0;
+    const elapsed = Math.max(0, now - (population?.lastDialogueRefreshAt || now));
+    return Math.max(0, DIALOGUE_REFRESH_MS - elapsed);
+  }
+  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, dialogueRecipient, dialogueRefreshDelay, isDown, isAlive, canAct,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
     attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };

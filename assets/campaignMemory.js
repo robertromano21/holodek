@@ -3,17 +3,21 @@
   else root.CampaignMemory = factory(root.DungeonInhabitants);
 })(typeof window === 'object' ? window : globalThis, function(Inhabitants) {
   'use strict';
-  const VERSION = 1, MAX_TEXT = 1400, MAX_RECORDS = 8192, MAX_CONTEXT = 4800;
-  const stop = new Set('a an and are as at be been but by can could did do does for from had has have how i if in is it its me my of on or our say so that the their them there these they this to us was we were what when where which who will with would you your'.split(' '));
+  const VERSION = 2, MAX_TEXT = 1400, MAX_RECORDS = 8192, MAX_CONTEXT = 4800;
+  const stop = new Set('a about an and are as at be been but by can could did do does for from had has have how i if in is it its me my of on or our say so that the their them there these they this to us was we were what when where which who will with would you your'.split(' '));
   const clusters = ['promise vow oath pledge', 'missing vanished lost disappearance', 'key seal lock unlock',
     'puzzle riddle mechanism sequence', 'defeat kill slain dead killed', 'deliver return give handed',
-    'search investigate inspect examine', 'gate door entrance', 'clue hint inscription rune', 'help assist protect rescue'];
+    'search investigate inspect examine', 'gate door entrance', 'clue hint inscription rune', 'help assist protect rescue',
+    'depart departure leave leaving left farewell stay stayed remain remained behind guardian',
+    'book tome chronicle codex journal', 'keep keeping kept tend tending care protect watch guard guardian'];
+  const queryStop = new Set('ask asked tell told say said party remember remembered recall recollect please'.split(' '));
   const synonyms = new Map();
   const inflections = new Map();
   for (const family of ['promise promised promises promising', 'vow vowed vows', 'kill killed kills killing',
     'defeat defeated defeats defeating', 'search searched searches searching', 'investigate investigated investigating',
     'deliver delivered delivering delivery', 'unlock unlocked unlocking', 'key keys', 'clue clues', 'rune runes',
-    'gate gates', 'door doors', 'puzzle puzzles']) {
+    'gate gates', 'door doors', 'puzzle puzzles', 'remain remains remained remaining', 'stay stays stayed staying',
+    'leave left leaving leaves', 'depart departed departing departure', 'companion companions']) {
     const [root, ...forms] = family.split(' '); forms.forEach(form => inflections.set(form, root));
   }
   const clean = (value, max = MAX_TEXT) => typeof value === 'string' ? value.trim().slice(0, max) : '';
@@ -22,7 +26,10 @@
     return (key(value).match(/[\p{L}\p{N}]+/gu) || []).filter(word => word.length > 1 && !stop.has(word))
       .map(word => inflections.get(word) || word);
   }
-  for (const cluster of clusters) for (const word of cluster.split(' ')) synonyms.set(word, cluster.split(' '));
+  for (const cluster of clusters) {
+    const words = [...new Set(cluster.split(' ').map(word => inflections.get(word) || word))];
+    for (const word of words) synonyms.set(word, words);
+  }
   function roomKey(value) {
     if (typeof value !== 'string') return null;
     const plain = value.trim(), labelled = plain.match(/^X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)$/i);
@@ -44,6 +51,8 @@
       speaker: clean(raw.speaker, 100), turn: Number.isSafeInteger(raw.turn) && raw.turn >= 0 ? raw.turn : 0,
       at: Number.isFinite(raw.at) && raw.at >= 0 ? raw.at : 0, taskBinding: clean(raw.taskBinding, 160),
       evidenceIds: names(raw.evidenceIds).slice(0, 8) };
+    if (clean(raw.topic, 240)) record.topic = clean(raw.topic, 240);
+    if (raw.excerpted === true) record.excerpted = true;
     if (raw.profile && typeof raw.profile === 'object') record.profile = {
       personality: clean(raw.profile.personality, 220), voice: clean(raw.profile.voice, 140),
       history: clean(raw.profile.history, 600), motivation: clean(raw.profile.motivation, 180) };
@@ -65,8 +74,30 @@
   }
   const unwrap = value => clean(value, 24000).replace(/^\$\.(?:user|assistant)\s*`([\s\S]*)`$/, '$1');
   function canReplace(previous, record) {
+    if (previous && record.excerpted && !previous.excerpted) return false;
     return !previous || JSON.stringify(previous) !== JSON.stringify(record) &&
       (!['background', 'adjudicated', 'state'].includes(previous.authority) || ['background', 'adjudicated', 'state'].includes(record.authority));
+  }
+  function linkEpisodes(initial) {
+    const inputs = new Map();
+    const episode = row => `${row.runId}:${row.roomKey}:${row.turn}`;
+    for (const row of initial) if (row.kind === 'player-input' && row.source === 'player-command' && row.authority === 'statement') {
+      const id = episode(row);
+      if (!inputs.has(id)) inputs.set(id, []);
+      inputs.get(id).push(row);
+    }
+    for (const rows of inputs.values()) rows.sort((a, b) => a.at - b.at);
+    return initial.map(row => {
+      if (!(row.kind === 'room-history' && row.source === 'room-turn-narrative' ||
+          row.kind === 'dialogue' && row.authority === 'statement')) return row;
+      const candidates = inputs.get(episode(row)) || [];
+      const input = candidates.filter(input => input.at <= row.at).at(-1) ||
+        (candidates.length === 1 && (!row.at || !candidates[0].at) ? candidates[0] : null);
+      if (!input) return row;
+      // Repair legacy public scenes using the audience recorded at that exchange, never today's party.
+      return { ...row, topic: row.topic || clean(input.text, 240),
+        witnesses: row.kind === 'room-history' ? names([...row.witnesses, ...input.witnesses]) : row.witnesses };
+    });
   }
   function historyRecords(row, context) {
     if (!row || row.runId && row.runId !== context.runId || !row.runId && context.allowLegacy === false ||
@@ -76,7 +107,8 @@
     const roomName = row.roomName || clean(row.gameConsole, 100000).match(/^Room Name:[ \t]*(.*)$/m)?.[1];
     const pc = clean(row.gameConsole, 100000).match(/^PC:[ \t]*(?:\r?\n[ \t]*)?([^\r\n]+)/m)?.[1]?.trim();
     const base = { runId: context.runId, roomKey: geo, roomName, authority: 'reported', source: 'indexeddb-room-history',
-      actors: pc ? [pc] : [], witnesses: pc ? [pc] : [], at: row.at || 0, turn: row.turn || 0 };
+      actors: pc ? [pc] : [], witnesses: names([pc, ...(row.witnesses || [])].filter(Boolean)), at: row.at || 0,
+      turn: row.turn ?? Number(clean(row.gameConsole, 100000).match(/^Turns:[ \t]*(\d+)/m)?.[1] || 0) };
     const identity = `${context.conversationId || ''}:${row.id ?? hash(unwrap(row.prompt) + unwrap(row.response))}`;
     const records = [];
     if (row.kind === 'ambient-dialogue') {
@@ -96,7 +128,8 @@
       // Never index recursive personalNarrative, system prompts, sheets, item JSON or cached alternatives.
       for (const [i, excerpt] of chunks(text).entries()) {
         if (/^(?:Current Game Information|Updated Game Information|PC:|NPCs in Party:)/i.test(excerpt)) continue;
-        records.push({ ...base, id: `history:${identity}:${kind}:${i}`, kind, text: excerpt });
+        records.push({ ...base, id: `history:${identity}:${kind}:${i}`, kind, text: excerpt,
+          ...(kind === 'room-history' ? { topic: clean(unwrap(row.prompt), 240) } : {}) });
       }
     }
     if (Inhabitants && row.gameConsole) {
@@ -104,7 +137,8 @@
       for (const speech of Inhabitants.extractAttributedSpeech(unwrap(row.response), cast)) {
         for (const [i, text] of chunks(speech.line).entries()) records.push({ ...base,
           id: `history:${identity}:speech:${hash(speech.speaker)}:${i}`, kind: 'dialogue', speaker: speech.speaker,
-          actors: [speech.speaker], witnesses: [...new Set([pc, speech.speaker].filter(Boolean))], text });
+          actors: [speech.speaker], witnesses: names([...base.witnesses, speech.speaker]), text,
+          topic: clean(unwrap(row.prompt), 240) });
       }
     }
     return records;
@@ -141,7 +175,7 @@
       if (!canReplace(previous, record)) return null;
       remove(record.id);
       const terms = new Map();
-      for (const word of tokens([record.text, record.roomName, record.kind, record.speaker, ...record.actors].join(' '))) {
+      for (const word of tokens([record.text, record.topic, record.roomName, record.kind, record.speaker, ...record.actors].join(' '))) {
         terms.set(word, (terms.get(word) || 0) + 1);
       }
       records.set(record.id, record); frequencies.set(record.id, terms);
@@ -160,9 +194,11 @@
       return structuredClone(record);
     }
     function search(query, options = {}) {
-      const words = [...new Set(tokens(clean(query, 1200)))].slice(0, 48), expanded = new Map(words.map(word => [word, 1]));
+      const focused = clean(query, 1200).replace(/\b(?:look(?:ing)? after|tak(?:e|ing) care of)\b/gi, 'keep protect');
+      const words = [...new Set(tokens(focused).filter(word => !queryStop.has(word)))].slice(0, 48);
+      const expanded = new Map(words.map(word => [word, 1]));
       for (const word of words) {
-        for (const synonym of synonyms.get(word) || []) if (!expanded.has(synonym)) expanded.set(synonym, .3);
+        for (const synonym of synonyms.get(word) || []) if (!expanded.has(synonym)) expanded.set(synonym, .5);
         if (postings.has(word) || word.length < 5) continue;
         const candidates = new Map();
         for (const gram of grams(word)) for (const term of gramTerms.get(gram) || []) {
@@ -175,6 +211,8 @@
       }
       const hits = new Set();
       for (const term of expanded.keys()) for (const id of postings.get(term) || []) hits.add(id);
+      const semantic = options.semantic instanceof Map ? options.semantic : new Map();
+      for (const [id, similarity] of semantic) if (Number.isFinite(similarity) && similarity >= .25 && records.has(id)) hits.add(id);
       const actors = names(options.actors).map(key), owner = key(options.owner), room = roomKey(options.roomKey);
       if (!words.length && room) for (const row of records.values()) if (row.roomKey === room) hits.add(row.id);
       const scored = [], average = totalLength / Math.max(1, records.size), phrase = key(query);
@@ -183,6 +221,7 @@
         if (options.excludeKinds?.includes(row.kind)) continue;
         if (options.excludeCurrentInput && row.kind === 'player-input' && row.turn === options.turn && key(row.text) === key(query)) continue;
         if (owner && !row.witnesses.some(name => key(name) === owner) && key(row.speaker) !== owner) continue;
+        if (options.qualified && !row.witnesses.some(name => actors.includes(key(name))) && !actors.includes(key(row.speaker))) continue;
         if (options.roomOnly && row.roomKey !== room || options.verifiedOnly && !['adjudicated', 'state'].includes(row.authority)) continue;
         const terms = frequencies.get(id), length = [...terms.values()].reduce((sum, count) => sum + count, 0);
         let score = 0;
@@ -191,6 +230,9 @@
           if (count) score += weight * Math.log(1 + (records.size - df + .5) / (df + .5)) * count * 2.2 /
             (count + 1.2 * (.25 + .75 * length / Math.max(1, average)));
         }
+        // Questions identify an episode; its answer is normally more useful than the old question alone.
+        if (row.kind === 'player-input') score *= .55;
+        if (row.kind === 'room-history') score *= 1.25;
         if (phrase.length > 3 && key(row.text).includes(phrase)) score += 3;
         if (row.roomKey === room) score += .6;
         if (row.actors.some(name => actors.includes(key(name))) || actors.includes(key(row.speaker))) score += .5;
@@ -199,12 +241,32 @@
         scored.push({ ...row, score: Math.round(score * 1000) / 1000 });
       }
       scored.sort((a, b) => b.score - a.score || b.turn - a.turn || b.at - a.at || a.id.localeCompare(b.id));
+      if (semantic.size) {
+        const semanticOrder = [...scored].filter(row => semantic.has(row.id)).sort((a, b) => semantic.get(b.id) - semantic.get(a.id));
+        const semanticRanks = new Map(semanticOrder.map((row, i) => [row.id, i + 1]));
+        const lexical = scored.filter(row => [...expanded.keys()].some(term => frequencies.get(row.id).has(term)));
+        const anchor = lexical[0]?.id;
+        const lexicalRanks = new Map(lexical.map((row, i) => [row.id, i + 1]));
+        for (const row of scored) {
+          const lexicalRank = lexicalRanks.get(row.id), semanticRank = semanticRanks.get(row.id);
+          const exactName = [...row.actors, row.speaker].some(name => key(name).length > 3 && phrase.includes(key(name)));
+          row.keywordScore = row.score;
+          row.score = 1000 * ((lexicalRank ? 1 / (60 + lexicalRank) : 0) +
+            (semanticRank ? 1 / (60 + semanticRank) : 0) + (exactName ? 1 / 61 : 0));
+          if (semanticRank) row.semanticSimilarity = semantic.get(row.id);
+        }
+        // Semantic search is additive: it cannot displace the strongest existing keyword result.
+        scored.sort((a, b) => Number(b.id === anchor) - Number(a.id === anchor) || b.score - a.score || b.turn - a.turn || a.id.localeCompare(b.id));
+      }
       const limit = Math.max(0, Math.min(12, options.limit ?? 6)), budget = Math.max(0, Math.min(MAX_CONTEXT, options.maxChars ?? MAX_CONTEXT));
       const result = []; let size = 2;
       for (const row of scored) {
-        const bytes = JSON.stringify(row).length + (result.length ? 1 : 0);
+        const available = budget - size - (result.length ? 1 : 0);
+        const selected = excerptRecord(row, expanded, Math.min(options.maxText ?? MAX_TEXT, available), available);
+        if (!selected) continue;
+        const bytes = JSON.stringify(selected).length + (result.length ? 1 : 0);
         if (size + bytes > budget) continue;
-        result.push(structuredClone(row)); size += bytes;
+        result.push(selected); size += bytes;
         if (result.length >= limit) break;
       }
       return limit ? result : [];
@@ -227,9 +289,27 @@
       }
       return result;
     }
-    for (const record of initial) add(record);
+    for (const record of linkEpisodes(initial.map(raw => normalize(raw, runId)).filter(Boolean))) add(record);
     return { runId, add, search, recent, get: id => records.has(id) ? structuredClone(records.get(id)) : null,
       all: () => [...records.values()].map(record => structuredClone(record)), size: () => records.size };
+  }
+  function excerptRecord(row, terms, maxText, budget) {
+    if (row.text.length <= maxText && JSON.stringify(row).length <= budget) return structuredClone(row);
+    const result = { ...row, text: '', excerpted: true };
+    const available = Math.min(maxText, budget - JSON.stringify(result).length);
+    if (available < 80) return null;
+    const sentences = row.text.match(/[^.!?\n]+(?:[.!?]+["'\u201d\u2019]*|$)/gu) || [row.text];
+    const ranked = sentences.map((text, i) => ({ text: text.trim(), i,
+      score: tokens(text).reduce((sum, term) => sum + (terms.get(term) || 0), 0) }));
+    ranked.sort((a, b) => b.score - a.score || a.i - b.i);
+    const selected = []; let size = 0;
+    for (const sentence of ranked) {
+      if (size + sentence.text.length + (selected.length ? 1 : 0) > available) continue;
+      selected.push(sentence); size += sentence.text.length + (selected.length > 1 ? 1 : 0);
+    }
+    if (!selected.length) return null;
+    result.text = selected.sort((a, b) => a.i - b.i).map(sentence => sentence.text).join(' ');
+    return JSON.stringify(result).length <= budget ? result : null;
   }
   return { VERSION, MAX_TEXT, MAX_RECORDS, MAX_CONTEXT, clean, roomKey, normalize, canReplace, chunks, historyRecords, createIndex, hash };
 });

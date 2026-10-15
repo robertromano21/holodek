@@ -185,10 +185,10 @@ function writeMono16Wav(outPath, samples, sampleRate) {
   return outPath;
 }
 
-function renderArrangementFallback(musicJson, outBaseNoExt, seconds = 20) {
+function renderArrangementFallback(musicJson, outBaseNoExt, seconds = 20, options = {}) {
   // Enhanced SID mode (retort/sidMode.js): rendered at 44.1 kHz (oscillator ceiling ~7.8 kHz instead of ~3.9 kHz, far less
   // aliasing on saw/pulse) and the filter cutoff range opens up to 2x at the top, low cutoffs unchanged (same as jsid).
-  const mult = require('./sidMode').mult(), enhanced = mult > 1; // 4x: ceiling 15.6 kHz, still under the 22.05 kHz Nyquist of 44.1 kHz output
+  const mult = require('./sidMode').mult(options.clock || require('./sidMode').get()), enhanced = mult > 1; // 4x: ceiling 15.6 kHz, still under the 22.05 kHz Nyquist of 44.1 kHz output
   const sampleRate = enhanced ? 44100 : 22050, fMax = 3900 * mult;
   const totalSamples = Math.max(1, Math.floor(sampleRate * Math.max(1, seconds)));
   const voices = Array.isArray(musicJson?.voices) ? musicJson.voices : [];
@@ -220,6 +220,8 @@ function renderArrangementFallback(musicJson, outBaseNoExt, seconds = 20) {
       })(),
     };
   });
+
+  if (options.chip === '10582' && voices.length !== 3) throw Error('10582 music requires the complete three-voice score.');
 
   for (let i = 0; i < totalSamples; i++) {
     let mix = 0;
@@ -260,6 +262,23 @@ function renderArrangementFallback(musicJson, outBaseNoExt, seconds = 20) {
     master[i] = Math.tanh(mix * 0.9);
   }
 
+  if (options.chip === '10582') {
+    const Extended = require('./sid10582'), palette = Extended.paletteFor(musicJson);
+    const layer = new Extended.Layer(sampleRate, mult, palette), lead = buildVoiceSequence(voices[0], musicJson.bpm), drums = buildVoiceSequence(voices[2], musicJson.bpm);
+    let index = 0, start = 0, end = Math.floor(lead[0].durationSec * sampleRate), drumIndex = 0, drumEnd = Math.floor(drums[0].durationSec * sampleRate);
+    for (let at = 0, tick = 0; at < totalSamples; tick++) {
+      while (at >= end) { start = end; index = (index + 1) % lead.length; end += Math.max(1, Math.floor(lead[index].durationSec * sampleRate)); }
+      while (at >= drumEnd) { drumIndex = (drumIndex + 1) % drums.length; drumEnd += Math.max(1, Math.floor(drums[drumIndex].durationSec * sampleRate)); }
+      const ev = lead[index], elapsed = (at-start)/sampleRate, gate = !ev.isRest && at < end - sampleRate*.02;
+      layer.frame({ time:at/sampleRate, frequency:ev.freq, gate, envelope:gate ? envelopeForSample(ev.adsr || voices[0].adsr,elapsed,ev.durationSec) : 0,
+        noise:drums[drumIndex].wave === 'NOISE', bar:at/sampleRate*musicJson.bpm/240 });
+      const next = Math.min(totalSamples, Math.round((tick+1)*sampleRate/100));
+      const wet = new Float32Array(next-at); layer.render(wet);
+      for(let i=0;i<wet.length;i++) master[at+i] = clamp(master[at+i]+wet[i],-.98,.98);
+      at = next;
+    }
+    fs.writeFileSync(`${outBaseNoExt}.10582.json`,JSON.stringify(layer.report()));
+  }
   return writeMono16Wav(`${outBaseNoExt}.wav`, master, sampleRate);
 }
 
@@ -325,6 +344,8 @@ function renderArrangementToWav(musicJson, options = {}) {
   if (!outBaseNoExt) {
     throw new Error('outBaseNoExt is required');
   }
+  if (options.chip && !['8580','10582'].includes(options.chip)) throw Error('chip must be 8580 or 10582');
+  if (options.clock && !require('./sidMode').norm(options.clock)) throw Error('clock must be 1x, 2x or 4x');
 
   fs.mkdirSync(path.dirname(outBaseNoExt), { recursive: true });
 
@@ -342,6 +363,8 @@ function renderArrangementToWav(musicJson, options = {}) {
       console.warn(`Music renderer exited with status ${build.status}; using JS WAV fallback.`);
     } else if (!fs.existsSync(sidOut)) {
       console.warn('SID output not produced; using JS WAV fallback.');
+    } else if (options.chip === '10582') {
+      console.warn('Custom 10582 registers require the software companion renderer, not a stock SID player.');
     } else if (require('./sidMode').mult() > 1) {
       console.warn(require('./sidMode').get() + ' SID clock: sidplayfp/reSIDfp only emulate stock clocks; using the enhanced JS renderer.');
     } else if (!hasCommand('sidplayfp')) {
@@ -357,10 +380,10 @@ function renderArrangementToWav(musicJson, options = {}) {
   }
 
   return {
-    wavPath: renderArrangementFallback(musicJson, outBaseNoExt, songLoopSeconds(musicJson, 'js') || seconds),
+    wavPath: renderArrangementFallback(musicJson, outBaseNoExt, songLoopSeconds(musicJson, 'js') || seconds, options),
     sidOut: sidOut && fs.existsSync(sidOut) ? sidOut : null,
-    renderer: 'js-fallback',
+    renderer: options.chip === '10582' ? 'js-10582-layer' : 'js-fallback',
   };
 }
 
-module.exports = { sidChunks, songLoopSeconds, hasCommand, renderRoomMusic, renderArrangementToWav };
+module.exports = { sidChunks, songLoopSeconds, hasCommand, renderRoomMusic, renderArrangementToWav, writeMono16Wav };

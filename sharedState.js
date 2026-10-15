@@ -17,6 +17,7 @@ let questSeeded = false;
 let lastQuestUpdate = "";
 let questLog = [];
 let roomMusicDatabase = {};
+let graphicsRebuildPending = new Set();
 let roomDungeonDatabase = {};   // ← NEW: 3D dungeon per geo-room
 let dungeonRunId = randomUUID();
 let roomPopulations = new Map();
@@ -43,11 +44,26 @@ let characterGenerationInProgress = false;
 let pendingCharacterForReview = null;
 
 module.exports = {
+  exportSaveState: () => require('./saveGameState').clone({ personalNarrative, updatedGameConsole, roomNameDatabaseString,
+    combatCharactersString, liveWorldState, npcAutonomyFeed, combatMode, dungeonTestingMode, currentQuest, currentTasks,
+    currentTaskIndex, questSeeded, lastQuestUpdate, questLog, roomMusicDatabase, roomDungeonDatabase, dungeonRunId,
+    roomPopulations, gamePaused, dialogueMemory, campaignMemory, lastAdjudication, lastCoords, currentPC,
+    characterGenerationInProgress, pendingCharacterForReview }),
+  importSaveState: (snapshot, { graphicsReady = [] } = {}) => {
+    const next = require('./saveGameState').clone(require('./saveGameState').validate(snapshot));
+    ({ personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, liveWorldState, npcAutonomyFeed,
+      combatMode, dungeonTestingMode, currentQuest, currentTasks, currentTaskIndex, questSeeded, lastQuestUpdate, questLog,
+      roomMusicDatabase, roomDungeonDatabase, dungeonRunId, gamePaused, dialogueMemory, campaignMemory, lastAdjudication,
+      lastCoords, currentPC, characterGenerationInProgress, pendingCharacterForReview } = next);
+    roomPopulations = new Map(Object.entries(next.roomPopulations));
+    graphicsRebuildPending = new Set(Object.keys(roomDungeonDatabase).filter(key => !graphicsReady.includes(key)));
+  },
   // --- existing getters/setters ---
   getDungeonRunId: () => dungeonRunId,
   beginDungeonRun: () => {
     dungeonRunId = randomUUID();
     roomDungeonDatabase = {};
+    graphicsRebuildPending.clear();
     roomMusicDatabase = {};
     roomPopulations.clear();
     gamePaused = false;
@@ -191,6 +207,12 @@ module.exports = {
     const key = `${coords.x},${coords.y},${coords.z}`;
     return roomMusicDatabase[key] || null;
   },
+  getRecentRoomMusic: (excludeKey, limit = 8) => Object.entries(roomMusicDatabase)
+    .filter(([key, song]) => key !== excludeKey && song && typeof song === 'object').slice(-Math.max(1, Math.min(8, Number(limit) || 8)))
+    .map(([roomKey, song]) => ({ roomKey, song: structuredClone({ title: song.title, key: song.key,
+      scale: song.scale, bpm: song.bpm, plan: song.plan,
+      composition: song.composition && { acceptedPlan: song.composition.acceptedPlan,
+        realizedMotifSignature: song.composition.realizedMotifSignature } }) })),
   setRoomMusic: (coords, musicJson) => {
     if (!coords || typeof coords !== 'object') return;
     const key = `${coords.x},${coords.y},${coords.z}`;
@@ -202,6 +224,10 @@ module.exports = {
   getRoomDungeon: (coords) => {
     if (!coords || typeof coords !== 'object') return null;
     const key = `${coords.x},${coords.y},${coords.z}`;
+    if (graphicsRebuildPending.has(key)) {
+      require('./saveGameAssets').rebuildRoom(roomDungeonDatabase[key], key);
+      graphicsRebuildPending.delete(key);
+    }
     const dungeon = roomDungeonDatabase[key] || null;
     if (dungeon) {
       // Ensure customTiles is attached (backward compat)
@@ -217,6 +243,7 @@ module.exports = {
       dungeon.customTiles = customTiles || [];
       const storedDungeon = cloneDungeonForStorage(dungeon);
       roomDungeonDatabase[key] = storedDungeon;
+      graphicsRebuildPending.delete(key);
       sharedStateEmitter.emit('dungeon:update', { key, dungeon: cloneDungeonForStorage(storedDungeon) });
       console.log('DUNGEON SEEDED FOR', key, `with ${customTiles.length} custom tiles`);
     }

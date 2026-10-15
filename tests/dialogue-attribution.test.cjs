@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const I = require('../assets/dungeonInhabitants');
 const continued = require('./fixtures/continued-dialogue.cjs');
 const zharok = require('./fixtures/zharok-dialogue.cjs');
+const tarn = require('./fixtures/tarn-recall-dialogue.cjs');
 const prose = 'Nyssara\u2019s ethereal gaze sharpens, her voice a low murmur, \u201cThe path ahead is fraught with shadows.\u201d ' +
   'Voranyx\u2019s eyes flicker with wary resolve, \u201cEach step we take risks stirring old betrayals.\u201d';
 const expected = [{ speaker: 'Nyssara', line: 'The path ahead is fraught with shadows.' },
@@ -10,6 +11,13 @@ const expected = [{ speaker: 'Nyssara', line: 'The path ahead is fraught with sh
 
 test('regular narration attributes the actual session style of possessive gaze/voice quotes', () => {
   assert.deepEqual(I.extractAttributedSpeech(prose, ['Nyssara', 'Voranyx']), expected);
+});
+
+test('the Tarn recollection includes Orro\'s action-led shrug instead of silently losing his speech', () => {
+  const expected = tarn.rows.map(({ speaker, line }) => ({ speaker, line }));
+  assert.deepEqual(I.extractAttributedSpeech(tarn.prose, tarn.rows.map(row => row.speaker)), expected);
+  assert.deepEqual(I.extractDialogue(tarn.prose, tarn.rows.map(row => row.speaker)).dialogue, expected);
+  assert.deepEqual(I.extractAttributedSpeech('Orro gives Mortacia a scroll inscribed with "Do not pass."', ['Orro Flintcup']), []);
 });
 test('an incomplete or empty structured speech list is supplemented from actual prose without duplicate speakers', () => {
   for (const spoken of [[], [expected[0]], expected]) {

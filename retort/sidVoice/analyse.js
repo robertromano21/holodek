@@ -63,4 +63,22 @@ function analyse(x) {
   }
   return frames;
 }
-module.exports = { analyse, SR };
+// A separate 8 ms noise spectrum. Keep the 32 ms harmonic analysis untouched.
+// Window-energy compensation prevents stationary noise gaining 6 dB just because
+// the window is four times shorter. Only parameters leave this analyser, not PCM.
+function analyseNoise(x) {
+  const w = Math.round(0.008 * SR), window = Float64Array.from({ length: w }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (w - 1)));
+  const buf = new Float64Array(NF), X = new Float64Array(NF / 2 + 1), frames = [], scale = 4 / w * Math.sqrt(w / W);
+  for (let i = 0, n = Math.floor(x.length / HOP); i < n; i++) {
+    buf.fill(0); let energy = 0; const c = i * HOP - (w >> 1);
+    for (let k = 0; k < w; k++) { const sample = x[c + k] || 0; energy += sample * sample; buf[k] = sample * window[k]; }
+    fftMag(buf, X); const logs = Array.from(X, v => Math.log(v * scale + 1e-7)), env = new Float32Array(NB);
+    for (let b = 0; b < NB; b++) { const at = Math.round(b * (NF / 2) / (NB - 1)); let sum = 0, count = 0;
+      for (let k = Math.max(0, at - 3); k <= Math.min(logs.length - 1, at + 3); k++) { sum += logs[k]; count++; }
+      env[b] = +(sum / count).toFixed(3); }
+    let high = 0; for (let k = Math.ceil(1500 * NF / SR); k <= Math.floor(9000 * NF / SR); k++) high += (X[k] * scale) ** 2;
+    frames.push({ env, rms: Math.sqrt(energy / w), high });
+  }
+  return frames;
+}
+module.exports = { analyse, analyseNoise, SR, HOP };

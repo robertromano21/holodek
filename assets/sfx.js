@@ -11,7 +11,7 @@
   const AMB_TAGS = ['wind', 'sandstorm', 'drips', 'fire', 'howls', 'chant', 'rumble', 'water'];
   const KEY = 'holodekAudioSettings';
   // Defaults = the owner's tuned ♫ panel (Oct 2026): Music 0.20, Effects 0.80, Voices 0.85, Ambience 0.10, Stereo width 1.0, Swap off, SID 2x, Mute off.
-  const DEF = { muted: false, sfx: 0.8, amb: 0.1, music: 0.2, width: 1, swapLR: false, voice: 0.85, sidMode: '2x', voiceChip: '8580', voiceNotch: false };
+  const DEF = { muted: false, sfx: 0.8, amb: 0.1, music: 0.2, width: 1, swapLR: false, voice: 0.85, sidMode: '2x', voiceChip: '10582', voiceNotch: false, voiceDetail: true, compositionChip: '8580' };
   const saved = (() => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; } })();
   const settings = Object.assign({}, DEF, saved || {}, saved ? {} : { v: 4, touched: {} });
   if (saved) {
@@ -31,8 +31,9 @@
   const postSidMode = () => fetch('/sid-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: sidMode() }) })
     .then(r => r.json()).then(j => console.info('[SidMode]', j)).catch(e => console.warn('[SidMode] server switch failed', e && e.message));
   postSidMode();
-  const voiceChip = () => settings.voiceChip === '10582' ? '10582' : '8580', voiceNotch = () => voiceChip() === '10582' && !!settings.voiceNotch; // voice-only chip (music/ambience stay 8580)
-  const postVoiceChip = () => fetch('/voice/chip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chip: voiceChip(), notch: voiceNotch() }) })
+  const voiceChip = () => settings.voiceChip === '8580' ? '8580' : '10582', voiceNotch = () => voiceChip() === '10582' && !!settings.voiceNotch;
+  const compositionChip = () => settings.compositionChip === '10582' ? '10582' : '8580';
+  const postVoiceChip = () => fetch('/voice/chip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false }) })
     .then(r => r.json()).then(j => console.info('[VoiceChip]', j)).catch(e => console.warn('[VoiceChip] server switch failed', e && e.message));
   postVoiceChip();
 
@@ -63,13 +64,32 @@
     return ctx;
   }
   function load(name) {
-    if (buffers.has(name)) return Promise.resolve(buffers.get(name));
-    if (loading.has(name)) return loading.get(name);
-    const p = fetch(SFX_DIRS[sidMode()] + name + '.ogg').then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+    const clock = sidMode(), chip = compositionChip(), key = clock + '|' + chip + '|' + name;
+    if (buffers.has(key)) return Promise.resolve(buffers.get(key));
+    if (loading.has(key)) return loading.get(key);
+    const p = fetch(SFX_DIRS[clock] + name + '.ogg').then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
       .then(b => new Promise((res, rej) => audio().decodeAudioData(b, res, rej)))
-      .then(buf => { buffers.set(name, buf); loading.delete(name); return buf; })
-      .catch(e => { loading.delete(name); console.warn('[sfx] load failed', name, e && e.message); return null; });
-    loading.set(name, p); return p;
+      .then(async buf => {
+        if (chip !== '10582') return buf;
+        try {
+          const r = await fetch('/audio/palette/' + encodeURIComponent(name) + '.wav?clock=' + clock + '&seconds=' + buf.duration.toFixed(3));
+          if (!r.ok) throw new Error('10582 effect ' + r.status);
+          const bytes = await r.arrayBuffer();
+          const wet = await new Promise((res, rej) => audio().decodeAudioData(bytes, res, rej));
+          return mixPaletteBuffers(buf, wet);
+        } catch (e) { console.warn('[AudioPalette] retaining traditional effect', name, e.message); paletteStatus('10582 effect unavailable; traditional sound retained'); return buf; }
+      })
+      .then(buf => { buffers.set(key, buf); loading.delete(key); return buf; })
+      .catch(e => { loading.delete(key); console.warn('[sfx] load failed', name, e && e.message); return null; });
+    loading.set(key, p); return p;
+  }
+  function mixPaletteBuffers(dry, wet) {
+    const out = audio().createBuffer(dry.numberOfChannels, dry.length, dry.sampleRate);
+    for (let c = 0; c < out.numberOfChannels; c++) {
+      const a = dry.getChannelData(c), b = wet.getChannelData(0), dest = out.getChannelData(c);
+      for (let i = 0; i < dest.length; i++) dest[i] = Math.max(-.98, Math.min(.98, a[i] + (b[Math.floor(i * wet.sampleRate / dry.sampleRate)] || 0)));
+    }
+    return out;
   }
   // --- music ducking: lower the <audio id="room-audio"> volume while effects sound, never pause it ---
   let duckUntil = 0, duckLevel = 1, duckTimer = null;
@@ -230,13 +250,16 @@
   function normalizeAmb(list) {
     return (Array.isArray(list) ? list : []).map(x => typeof x === 'string' ? { tag: x, level: 0.6 } : x)
       .filter(x => x && AMB_TAGS.includes(x.tag)).slice(0, 3)
-      .map(x => ({ tag: x.tag, level: Math.max(0.15, Math.min(1, Number(x.level) || 0.6)) }));
+      .map(x => {
+        const level = x.level == null ? NaN : Number(x.level);
+        return { tag: x.tag, level: Number.isFinite(level) ? Math.max(0, Math.min(1, level)) : 0.6 };
+      });
   }
   // --- key-aware pitched ambience ---
   // With the room's song JSON known, the pitched layers follow the music: chant becomes a tonic+fifth drone (amb_drone_A)
   // and drips/howls become single notes (amb_drip_A, amb_howl_A) picked from the song's scale. All stems are in A and are
   // transposed with playbackRate by at most +-6 semitones; key changes between movements glide smoothly. The key is read
-  // from plan.form ("Name [F minor, ..." and "transition -> G minor") synced to the playing music's currentTime, so
+  // from structured movement bars/keys (or legacy plan.form) synced to the playing music's currentTime, so
   // rewind/fast-forward/pause follow. Without song data the original pitched loops play.
   const MODES = { major: [0, 2, 4, 5, 7, 9, 11], lydian: [0, 2, 4, 6, 7, 9, 11], mixolydian: [0, 2, 4, 5, 7, 9, 10],
     dorian: [0, 2, 3, 5, 7, 9, 10], minor: [0, 2, 3, 5, 7, 8, 10], phrygian: [0, 1, 3, 5, 7, 8, 10] };
@@ -244,8 +267,29 @@
   const KEYED = { chant: 'amb_drone_A', drips: 'amb_drip_A', howls: 'amb_howl_A' };
   const pcOf = k => { const m = String(k || '').match(/^([A-G])([#b]?)/); return m ? (PC[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0) + 12) % 12 : null; };
   const wrap = n => { n = ((n % 12) + 12) % 12; return n > 5 ? n - 12 : n; }; // -6..+5 semitones from A
+  function structuredSegments(plan, dur) {
+    const themes = plan.themes, bars = plan.bars, out = [];
+    const names = { room: 'Room theme', reflective: 'Reflection', danger: 'Danger', mortacia: 'Mortacia', return: 'Room theme returns' };
+    if (!Number.isInteger(bars) || bars <= 0 || !Array.isArray(themes) || !themes.length) return [];
+    let endBar = 0;
+    for (const t of themes) {
+      if (!t || !names[t.role] || !Number.isInteger(t.startBar) || !Number.isInteger(t.bars) || t.bars <= 0 ||
+          t.startBar < endBar || t.startBar + t.bars > bars || pcOf(t.key) === null || !MODES[t.scale]) return [];
+      const tonal = { pc: pcOf(t.key), scale: t.scale };
+      const add = (start, end, role, name) => out.push({ start: start / bars * dur, end: end / bars * dur,
+        startBar: start, endBar: end, role, name, ...tonal });
+      // The arranger's two-bar bridges prepare the incoming movement's tonic.
+      if (t.startBar > endBar) add(endBar, t.startBar, 'transition', 'Transition');
+      add(t.startBar, t.startBar + t.bars, t.role === 'reflective' ? 'reflect' : t.role === 'return' ? 'room' : t.role, names[t.role]);
+      endBar = t.startBar + t.bars;
+    }
+    return themes[0].startBar === 0 && endBar === bars ? out : [];
+  }
   function keySegments(dur) {
-    const form = song && song.plan && song.plan.form, bars = song && song.plan && song.plan.bars;
+    if (!Number.isFinite(dur) || dur <= 0) return [];
+    const plan = song && song.plan;
+    if (plan && plan.compositionVersion === 3) return structuredSegments(plan, dur);
+    const form = plan && plan.form, bars = plan && plan.bars;
     if (!form || !bars || !dur) return [];
     let bar = 0; const out = [];
     for (const seg of String(form).split('||').map(x => x.trim())) {
@@ -377,9 +421,12 @@
 
   async function setAmbience(list, roomKey) {
     const keyed = !!songKeyNow();
-    const layers = normalizeAmb(list), sig = roomKey + '|' + layers.map(l => l.tag + l.level).join(',') + '|' + (keyed ? 'k:' + (song.title || '') : '');
+    const layers = normalizeAmb(list), sig = roomKey + '|' + layers.map(l => l.tag + l.level).join(',') + '|' + (keyed ? 'k:' + (song.title || '') : '') + '|' + sidMode() + '|' + compositionChip();
     if (sig === ambKey) return; ambKey = sig;
     if (!audio()) return;
+    // Keep the old ambience alive while an extended palette is being prepared.
+    await Promise.all(layers.map(l => load(keyed && KEYED[l.tag] ? KEYED[l.tag] : 'amb_' + l.tag)));
+    if (ambKey !== sig) return;
     const t = ctx.currentTime, old = ambLayers; ambLayers = [];
     old.forEach(l => { l.dead = true; try { l.g.gain.cancelScheduledValues(t); l.g.gain.setValueAtTime(l.g.gain.value, t); l.g.gain.linearRampToValueAtTime(0, t + 2.5); if (l.src) l.src.stop(t + 2.6); setTimeout(() => { try { l.g.disconnect(); } catch {} }, 3000); } catch {} });
     keyNow = null;
@@ -487,10 +534,22 @@
     if (P.kind === 'regal') return 'regal'; if (/\b(old|farmer|peasant|innkeep)/.test(s)) return 'rural'; return 'party'; }
   function voiceSpecOf(actor) { const a = actor || {}, base = voiceProfileRaw(a), sp = (a.sprite && a.sprite.spec) || {};
     const seed = hash([base.name, sp.race || a.race || a.Race || '', a.personality || a.Personality || ''].join('|')), j = i => (((seed >>> (i * 4)) & 15) / 15 - 0.5);
-    return { v: 1, accent: accentFor(base, a), kind: base.kind, f0: +(base.f0 * (1 + 0.06 * j(0))).toFixed(1), fs: +base.fs.toFixed(3), range: +(base.range * (1 + 0.1 * j(1))).toFixed(2),
-      rate: +(base.rate * (1 + 0.06 * j(2))).toFixed(2), breath: +base.breath.toFixed(3), rasp: +base.rasp.toFixed(3) }; }
+    return { v: 2, accent: accentFor(base, a), kind: base.kind, f0: +(base.f0 * (1 + 0.06 * j(0))).toFixed(1), fs: +base.fs.toFixed(3), range: +(base.range * (1 + 0.1 * j(1))).toFixed(2),
+      rate: +(base.rate * (1 + 0.06 * j(2))).toFixed(2), breath: +base.breath.toFixed(3), rasp: +base.rasp.toFixed(3),
+      ...voiceDetails(base.name), pauses: base.pauses, race: String(sp.race || a.race || a.Race || '') }; }
+  function voiceDetails(name) { const r = i => (hash(name + '#detail' + i) % 1000) / 1000;
+    return { warm: +(0.05 + r(1) * 0.3).toFixed(3), bright: +(0.85 + r(2) * 0.3).toFixed(3),
+      vibAmt: +(0.45 + r(3) * 0.85).toFixed(3), vibRate: +(4.1 + r(4) * 2.3).toFixed(3),
+      fineKeep: +(0.7 + r(5) * 0.25).toFixed(3), decl: +(1.3 + r(6) * 1.4).toFixed(3) }; }
   function voiceProfile(nameOrActor) { const a = typeof nameOrActor === 'object' && nameOrActor ? nameOrActor : (actorByName(nameOrActor) || { name: nameOrActor }), P = voiceProfileRaw(a), S = specOf(a);
-    return S ? Object.assign(P, { kind: S.kind || P.kind, f0: S.f0, fs: S.fs || P.fs, range: S.range, rate: S.rate, breath: S.breath, rasp: S.rasp, accent: S.accent }) : P; }
+    Object.assign(P, voiceDetails(P.name));
+    if (S) for (const key of ['kind', 'f0', 'fs', 'range', 'rate', 'breath', 'rasp', 'accent', 'warm', 'bright', 'vibAmt', 'vibRate', 'fineKeep', 'decl', 'pauses', 'race']) if (S[key] != null) P[key] = S[key];
+    if (S && S.v !== 2) { P.pauses = S.pauses ?? 1; P.race = S.race ?? ''; }
+    if (!P.accent) P.accent = accentFor(P, a);
+    return P; }
+  function voiceWireProfile(actor) { const P = voiceProfile(actor), out = { name: P.name };
+    for (const key of ['kind', 'f0', 'fs', 'range', 'rate', 'breath', 'rasp', 'accent', 'warm', 'bright', 'vibAmt', 'vibRate', 'fineKeep', 'decl', 'pauses', 'race']) if (P[key] != null) out[key] = P[key];
+    return out; }
   function voiceProfileRaw(nameOrActor) {
     const a = typeof nameOrActor === 'object' && nameOrActor ? nameOrActor : (actorByName(nameOrActor) || { name: nameOrActor });
     const name = String(a.name || ''), sp = a.sprite?.spec || {}, tr = sp.traits || {};
@@ -526,7 +585,7 @@
     if (has(/regret|weary|sorrow|bleak|melanch|grief|loss|mourn|tired/i)) sig.push('sigh');
     if (kind === 'beast' || has(/warrior|fighter|guard|brute|soldier|barbarian|knight/i)) sig.push('grunt');
     if (kind === 'undead' || has(/serpent|snake|naga|lizard|viper/i)) sig.push('hiss');
-    return { name, kind, f0, fs, mix, pw: 0.15 + hr(4) * 0.35, breath, rasp, vib, vibRate: 4.5 + hr(8) * 2 + (nervous ? 2 : 0), rate, range, pauses, vset, sig: sig.slice(0, 2) };
+    return { name, kind, race, f0, fs, mix, pw: 0.15 + hr(4) * 0.35, breath, rasp, vib, vibRate: 4.5 + hr(8) * 2 + (nervous ? 2 : 0), rate, range, pauses, vset, sig: sig.slice(0, 2) };
   }
   // text -> syllable events {t, dur, semis, semis2, v, v2, amp | br (breath only)}. Long lines: each sentence voices its
   // first ~8-11 words then trails off softly; breaths/pauses at commas and sentence ends; ? rises, ! stresses, . falls.
@@ -679,12 +738,15 @@
     }
   }
   // --- SID speech (server: Piper analysis -> 64-SID vocoder WAV per sentence; see retort/sidVoice) ---
-  const speechBufs = new Map(); let speechNow = null, profileSig = '';
-  function speechKey(who, text) { return sidMode() + '|' + voiceChip() + (voiceNotch() ? 'n' : '') + '|' + who + '|' + text; }
+  const speechBufs = new Map(); let speechNow = null, profileSig = '', profilePending = null;
+  function speechKey(who, text, profile) { return sidMode() + '|' + voiceChip() + (voiceNotch() ? 'n' : '') + '|detail' + (settings.voiceDetail !== false) + '|' + JSON.stringify(profile) + '|' + who + '|' + text; }
   function fetchSpeech(who, text) {
-    const k = speechKey(who, text); if (speechBufs.has(k)) return speechBufs.get(k);
+    const actor = actorByName(who), saved = window._partyCharacterRegistry?.[who];
+    const profile = actor || saved ? voiceWireProfile(actor || { ...saved, name: who }) : null;
+    const k = speechKey(who, text, profile); if (speechBufs.has(k)) return speechBufs.get(k);
     const t0 = performance.now();
-    const p = fetch('/voice/line.wav?speaker=' + encodeURIComponent(who) + '&text=' + encodeURIComponent(text) + '&clock=' + sidMode() + '&chip=' + voiceChip() + '&notch=' + (voiceNotch() ? 1 : 0))
+    const p = fetch('/voice/line.wav', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speaker: who, text, profile, clock: sidMode(), chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false }) })
       .then(r => { if (!r.ok) throw new Error('voice ' + r.status); return r.arrayBuffer(); })
       .then(b => new Promise((res, rej) => audio().decodeAudioData(b, res, rej)))
       .then(buf => { speechLog.push({ who, text: text.slice(0, 50), fetchMs: Math.round(performance.now() - t0), dur: +buf.duration.toFixed(2) }); if (speechLog.length > 30) speechLog.shift(); return buf; });
@@ -721,10 +783,10 @@
     return { dur: first.duration, sentences: sents.length };
   }
   function postProfiles() { // room entered / roster changed: send voice mappings so the server can pre-synthesize in character
-    const actors = (window.getDungeonLifeContext?.()?.actors || []).filter(a => a && a.name && a.type !== 'pc');
-    const sig = currentRoomKey() + '|' + actors.map(a => a.name).sort().join(','); if (!actors.length || sig === profileSig) return; profileSig = sig;
-    const profiles = actors.map(a => { const P = voiceProfile(a); return { name: P.name, kind: P.kind, f0: P.f0, fs: P.fs, breath: P.breath, rasp: P.rasp, range: P.range, rate: P.rate, ...(P.accent ? { accent: P.accent } : {}) }; });
-    fetch('/voice/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profiles }) }).catch(() => {});
+    const profiles = (window.getDungeonLifeContext?.()?.actors || []).filter(a => a && a.name).map(voiceWireProfile).sort((a, b) => a.name.localeCompare(b.name));
+    const sig = currentRoomKey() + '|' + JSON.stringify(profiles); if (!profiles.length || sig === profileSig || profilePending) return;
+    profilePending = fetch('/voice/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profiles }) })
+      .then(r => { if (r.ok) profileSig = sig; }).catch(() => {}).finally(() => { profilePending = null; });
   }
   setInterval(() => { try { postProfiles(); } catch {} }, 1000);
 
@@ -748,8 +810,12 @@
     if (!d || typeof d !== 'object') return;
     try {
       switch (d.type) {
+        case 'dungeonRun':
+          if (d.runId && songRunId && d.runId !== songRunId) { songRunId = d.runId; songRoom = ''; palettePairs.clear(); paletteGeneration++; }
+          break;
         case 'roomMusicUpdated':
         case 'roomMusicReady':
+          paletteGeneration++; palettePairs.clear(); // a replacement score at the same coordinates must not reuse an old pair
           songRoom = ''; // the room's song JSON may be new; refetch it for movement names
           if (d.wav) queueRoomMusic(d);
           else if (d.type === 'roomMusicUpdated' && d.isNew) queueRoomMusic({ wav: '/sid/current_room.wav?ts=' + Date.now(), coords: d.coords }); // pre-slot server
@@ -810,7 +876,31 @@
   // --- room music transport: play/pause, rewind, fast-forward, time and movement ---
   // Music plays through <audio id="room-music"> (index.html, reloaded per room) and sometimes game.js's #room-audio.
   // The element that started most recently is "the" music; any other one that is playing is paused, so only one plays.
-  let activeMusic = null, internalPlay = false, song = null, songRoom = '', lastRew = 0, lastFf = 0;
+  let activeMusic = null, internalPlay = false, song = null, songRoom = '', songRunId = '', lastRew = 0, lastFf = 0;
+  const palettePairs = new Map();
+  let paletteGeneration = 0;
+  function paletteStatus(text) { const el = document.querySelector('#holodek-audio-panel .hx-palette'); if (el) el.textContent = text; }
+  async function preparePalette(room, apply = false) {
+    const clock = sidMode(), runId = songRunId, generation = paletteGeneration, key = runId + '|' + room + '|' + clock;
+    try {
+      if (!palettePairs.has(key)) {
+        paletteStatus('Preparing both SID versions...');
+        const p = fetch('/music/palette', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({coords:room,clock,runId}) })
+          .then(async r => { const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j; });
+        palettePairs.set(key,p); p.catch(() => palettePairs.delete(key));
+        while (palettePairs.size > 6) palettePairs.delete(palettePairs.keys().next().value);
+      }
+      const pair = await palettePairs.get(key);
+      if (clock !== sidMode() || runId !== songRunId || room !== currentRoomKey() || generation !== paletteGeneration) return;
+      paletteStatus('Both versions ready: ' + compositionChip());
+      if (apply) queueRoomMusic({ coords:room, wav:pair.variants[compositionChip()], palette:true, preserveTime:room === shownRoom });
+      return pair;
+    } catch (e) { paletteStatus('A/B unavailable: ' + e.message); console.warn('[AudioPalette]', e.message); }
+  }
+  function changeComposition() {
+    save(); ambKey = ''; if (lastRoom) applyRoomAmbience(lastRoom);
+    const room = currentRoomKey(); if (room) preparePalette(room,true);
+  }
   function playable(a) { return a && (a.currentSrc || a.getAttribute('src')); }
   function music() {
     if (activeMusic && document.contains(activeMusic) && playable(activeMusic)) return activeMusic;
@@ -832,9 +922,11 @@
     if (p && p.catch) p.catch(() => {});
   }
   function musicPause() { settings.userPaused = true; save(); for (const a of musicEls()) if (!a.paused) a.pause(); }
-  // Movement boundaries come from the room's song JSON: plan.form lists "Name [..., N bars: ...]" segments and
-  // 2-bar "transition -> key" segments joined by '||'; plan.bars is the loop length. Scaled to the real audio length.
+  // Movement boundaries use structured bars/keys, with the old text form retained for cached scores.
+  // plan.bars is the loop length; boundaries are scaled to the real audio length.
   function movements(dur) {
+    if (song && song.plan && song.plan.compositionVersion === 3)
+      return keySegments(dur).filter(s => s.role !== 'transition').map(s => ({ name: s.name, start: s.start }));
     const form = song && song.plan && song.plan.form, bars = song && song.plan && song.plan.bars;
     if (!form || !bars || !dur) return [];
     let bar = 0; const out = [];
@@ -872,7 +964,8 @@
   function loadSong(room) {
     if (!room || room === songRoom) return; songRoom = room; song = null;
     fetch('/get-room-music?coords=' + encodeURIComponent(room)).then(r => r.ok ? r.json() : null)
-      .then(j => { if (songRoom === room) { song = j && j.music; if (song && lastRoom) applyRoomAmbience(lastRoom); } }).catch(() => {}); // re-key ambience
+      .then(j => { if (songRoom === room) { song = j && j.music; songRunId = j && j.runId || ''; if (song && lastRoom) applyRoomAmbience(lastRoom);
+        if (song) preparePalette(room,compositionChip() === '10582'); } }).catch(() => {}); // re-key ambience and prepare the same-score A/B pair
   }
   const fmt = s => !Number.isFinite(s) ? '0:00' : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
   function transportUi(box) {
@@ -896,7 +989,7 @@
   // The server renders the next room's song into the slot we are not playing and announces it (roomMusicUpdated /
   // roomMusicReady). We hold it until game.js reports the new room spawned and drawn (roomShown), then crossfade.
   // Only the latest announced song is kept; a render that finishes after the room appeared switches immediately.
-  let crossfading = false, pendingSong = null, shownRoom = '', playingUrl = '';
+  let crossfading = false, pendingSong = null, shownRoom = '', playingUrl = '', cancelTransition = null;
   const slotOf = url => (String(url).match(/room_([AB])\.wav/) || [])[1] || null;
   function reportSlot(url) {
     const slot = slotOf(url); if (!slot) return;
@@ -904,9 +997,10 @@
   }
   function queueRoomMusic(d) {
     if (!d || !d.wav) return;
+    if (!d.palette && compositionChip() === '10582' && d.coords === currentRoomKey()) { preparePalette(d.coords,true); return; }
     const url = d.wav;
     if (url === playingUrl || (pendingSong && pendingSong.url === url)) return;
-    pendingSong = { url, coords: d.coords || '' };
+    pendingSong = { url, coords: d.coords || '', preserveTime:!!d.preserveTime, startTime: d.startTime };
     if (!pendingSong.coords || pendingSong.coords === shownRoom) startPending(); // the room is already on screen
   }
   function roomShown(geoKey) {
@@ -919,38 +1013,74 @@
     return a;
   }
   function startPending() {
-    if (crossfading) return; // finish() starts the newest pending song when this fade ends
-    const song = pendingSong; pendingSong = null; if (!song) return;
+    if (crossfading) return;
+    const selection = pendingSong; pendingSong = null; if (!selection) return;
     const old = music(), next = old && old.id === 'room-music' ? musicPlayer('room-audio') : musicPlayer('room-music');
-    playingUrl = song.url; songRoom = ''; // refetch the movement map for the new song
-    next.loop = true; next.__fade = 0; next.src = song.url;
+    let settled = false;
+    crossfading = true;
+    const clear = () => { clearTimeout(timer); next.removeEventListener('canplay', begin); next.removeEventListener('error', failed); };
     const finish = () => {
+      if (settled) return; settled = true; clear();
       if (old && old !== next) { old.pause(); old.__fade = 1; old.removeAttribute('src'); try { old.load(); } catch {} } // release the old slot file
-      next.__fade = 1; crossfading = false; activeMusic = next; setMusicVolume();
+      playingUrl = selection.url; songRoom = ''; next.__fade = 1; crossfading = false; activeMusic = next; setMusicVolume();
+      cancelTransition = null;
       if (pendingSong && (!pendingSong.coords || pendingSong.coords === shownRoom)) startPending(); // rapid room changes: newest wins
     };
-    reportSlot(song.url); // tell the server now, so the next render never targets the slot we are fading into
-    if (settings.userPaused || !old || old.paused) { // nothing audible to fade from (or the user paused)
-      activeMusic = next; finish();
-      if (!settings.userPaused) { internalPlay = true; const p = next.play(); if (p && p.finally) p.finally(() => { internalPlay = false; }).catch(() => {}); else internalPlay = false; }
-      return;
-    }
-    crossfading = true; internalPlay = true;
-    const p = next.play(); if (p && p.finally) p.finally(() => { internalPlay = false; }).catch(() => {}); else internalPlay = false;
-    const t0 = performance.now(), dur = 1500;
-    const step = () => {
-      const x = Math.min(1, (performance.now() - t0) / dur);
-      next.__fade = x; old.__fade = 1 - x; setMusicVolume();
-      if (x < 1) setTimeout(step, 50); else finish();
+    const failed = () => {
+      if (settled) return; settled = true; clear(); next.pause(); next.__fade = 0;
+      crossfading = false; activeMusic = old; if (old) old.__fade = 1; setMusicVolume();
+      cancelTransition = null;
+      paletteStatus('New audio unavailable; previous track retained');
+      if (pendingSong && (!pendingSong.coords || pendingSong.coords === shownRoom)) startPending();
     };
-    step();
+    const begin = async () => {
+      if (settled) return; clearTimeout(timer); next.removeEventListener('canplay', begin);
+      if ((pendingSong && pendingSong.url !== selection.url) || (selection.coords && selection.coords !== shownRoom)) return failed();
+      if (selection.preserveTime && old && Number.isFinite(next.duration) && next.duration > 0)
+        try { next.currentTime = (old.currentTime || 0) % next.duration; } catch { return failed(); }
+      if (Number.isFinite(selection.startTime) && Number.isFinite(next.duration) && next.duration > 0)
+        try { next.currentTime = Math.max(0, selection.startTime) % next.duration; } catch { return failed(); }
+      if (settings.userPaused) return finish();
+      internalPlay = true;
+      try { await next.play(); } catch { internalPlay = false; return failed(); }
+      internalPlay = false;
+      if (!old || old.paused) return finish();
+      const t0 = performance.now(), dur = 1500;
+      const step = () => {
+        if (settled) return;
+        const x = Math.min(1, (performance.now() - t0) / dur);
+        next.__fade = x; old.__fade = 1 - x; setMusicVolume();
+        if (x < 1 && !settings.userPaused) setTimeout(step, 50); else finish();
+      };
+      step();
+    };
+    const timer = setTimeout(failed, 30000);
+    cancelTransition = () => { settled = true; clear(); next.pause(); };
+    next.addEventListener('canplay', begin); next.addEventListener('error', failed, { once:true });
+    next.loop = true; next.__fade = 0; next.src = selection.url; next.load();
+    reportSlot(selection.url);
   }
   function loadLatestSong() { // page load: start the newest rendered song (index.html no longer autoplays a fixed file)
     fetch('/music/latest').then(r => r.ok ? r.json() : { url: '/sid/current_room.wav' }).then(j => {
-      if (!j || !j.url || playingUrl || pendingSong) return;
+      if (!j || !j.url || playingUrl || pendingSong || crossfading) return;
       const a = musicPlayer('room-music'); playingUrl = j.url; a.loop = true; a.src = j.url; activeMusic = a; reportSlot(j.url);
       if (!settings.userPaused) { internalPlay = true; const p = a.play(); if (p && p.finally) p.finally(() => { internalPlay = false; }).catch(() => {}); else internalPlay = false; }
     }).catch(() => {});
+  }
+
+  function checkpoint() { const a = music(); return { time: Number.isFinite(a?.currentTime) ? a.currentTime : 0, paused: !!settings.userPaused }; }
+  async function restoreCheckpoint(saved, preferences, rendered, room, runId) {
+    cancelTransition?.(); cancelTransition = null; stopSpeech();
+    crossfading = false; pendingSong = null; playingUrl = ''; activeMusic = null;
+    paletteGeneration++; palettePairs.clear(); ambByRoom.clear(); ambKey = ''; lastRoom = '';
+    song = null; songRoom = ''; songRunId = runId; shownRoom = room; profileSig = '';
+    pcName = ''; pcHp = pcLevel = lastX = lastY = null; walked = 0;
+    for (const a of musicEls()) { a.pause(); a.removeAttribute('src'); a.__fade = 1; try { a.load(); } catch {} }
+    for (const k of Object.keys(DEF)) if (preferences && Object.hasOwn(preferences, k)) settings[k] = preferences[k];
+    settings.userPaused = !!saved?.paused; save(); applyVolumes();
+    await postVoiceChip();
+    if (rendered?.url) queueRoomMusic({ coords: room, wav: rendered.url, palette: true, startTime: Number(saved?.time) || 0 });
+    loadSong(room); applyRoomAmbience(room);
   }
 
   // --- tiny volume / mute panel ---
@@ -961,15 +1091,17 @@
       '<button type="button" data-t="rew" title="Back 10 s (press twice, or near a movement start: previous movement)">&#9664;&#9664;</button>' +
       '<button type="button" data-t="play" title="Play / pause room music">&#9654;</button>' +
       '<button type="button" data-t="ff" title="Ahead 10 s (press twice: next movement)">&#9654;&#9654;</button>' +
-      '<span class="hx-time">0:00 / 0:00</span></div><div class="hx-mvt">&nbsp;</div>' +
+      '<span class="hx-time">0:00 / 0:00</span></div><div class="hx-mvt">&nbsp;</div><div class="hx-palette" role="status" aria-live="polite"></div>' +
       '<label>Music <input type="range" min="0" max="1" step="0.05" data-k="music"></label>' +
       '<label>Effects <input type="range" min="0" max="1" step="0.05" data-k="sfx"></label>' +
       '<label>Voices <input type="range" min="0" max="1.5" step="0.05" data-k="voice"></label>' +
       '<label>Ambience <input type="range" min="0" max="2" step="0.05" data-k="amb"></label>' +
       '<label>Stereo width <input type="range" min="0" max="1.5" step="0.05" data-k="width"></label>' +
       '<label><input type="checkbox" data-k="swapLR"> Swap L/R</label>' +
-      '<label>SID chip <select data-k="sidMode" title="Stock = real C64 SID clock; 2x/4x = same SID clocked 2x/4x (oscillators to ~7.8/15.6 kHz) for voices, music, ambience and effects"><option value="1x">1x (1 MHz stock)</option><option value="2x">2x (2 MHz)</option><option value="4x">4x (4 MHz)</option></select></label>' +
-      '<label>Voice chip <select data-k="voiceChip" title="Speech only: 8580 = standard SID bank; 10582 = extended voice chip (level, mute, formant). Music and ambience stay 8580"><option value="8580">8580</option><option value="10582">10582</option></select></label>' +
+      '<label>SID clock <select data-k="sidMode" title="Stock = real C64 SID clock; 2x/4x = same SID clocked 2x/4x (oscillators to ~7.8/15.6 kHz) for voices, music, ambience and effects"><option value="1x">1x (1 MHz stock)</option><option value="2x">2x (2 MHz)</option><option value="4x">4x (4 MHz)</option></select></label>' +
+      '<label>Composition <select data-k="compositionChip" title="Same song and playback position. 10582 adds custom emulated registers to music, ambience and effects; voices have their own selector."><option value="8580">8580: traditional SID</option><option value="10582">10582: extended registers</option></select></label>' +
+      '<label>Voice chip <select data-k="voiceChip" title="Speech only: 10582 is the default; 8580 remains available."><option value="10582">10582</option><option value="8580">8580</option></select></label>' +
+      '<label>Voice articulation <select data-k="voiceDetail" title="10582 only. Both paths are pure synthesis; no sampled speech."><option value="detail">10582: detailed consonants</option><option value="legacy">Legacy articulation (compare)</option></select></label>' +
       '<label><input type="checkbox" data-k="voiceNotch"> 10582 /l/ notch</label>' +
       '<label><input type="checkbox" data-k="muted"> Mute all</label></div>';
     const st = document.createElement('style');
@@ -977,7 +1109,8 @@
       '#holodek-audio-panel .hx-transport{display:flex;align-items:center;gap:4px;margin:0 0 4px;padding:4px;background:#40318d;border:2px solid #7869c4;font:bold 12px/1 \'Courier New\',monospace;color:#a59bff}' +
       '#holodek-audio-panel .hx-transport button{min-width:30px;height:22px;padding:0 4px;background:#352879;color:#a59bff;border:2px solid #7869c4;border-radius:0;font:bold 11px/1 \'Courier New\',monospace;cursor:pointer}' +
       '#holodek-audio-panel .hx-transport button:hover{background:#7869c4;color:#fff}#holodek-audio-panel .hx-time{margin-left:4px;min-width:92px;text-align:right}' +
-      '#holodek-audio-panel .hx-mvt{font:11px \'Courier New\',monospace;color:#a59bff;margin:0 0 6px;max-width:250px;overflow:hidden;text-overflow:ellipsis}';
+      '#holodek-audio-panel .hx-mvt{font:11px \'Courier New\',monospace;color:#a59bff;margin:0 0 6px;max-width:250px;overflow:hidden;text-overflow:ellipsis}' +
+      '#holodek-audio-panel .hx-palette{font:11px Georgia,serif;color:#ead29d;max-width:280px;white-space:normal}';
     document.head.appendChild(st); document.body.appendChild(box);
     const menu = box.querySelector('div'), btn = box.querySelector('button');
     // keep game key/mouse handlers (movement keys, drag, canvas focus) from eating slider input
@@ -997,9 +1130,13 @@
     });
     box.querySelectorAll('select[data-k="sidMode"]').forEach(sel => { sel.value = sidMode();
       sel.addEventListener('change', () => { settings.sidMode = ['1x', '2x', '4x'].includes(sel.value) ? sel.value : '1x'; save();
-        buffers.clear(); loading.clear(); speechBufs.clear(); postSidMode(); unlock(); play('notice'); }); });
+        buffers.clear(); loading.clear(); speechBufs.clear(); postSidMode(); changeComposition(); unlock(); play('notice'); }); });
+    box.querySelectorAll('select[data-k="compositionChip"]').forEach(sel => { sel.value = compositionChip();
+      sel.addEventListener('change', () => { settings.compositionChip = sel.value === '10582' ? '10582' : '8580'; changeComposition(); }); });
     box.querySelectorAll('select[data-k="voiceChip"]').forEach(sel => { sel.value = voiceChip();
-      sel.addEventListener('change', () => { settings.voiceChip = sel.value === '10582' ? '10582' : '8580'; save(); speechBufs.clear(); postVoiceChip(); unlock(); play('notice'); }); });
+      sel.addEventListener('change', () => { settings.voiceChip = sel.value === '10582' ? '10582' : '8580'; (settings.touched = settings.touched || {})['voiceChip'] = true; save(); speechBufs.clear(); postVoiceChip(); unlock(); play('notice'); }); });
+    box.querySelectorAll('select[data-k="voiceDetail"]').forEach(sel => { sel.value = settings.voiceDetail === false ? 'legacy' : 'detail';
+      sel.addEventListener('change', () => { settings.voiceDetail = sel.value === 'detail'; save(); speechBufs.clear(); postVoiceChip(); }); });
     box.querySelectorAll('input[data-k="voiceNotch"]').forEach(inp => inp.addEventListener('change', () => { speechBufs.clear(); postVoiceChip(); }));
     paint();
     // Anchor the button just right of the compass and above the command prompt; reposition on any layout change.
@@ -1069,8 +1206,9 @@
       window.DungeonActionNotices.observeItems = function (...a) { const taken = orig.apply(this, a); if (taken?.length) play(taken.some(i => /gold|coin|gem|jewel/i.test(i.name || '')) ? 'coins' : 'pickup'); return taken; };
     }
   }
-  const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length,
+  const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, compositionChip: compositionChip(), voiceChip: voiceChip(), clock: sidMode(), active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length,
     music: musicEls().map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused })) });
   window.HolodekSfx = { voiceSpecOf, speakLine, stopSpeech, voicePrefetch, speechLog: () => speechLog.slice(), stereo: stereoInfo, listener, ctxNow: () => ctx && ctx.currentTime, speakVoice, voiceSound, voiceProfile, renderVoiceDemo, voices: () => voiceLog.slice(), play, onServerEvent, setAmbience, keywordAmbience, settings, applyVolumes, state, musicPlay, musicPause, rewind, fastForward, queueRoomMusic, roomShown, songKeyNow, rhythm: () => ({ mode: rhythmMode, clkOff, evLog: evLog.slice(-200) }), ambLayersInfo: () => ambLayers.map(l => ({ tag: l.tag, keyed: l.keyed || null, rate: l.src ? +l.src.playbackRate.value.toFixed(4) : null })) };
+  Object.assign(window.HolodekSfx, { checkpoint, restoreCheckpoint });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

@@ -7,6 +7,7 @@ const retort = require('./gameRetort').retort;
 const run = require('./gameRetort').run;
 const GraveMasterProtocol = require('./graveMasterProtocol');
 const StoryPrompts = require('./graveMasterStoryPrompts');
+const RoomDescription = require('./roomDescription');
 const GeneratedNames = require('./generatedNames');
 
 const axios = require('axios');
@@ -1667,6 +1668,7 @@ function seedFrom(source) {
 // same arrangement JSON the SID renderer always used. Old note-by-note composer kept below
 // as generateSidArrangementLegacy.
 const SidMusicTheory = require('./sidMusicTheory.js');
+const RoomMusicComposer = require('./roomMusicComposer');
 
 // SFX pass: ambient loop layers shipped in assets/sfx/amb_<tag>.ogg (see assets/sfx.js).
 const SID_AMBIENCE_TAGS = ['wind', 'sandstorm', 'drips', 'fire', 'howls', 'chant', 'rumble', 'water'];
@@ -1691,6 +1693,11 @@ function normalizeSidAmbience(list, text) {
 }
 
 async function generateSidArrangement($, roomDescriptionOrToken, monstersOrContext = {}, roomKey = '') {
+  return RoomMusicComposer.generate($, sharedState, roomDescriptionOrToken, monstersOrContext, roomKey);
+}
+
+// Kept for explicit comparison only. New rooms never silently fall back to v2.
+async function generateSidArrangementV2($, roomDescriptionOrToken, monstersOrContext = {}, roomKey = '') {
   // Callers pass ($, roomDescription, monstersInRoom, key); older code passed ($, token, {roomDescription}).
   const ctxObj = (monstersOrContext && !Array.isArray(monstersOrContext) && typeof monstersOrContext === 'object') ? monstersOrContext : {};
   const description = String(ctxObj.roomDescription || (typeof roomDescriptionOrToken === 'string' ? roomDescriptionOrToken : JSON.stringify(roomDescriptionOrToken || '')) || '').slice(0, 2500);
@@ -5979,8 +5986,8 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     await $.assistant`Physical architecture guidance for newly described locations: describe concrete, navigable buildings, not only metaphors. Match the existing room name and biome; never replace an already described room. Use one dominant plan, with a few coherent nested structures: Roman temples, basilicas, forums, amphitheaters, theaters, chariot circuses, bathhouses, granaries/horrea, atrium houses/domus, villas, insula courtyards, aqueduct arcades or monumental arches; or motte-and-bailey, shell-keep, stone-keep or concentric castles. Indoor halls and corridors are normally roofed, with explicitly located open courtyards or ruined sections. Mention an appropriate roof where relevant: barrel/groin/ribbed/fan vault, timber or hammerbeam roof, boarded or gold-coffered ceiling, pendentive or squinch dome. Pillars support grouped buildings, not random farms. A pedimented portico may lead into a rotunda inside a larger complex. These are visual construction cues, not new inventory items, exits, characters or rules. Do not list every style; choose what serves this location's lore and physical use.`;
     await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits; skip for auditory. - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
     if (coordKey === startKey) await $.assistant`[START-ROOM] Ruined Temple Entrance at 0,0,0 is an INDOOR temple chamber with a roof, walls and interior floor. Describe the party inside it. Tartarus's dunes and yellow sky are beyond the outdoor exit, not the ground or open sky of this chamber. This fixed physical rule overrides environmental poetry and variability hints. [/START-ROOM]`;
-    const generationResultDescription = await $.assistant.generation({ maxTokens: 220 });
-    roomDescription = generationResultDescription.content.trim();
+    roomDescription = await RoomDescription.generate($, { name: roomName, coordinates: coordKey,
+      classification: currentRoomData.classification, room: currentRoomData });
     updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${roomDescription}`);
     roomDescriptionGenerated = true;
 
@@ -11467,6 +11474,7 @@ async function logThreadMessages() {
         roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatRoundOnly: true };
     }
     try {
+    if (typeof CampaignMemory !== 'undefined' && CampaignMemory.prepare && !combatMode) await CampaignMemory.prepare(sharedState, userInput);
     const gameRetort = GraveMasterProtocol.runtimeFor(sharedState).retort;
     return await run(gameRetort(async ($) => {
     $.model = "gpt-4.1-mini";
@@ -13074,12 +13082,14 @@ async function runNpcAutonomyTick(isCurrent = () => true) {
   const live = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
   if (!dungeon || !live?.player || Inhabitants.roomKey(live.roomKey) !== geoKey) return { dialogue: [], summary: '' };
   const refreshAtStart = population.lastDialogueRefreshAt || 0;
-  if (Date.now()-refreshAtStart < Inhabitants.DIALOGUE_REFRESH_MS) return {dialogue:[],summary:'',cached:true};
   const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
   Inhabitants.attach(roster,population);
   const context = describeCharacters(roster.filter(a=>a.type==='npc'||population.actors[a.name]?.status==='present'),population);
   if (!context.length) return { dialogue: [], summary: '' };
   const nearby = Inhabitants.perceive(dungeon,roster,population).conversational.filter(a => Inhabitants.hasEncountered(a, population)).map(a=>a.name);
+  if (Date.now()-refreshAtStart < Inhabitants.DIALOGUE_REFRESH_MS &&
+      !(population.dialogueResumePending && Inhabitants.dialogueRefreshDelay(population, roster.filter(actor => nearby.includes(actor.name))) === 0))
+    return {dialogue:[],summary:'',cached:true};
   const recollections = DialogueMemory.memoryContext(sharedState,[...nearby,...context.map(a=>a.name)],population,2400);
   const personalMemories = typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState, context,
     `${live.currentConversation || ''} ${sharedState.getCurrentQuest() || ''}`) : [];
@@ -13099,6 +13109,7 @@ async function runNpcAutonomyTick(isCurrent = () => true) {
   const currentRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
   const count = Inhabitants.applyReplies(population,parsed.replies,currentRoster,{exchanges:parsed.exchanges});
   if (!count) return {dialogue:[],summary:''};
+  delete population.dialogueResumePending;
   populationService.save(population);
   console.info('[DialogueGrounding]',JSON.stringify({geoKey,mode:'five-minute-cache',journey:!!journey,
     characters:personalMemories.map(row=>({name:row.name,partyMember:row.partyMember,heard:row.heardCurrentConversation,

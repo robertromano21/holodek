@@ -4242,6 +4242,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
     },
 
     renderScene() {
+      const dungeon = window.SceneExteriorDetails?.forRendering(window.currentDungeon) || window.currentDungeon;
+      const textures = window.dungeonTextures;
+      if (!dungeon || !textures) return;
       const frameStartedAt = performance.now();
       let voxelDrawCalls = 0, voxelIndices = 0, culledVoxels = 0, torchQueries = 0;
       const torchCacheStats = { hits: 0, losTests: 0 };
@@ -4268,9 +4271,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const width = this.canvas ? this.canvas.width : Math.max(1, Math.floor(displayW / pixelScale));
       const height = this.canvas ? this.canvas.height : Math.max(1, Math.floor(displayH / pixelScale));
 
-      const dungeon = window.SceneExteriorDetails?.forRendering(window.currentDungeon) || window.currentDungeon;
-      const textures = window.dungeonTextures;
-      if (!dungeon || !textures) return;
       this.rebuildDungeonTextures(dungeon, textures);
       const resourcesReadyAt = performance.now();
       const startupFrame = this._startupFrameVersion !== this.sceneResourceVersion;
