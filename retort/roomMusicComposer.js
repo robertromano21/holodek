@@ -38,6 +38,13 @@ async function generate($, state, descriptionOrToken, monstersOrContext = {}, ro
     runId: state.getDungeonRunId(), recent: state.getRecentRoomMusic?.(roomKey) || [] });
   try { logComposition(song, context); }
   catch (error) { console.warn('[SidCompositionLog]', JSON.stringify({ roomKey, reason: error.message })); }
+  try {
+    const saved=require('./sidArchive').record(song,{roomKey,runId:state.getDungeonRunId(),roomName:context.roomName});
+    song.archive={id:saved.id,url:'/music-archive/'+saved.id+'/',variants:['8580.sid','10582.sid']};
+  } catch(error) {
+    song.archive={error:error.message};
+    console.error('[SidArchiveFailure]',JSON.stringify({roomKey,reason:error.message}));
+  }
   return song;
 }
 module.exports = { generate, contextFor, logComposition };

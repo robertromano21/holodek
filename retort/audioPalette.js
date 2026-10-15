@@ -43,12 +43,8 @@ function prune(){
 }
 async function pair(song,{clock,runId,coords}){
   clock=clockOf(clock);
-  const key=digest([Extended.VERSION,clock,runId,coords,song]),base=path.join(DIR,key);
-  const files=['8580','10582'].map(chip=>base+'-'+chip+'.wav');
-  if(!files.every(f=>fs.existsSync(f)))await run(key,{kind:'music',song,clock,base});
-  files.forEach(touch);prune();
-  return {variants:Object.fromEntries(['8580','10582'].map(chip=>[chip,'/sid/palettes/'+key+'-'+chip+'.wav'])),
-    clock,palette:Extended.paletteFor(song),source:'same-score-pair',runId,coords};
+  return {...require('./liveRoomMusic').describe(song,{clock,runId,coords}),
+    palette:Extended.paletteFor(song),source:'same-score-sid-pair'};
 }
 async function effect(name,seconds,clock){
   if(!Effects.names.includes(name))throw Error('Unknown 10582 effect');
@@ -60,6 +56,11 @@ async function effect(name,seconds,clock){
   return base+'.wav';
 }
 function install(app,state){
+  app.get('/audio/registers/:name.sidregs',(req,res)=>{
+    try{const result=require('./sidEffectsLive').compile(req.params.name,{chip:req.query.chip,clock:req.query.clock});
+      res.set({'Content-Type':'application/x-holodek-sid-registers','Cache-Control':'private, max-age=86400','X-SID-Duration':String(result.duration),'X-SID-Loop':String(result.loop)});res.end(Buffer.from(result.bytes));
+    }catch(error){res.status(400).json({error:error.message});}
+  });
   app.post('/music/palette',async(req,res)=>{
     try{
       const {coords,clock,runId}=req.body||{};

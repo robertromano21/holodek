@@ -85,6 +85,7 @@
 <script src="/assets/commandGate.js"></script>
 <script src="/assets/outdoorDiscovery.js"></script>
 <script src="/assets/game.js"></script>
+<script src="/assets/sidPlayer.js"></script>
 <script src="/assets/sfx.js"></script>
 <script src="/assets/saveGameTranscript.js"></script>
 <script src="/assets/saveGameUi.js"></script>
@@ -1250,10 +1251,11 @@ function toggleCombatMode() {
     .game-menu-bars { display: grid; gap: 3px; width: 14px; }
     .game-menu-bars i { display: block; height: 2px; background: #eee; }
     #game-menu { position: fixed; top: 38px; left: 10px; z-index: 3100; display: flex;
-      flex-direction: column; gap: 3px; width: 210px; padding: 5px; box-sizing: border-box;
+      flex-direction: column; gap: 2px; width: 195px; padding: 5px; box-sizing: border-box;
       border: 1px solid #8f8f8f; border-radius: 6px; background: rgba(0,0,0,.94); overflow-y: auto; }
     #game-menu[hidden] { display: none; }
     #game-menu > button { text-align: left; }
+    #game-menu > button { flex-shrink: 0; font-size: 12px; padding: 4px 7px; }
     #game-menu #combat-mode-toggle { padding: 5px; }
     #game-menu #combat-mode-select { width: 100%; }
     .game-menu-button { background: #444; color: white; padding: 5px 10px; border: none; cursor: pointer; }
@@ -2035,6 +2037,7 @@ function toggleCombatMode() {
       <button id="open-journal-button" class="game-menu-button" aria-expanded="false" aria-controls="journal-popup" onclick="window.AdventureJournalUi.toggle()">Adventurers' Journal</button>
       <button id="open-exploration-map-button" class="game-menu-button" aria-expanded="false" aria-controls="exploration-map-popup" onclick="window.DungeonExplorationMap.toggle()">Map</button>
       <button id="environment-lab-button" class="game-menu-button" onclick="window.open('/assets/environment-lab.html', '_blank', 'noopener')">Environment Lab</button>
+      <button id="sid-music-archive-button" class="game-menu-button" onclick="window.open('/sid-to-wav.html', '_blank', 'noopener')">SID Player / WAV Export</button>
       <button id="open-game-model-button" class="game-menu-button" aria-expanded="false" aria-controls="game-model-popup">Game Model</button>
       <button id="carved-stonework-toggle" class="game-menu-button" aria-pressed="true" title="Toggle compatible stone and wood architectural carvings and statue refinements; OFF restores the previous geometry without changing the dungeon">Carved Stonework: ON</button>
       <button id="stonework-fill-toggle" class="game-menu-button" title="Cycle 0%, 50%, 100%, 300% and 500%; above 100%, uncut stone within carving fields projects outward while grooves stay recessed, including pillar bases. Shafts, rims and backing stay at 100%. Below 100% is the older surface-repair trial and may show gaps. Lighting stays unchanged">Stonework Relief: 300%</button>

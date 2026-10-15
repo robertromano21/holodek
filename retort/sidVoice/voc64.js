@@ -428,7 +428,7 @@ function render0(item) {
     d.articulation = { mode: 'detail', frames: detailPlan.mix.length, activeFrames: detailPlan.mix.reduce((n, v) => n + (v > 0 ? 1 : 0), 0), bursts: detailPlan.bursts.length };
     return d;
   }
-  if (BEDGE && X10 && NOISEFORM && !item._ep && !item.bEdge && item.phones) { const d1 = render0(Object.assign({}, item, { _ep: 1 })), it = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))), it2 = (process.env.SIDVOICE_R4B ?? '1') !== '0' ? onsetSharpen(it) : it; const EWs = burstEdges(it2, d1); return render0(Object.assign({}, item, { _ep: 1, bEdge: EWs })); }
+  if (BEDGE && X10 && NOISEFORM && !item._ep && !item.bEdge && item.phones) { const d1 = render0(Object.assign({}, item, { _ep: 1, captureRegisters: false, compileOnly: false })), it = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))), it2 = (process.env.SIDVOICE_R4B ?? '1') !== '0' ? onsetSharpen(it) : it; const EWs = burstEdges(it2, d1),result=render0(Object.assign({}, item, { _ep: 1, bEdge: EWs }));if(item.compileOnly)result.serverPcm=true;return result; }
   return render0b(item); }
 function render0b(item) { const _bE = item.bEdge; if (!item._prepared) { item = stressTiming(phoneSnap(Object.assign({}, item, { digi: null, audio: null }))); if ((process.env.SIDVOICE_R4B ?? '1') !== '0') item = onsetSharpen(item); } if (_bE) item = Object.assign({}, item, { bEdge: _bE }); // digi disabled: SID synthesis only // -> Float32Array at 22050 Hz (DC-blocked)
   const Dg = item.digi && item.audio ? require('./digi') : null, Md = modeOf(item.mode);
@@ -437,7 +437,13 @@ function render0b(item) { const _bE = item.bEdge; if (!item._prepared) { item = 
   const m = voice(item); if (X10 && NOTCH && item.phones) { const hzN = item.hz || HZ, pad = Number(process.env.SIDVOICE_NOTCH_PAD_MS ?? 9) / 1000, NW = []; for (const p of item.phones) if (/^[lɫ]$/.test(p.c)) NW.push([Math.max(0, Math.floor((p.t0 - pad) * hzN)), Math.ceil((p.t1 + pad) * hzN)]);
     const nf = Math.round(Number(process.env.SIDVOICE_NOTCH_HZ ?? 2000)), nw = Math.round(Number(process.env.SIDVOICE_NOTCH_W ?? 400)), nd = Math.max(0, Math.min(255, Math.round(255 * Number(process.env.SIDVOICE_NOTCH_DEPTH ?? 0.15)))), tk0 = m.ticks; let non = false;
     m.ticks = n => { const w = tk0(n), on = NW.some(([a, b]) => n >= a && n < b); if (on !== non) { for (let c = 0; c < 64; c++) { if (on) w.push([c, 37, nf & 255], [c, 38, nf >> 8], [c, 39, nw & 255], [c, 40, nw >> 8], [c, 41, nd]); w.push([c, 36, on ? 1 : 0]); } non = on; } return w; }; } /* 10582 output notch: on at first tick of each padded /l/ window, off on the tick after */
-  const M = modeOf(item.mode), ms = new MultiSid(64, M.sr, { clk: M.clk, cut: M.cut, model: X10 ? '10582' : undefined }), d = ms.render(m.nTicks, item.hz || HZ, m.ticks, CLOCKFIX); d.sr = M.sr;
+  const M = modeOf(item.mode), ms = new MultiSid(64, M.sr, { clk: M.clk, cut: M.cut, model: X10 ? '10582' : undefined });
+  let recorder=null;
+  if(item.captureRegisters){const hz=item.hz||HZ,samples=CLOCKFIX?Math.round(m.nTicks*M.sr/hz):m.nTicks*Math.round(M.sr/hz);
+    recorder=new (require('./registerScore').Recorder)({model:X10?'10582':'8580',chips:64,sampleRate:M.sr,clock:M.clk,cut:M.cut,hz,nTicks:m.nTicks,samples,exact:CLOCKFIX,fadeSamples:VFIX?Math.min(samples>>2,Math.round(K.fadeMs/1000*M.sr)):0});
+    const ticks=m.ticks;m.ticks=n=>{const writes=ticks(n);recorder.tick(writes);return writes;};}
+  if(item.compileOnly){for(let n=0;n<m.nTicks;n++)m.ticks(n);return{registerScore:recorder.finish(),sr:M.sr,length:CLOCKFIX?Math.round(m.nTicks*M.sr/(item.hz||HZ)):m.nTicks*Math.round(M.sr/(item.hz||HZ))};}
+  const d = ms.render(m.nTicks, item.hz || HZ, m.ticks, CLOCKFIX); d.sr = M.sr;
   let px = 0, py = 0; for (let k = 0; k < d.length; k++) { const y = d[k] - px + 0.995 * py; px = d[k]; py = y; d[k] = y; }
   if (VFIX) { const L = Math.min(d.length >> 2, Math.round(K.fadeMs / 1000 * M.sr)); for (let k = 0; k < L; k++) { const g = Math.sin(Math.PI / 2 * k / L) ** 2; d[k] *= g; d[d.length - 1 - k] *= g; } } // voicefix: ~20 ms line fades
   if (Dg && item.digi.mix === 'hybrid') { const fr = item.frames, w = digiWeight(item, fr), g = Dg.digi(item.audio, M, Object.assign({}, item.digi, { weight: w })), up = M.sr / 22050;
@@ -445,6 +451,7 @@ function render0b(item) { const _bE = item.bEdge; if (!item._prepared) { item = 
     let ev = 0, ep = 0; for (let k = 0; k < item.audio.length; k++) if (w[k] < 0.05) { const j = Math.round(k * up); if (j < d.length) { ev += d[j] * d[j]; ep += item.audio[k] * item.audio[k]; } }
     const gain = Math.sqrt(ev / Math.max(1e-12, ep)) / (g.unit * g.norm) * K.digiG; const L = Math.min(d.length, g.length);
     for (let k = 0; k < L; k++) d[k] += g[k] * gain; }
+  if(recorder)d.registerScore=recorder.finish();
   return d;
 }
-module.exports = { stressTiming, phoneSnap, snapMeasure, STATS, voice, render, digiWeight, SR, MODES, modeOf, VERSION: 1000 + (X10 ? (NOTCH ? 43 : 41) : VFIX ? (CONS ? (!CLOCKFIX ? ((process.env.SIDVOICE_SNAP ?? '1') === '0' ? 29 : 30) : (process.env.SIDVOICE_SNAP ?? '1') === '0' ? 31 : 32) : 25) : 24) + (NOISEFORM ? 100 : 0) + (NOISEFORM && BEDGE ? 100 : 0) }; // +1000: identity/vibrato/detail-analysis revision; chip and detail mode also key the speech cache.
+module.exports = { compile:item=>render({...item,captureRegisters:true,compileOnly:true}),stressTiming, phoneSnap, snapMeasure, STATS, voice, render, digiWeight, SR, MODES, modeOf, VERSION: 1000 + (X10 ? (NOTCH ? 43 : 41) : VFIX ? (CONS ? (!CLOCKFIX ? ((process.env.SIDVOICE_SNAP ?? '1') === '0' ? 29 : 30) : (process.env.SIDVOICE_SNAP ?? '1') === '0' ? 31 : 32) : 25) : 24) + (NOISEFORM ? 100 : 0) + (NOISEFORM && BEDGE ? 100 : 0) }; // +1000: identity/vibrato/detail-analysis revision; chip and detail mode also key the speech cache.

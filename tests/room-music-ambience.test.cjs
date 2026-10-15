@@ -19,7 +19,7 @@ function fixture(song) {
   const param = () => ({ value: .8, cancelScheduledValues() {}, setValueAtTime() {},
     linearRampToValueAtTime(...args) { calls.ramps.push(args); } });
   const context = vm.createContext({ song, music: () => audio, AMB_TAGS: ['wind','sandstorm','drips','fire','howls','chant','rumble','water'],
-    settings: { muted: false, music: .2, amb: .1, sfx: .8, voice: .85 },
+    settings: { muted: false, music: .2, amb: .1, sfx: .8, voice: .85 }, sidPlayers:new Set(),
     ctx: { currentTime: 10 }, crossfading: false, ambLayers: [],
     rhythmMode: '', clkOff: null, schedTo: null, gridSig: '',
     resetAutomation() { calls.resets++; }, gridEvents(...args) { calls.events.push(args); },

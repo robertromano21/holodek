@@ -13081,7 +13081,7 @@ const taskRequest = {
                       if (music) {
                         // 2) cache locally
                         await idbSetMusic(coordsKey, { ...music, __runId: runId });
-                        // 3) tell server to write retort/current_room.json and render WAV
+                        // Prepare portable SID files; the browser synthesizes room music live.
                         return fetch('/music/commit', {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
@@ -13103,10 +13103,10 @@ const taskRequest = {
                     })
                     .then(r => r && r.json ? r.json() : null)
                     .then(resp => {
-                      if (resp?.ok && resp?.wav) {
+                      if (resp?.ok && (resp?.sid || resp?.wav)) {
                         // Use the same selector/room queue as SSE, never bypass an extended palette.
-                        if (window.HolodekSfx?.queueRoomMusic) window.HolodekSfx.queueRoomMusic({coords:coordsKey,wav:resp.wav});
-                        else playRoomWavFresh(resp.wav, resp.token || Date.now());
+                        if (window.HolodekSfx?.queueRoomMusic) window.HolodekSfx.queueRoomMusic({...resp,coords:coordsKey});
+                        else if(resp.wav) playRoomWavFresh(resp.wav, resp.token || Date.now());
                       }
                     })
                     .catch(err => console.error('room-music flow failed:', err));

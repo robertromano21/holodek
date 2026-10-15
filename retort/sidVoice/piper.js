@@ -4,7 +4,7 @@
 const fs = require('fs'), path = require('path');
 const MODEL = process.env.HOLODEK_PIPER_MODEL || path.join(__dirname, '..', '..', 'models', 'piper', 'en_US-ljspeech-high.onnx');
 const Accent = require('./accent');
-let session = null, cfg = null, ort = null, phon = null, curV = 'lj';
+let ort = null, phon = null, engineReady = null;
 // analysis guides: LJ Speech (female) and Ryan (male, en_US-ryan-high). Piper audio is ANALYSIS ONLY (sheet music for the SID vocoder).
 const VOICES0 = { lj: MODEL, ryan: process.env.HOLODEK_PIPER_MALE || path.join(__dirname, '..', '..', 'models', 'piper', 'en_US-ryan-high.onnx') };
 // consA: prefer the duration-exposing re-export next to each model (<name>-dur.onnx: same weights + the duration predictor's
@@ -12,11 +12,19 @@ const VOICES0 = { lj: MODEL, ryan: process.env.HOLODEK_PIPER_MALE || path.join(_
 const durOf = p => p.replace(/\.onnx$/, '-dur.onnx'), VOICES = {}, CFG = {};
 for (const [k, p] of Object.entries(VOICES0)) { const d = durOf(p); VOICES[k] = (process.env.SIDVOICE_DURMODEL ?? '1') !== '0' && fs.existsSync(d) ? d : p; CFG[k] = p + '.json'; }
 const warned = new Set(); const warnOnce = (v, why) => { if (warned.has(v)) return; warned.add(v); console.warn(`[SidVoice] no phone timings for voice '${v}' (${why}): consonant model off for it, voicefix behaviour (model ${path.basename(VOICES[v])})`); };
-const S = {}; // voice -> { session, cfg }
+const S = {}; // voice -> Promise<{ name, session, cfg }>
 const hasVoice = v => !!VOICES[v] && fs.existsSync(VOICES[v]) && fs.existsSync(CFG[v]);
-async function useVoice(v) { if (!hasVoice(v)) v = 'lj'; if (!S[v]) { if (!ort) { ort = require('onnxruntime-node'); phon = await import('phonemizer'); }
-  S[v] = { name: v, cfg: JSON.parse(fs.readFileSync(CFG[v], 'utf8')), session: await ort.InferenceSession.create(VOICES[v], { intraOpNumThreads: Math.max(1, Math.min(8, require('os').cpus().length)) }) }; }
-  session = S[v].session; cfg = S[v].cfg; curV = v; }
+async function useVoice(v) {
+  if (!hasVoice(v)) v = 'lj';
+  if (!engineReady) engineReady = (async()=>{
+    ort = require('onnxruntime-node'); phon = await import('phonemizer');
+  })().catch(error=>{ engineReady=null; throw error; });
+  await engineReady;
+  if (!S[v]) S[v] = (async()=>({name:v,cfg:JSON.parse(fs.readFileSync(CFG[v], 'utf8')),
+    session:await ort.InferenceSession.create(VOICES[v], {intraOpNumThreads:Math.max(1,Math.min(8,require('os').cpus().length))})}))()
+    .catch(error=>{ delete S[v]; throw error; });
+  return S[v];
+}
 async function load() {
   if (S.lj) return; await useVoice('lj');
   await synth('Welcome, traveller. The torches are lit.', 1); // warm-up run (first inference is several times slower)
@@ -53,7 +61,7 @@ function sylOf(ph) { const out = []; let pend = 0, inV = false;
     if (VOW.test(c) || (inV && /[ːˑ̯]/.test(c))) { if (!inV) { out.push(pend); pend = 0; } inV = true; } else inV = false; }
   return out; }
 async function synth(text, lengthScale = 1, noiseMul = 1, voice = 'lj', acc = null) { // acc: { accent, emph } (accent.js) // noiseMul: prosody variability (mood) // -> Float32Array @ cfg.audio.sample_rate (22050)
-  await useVoice(voice);
+  const {session,cfg,name:guide} = await useVoice(voice);
   const T = acc ? Accent.stripMarks(text) : String(text), TW = T.split(/\s+/).filter(Boolean), lang = acc ? Accent.langOf(acc.accent) : 'en-us', clauses0 = await lexApply(await phon.phonemize(T, lang), T, lang), clauses = acc ? lexRestore(clauses0, Accent.transform(clauses0, acc.accent, acc.emph, TW.length, TW)) : clauses0.map(c => c.replace(/ɾ/g, 't'));
   if (process.env.SIDVOICE_LEXLOG) console.log('[lexph]', voice, acc && acc.accent, JSON.stringify(T), '->', JSON.stringify(clauses));
   const map = cfg.phoneme_id_map, ids = [...map['^'], ...map['_']];
@@ -71,7 +79,7 @@ async function synth(text, lengthScale = 1, noiseMul = 1, voice = 'lj', acc = nu
   if (wc) { const hop = cfg.audio.hop_length || 256, sr = cfg.audio.sample_rate, d = Array.from(wc, Number), st = []; let acc = 0; for (let i = 0; i < d.length; i++) { st.push(acc); acc += d[i]; }
     phones = pos.map(([c, i, k]) => { const own0 = st[i], own1 = st[i + k - 1] + d[i + k - 1], prevBlank = i > 0 ? d[i - 1] : 0, nextBlank = i + k < d.length ? d[i + k] : 0;
       return { c, t0: (own0 - prevBlank / 2) * hop / sr, t1: (own1 + nextBlank / 2) * hop / sr }; }); }
-  if (!phones || !phones.length) warnOnce(curV, wo ? 'empty duration output' : 'model has no duration output');
+  if (!phones || !phones.length) warnOnce(guide, wo ? 'empty duration output' : 'model has no duration output');
   return { audio: r[session.outputNames[0]].data, sr: cfg.audio.sample_rate, syl: sylOf(ph), ph, phones };
 }
 // --- paced synthesis: punctuation drives real silence. The phonemizer drops all punctuation (every clause was re-joined

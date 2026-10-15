@@ -38,7 +38,8 @@ test('invalid values are bounded; Mortacia keeps her named voice', () => {
   const p = Profile.normalize({ name: 'Test', f0: Infinity, fs: -100, range: NaN, rate: 1e9, breath: 9, rasp: -9, warm: NaN, vibAmt: 0 });
   assert.equal(p.f0, 130); assert.equal(p.fs, 0.7); assert.equal(p.rate, 7); assert.equal(p.vibAmt, 0);
   assert.ok(Object.values(p).every(v => typeof v !== 'number' || Number.isFinite(v)));
-  assert.equal(Profile.normalize({ name: '  MORTACIA ', f0: 75 }).f0, 182);
+  const mortacia=Profile.normalize({ name: '  MORTACIA ', f0: 75 });
+  assert.equal(mortacia.f0, 205);assert.equal(mortacia.rasp,0);assert.ok(mortacia.vibAmt<=.2);assert.ok(mortacia.rate>=4.5);
   assert.equal(Profile.keyOf('  Vessa   Reedwake '), 'vessa reedwake');
 });
 test('mood modulates, rather than replaces, character brightness and pauses', () => {
@@ -67,13 +68,13 @@ test('speech fetch carries the profile atomically and separates the articulation
   const b = browser(), actor = { name: 'Vessa Reedwake', voiceSpec: { f0: 180 } }, requests = [];
   const context = { window: b.window, settings: { voiceDetail: true }, actorByName: () => actor, voiceWireProfile: b.voiceWireProfile,
     sidMode: () => '2x', voiceChip: () => '10582', voiceNotch: () => false, performance,
-    audio: () => ({ decodeAudioData: (data, resolve) => resolve({ duration: 1 }) }),
-    fetch: async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); return { ok: true, arrayBuffer: async () => new ArrayBuffer(2) }; } };
+    audio: () => {throw Error('Speech must not decode a WAV');},
+    fetch: async (url, options) => { requests.push({ url, body: JSON.parse(options.body) }); return { ok: true,headers:{get:()=> '1'}, arrayBuffer: async () => new ArrayBuffer(2) }; } };
   vm.createContext(context);
   const start = source.indexOf('  const speechBufs ='), end = source.indexOf('  const cleanSpeech =', start);
   vm.runInContext(source.slice(start, end) + '\nthis.get = fetchSpeech;', context);
   await context.get(actor.name, 'The gods remember.'); await context.get(actor.name, 'The gods remember.');
-  assert.equal(requests.length, 1); assert.equal(requests[0].url, '/voice/line.wav');
+  assert.equal(requests.length, 1); assert.equal(requests[0].url, '/voice/line.sidvoice');
   assert.equal(requests[0].body.profile.f0, 180);
   context.settings.voiceDetail = false; await context.get(actor.name, 'The gods remember.');
   actor.voiceSpec.f0 = 190; await context.get(actor.name, 'The gods remember.');

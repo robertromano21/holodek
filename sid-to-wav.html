@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Underworld SID Workshop</title>
+<style>
+:root{--ink:#f2e6ca;--muted:#c4b496;--paper:#191b18;--line:#62705a;--gold:#dfb56b}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:radial-gradient(ellipse at top left,#3c4230,transparent 60%),repeating-linear-gradient(0deg,#171a17 0 3px,#1b1e1a 3px 6px);font:18px Georgia,serif;min-height:100vh}
+main{max-width:860px;margin:auto;padding:42px 24px}h1{font-size:clamp(2.4rem,7vw,4.8rem);font-weight:normal;margin:.2em 0}h2{font-weight:normal;color:var(--gold)}.eyebrow{font:12px monospace;letter-spacing:.3em;color:var(--gold)}p{line-height:1.55;color:var(--muted)}section{background:#191b18ed;border:1px solid var(--line);padding:24px;margin:28px 0}.fields{display:flex;flex-wrap:wrap;gap:18px}label{display:grid;gap:8px;margin-bottom:20px}input,select,button,a.download{font:inherit;background:#30362a;color:var(--ink);border:1px solid #8c9779;padding:10px;max-width:100%}button,a.download{cursor:pointer}button:disabled{opacity:.4;cursor:default}button.primary{background:var(--gold);color:#171a17}a{color:var(--gold)}progress,audio{display:block;width:100%;margin:18px 0}#status{color:var(--ink);white-space:pre-wrap}#library article{border-top:1px solid var(--line);padding:12px 0}#library a{display:inline-block;margin:5px 20px 5px 0}small{font:13px monospace;color:var(--muted)}[hidden]{display:none!important}
+</style>
+<main>
+<div class="eyebrow">CHILDREN OF THE GRAVE / MUSIC ARCHIVE</div>
+<h1>Underworld<br>SID Workshop</h1>
+<p>Play a room's portable SID score live, or export a WAV you can keep and share. Playback synthesizes the SID as you listen, without creating a full recording first. This page works offline: your file stays in this browser.</p>
+<section>
+<label>Open a SID or register-score file<input id="file" type="file" accept=".sid,.sidvoice,.sidregs"></label>
+<p id="info">Choose 8580.sid for the classic arrangement, or 10582.sid for the custom register layer as well.</p>
+<div class="fields"><label>Duration (seconds)<input id="seconds" type="number" min="1" max="1200" step="0.01" value="600"></label><label>Sample rate<select id="rate"><option value="44100">44.1 kHz</option><option value="22050">22.05 kHz</option></select></label><label>Subtune<input id="subtune" type="number" min="1" value="1"></label></div>
+<label>Playback chip<select id="chip"><option value="8580">8580: traditional SID</option><option value="10582">10582: expanded registers</option></select></label>
+<p>The file selects its chip automatically. Switch at any time to compare the same SID at the same position. WAV export uses the selected chip too. An 8580 has no 10582 extensions; a traditional score does not gain new register instructions just by choosing 10582.</p>
+<button id="play" class="primary" disabled>Play SID</button> <button id="pause" disabled>Pause</button> <button id="stop" disabled>Stop SID</button>
+<label>SID position<input id="seek" type="range" min="0" max="600" step="0.1" value="0" disabled></label><span id="live-time">0:00 / 0:00</span>
+<label><span><input id="loop" type="checkbox" checked> Loop SID</span></label>
+<button id="render" disabled>Export Full WAV</button> <button id="cancel" disabled>Cancel Export</button>
+<progress id="progress" max="1" value="0" aria-label="Render progress"></progress>
+<p id="status" role="status" aria-live="polite">Ready.</p>
+<h2 id="player-title" hidden>WAV Player</h2><audio id="audio" controls preload="metadata" aria-label="Rendered SID playback" hidden></audio><a id="download" class="download" hidden>Download WAV</a>
+</section>
+<p><strong>Compatibility:</strong> this is the game's bounded PSID player, not a complete C64 emulator. Game exports are supported. RSID, multi-chip tunes, CIA timing, ROM-dependent drivers and unsupported instructions fail explicitly. Native SID timing can differ from the game's nominal-tempo WAV. Conventional players play the three-voice core of a 10582 export; only an extension-aware renderer adds its custom layer.</p>
+<p>Voice exports use the private <code>.sidvoice</code> register-score format: 64 emulated chips, no speech samples. These are not PSID files and do not work in stock SID players. They use this same live synthesis worker.</p>
+<section id="library-section" hidden><h2>Saved Compositions</h2><p>Both SID variants are small, permanent files. WAVs are generated only when you request them.</p><div id="library"></div></section>
+<small>Live playback uses a bounded audio queue, a synthesis worker and an AudioWorklet. WAV export is separate. Sharing a SID does not share your save game.</small>
+</main>
+<script id="sid-worker" type="text/plain">const __bundleCore=(()=>{const hex = n => '$' + n.toString(16).padStart(4, '0');
+function header(b) {
+  if(b.length<118||b.toString('ascii',0,4)!=='PSID')throw Error('Only PSID is supported; RSID needs a full C64 emulator.');
+  const version=b.readUInt16BE(4),offset=b.readUInt16BE(6);
+  if(![1,2].includes(version)||offset<(version===1?118:124)||offset+2>b.length)throw Error('Unsupported/truncated PSID header.');
+  const flags=version>=2?b.readUInt16BE(118):0;
+  if(flags&3)throw Error('External MUS/PlaySID-specific players are unsupported.');
+  const load=b.readUInt16BE(8)||b.readUInt16LE(offset),prefix=b.readUInt16BE(8)?0:2;
+  const data=b.subarray(offset+prefix),init=b.readUInt16BE(10)||load,play=b.readUInt16BE(12),songs=b.readUInt16BE(14),speed=b.readUInt32BE(18);
+  if(!play||!songs||songs>256||load+data.length>65536||init<load||init>=load+data.length)throw Error('Invalid PSID payload or unsupported IRQ-installed player.');
+  if(speed)throw Error('CIA/mixed-speed timing requires a full emulator; refusing a guessed trace.');
+  const clock=['unknown','PAL','NTSC','both'][(flags>>2)&3];
+  return {version,load,init,play,songs,data,clock,hz:clock==='NTSC'?60:50,
+    timingAssumption:clock==='unknown'||clock==='both'?'PAL chosen for ambiguous clock':null,
+    title:b.toString('latin1',22,54).split('\0')[0],author:b.toString('latin1',54,86).split('\0')[0],
+    released:b.toString('latin1',86,118).split('\0')[0]};
+}
+
+const instructions = new Map();
+function codes(name, entries) { for(const [code,mode] of entries)instructions.set(code,{name,mode}); }
+const familyModes=['ix','zp','imm','abs','iy','zx','ay','ax'];
+for(const [row,name]of ['ORA','AND','EOR','ADC','STA','LDA','CMP','SBC'].entries())
+  for(const [i,col]of [1,5,9,13,17,21,25,29].entries())if(!(name==='STA'&&col===9))instructions.set(row*32+col,{name,mode:familyModes[i]});
+codes('ASL',[[6,'zp'],[10,'acc'],[14,'abs'],[22,'zx'],[30,'ax']]);
+codes('ROL',[[38,'zp'],[42,'acc'],[46,'abs'],[54,'zx'],[62,'ax']]);
+codes('LSR',[[70,'zp'],[74,'acc'],[78,'abs'],[86,'zx'],[94,'ax']]);
+codes('ROR',[[102,'zp'],[106,'acc'],[110,'abs'],[118,'zx'],[126,'ax']]);
+codes('STX',[[134,'zp'],[142,'abs'],[150,'zy']]);codes('STY',[[132,'zp'],[140,'abs'],[148,'zx']]);
+codes('LDX',[[162,'imm'],[166,'zp'],[174,'abs'],[182,'zy'],[190,'ay']]);
+codes('LDY',[[160,'imm'],[164,'zp'],[172,'abs'],[180,'zx'],[188,'ax']]);
+codes('CPX',[[224,'imm'],[228,'zp'],[236,'abs']]);codes('CPY',[[192,'imm'],[196,'zp'],[204,'abs']]);
+codes('DEC',[[198,'zp'],[206,'abs'],[214,'zx'],[222,'ax']]);codes('INC',[[230,'zp'],[238,'abs'],[246,'zx'],[254,'ax']]);
+codes('BIT',[[36,'zp'],[44,'abs']]);
+class Cpu {
+  constructor() { this.mem=new Uint8Array(65536);this.mem[0]=0x2f;this.mem[1]=0x37;this.a=this.x=this.y=0;this.p=0x24;this.sp=255;this.pc=0;this.onWrite=()=>{}; }
+  read(a) {
+    a&=65535;
+    if(a>=0xd41b&&a<=0xd41c)throw Error('SID oscillator/envelope readback needs a full emulator.');
+    return this.mem[a];
+  }
+  write(a,v) {a&=65535;v&=255;this.mem[a]=v;this.onWrite(a,v);}
+  byte(){const n=this.read(this.pc);this.pc=(this.pc+1)&65535;return n;}
+  word(){const lo=this.byte();return lo|(this.byte()<<8);}
+  nz(v){v&=255;this.p=(this.p&~130)|(v===0?2:0)|(v&128);return v;}
+  flag(bit,set){this.p=set?this.p|bit:this.p&~bit;}
+  push(v){this.write(256+this.sp,v);this.sp=(this.sp-1)&255;}
+  pop(){this.sp=(this.sp+1)&255;return this.read(256+this.sp);}
+  address(mode){
+    let n;
+    switch(mode){
+      case'imm':return this.pc++;
+      case'zp':return this.byte();case'zx':return(this.byte()+this.x)&255;case'zy':return(this.byte()+this.y)&255;
+      case'abs':return this.word();case'ax':return(this.word()+this.x)&65535;case'ay':return(this.word()+this.y)&65535;
+      case'ix':n=(this.byte()+this.x)&255;return this.read(n)|(this.read((n+1)&255)<<8);
+      case'iy':n=this.byte();return((this.read(n)|(this.read((n+1)&255)<<8))+this.y)&65535;
+      default:throw Error('Unknown addressing mode.');
+    }
+  }
+  compare(a,b){this.flag(1,a>=b);this.nz(a-b);}
+  add(v,subtract=false){
+    if(this.p&8)throw Error('Decimal ADC/SBC is intentionally unsupported.');
+    const b=subtract?v^255:v,a=this.a,n=a+b+(this.p&1);
+    this.flag(64,(~(a^b)&(a^n)&128)!==0);this.flag(1,n>255);this.a=this.nz(n);
+  }
+  step(){
+    const at=this.pc,op=this.byte();
+    if((op&31)===16){const bits=[128,64,1,2],bit=bits[op>>6],want=!!(op&32),n=this.byte();if(!!(this.p&bit)===want)this.pc=(this.pc+(n<128?n:n-256))&65535;return;}
+    switch(op){
+      case 0x20:{const target=this.word(),ret=(this.pc-1)&65535;this.push(ret>>8);this.push(ret);this.pc=target;return;}
+      case 0x60:{const lo=this.pop();this.pc=((lo|(this.pop()<<8))+1)&65535;return;}
+      case 0x4c:this.pc=this.word();return;
+      case 0x6c:{const a=this.word();this.pc=this.read(a)|(this.read((a&0xff00)|((a+1)&255))<<8);return;}
+      case 0x48:this.push(this.a);return;case 0x68:this.a=this.nz(this.pop());return;
+      case 0x08:this.push(this.p|0x30);return;case 0x28:this.p=(this.pop()&~16)|32;return;
+      case 0x18:this.flag(1,false);return;case 0x38:this.flag(1,true);return;
+      case 0x58:this.flag(4,false);return;case 0x78:this.flag(4,true);return;
+      case 0xb8:this.flag(64,false);return;case 0xd8:this.flag(8,false);return;case 0xf8:this.flag(8,true);return;
+      case 0xaa:this.x=this.nz(this.a);return;case 0xa8:this.y=this.nz(this.a);return;
+      case 0x8a:this.a=this.nz(this.x);return;case 0x98:this.a=this.nz(this.y);return;
+      case 0xba:this.x=this.nz(this.sp);return;case 0x9a:this.sp=this.x;return;
+      case 0xe8:this.x=this.nz(this.x+1);return;case 0xc8:this.y=this.nz(this.y+1);return;
+      case 0xca:this.x=this.nz(this.x-1);return;case 0x88:this.y=this.nz(this.y-1);return;
+      case 0xea:return;
+    }
+    const instruction=instructions.get(op);if(!instruction)throw Error('Unsupported opcode '+hex(op)+' at '+hex(at));
+    const {name,mode}=instruction,a=mode==='acc'?null:this.address(mode),v=mode==='acc'?this.a:name.startsWith('ST')?0:this.read(a);
+    const put=n=>{const value=this.nz(n);if(a===null)this.a=value;else this.write(a,value);};
+    switch(name){
+      case'LDA':this.a=this.nz(v);break;case'LDX':this.x=this.nz(v);break;case'LDY':this.y=this.nz(v);break;
+      case'STA':this.write(a,this.a);break;case'STX':this.write(a,this.x);break;case'STY':this.write(a,this.y);break;
+      case'ORA':this.a=this.nz(this.a|v);break;case'AND':this.a=this.nz(this.a&v);break;case'EOR':this.a=this.nz(this.a^v);break;
+      case'ADC':this.add(v);break;case'SBC':this.add(v,true);break;
+      case'CMP':this.compare(this.a,v);break;case'CPX':this.compare(this.x,v);break;case'CPY':this.compare(this.y,v);break;
+      case'BIT':this.p=(this.p&~194)|(v&192)|((this.a&v)?0:2);break;
+      case'INC':put(v+1);break;case'DEC':put(v-1);break;
+      case'ASL':this.flag(1,v&128);put(v<<1);break;case'LSR':this.flag(1,v&1);put(v>>1);break;
+      case'ROL':{const c=this.p&1;this.flag(1,v&128);put((v<<1)|c);break;}
+      case'ROR':{const c=this.p&1;this.flag(1,v&1);put((v>>1)|(c<<7));break;}
+    }
+  }
+  call(address,limit=100000){
+    this.push(2);this.push(254);this.pc=address;
+    let count=0;while(this.pc!==0x2ff){if(++count>limit)throw Error('Instruction budget exceeded.');this.step();}
+    return count;
+  }
+}
+
+;return {header,Cpu};})();const __bundleSid=(()=>{const module={exports:{}};'use strict';
+// jsid: compact multi-SID emulation in JS (sample-rate, 8580-style), meant to run in an AudioWorklet in the browser.
+// Per chip: 3 voices (24-bit phase accumulator, 12-bit saw/triangle/pulse, 23-bit LFSR noise clocked from accumulator
+// bit 19, ADSR with SID rate table + exponential decay), one multimode state-variable filter (cutoff 11-bit, 4-bit
+// resonance, LP/BP/HP, routing, voice-3-off), 4-bit master volume. Registers are written exactly like $D400-$D418.
+const CLK = 985248;
+const ATT = [2, 8, 16, 24, 38, 56, 68, 80, 100, 250, 500, 800, 1000, 3000, 5000, 8000]; // ms (decay/release x3)
+const CAL = [[0, 30], [60, 389], [100, 630], [150, 1015], [220, 1455], [300, 2200], [400, 2653], [550, 3541], [700, 5085], [900, 6181], [1100, 7877], [1400, 8999], [1700, 10627], [2047, 12000]];
+function cutHz(r) { for (let i = 1; i < CAL.length; i++) if (r <= CAL[i][0]) { const [r0, f0] = CAL[i - 1], [r1, f1] = CAL[i]; return f0 + (f1 - f0) * (r - r0) / (r1 - r0); } return 12000; }
+class Chip {
+  constructor(sr, opt = {}) { this.dc = opt.model === '6581' ? 0.8 : opt.model === '8580' ? 0.03 : 0; this.aa = !!opt.aa; this.clk = opt.clk || CLK; this.cut = opt.cut || 1; this.sr = sr; this.x = opt.model === '10582'; this.r = new Uint8Array(this.x ? 64 : 32); if (this.x) { this.r[25] = this.r[26] = this.r[27] = 255; this.fe = [0, 0, 0]; this.fph = [0, 0, 0]; this.fy1 = 0; this.fy2 = 0; this.fdc = 0; this.nm = 0; this.nz = [0, 0, 0, 0]; } this.v = [0, 1, 2].map(() => ({ acc: 0, lfsr: 0x7ffff8, env: 0, st: 0, gate: 0, prevBit: 0, hold: 2048, lastO: 2048 })); this.sched = []; this.holdTau = opt.model === '6581' ? 0.05 : 0.8; // waveform-0 floating-DAC hold decay (s)
+    this.lp = 0; this.bp = 0; this.inc = this.clk / sr; }
+  write(a, x) { if (a >= 25 && !this.x) return; /* stock SID: $19-$1C are read-only, nothing above $1C */ const old = this.r[a]; this.r[a] = x;
+    if (this.x && a === 30) { for (let i = 0; i < 3; i++) if (x >> (4 + i) & 1) this.fph[i] = 1; this.r[30] = x & 0x0f; } /* 10582: FENV trigger strobes self-clear */ if (a % 7 === 4 && a < 21) { const v = this.v[(a / 7) | 0], g = x & 1; if (x & 8) v.acc = 0; /* TEST bit: oscillator reset & held */ if (g && !(old & 1)) v.st = 1; if (!g && (old & 1)) v.st = 3; } }
+  // cycle-exact write inside the next render call: applied when the chip clock reaches `cyc` cycles after the call starts
+  writeAt(a, x, cyc) { this.sched.push({ a, x, cyc }); }
+  render(out, n, gain) {
+    const r = this.r, sr = this.sr, vol = (r[24] & 15) / 15, mode = r[24] >> 4, route = r[23] & 7, res = r[23] >> 4, v3off = mode & 8;
+    if (vol === 0) { // still advance oscillators/envelopes cheaply
+      for (let i = 0; i < 3; i++) { const v = this.v[i]; v.acc = (v.acc + (r[i * 7] | r[i * 7 + 1] << 8) * this.inc * n) % 16777216; this.envStep(v, i, n / sr); } this.lp *= 0.9; this.bp *= 0.9; return; }
+    const creg = r[21] & 7 | r[22] << 3, fc = Math.min(sr * (this.cut >= 4 ? 0.3 : 0.22), cutHz(creg) * (1 + (this.cut - 1) * creg / 2047)), /* enhanced: low cutoffs as stock, top of range opens x cut */ w = 2 * Math.sin(Math.PI * fc / sr / 2), q = 1 / (0.707 + res / 15); // 2x oversampled SVF
+    const fr = [], pw = [], wf = [], env = [];
+    for (let i = 0; i < 3; i++) { fr.push((r[i * 7] | r[i * 7 + 1] << 8) * this.inc); pw.push((r[i * 7 + 2] | (r[i * 7 + 3] & 15) << 8)); wf.push(r[i * 7 + 4] >> 4); }
+    for (const v of this.v) v.acc0 = v.acc;
+    let lp = this.lp, bp = this.bp;
+    const X = this.x, LV = X ? [r[25] / 255, r[26] / 255, r[27] / 255] : null, MU = X ? r[28] : 0, FEN = X ? r[30] & 7 : 0, fA = X ? 1 / (((r[29] & 15) + 1) * 0.0005 * sr) : 0, fD = X ? Math.exp(-1 / (((r[29] >> 4) + 1) * 0.002 * sr / 2.3)) : 0;
+    const FM = X && (r[31] & 1) && !(MU & 8) && r[35] > 0, fHz = X ? r[32] | r[33] << 8 : 0, fbw = X ? Math.max(20, r[34] * 4) : 0, fRt = FM ? Math.exp(-Math.PI * fbw / sr) : 0, fW = FM ? 2 * Math.PI * Math.min(fHz, sr * 0.45) / sr : 0, fC1 = 2 * fRt * Math.cos(fW), fC2 = -fRt * fRt, fB0 = Math.sin(fW) || 1e-3, fL = X ? r[35] / 255 : 0, fSrc = X ? (r[31] >> 1) & 3 : 0, fDiv = X ? ((r[31] >> 5) & 3) + 1 : 1, fFilt = X && (r[31] & 16);
+    let fy1 = X ? this.fy1 : 0, fy2 = X ? this.fy2 : 0;
+    const NE = X && (r[36] & 1), NA = X && (NE || this.nm > 0); let nb0 = 0, nb1 = 0, nb2 = 0, na1 = 0, na2 = 0, nm = X ? this.nm : 0; const nst = 1 / (0.001 * sr), nz = X ? this.nz : null; /* 10582 output notch ($24-$29): peaking biquad on the chip's final sum, gain at center = depth; 1 ms wet/dry ramp */
+    if (NA) { const nf = Math.max(50, Math.min(sr * 0.45, r[37] | r[38] << 8)), nwd = Math.max(20, r[39] | r[40] << 8), dp = Math.max(1e-3, r[41] / 255), A = Math.sqrt(dp), w0 = 2 * Math.PI * nf / sr, al = Math.sin(w0) / (2 * nf / nwd), cs = Math.cos(w0), a0 = 1 + al / A; nb0 = (1 + al * A) / a0; nb1 = -2 * cs / a0; nb2 = (1 - al * A) / a0; na1 = nb1; na2 = (1 - al / A) / a0; }
+    for (let s = 0; s < n; s++) {
+      let fin = 0, dir = 0;
+      if (s === 0) for (let i = 0; i < 3; i++) this.envStep(this.v[i], i, n / sr); // envelope counts first (also while a scheduled write later drops GATE)
+      if (this.sched.length) { const cEnd = (s + 1) * this.inc; for (let q = 0; q < this.sched.length; q++) { const w0 = this.sched[q]; if (w0.cyc > cEnd) continue;
+          const vi = (w0.a / 7) | 0, v = this.v[vi]; if (w0.a % 7 === 4 && w0.a < 21) { // exact accumulator at the write cycle
+            const F = r[vi * 7] | r[vi * 7 + 1] << 8; if (!(r[w0.a] & 8)) v.acc = (v.acc0 + F * w0.cyc) % 16777216; const a = (v.acc & 0x800000) ? ~v.acc & 0x7fffff : v.acc & 0x7fffff; v.hold = a >> 11; v.held = 1; }
+          this.write(w0.a, w0.x); wf[vi] = r[vi * 7 + 4] >> 4; fr[vi] = (r[vi * 7] | r[vi * 7 + 1] << 8) * this.inc; this.sched.splice(q--, 1); } }
+      for (let i = 0; i < 3; i++) { const u = this.v[i]; u.wrapped = u.acc + fr[i] >= 16777216; }
+      for (let i = 0; i < 3; i++) {
+        const v = this.v[i], ctl = r[i * 7 + 4], mod = this.v[(i + 2) % 3]; const e = v.env;
+        if (wf[i] === 0) { if (e > 0.0001 && v.held) { v.hold = 2048 + (v.hold - 2048) * Math.exp(-1 / (sr * this.holdTau)); const x = (v.hold - 2048) / 2048 * e; if (route >> i & 1) fin += x; else if (!(i === 2 && v3off)) dir += x; } continue; } // no waveform selected: DAC holds last level if (e <= 0.0001) { v.acc = (v.acc + fr[i]) % 16777216; continue; }
+        const prev = v.acc; v.acc = (ctl & 8) ? 0 : (v.acc + fr[i]) % 16777216; let o;
+        if ((ctl & 2) && mod.wrapped) v.acc = 0; // hard sync: reset when the modulating voice's accumulator wraps
+        if (wf[i] & 8) { if (((prev >> 19) & 1) === 0 && ((v.acc >> 19) & 1) === 1) { const b = ((v.lfsr >> 22) ^ (v.lfsr >> 17)) & 1; v.lfsr = ((v.lfsr << 1) | b) & 0x7fffff; }
+          const L = v.lfsr; o = ((L >> 22 & 1) << 11 | (L >> 20 & 1) << 10 | (L >> 16 & 1) << 9 | (L >> 13 & 1) << 8 | (L >> 11 & 1) << 7 | (L >> 7 & 1) << 6 | (L >> 4 & 1) << 5 | (L >> 2 & 1) << 4); }
+        else if (wf[i] & 4) { if (this.aa && !(ctl & 8)) { // box-filtered pulse: fraction of this sample's accumulator sweep spent above the PW threshold (needed for PWM digi)
+            const T = pw[i] * 4096, a0 = prev, a1 = prev + fr[i]; let hi = 0; if (a1 <= 16777216) hi = Math.max(0, a1 - Math.max(a0, T)); else hi = Math.max(0, 16777216 - Math.max(a0, T)) + Math.max(0, a1 - 16777216 - T);
+            o = 4095 * Math.min(1, hi / Math.max(1, fr[i])); } else o = (v.acc >> 12) >= pw[i] ? 4095 : 0; }
+        else if (wf[i] & 2) o = v.acc >> 12;
+        else { const msb = (v.acc ^ ((ctl & 4) ? mod.acc : 0)) & 0x800000; const a = msb ? ~v.acc & 0x7fffff : v.acc & 0x7fffff; o = a >> 11; } // ring mod: MSB xor modulator MSB
+        let x = (o - 2048) / 2048 * e;
+        if (X) { if (FEN >> i & 1) { const p = this.fph[i]; if (p === 1) { this.fe[i] += fA; if (this.fe[i] >= 1) { this.fe[i] = 1; this.fph[i] = 2; } } else if (p === 2) { this.fe[i] *= fD; if (this.fe[i] < 1e-4) { this.fe[i] = 0; this.fph[i] = 0; } } x = (o - 2048) / 2048 * this.fe[i]; } // fast noise/burst envelope replaces ADSR
+          x *= (MU >> i & 1) ? 0 : LV[i]; } // 8-bit level, hard mute (instant, held; ADSR keeps counting underneath)
+        if (route >> i & 1) fin += x; else if (!(i === 2 && v3off)) dir += x;
+      }
+      if (FM) { let ex = 0; if ((fSrc === 0 || fSrc === 2) && this.v[0].wrapped && ++this.fdc >= fDiv) { this.fdc = 0; ex += 1; } if (fSrc >= 1) ex += (((this.v[2].lfsr >> 22) & 1) - 0.5) * 0.25; // excitation: glottal pulse on voice-1 wrap (/divider) and/or noise
+        const fy = fC1 * fy1 + fC2 * fy2 + fB0 * ex; fy2 = fy1; fy1 = fy; const fo = fy * fL; if (fFilt) fin += fo; else dir += fo; } // formant voice: 2-pole resonator, direct Hz + bandwidth
+      let y = 0; for (let k = 0; k < 2; k++) { const hp = fin - lp - q * bp; bp += w * hp; lp += w * bp; if (k) y = (mode & 1 ? lp : 0) + (mode & 2 ? bp : 0) + (mode & 4 ? hp : 0); }
+      if (NA) { const t = (y + dir + this.dc) * vol; if (nm === 0) { nz[0] = nz[1] = nz[2] = nz[3] = t; } const yo = nb0 * t + nb1 * nz[0] + nb2 * nz[1] - na1 * nz[2] - na2 * nz[3]; nz[1] = nz[0]; nz[0] = t; nz[3] = nz[2]; nz[2] = yo; nm = NE ? Math.min(1, nm + nst) : Math.max(0, nm - nst); out[s] += (t + (yo - t) * nm) * gain; continue; } /* notch path; off => original line below, bit-identical */
+      out[s] += (y + dir + this.dc) * vol * gain; // dc: 6581 mixer bias (what $D418 volume digis modulate); 8580 has almost none
+    }
+    this.lp = lp; this.bp = bp; if (X) { if (FM) { this.fy1 = fy1; this.fy2 = fy2; } else { this.fy1 *= 0.5; this.fy2 *= 0.5; } this.nm = nm; }
+  }
+  envStep(v, i, dt) { // SID ADSR: linear attack, exponential decay/release toward sustain/0
+    const ad = this.r[i * 7 + 5], srr = this.r[i * 7 + 6], A = ATT[ad >> 4] / 1000, D = ATT[ad & 15] * 3 / 1000, S = (srr >> 4) / 15, R = ATT[srr & 15] * 3 / 1000;
+    if (v.st === 1) { v.env += dt / A; if (v.env >= 1) { v.env = 1; v.st = 2; } }
+    else if (v.st === 2) v.env = S + (v.env - S) * Math.exp(-dt * 4 / D);
+    else if (v.st === 3) { v.env *= Math.exp(-dt * 4 / R); if (v.env < 0.0005) { v.env = 0; v.st = 0; } }
+  }
+}
+class MultiSid {
+  constructor(nChips, sr = 22050, opt = {}) { this.sr = sr; this.chips = Array.from({ length: nChips }, () => new Chip(sr, opt)); } // opt.clk: chip clock (stock PAL 985248); opt.cut: filter cutoff scale
+  write(c, a, x, cyc) { if (cyc > 0) this.chips[c].writeAt(a, x, cyc); else this.chips[c].write(a, x); }
+  // ticks: function(n) -> [[chip, reg, val], ...]; hz: register update rate
+  render(nTicks, hz, ticks, exact) { // exact: tick n starts at sample round(n*sr/hz) (true hz update rate); default: round(sr/hz) samples per tick (legacy)
+    const per = Math.round(this.sr / hz), at = n => exact ? Math.round(n * this.sr / hz) : n * per, out = new Float32Array(at(nTicks)), g = 0.5 / Math.sqrt(this.chips.length);
+    for (let n = 0; n < nTicks; n++) { for (const [c, a, x, cyc] of ticks(n)) this.write(c, a, x, cyc);
+      const s0 = at(n), s1 = at(n + 1), buf = out.subarray(s0, s1); for (const ch of this.chips) ch.render(buf, s1 - s0, g); }
+    return out;
+  }
+}
+module.exports = { MultiSid, Chip, cutHz, CLK };
+;return module.exports;})();const __bundleExtended=(()=>{const module={exports:{}};const require=id=>{if(id==='./sidVoice/jsid')return __bundleSid;throw Error('Unknown bundled import');};'use strict';
+const { Chip, CLK } = require('./sidVoice/jsid');
+const VERSION = 2;
+const PROFILES = {
+  reed_resonance: { ratio: 2, center: 850, width: 180, level: 30 },
+  spectral_choir: { ratio: 1, center: 620, width: 140, level: 34 },
+  glass_halo: { ratio: 3, center: 1900, width: 100, level: 26 },
+  ember_air: { ratio: 2, center: 1100, width: 240, level: 24 }
+};
+const MOTION = ['still', 'breath', 'phrase'];
+const DEPTHS = [.15, .25, .4];
+const TRANSIENTS = ['off', 'soft', 'crisp'];
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+function validate(p) {
+  if (!p || !Object.hasOwn(PROFILES, p.profile) || !MOTION.includes(p.motion) ||
+      !DEPTHS.includes(p.depth) || !TRANSIENTS.includes(p.transients)) throw Error('extensions: choose a supported profile, motion, depth and transients enum.');
+  return p;
+}
+function paletteFor(song) {
+  const selected = song.composition?.acceptedPlan?.extensions || song.extensions;
+  if (selected) return { ...validate(selected), source: 'llm-plan' };
+  const patch = song.composition?.acceptedPlan?.leadPatch || '', mood = song.plan?.mood || '';
+  return { profile: /bell|glass|chime/.test(patch) ? 'glass_halo' : /sacred/.test(mood) ? 'spectral_choir' :
+    /saw/.test(patch) ? 'ember_air' : 'reed_resonance', motion: 'phrase', depth: .25,
+    transients: song.composition?.acceptedPlan?.percussion === 'none' ? 'off' : 'soft', source: 'legacy-patch-translation' };
+}
+// Return a companion layer only: the proven dry three-voice arrangement is untouched.
+class Layer {
+  constructor(sampleRate, mult, palette, trace = []) {
+    this.chip = new Chip(sampleRate, { model: '10582', clk: CLK * mult, cut: mult, aa: true });
+    this.palette = validate(palette); this.preset = PROFILES[palette.profile]; this.trace = trace; this.used = new Set();
+    this.clock = CLK * mult; this.gain = 0; this.last = new Map(); this.previousBurst = false;
+    this.dcX = 0; this.dcY = 0; this.dcR = Math.exp(-2*Math.PI*20/sampleRate);
+    this.write(24, 15, 0); this.write(25, 0, 0); this.write(26, 0, 0); this.write(27, 0, 0);
+    this.write(28, 7, 0); this.write(4, 0x21, 0); this.write(18, 0x80, 0);
+    this.write(14, 0, 0); this.write(15, 24, 0); this.write(29, 0x42, 0);
+  }
+  write(reg, value, time, strobe = false) {
+    value = clamp(Math.round(value), 0, 255);
+    if (!strobe && this.last.get(reg) === value) return;
+    this.last.set(reg, value); this.chip.write(reg, value); this.used.add(reg);
+    if (this.trace.length < 2000) this.trace.push([+time.toFixed(4), reg, value]);
+  }
+  frame({ time, frequency = 0, gate = false, envelope = 0, noise = false, bar = 0 }) {
+    const p = this.palette, q = this.preset;
+    const motion = p.motion === 'breath' ? .5 + .5 * Math.sin(time * .7) : p.motion === 'phrase' ? .5 - .5 * Math.cos(bar * Math.PI / 4) : .5;
+    const target = gate ? clamp(envelope, 0, 1) : 0;
+    this.gain += (target - this.gain) * (target > this.gain ? .3 : .12);
+    const f = clamp(Math.round(frequency * 16777216 / this.clock), 0, 65535);
+    this.write(0, f & 255, time); this.write(1, f >> 8, time);
+    const center = clamp(frequency * q.ratio + q.center * (.75 + .5 * motion), 150, 7000);
+    this.write(31, 1 | (p.profile === 'ember_air' ? 4 : 0), time);
+    this.write(32, Math.round(center) & 255, time); this.write(33, Math.round(center) >> 8, time);
+    this.write(34, q.width / 4, time); this.write(35, q.level * this.gain, time);
+    // This notch shapes only the companion, never the traditional dry signal.
+    const notch = Math.round(center * 1.8);
+    this.write(36, 1, time); this.write(37, notch & 255, time); this.write(38, notch >> 8, time);
+    this.write(39, 180, time); this.write(40, 0, time); this.write(41, 180, time);
+    const burst = noise && p.transients !== 'off';
+    this.write(28, burst ? 3 : 7, time); this.write(27, burst ? (p.transients === 'crisp' ? 36 : 18) : 0, time);
+    const trigger = burst && !this.previousBurst;
+    this.write(30, burst ? 4 | (trigger ? 64 : 0) : 0, time, trigger);
+    this.previousBurst = burst;
+  }
+  render(out) {
+    this.chip.render(out, out.length, this.palette.depth);
+    for(let i=0;i<out.length;i++){
+      const x=out[i], y=x-this.dcX+this.dcR*this.dcY;
+      this.dcX=x;this.dcY=y;out[i]=y;
+    }
+  }
+  report() { return { version: VERSION, model: '10582', architecture: 'additive-register-layer', palette: this.palette,
+    registers: [...this.used].sort((a,b) => a-b), tracePreview: this.trace, traceTruncated: this.trace.length === 2000 }; }
+}
+module.exports = { VERSION, PROFILES, MOTION, DEPTHS, TRANSIENTS, validate, paletteFor, Layer };
+;return module.exports;})();const __bundleFormat=(()=>{const module={exports:{}};'use strict';
+// Private, versioned metadata appended to unused PSID payload RAM. The C64
+// player never references it; ordinary players play only the three-voice core.
+const MAGIC='HDK10582',encoder=new TextEncoder(),decoder=new TextDecoder();
+function split(input){
+  const bytes=new Uint8Array(input.buffer||input,input.byteOffset||0,input.byteLength);
+  if(bytes.length<12||decoder.decode(bytes.subarray(-8))!==MAGIC)return{core:bytes,extension:null};
+  const size=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength).getUint32(bytes.length-12,true);
+  if(size>4096||size<2||size>bytes.length-130)throw Error('Invalid 10582 extension length');
+  const at=bytes.length-12-size,extension=JSON.parse(decoder.decode(bytes.subarray(at,at+size)));
+  if(extension.format!=='holodek-10582'||extension.version!==1)throw Error('Unsupported 10582 export version');
+  return{core:bytes.subarray(0,at),extension};
+}
+function attach(input,metadata){
+  const {core}=split(input),extra=encoder.encode(JSON.stringify({...metadata,format:'holodek-10582',version:1}));
+  if(extra.length>4096)throw Error('10582 export metadata too large');
+  const out=new Uint8Array(core.length+extra.length+12);out.set(core);out.set(extra,core.length);
+  new DataView(out.buffer).setUint32(out.length-12,extra.length,true);out.set(encoder.encode(MAGIC),out.length-8);
+  return out;
+}
+module.exports={split,attach};
+;return module.exports;})();const __bundleVoice=(()=>{const module={exports:{}};const require=id=>{if(id==='./jsid')return __bundleSid;throw Error('Unknown bundled import');};'use strict';
+// Private, bounded 64-chip register score. This is not a PSID or sampled audio.
+const {MultiSid}=require('./jsid');
+const MAGIC='HDKSV001',REGISTER_MAGIC='HDKRG001',HEADER=80,MAX_BYTES=24*1024*1024,MAX_SECONDS=120;
+function view(input){return new Uint8Array(input.buffer||input,input.byteOffset||0,input.byteLength);}
+function matches(b,magic){return b.length>=8&&[...magic].every((c,i)=>b[i]===c.charCodeAt(0));}
+function isScore(input){const b=view(input);return matches(b,MAGIC)||matches(b,REGISTER_MAGIC);}
+class Recorder{
+  constructor(info){this.info=info;this.parts=[];this.bytes=0;this.events=0;this.rawWrites=0;this.ticks=0;this.last=new Int16Array(4096).fill(-1);}
+  tick(writes){
+    const kept=[];this.rawWrites+=writes.length;
+    for(const [chip,reg,value,cycle]of writes){
+      if(!Number.isInteger(chip)||chip<0||chip>=this.info.chips||!Number.isInteger(reg)||reg<0||reg>63||!Number.isInteger(value)||value<0||value>255||cycle>0)throw Error('Unsupported SID voice register write');
+      const index=chip*64+reg;
+      // TEST resets phase even when unchanged; fast-envelope trigger bits are strobes.
+      const strobe=(reg<21&&reg%7===4&&(value&8))||(reg===30&&(value&112));
+      if(this.last[index]===value&&!strobe)continue;
+      kept.push(index&255,index>>8,value);this.last[index]=reg===30?value&15:value;
+    }
+    const count=kept.length/3;if(count>65535)throw Error('Too many voice writes in one tick');
+    this.events+=count;this.bytes+=2+kept.length;this.ticks++;
+    if(this.bytes+HEADER>MAX_BYTES||this.ticks>this.info.hz*MAX_SECONDS)throw Error('SID voice score exceeds its safety budget');
+    this.parts.push(Uint8Array.from([count&255,count>>8,...kept]));
+  }
+  finish(){
+    const i=this.info;if(this.ticks!==i.nTicks)throw Error('Incomplete SID voice score');
+    const b=new Uint8Array(HEADER+this.bytes),d=new DataView(b.buffer);
+    const magic=i.kind?REGISTER_MAGIC:MAGIC;for(let n=0;n<magic.length;n++)b[n]=magic.charCodeAt(n);
+    d.setUint16(8,HEADER,true);d.setUint16(10,Number(i.model),true);d.setUint16(12,i.chips,true);d.setUint16(14,i.exact?1:0,true);
+    d.setUint32(16,i.sampleRate,true);d.setUint32(20,i.clock,true);d.setUint16(24,i.cut,true);d.setUint16(26,i.hz,true);
+    d.setUint32(28,i.nTicks,true);d.setUint32(32,i.samples,true);d.setUint32(36,i.fadeSamples,true);d.setFloat64(40,1,true);d.setFloat64(48,.995,true);
+    d.setUint32(56,this.events,true);d.setUint32(60,this.bytes,true);d.setUint32(64,this.rawWrites,true);
+    d.setUint16(68,i.kind==='sid-ambience'?2:i.kind==='sid-effect'?1:0,true);
+    let at=HEADER;for(const part of this.parts){b.set(part,at);at+=part.length;}return b;
+  }
+}
+function inspect(input){
+  const b=view(input);if(!isScore(b)||b.length<HEADER||b.length>MAX_BYTES)throw Error('Invalid SID voice score');
+  const d=new DataView(b.buffer,b.byteOffset,b.byteLength),header=d.getUint16(8,true),model=String(d.getUint16(10,true)),chips=d.getUint16(12,true),flags=d.getUint16(14,true);
+  const sampleRate=d.getUint32(16,true),clock=d.getUint32(20,true),cut=d.getUint16(24,true),hz=d.getUint16(26,true),nTicks=d.getUint32(28,true),samples=d.getUint32(32,true),fadeSamples=d.getUint32(36,true),gain=d.getFloat64(40,true),dc=d.getFloat64(48,true),events=d.getUint32(56,true),payload=d.getUint32(60,true);
+  const role=d.getUint16(68,true),generic=matches(b,REGISTER_MAGIC),kind=generic?(role===1?'sid-effect':role===2?'sid-ambience':null):'sid-voice';
+  if(!kind||!generic&&role||header!==HEADER||!['8580','10582'].includes(model)||chips<1||chips>64||flags>1||![22050,44100].includes(sampleRate)||![985248,1970496,3940992].includes(clock)||![1,2,4].includes(cut)||clock!==985248*cut||hz<50||hz>8000||!nTicks||nTicks>MAX_SECONDS*hz||samples!==(flags?Math.round(nTicks*sampleRate/hz):nTicks*Math.round(sampleRate/hz))||samples/sampleRate>MAX_SECONDS||fadeSamples>samples/4||!Number.isFinite(gain)||gain<0||gain>(generic?64:6)||dc!==.995||payload+HEADER!==b.length||b.subarray(70,HEADER).some(x=>x))throw Error('Invalid SID voice score parameters');
+  return{kind,title:chips+'-chip SID '+(kind==='sid-voice'?'voice':kind==='sid-ambience'?'ambience':'effect'),model,chips,sampleRate,clock,cut,hz,nTicks,samples,fadeSamples,gain,dc,events,exact:!!flags,seconds:samples/sampleRate,bytes:b.length,rawWrites:d.getUint32(64,true)};
+}
+function withGain(input,gain){const b=view(input).slice();new DataView(b.buffer).setFloat64(40,gain,true);inspect(b);return b;}
+function createEngine(input,{sampleRate=44100,model='auto'}={}){
+  if(!Number.isInteger(sampleRate)||sampleRate<8000||sampleRate>96000)throw Error('Unsupported sample rate');
+  const b=view(input),info=inspect(b),selected=model==='auto'?info.model:model;
+  if(!['8580','10582'].includes(selected))throw Error('Choose 8580 or 10582 playback');
+  const d=new DataView(b.buffer,b.byteOffset,b.byteLength),offsets=new Uint32Array(info.nTicks+1);let at=HEADER,events=0;
+  for(let tick=0;tick<info.nTicks;tick++){
+    if(at+2>b.length)throw Error('Truncated SID voice tick');offsets[tick]=at;
+    const count=d.getUint16(at,true);at+=2;if(at+count*3>b.length)throw Error('Truncated SID voice registers');events+=count;
+    for(let n=0;n<count;n++,at+=3)if(d.getUint16(at,true)>=info.chips*64)throw Error('SID voice chip index out of range');
+  }
+  if(at!==b.length||events!==info.events)throw Error('SID voice event count mismatch');offsets[info.nTicks]=at;
+  // Preserve the original tick-sized envelope/filter updates, independent of device chunks.
+  const bank=new MultiSid(info.chips,info.sampleRate,{clk:info.clock,cut:info.cut,model:selected==='10582'?'10582':undefined});
+  let tick=0,cursor=0,frame=new Float32Array(0),nativePosition=0,position=0,dx=0,dy=0;
+  const edge=n=>info.exact?Math.round(n*info.sampleRate/info.hz):n*Math.round(info.sampleRate/info.hz),g=.5/Math.sqrt(info.chips);
+  function nativeSample(){
+    if(nativePosition>=info.samples)return 0;
+    if(cursor===frame.length){
+      let offset=offsets[tick],count=d.getUint16(offset,true);offset+=2;
+      for(let n=0;n<count;n++,offset+=3){const index=d.getUint16(offset,true);bank.write(index>>6,index&63,b[offset+2]);}
+      frame=new Float32Array(edge(tick+1)-edge(tick));for(const chip of bank.chips)chip.render(frame,frame.length,g);cursor=0;tick++;
+    }
+    const raw=frame[cursor++],filtered=raw-dx+info.dc*dy;dx=raw;dy=filtered;
+    let value=Math.fround(filtered),fade=info.fadeSamples;
+    if(fade){const k=Math.min(nativePosition,info.samples-1-nativePosition);if(k<fade)value=Math.fround(value*Math.sin(Math.PI/2*k/fade)**2);}
+    nativePosition++;return value*info.gain;
+  }
+  const total=Math.round(info.samples*sampleRate/info.sampleRate),ratio=info.sampleRate/sampleRate,radius=16,ring=new Float32Array(512);
+  let generated=-1;
+  const source=index=>{if(index<0||index>=info.samples)return 0;while(generated<index){generated++;ring[generated%ring.length]=nativeSample();}return ring[index%ring.length];};
+  // Windowed-sinc conversion keeps the existing synthesis rate and chip state intact.
+  const phases=1024,kernels=[];
+  if(sampleRate!==info.sampleRate)for(let phase=0;phase<phases;phase++){
+    const f=phase/phases,kernel=new Float64Array(radius*2),cutoff=Math.min(1,sampleRate/info.sampleRate)*.96;let sum=0;
+    for(let k=0;k<kernel.length;k++){const x=k-radius+1-f,z=Math.PI*x*cutoff;kernel[k]=(Math.abs(z)<1e-12?1:Math.sin(z)/z)*(.5+.5*Math.cos(Math.PI*x/radius))*cutoff;sum+=kernel[k];}
+    for(let k=0;k<kernel.length;k++)kernel[k]/=sum;kernels.push(kernel);
+  }
+  function read(count){
+    if(!Number.isInteger(count)||count<0||count>sampleRate*2)throw Error('SID voice read must be at most two seconds');
+    const out=new Float32Array(count);
+    for(let n=0;n<count;n++,position++){
+      if(position>=total)continue;
+      if(sampleRate===info.sampleRate)out[n]=nativeSample();
+      else{const p=position*ratio,base=Math.floor(p),kernel=kernels[Math.min(phases-1,Math.floor((p-base)*phases))];let value=0;
+        for(let k=0;k<kernel.length;k++)value+=source(base+k-radius+1)*kernel[k];out[n]=value;}
+      if(!Number.isFinite(out[n]))throw Error('Non-finite SID voice output');
+    }return out;
+  }
+  function restartLoop(){tick=cursor=nativePosition=position=0;frame=new Float32Array(0);generated=-1;ring.fill(0);}
+  return{info,sampleRate,read,restartLoop,get position(){return position;},report:()=>({model:selected,synthesis:info.chips+' live SID chips; register score only',chips:info.chips,registerHz:info.hz,events:info.events,sourceAudio:false})};
+}
+module.exports={MAGIC,REGISTER_MAGIC,Recorder,isScore,inspect,withGain,createEngine};
+;return module.exports;})();const Converter=(()=>{const module={exports:{}};const require=id=>{if(id==='../tools/analyze-sid-reference.cjs')return __bundleCore;if(id==='./sidVoice/jsid')return __bundleSid;if(id==='./sidVoice/registerScore')return __bundleVoice;if(id==='./sid10582')return __bundleExtended;if(id==='./sidExportFormat')return __bundleFormat;throw Error('Unknown bundled import');};'use strict';
+const {header,Cpu}=require('../tools/analyze-sid-reference.cjs');
+const {Chip,CLK}=require('./sidVoice/jsid');
+const Extended=require('./sid10582'),Format=require('./sidExportFormat');
+const VoiceScore=require('./sidVoice/registerScore');
+function binaryView(input){
+  const bytes=new Uint8Array(input.buffer||input,input.byteOffset||0,input.byteLength),d=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  bytes.readUInt16BE=n=>d.getUint16(n,false);bytes.readUInt16LE=n=>d.getUint16(n,true);bytes.readUInt32BE=n=>d.getUint32(n,false);
+  bytes.toString=(encoding,start=0,end=bytes.length)=>new TextDecoder(encoding==='latin1'?'windows-1252':'utf-8').decode(bytes.subarray(start,end));
+  return bytes;
+}
+function inspect(input){
+  if(VoiceScore.isScore(input))return VoiceScore.inspect(input);
+  const {core,extension}=Format.split(input),{data,...info}=header(binaryView(core));
+  if(info.version===2){const b=binaryView(core);if(b[122]||b[123])throw Error('Multi-SID files require a full SID player.');}
+  if(extension){Extended.validate(extension.palette);if(!['1x','2x','4x'].includes(extension.clock)||
+    !Number.isFinite(extension.nativeBpm)||extension.nativeBpm<40||extension.nativeBpm>240)throw Error('Unsupported 10582 timing');}
+  const seconds=extension?.seconds??Number(info.released.match(/;sec=([\d.]+)/)?.[1]);
+  return{...info,extension,registerDriver:info.released.startsWith('HDK10582N'),seconds:Number.isFinite(seconds)&&seconds>0?seconds:null,bytes:core.length};
+}
+function createEngine(input,{sampleRate=44100,subtune=1,clock:clockOverride,model='auto'}={}){
+  if(VoiceScore.isScore(input))return VoiceScore.createEngine(input,{sampleRate,model});
+  if(!Number.isInteger(sampleRate)||sampleRate<8000||sampleRate>96000)throw Error('Unsupported sample rate');
+  if(clockOverride&&!['1x','2x','4x'].includes(clockOverride))throw Error('Unsupported SID clock');
+  if(!['auto','8580','10582'].includes(model))throw Error('Choose 8580 or 10582 playback');
+  const info=inspect(input),{core,extension}=Format.split(input),h=header(binaryView(core));
+  if(!Number.isInteger(subtune)||subtune<1||subtune>h.songs)throw Error('Invalid subtune');
+  const clock=h.clock==='NTSC'?1022727:CLK;
+  const selected=model==='auto'?(extension||info.registerDriver?'10582':'8580'):model;
+  const cpu=new Cpu(),chip=new Chip(sampleRate,{model:selected,clk:clock,aa:true}),regs=new Uint8Array(64),used=new Set();
+  const layer=extension&&selected==='10582'?new Extended.Layer(sampleRate,Number((clockOverride||extension.clock)[0]),extension.palette):null;
+  cpu.mem.set(h.data,h.load);cpu.onWrite=(address,value)=>{
+    if(address>=0xd400&&address<=(info.registerDriver?0xd43f:0xd418)){
+      const raw=address-0xd400,r=selected==='8580'?raw&31:raw;
+      regs[r]=value;chip.write(r,value);used.add(raw);
+    }
+    else if(address>=0xd000&&address<=0xdfff)throw Error('This SID needs hardware outside the supported single-chip player.');
+  };
+  cpu.a=subtune-1;cpu.call(h.init,20000);
+  let frame=0,position=0,cursor=0,buffer=new Float32Array(0),dx=0,dy=0;
+  const dcR=Math.exp(-2*Math.PI*18/sampleRate);
+  function nextFrame(){
+    cpu.call(h.play,20000);
+    const a=Math.round(frame*sampleRate/h.hz),b=Math.round((frame+1)*sampleRate/h.hz);
+    buffer=new Float32Array(b-a);cursor=0;
+    for(let part=0;part<2;part++){
+      const begin=Math.round((b-a)*part/2),end=Math.round((b-a)*(part+1)/2),buf=buffer.subarray(begin,end);
+      chip.render(buf,buf.length,.22);
+      if(layer){
+        const time=(a+begin)/sampleRate,frequency=(regs[0]|regs[1]<<8)*clock/16777216;
+        layer.frame({time,frequency,gate:!!(regs[4]&1),envelope:chip.v[0].env,
+          noise:!!(regs[18]&0x80)&&!!(regs[18]&1),bar:time*(extension.nativeBpm||120)/240});
+        const wet=new Float32Array(buf.length);layer.render(wet);for(let j=0;j<buf.length;j++)buf[j]+=wet[j];
+      }
+      for(let i=begin;i<end;i++){
+        const x=buffer[i],y=x-dx+dcR*dy;dx=x;dy=y;buffer[i]=y;
+        if(!Number.isFinite(y))throw Error('Non-finite SID output');
+      }
+    }
+    frame++;
+  }
+  // Keep native frame boundaries independent of browser/render chunk sizes.
+  function read(count){
+    if(!Number.isInteger(count)||count<0||count>sampleRate*2)throw Error('SID read must be at most two seconds');
+    const out=new Float32Array(count);
+    for(let at=0;at<count;){
+      if(cursor===buffer.length)nextFrame();
+      const n=Math.min(count-at,buffer.length-cursor);out.set(buffer.subarray(cursor,cursor+n),at);cursor+=n;at+=n;
+    }
+    position+=count;return out;
+  }
+  return{info,sampleRate,read,get position(){return position;},report:()=>({
+    model:selected,synthesis:info.registerDriver&&selected==='10582'?'native 6502-driven 10582':layer?'native SID core + custom 10582 register layer':selected==='10582'?'10582 (traditional three-voice score)':'8580 native three-voice SID',extendedRegisters:layer?.report().registers||[...used].filter(r=>r>=25)})};
+}
+function render(input,{seconds=600,sampleRate=44100,subtune=1,model='auto',onProgress=()=>{}}={}){
+  if(!Number.isFinite(seconds)||seconds<(VoiceScore.isScore(input)?0.05:1)||seconds>1200||![22050,44100].includes(sampleRate))throw Error('Choose a supported duration in seconds and sample rate.');
+  const engine=createEngine(input,{sampleRate,subtune,model}),info=engine.info,out=new Float32Array(Math.round(seconds*sampleRate));
+  let peak=0,energy=0;
+  for(let at=0;at<out.length;at+=sampleRate){
+    const buf=engine.read(Math.min(sampleRate,out.length-at));out.set(buf,at);
+    for(const y of buf){peak=Math.max(peak,Math.abs(y));energy+=y*y;}
+    onProgress(at/out.length);
+  }
+  if(peak<1e-6)throw Error('The SID rendered silence. No WAV was exported.');
+  const gain=Math.min(1,.9/peak),fade=Math.min(Math.round(sampleRate*.005),out.length/2);
+  for(let i=0;i<out.length;i++)out[i]*=gain*Math.min(1,i/fade,(out.length-1-i)/fade);
+  onProgress(1);
+  return{samples:out,sampleRate,info,report:{seconds,sampleRate,peak:peak*gain,rms:Math.sqrt(energy/out.length)*gain,gain,
+    ...engine.report()}};
+}
+function wav(samples,sampleRate){
+  const buffer=new ArrayBuffer(44+samples.length*2),v=new DataView(buffer),text=(at,s)=>{for(let i=0;i<s.length;i++)v.setUint8(at+i,s.charCodeAt(i));};
+  text(0,'RIFF');v.setUint32(4,36+samples.length*2,true);text(8,'WAVEfmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,sampleRate,true);v.setUint32(28,sampleRate*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);text(36,'data');v.setUint32(40,samples.length*2,true);
+  for(let i=0;i<samples.length;i++)v.setInt16(44+i*2,Math.round(Math.max(-1,Math.min(1,samples[i]))*32767),true);
+  return buffer;
+}
+module.exports={inspect,createEngine,render,wav};
+;return module.exports;})();'use strict';
+// Converter is bundled with the same engine used by offline WAV export.
+let epoch=0,engine=null,bytes=null,options=null,position=0,total=0,audioPort=null,failedEpoch=null;
+let voiceGain=1;
+self.onmessage=async({data:d})=>{
+  try{
+    if(d.action==='connect'){audioPort=d.port;audioPort.onmessage=self.onmessage;return;}
+    if(d.action==='inspect'){self.postMessage({info:Converter.inspect(d.bytes)});return;}
+    if(d.action==='render'){
+      const result=Converter.render(d.bytes,{...d,onProgress:progress=>self.postMessage({progress})});
+      const wav=Converter.wav(result.samples,result.sampleRate);self.postMessage({wav,report:result.report},[wav]);return;
+    }
+    if(d.action==='open'||d.action==='seek'){
+      epoch=d.epoch;failedEpoch=null;voiceGain=1;const ticket=epoch;
+      if(d.action==='open'){bytes=d.bytes;options=d;}
+      if(!bytes)throw Error('No SID loaded');
+      engine=Converter.createEngine(bytes,options);
+      const seconds=Number(options.seconds??engine.info.seconds??600);
+      if(!Number.isFinite(seconds)||seconds<(engine.info.kind?0.05:1)||seconds>1200)throw Error('Duration is outside the supported SID playback range');
+      total=Math.round(seconds*options.sampleRate);position=0;
+      const target=Math.round(Math.max(0,Number(d.time)||0)*options.sampleRate)%total;
+      while(position<target){
+        for(let n=0;n<24&&position<target;n++){const count=Math.min(4096,target-position);engine.read(count);position+=count;}
+        await new Promise(resolve=>setTimeout(resolve,0));if(ticket!==epoch)return;
+      }
+      self.postMessage({ready:true,epoch,info:engine.info,model:engine.report().model,seconds:total/options.sampleRate,position});return;
+    }
+    if(d.action==='pull'&&d.epoch===epoch&&failedEpoch!==epoch){
+      const chunk=new Float32Array(2048);let written=0;
+      while(written<chunk.length){
+        if(position>=total){if(!options.loop)break;if(engine.info.kind==='sid-ambience')engine.restartLoop();else engine=Converter.createEngine(bytes,options);position=0;}
+        const count=Math.min(chunk.length-written,total-position),part=engine.read(count),fade=engine.info.kind==='sid-voice'?0:options.sampleRate*.005;
+        for(let i=0;i<count;i++)chunk[written+i]=(engine.info.kind==='sid-voice'?part[i]:Math.max(-.98,Math.min(.98,part[i])))*(fade?Math.min(1,(position+i)/fade,(total-1-position-i)/fade):1);
+        written+=count;position+=count;
+      }
+      const samples=written===chunk.length?chunk:chunk.slice(0,written);
+      if(engine.info.kind==='sid-voice'){
+        // Peak limiting is bounded lookahead, not a full-sentence normalization pass.
+        // Raw voice samples are protected before the final sample clamp below.
+        let peak=0;for(const x of samples)peak=Math.max(peak,Math.abs(x));
+        const target=peak>.9?0.9/peak:1;voiceGain=Math.min(target,voiceGain+samples.length/options.sampleRate*.25);
+        for(let i=0;i<samples.length;i++)samples[i]=Math.max(-.98,Math.min(.98,samples[i]*voiceGain));
+      }
+      (audioPort||self).postMessage({chunk:samples,epoch,end:!options.loop&&position>=total},[samples.buffer]);
+    }
+  }catch(error){failedEpoch=d.epoch;(d.action==='pull'&&audioPort?audioPort:self).postMessage({error:error.message,epoch:d.epoch});}
+};
+</script>
+<script>(function(root){
+  'use strict';
+  const installed=new WeakMap();
+  function processorModule(){
+  class SidQueueProcessor extends AudioWorkletProcessor {
+    constructor(){
+      super();this.queue=[];this.offset=0;this.fraction=0;this.paused=true;this.epoch=0;this.end=false;this.played=0;this.pending=0;this.started=false;this.rates=[{frame:0,value:1}];this.stopFrame=Infinity;
+      this.port.onmessage=({data:d})=>{
+        if(d.action==='connect'){this.synthesis=d.port;this.synthesis.onmessage=({data:chunk})=>this.receive(chunk);}
+        if(d.action==='reset'){this.queue=[];this.offset=0;this.fraction=0;this.epoch=d.epoch;this.played=0;this.end=false;this.paused=true;this.pending=0;this.started=false;this.stopFrame=Infinity;}
+        if(d.action==='start'&&d.epoch===this.epoch){this.started=true;this.fill();}
+        if(d.action==='pause'){this.paused=d.value;this.startFrame=d.at||0;}
+        if(d.action==='stop')this.stopFrame=d.at;
+        if(d.action==='rate'){
+          if(d.cancel!==undefined)this.rates=this.rates.filter(e=>e.frame<d.cancel);
+          else this.rates.push(d.event);
+          this.rates.sort((a,b)=>a.frame-b.frame);
+        }
+      };
+    }
+    fill(){while(this.synthesis&&this.started&&!this.end&&this.pending+this.queue.length<12){this.pending++;this.synthesis.postMessage({action:'pull',epoch:this.epoch});}}
+    state(){this.port.postMessage({consumed:true,epoch:this.epoch,played:this.played,queued:this.queue.length,pending:this.pending});}
+    receive(d){
+      if(d.epoch!==this.epoch)return;
+      if(d.error){this.started=false;this.paused=true;this.port.postMessage(d);return;}
+      if(d.chunk){this.pending--;if(d.chunk.length)this.queue.push(d.chunk);this.end=d.end;this.fill();this.state();}
+    }
+    process(inputs,outputs){
+      const out=outputs[0][0];if(this.paused)return true;
+      while(this.rates.length>1&&this.rates[1].frame<=currentFrame)this.rates.shift();
+      for(let i=0;i<out.length;i++){
+        if(currentFrame+i<this.startFrame)continue;
+        if(currentFrame+i>=this.stopFrame){this.paused=true;this.port.postMessage({ended:true,epoch:this.epoch});break;}
+        const chunk=this.queue[0];if(!chunk)break;
+        const next=this.offset+1<chunk.length?chunk[this.offset+1]:this.queue[1]?.[0]??chunk[this.offset];
+        out[i]=chunk[this.offset]+(next-chunk[this.offset])*this.fraction;
+        let previous={frame:0,value:1},upcoming;
+        for(const event of this.rates){if(event.frame>currentFrame+i){upcoming=event;break;}previous=event;}
+        const rate=upcoming?.linear?previous.value+(upcoming.value-previous.value)*(currentFrame+i-previous.frame)/(upcoming.frame-previous.frame):previous.value;
+        this.fraction+=rate;
+        while(this.fraction>=1&&this.queue.length){this.fraction--;this.offset++;this.played++;
+          if(this.offset===this.queue[0].length){this.queue.shift();this.offset=0;this.fill();this.state();}}
+        if(!this.queue.length)this.fraction=0;
+      }
+      if(!this.queue.length&&this.end){this.paused=true;this.port.postMessage({ended:true,epoch:this.epoch});}
+      return true;
+    }
+  }
+  registerProcessor('holodek-sid-queue',SidQueueProcessor);
+  }
+  // The processor class is serialized, not evaluated on the page's main thread.
+  const workletSource='('+processorModule.toString()+')();';
+  async function install(context){
+    if(!context.audioWorklet)throw Error('Live SID needs AudioWorklet. Open this page on localhost or HTTPS in a modern browser.');
+    if(!installed.has(context)){
+      // data: modules also load when the self-contained workshop has an opaque file: origin.
+      const promise=context.audioWorklet.addModule('data:text/javascript;charset=utf-8,'+encodeURIComponent(workletSource));installed.set(context,promise);
+      promise.catch(()=>installed.delete(context));
+    }
+    await installed.get(context);
+  }
+  class RateParam{
+    constructor(player){this.player=player;this.events=[];}
+    get value(){const time=this.player.context.currentTime;let previous={time:0,value:1};for(const e of this.events){if(e.time>time)return e.linear?previous.value+(e.value-previous.value)*(time-previous.time)/(e.time-previous.time):previous.value;previous=e;}return previous.value;}
+    set value(value){this.setValueAtTime(value,this.player.context.currentTime);}
+    event(value,time,linear){if(!Number.isFinite(value)||value<.25||value>4||!Number.isFinite(time))throw Error('SID playback rate must be 0.25-4');
+      this.events.push({value,time,linear});this.events.sort((a,b)=>a.time-b.time);this.player.node.port.postMessage({action:'rate',event:{value,frame:Math.round(time*this.player.context.sampleRate),linear}});return this;}
+    setValueAtTime(value,time){return this.event(value,time,false);}
+    linearRampToValueAtTime(value,time){return this.event(value,time,true);}
+    cancelScheduledValues(time){this.events=this.events.filter(e=>e.time<time);this.player.node.port.postMessage({action:'rate',cancel:Math.round(time*this.player.context.sampleRate)});return this;}
+  }
+  class Player {
+    static async open(bytes,{context,destination,source,seconds,subtune=1,loop=true,time=0,clock,model='auto',onError=()=>{}}={}){
+      await install(context);
+      const player=new Player(context,destination||context.destination,source,onError);
+      try{await player.request({action:'open',bytes,seconds,subtune,loop,time,clock,model,sampleRate:context.sampleRate});return player;}
+      catch(error){player.dispose();throw error;}
+    }
+    constructor(context,destination,source,onError){
+      this.context=context;this.paused=true;this.disposed=false;this.duration=0;this.base=0;this.played=0;this.epoch=0;this.pending=0;this.volume=1;this.info=null;
+      this.gain=context.createGain();this.gain.connect(destination);
+      this.node=new AudioWorkletNode(context,'holodek-sid-queue',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[1]});this.node.connect(this.gain);
+      this.playbackRate=new RateParam(this);
+      const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));this.worker=new Worker(url);URL.revokeObjectURL(url);
+      this.onError=onError;
+      // Buffer demand bypasses the main/UI thread, which can be busy constructing a room.
+      const channel=new MessageChannel();this.node.port.postMessage({action:'connect',port:channel.port1},[channel.port1]);this.worker.postMessage({action:'connect',port:channel.port2},[channel.port2]);
+      this.worker.onerror=e=>this.fail(Error(e.message));
+      this.node.onprocessorerror=()=>this.fail(Error('SID audio processor failed'));
+      this.worker.onmessage=({data:d})=>{
+        if(this.disposed||this.failed||d.epoch!==this.epoch)return;
+        if(d.error){this.fail(Error(d.error));return;}
+        if(d.ready){this.duration=d.seconds;this.info=d.info;this.model=d.model;this.base=d.position/context.sampleRate;this.played=0;this.pending=0;this.end=false;this.resolve?.();this.resolve=this.reject=null;this.fill();this.node.port.postMessage({action:'pause',value:this.paused});}
+      };
+      this.node.port.onmessage=({data:d})=>{
+        if(d.epoch!==this.epoch||this.disposed)return;
+        if(d.error){this.fail(Error(d.error));return;}
+        if(d.consumed){this.played=d.played;this.queued=d.queued;this.pending=d.pending;}
+        if(d.ended){this.paused=true;this.played=Math.round((this.duration-this.base)*context.sampleRate);this.onended?.();}
+      };
+    }
+    get currentTime(){return this.duration?Math.min(this.duration,(this.base+this.played/this.context.sampleRate)%this.duration):0;}
+    set currentTime(time){this.seek(time).catch(error=>{if(error.name!=='AbortError')this.fail(error);});}
+    get volume(){return this._volume??1;}
+    set volume(value){this._volume=Math.max(0,Math.min(1,value));if(this.gain)this.gain.gain.setTargetAtTime(this._volume,this.context.currentTime,.02);}
+    fill(){if(!this.disposed&&!this.seeking)this.node.port.postMessage({action:'start',epoch:this.epoch});}
+    request(message){
+      if(this.disposed)return Promise.reject(Error('SID player closed'));
+      this.reject?.(new DOMException('SID seek superseded','AbortError'));
+      this.epoch++;this.queued=0;this.pending=0;this.seeking=true;
+      this.node.port.postMessage({action:'reset',epoch:this.epoch});
+      return new Promise((resolve,reject)=>{
+        this.resolve=()=>{this.seeking=false;resolve();};this.reject=reject;
+        this.worker.postMessage({...message,epoch:this.epoch});
+      });
+    }
+    seek(time){return this.request({action:'seek',time});}
+    async play(at=this.context.currentTime){if(this.disposed)throw Error('SID player closed');this.context.resume().catch(error=>this.fail(error));this.paused=false;this.node.port.postMessage({action:'pause',value:false,at:Math.round(at*this.context.sampleRate)});}
+    pause(){this.paused=true;this.node.port.postMessage({action:'pause',value:true});}
+    stop(at=this.context.currentTime){this.node.port.postMessage({action:'stop',at:Math.round(at*this.context.sampleRate)});}
+    fail(error){if(this.disposed||this.failed)return;this.failed=true;this.reject?.(error);this.resolve=this.reject=null;this.pause();this.worker.terminate();this.onError(error);}
+    dispose(){if(this.disposed)return;this.disposed=true;this.reject?.(new DOMException('SID player closed','AbortError'));this.resolve=this.reject=null;this.worker.terminate();this.node.disconnect();this.node.port.close();this.gain.disconnect();}
+  }
+  root.HolodekSidPlayer={open:Player.open,Player};
+})(typeof window==='object'?window:globalThis);
+</script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id),source=$('sid-worker').textContent;
+let worker=null,input=null,name='room',url=null,live=null,context=null,liveGeneration=0;
+const busy=on=>{$('render').disabled=on||!input;$('play').disabled=on||!input;$('cancel').disabled=!on;$('file').disabled=on;$('chip').disabled=on;};
+function stop(){worker?.terminate();worker=null;busy(false);}
+function clearOutput(){$('audio').pause();if(url)URL.revokeObjectURL(url);url=null;$('audio').removeAttribute('src');$('audio').hidden=true;$('player-title').hidden=true;$('download').hidden=true;}
+function stopLive(){liveGeneration++;live?.dispose();live=null;$('pause').disabled=$('stop').disabled=$('seek').disabled=true;$('seek').value=0;}
+function start(action,autoplay=false){
+  stop();if(!input)return;busy(true);
+  const blob=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));worker=new Worker(blob);URL.revokeObjectURL(blob);
+  worker.onerror=event=>{$('status').textContent='Renderer error: '+event.message;stop();};
+  worker.onmessage=event=>{
+    const m=event.data;
+    if(m.error){$('status').textContent=m.error;stop();return;}
+    if(m.progress!==undefined){$('progress').value=m.progress;return;}
+    if(m.info){const registers=!!m.info.kind;$('info').textContent=m.info.title+' / '+(registers?m.info.model+' register synthesis; no recorded audio':m.info.registerDriver?'Native 6502-driven 10582':m.info.extension?'10582 custom layer':'8580-compatible core')+(registers?'':' / '+m.info.songs+' subtune(s)');$('subtune').max=m.info.songs||1;$('subtune').disabled=registers;$('seconds').min=registers?'.05':'1';
+      $('chip').value=registers?m.info.model:m.info.extension||m.info.registerDriver?'10582':'8580';
+      if(Number.isFinite(m.info.seconds))$('seconds').value=Math.min(1200,m.info.seconds);stop();return;}
+    if(m.wav){clearOutput();url=URL.createObjectURL(new Blob([m.wav],{type:'audio/wav'}));$('audio').src=url;$('audio').hidden=false;$('player-title').hidden=false;$('download').href=url;$('download').download=name+'-'+m.report.model+'.wav';$('download').hidden=false;
+      $('status').textContent='Full WAV ready. '+m.report.synthesis+'. Use the player below to play, pause or seek. No file was uploaded.';$('progress').value=1;stop();
+      if(autoplay)$('audio').play().catch(()=>{$('status').textContent+=' Press Play to start playback.';});}
+  };
+  const bytes=input.slice(0);worker.postMessage({action,bytes,seconds:Number($('seconds').value),sampleRate:Number($('rate').value),subtune:Number($('subtune').value),model:$('chip').value},[bytes]);
+}
+$('file').addEventListener('change',async()=>{const file=$('file').files[0];if(!file)return;
+  if(file.size>(/\.(sidvoice|sidregs)$/i.test(file.name)?24:1)*1024*1024){$('status').textContent='SID files must be at most 1 MB; register scores at most 24 MB.';return;}
+  stopLive();clearOutput();input=await file.arrayBuffer();name=file.name.replace(/\.(sid|sidvoice|sidregs)$/i,'');$('subtune').value=1;start('inspect');});
+$('render').addEventListener('click',()=>{clearOutput();$('status').textContent='Rendering locally. You can stop at any time.';$('progress').value=0;start('render');});
+async function playSid({time=0,paused=false}={}){
+  if(live){await live.play();$('status').textContent='Playing live SID in '+$('chip').value+' mode. No WAV is being generated.';return;}
+  stopLive();clearOutput();const generation=liveGeneration;$('play').disabled=true;
+  try{
+    context=context||new AudioContext();context.resume();$('status').textContent='Starting live SID...';
+    const player=await HolodekSidPlayer.open(input.slice(0),{context,source,seconds:Number($('seconds').value),subtune:Number($('subtune').value),loop:$('loop').checked,model:$('chip').value,time,
+      onError:error=>{$('status').textContent='SID playback error: '+error.message;}});
+    if(generation!==liveGeneration){player.dispose();return;}
+    live=player;$('seek').max=live.duration;$('pause').disabled=$('stop').disabled=$('seek').disabled=false;
+    live.onended=()=>{$('status').textContent='SID ended.';stopLive();};
+    if(!paused)await live.play();$('status').textContent=(paused?'SID paused':'Playing live SID')+' in '+$('chip').value+' mode. No WAV is being generated.';
+  }catch(error){if(generation===liveGeneration){$('status').textContent='SID playback error: '+error.message;stopLive();$('play').disabled=!input;}}
+  finally{if(generation===liveGeneration)$('play').disabled=!input;}
+}
+$('play').addEventListener('click',()=>playSid());
+$('chip').addEventListener('change',()=>{const checkpoint=live?{time:live.currentTime,paused:live.paused}:null;stopLive();clearOutput();if(checkpoint)playSid(checkpoint);else $('status').textContent=$('chip').value+' mode selected.';});
+$('pause').addEventListener('click',()=>{live?.pause();$('status').textContent='SID paused. Play resumes at the same position.';});
+$('stop').addEventListener('click',()=>{stopLive();$('status').textContent='SID stopped.';});
+$('seek').addEventListener('change',async()=>{const player=live;if(!player)return;try{$('status').textContent='Seeking SID...';await player.seek(Number($('seek').value));if(player===live)$('status').textContent='SID position restored.';}catch(error){if(error.name!=='AbortError')$('status').textContent=error.message;}});
+for(const id of ['seconds','subtune','loop'])$(id).addEventListener('change',stopLive);
+const fmt=seconds=>Math.floor(seconds/60)+':'+String(Math.floor(seconds%60)).padStart(2,'0');
+setInterval(()=>{if(live){$('seek').value=live.currentTime;$('live-time').textContent=fmt(live.currentTime)+' / '+fmt(live.duration);}},150);
+$('cancel').addEventListener('click',()=>{stop();$('status').textContent='Render stopped.';});
+window.addEventListener('pagehide',()=>{stopLive();stop();clearOutput();context?.close();});
+const archiveBase='/music-archive/';
+if(location.protocol!=='file:')fetch(archiveBase+'catalog.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json();}).then(rows=>{
+  $('library-section').hidden=false;
+  for(const row of rows){if(!/^[a-z0-9-]+$/.test(row.id))continue;const article=document.createElement('article'),title=document.createElement('strong');title.textContent=row.title;article.append(title,document.createElement('br'));
+    for(const chip of ['8580','10582']){const a=document.createElement('a');a.href=archiveBase+encodeURIComponent(row.id)+'/'+chip+'.sid';a.download=chip+'.sid';a.textContent='Download '+chip+'.sid';article.append(a);} $('library').append(article);}
+}).catch(()=>{});
+</script>
+</html>

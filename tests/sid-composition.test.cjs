@@ -215,7 +215,7 @@ test('new scores render non-silent PCM and emit synchronized ASM with correct cu
     const stopped=Error('assembler intentionally unavailable');
     const context=vm.createContext({require:id=>id==='child_process'?{spawnSync:()=>({status:1})}:require(id),
       process:{argv:['node','renderSid_poke.js',json,asm],exit:()=>{throw stopped;}},console:{log(){},warn(){},error(){}},Buffer,__dirname:path.resolve('assets')});
-    assert.throws(()=>vm.runInContext(source,context),error=>error===stopped);
+    assert.doesNotThrow(()=>vm.runInContext(source,context));
     const registers=JSON.parse(vm.runInContext('JSON.stringify(FCFG)',context));
     const cutoff=s.voices.filter(v=>v.filter.type!=='NONE').reduce((n,v,_,vs)=>n+v.filter.cutoff/vs.length,0);
     assert.equal((registers.cutHi<<3)|registers.cutLo,Math.round(cutoff));

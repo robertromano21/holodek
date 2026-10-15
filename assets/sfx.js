@@ -1,7 +1,6 @@
 // Holodek-1 SID sound effects and room ambience (see CHANGES-SFX.txt).
-// Effects are real SID recordings (frame-by-frame register dumps played through reSIDfp on the build box) shipped as
-// small OGG files in /assets/sfx/. They play through WebAudio as an overlay: the room music keeps playing and is only
-// ducked a little while an effect sounds. Ambience is 1-3 looping SID noise layers per room, chosen by the music LLM
+// Music, speech, effects and ambience play register scores through live SID workers.
+// Effects overlay the music with gentle ducking. Ambience is 1-3 looping SID layers, chosen by the music LLM
 // (arrangement.ambience) or, for older cached rooms, by keywords in the room description.
 (function () {
   'use strict';
@@ -67,34 +66,24 @@
     const clock = sidMode(), chip = compositionChip(), key = clock + '|' + chip + '|' + name;
     if (buffers.has(key)) return Promise.resolve(buffers.get(key));
     if (loading.has(key)) return loading.get(key);
-    const p = fetch(SFX_DIRS[clock] + name + '.ogg').then(r => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
-      .then(b => new Promise((res, rej) => audio().decodeAudioData(b, res, rej)))
-      .then(async buf => {
-        if (chip !== '10582') return buf;
-        try {
-          const r = await fetch('/audio/palette/' + encodeURIComponent(name) + '.wav?clock=' + clock + '&seconds=' + buf.duration.toFixed(3));
-          if (!r.ok) throw new Error('10582 effect ' + r.status);
-          const bytes = await r.arrayBuffer();
-          const wet = await new Promise((res, rej) => audio().decodeAudioData(bytes, res, rej));
-          return mixPaletteBuffers(buf, wet);
-        } catch (e) { console.warn('[AudioPalette] retaining traditional effect', name, e.message); paletteStatus('10582 effect unavailable; traditional sound retained'); return buf; }
+    const p=fetch('/audio/registers/'+encodeURIComponent(name)+'.sidregs?clock='+clock+'&chip='+chip).then(async r=>{
+        if(!r.ok)throw Error('SID effect '+r.status);const duration=Number(r.headers.get('X-SID-Duration'));
+        if(!Number.isFinite(duration)||duration<=0||duration>30)throw Error('Invalid SID effect duration');
+        return{name,bytes:await r.arrayBuffer(),duration,loop:r.headers.get('X-SID-Loop')==='true'};
       })
-      .then(buf => { buffers.set(key, buf); loading.delete(key); return buf; })
+      .then(score=>{buffers.set(key,score);loading.delete(key);while(buffers.size>96)buffers.delete(buffers.keys().next().value);return score;})
       .catch(e => { loading.delete(key); console.warn('[sfx] load failed', name, e && e.message); return null; });
     loading.set(key, p); return p;
   }
-  function mixPaletteBuffers(dry, wet) {
-    const out = audio().createBuffer(dry.numberOfChannels, dry.length, dry.sampleRate);
-    for (let c = 0; c < out.numberOfChannels; c++) {
-      const a = dry.getChannelData(c), b = wet.getChannelData(0), dest = out.getChannelData(c);
-      for (let i = 0; i < dest.length; i++) dest[i] = Math.max(-.98, Math.min(.98, a[i] + (b[Math.floor(i * wet.sampleRate / dry.sampleRate)] || 0)));
-    }
-    return out;
+  const effectPlayers=new Set();let effectEpoch=0;
+  async function sidSource(score,destination,{loop=false,rate=1,time=0}={}){
+    let player;player=await window.HolodekSidPlayer.open(score.bytes,{context:ctx,destination,source:await workerSource(),seconds:score.duration,loop,time,
+      onError:error=>{player?.onended?.();player?.dispose();console.warn('[SIDEffect]',error.message);}});
+    effectPlayers.add(player);player.effectName=score.name;const dispose=player.dispose.bind(player);player.dispose=()=>{effectPlayers.delete(player);dispose();};player.playbackRate.value=rate;return player;
   }
-  // --- music ducking: lower the <audio id="room-audio"> volume while effects sound, never pause it ---
+  // --- music ducking: lower live SID (or legacy media) while effects sound ---
   let duckUntil = 0, duckLevel = 1, duckTimer = null;
-  // The live page has TWO music elements: index.html's autoplaying <audio id="room-music" src="/sid/current_room.wav">
-  // and game.js's #room-audio (created on demand, src replaced per room). Control every media element on the page.
+  // Legacy media players remain supported for old servers and tools.
   function musicEls() { return Array.from(document.querySelectorAll('audio, video')); }
   function setMusicVolume() {
     const v = settings.muted ? 0 : Math.max(0, Math.min(1, settings.music * duckLevel));
@@ -103,6 +92,7 @@
       if (Math.abs(a.volume - fv) > 0.005) a.volume = fv;
       if (a.muted !== !!settings.muted) a.muted = !!settings.muted;
     }
+    for(const a of sidPlayers)a.volume=v*(a.__fade??1);
   }
   function duck(seconds, depth = 0.7) {
     duckUntil = Math.max(duckUntil, performance.now() + seconds * 1000);
@@ -123,18 +113,16 @@
   async function play(name, opts = {}) {
     if (settings.muted || settings.sfx <= 0) return;
     const spec = SPEC[name] || [0.7, 100, true], now = performance.now();
-    if (now - (lastPlayed.get(name) || 0) < spec[1] || voices >= 8) return;
+    if (lastPlayed.has(name)&&now-lastPlayed.get(name)<spec[1] || voices>=8) return;
     lastPlayed.set(name, now);
     if (!audio() || ctx.state !== 'running') return; // before the first click browsers keep audio locked
-    const buf = await load(name); if (!buf) return;
-    const src = ctx.createBufferSource(), g = ctx.createGain();
-    src.buffer = buf; src.playbackRate.value = opts.rate || 1;
-    g.gain.value = spec[0] * (opts.vol ?? 1);
-    const sp = spatialOut(opts.at, opts.pan, buf.duration / (opts.rate || 1) + (opts.delay || 0) + 0.2);
-    src.connect(g); g.connect(sp.node);
-    voices++; src.onended = () => { voices--; g.disconnect(); sp.done(); };
-    src.start(ctx.currentTime + (opts.delay || 0));
-    if (spec[2]) duck(buf.duration / (opts.rate || 1) + (opts.delay || 0), name === 'death' || name === 'levelup' ? 0.45 : 0.7);
+    voices++;const epoch=effectEpoch;let src,g,sp,finished=false;
+    const done=()=>{if(finished)return;finished=true;voices--;src?.dispose();g?.disconnect();sp?.done();};
+    try{const score=await load(name);if(!score||epoch!==effectEpoch){done();return;}
+      g=ctx.createGain();g.gain.value=spec[0]*(opts.vol??1);sp=spatialOut(opts.at,opts.pan,score.duration/(opts.rate||1)+(opts.delay||0)+.2);g.connect(sp.node);
+      src=await sidSource(score,g,{rate:opts.rate||1});if(epoch!==effectEpoch){done();return;}src.onended=done;await src.play(ctx.currentTime+(opts.delay||0));
+      if(spec[2])duck(score.duration/(opts.rate||1)+(opts.delay||0),name==='death'||name==='levelup'?0.45:0.7);
+    }catch(error){done();console.warn('[SIDEffect] unavailable:',name,error.message);}
   }
   function sequence(names, gap = 0.22) { names.slice(0, 4).forEach((n, i) => setTimeout(() => Array.isArray(n) ? play(n[0], n[1] || {}) : play(n), i * gap * 1000)); }
 
@@ -323,12 +311,13 @@
     keyNow = k;
   }
   const pendingNotes = []; // notes scheduled ahead; cancelled on seek / mode switch so nothing lands off-grid
-  function fireNote(l, k, when, deg, gain) {
+  async function fireNote(l, k, when, deg, gain) {
     const scale = MODES[k && k.scale] || MODES.minor, semis = wrap((k ? k.pc : 9) + scale[deg % 7] - 9);
-    const src = ctx.createBufferSource(), g = ctx.createGain();
-    src.buffer = l.buf; src.playbackRate.value = Math.pow(2, semis / 12); g.gain.value = gain * l.level;
-    src.connect(g); g.connect(l.g); const at = Math.max(when, ctx.currentTime); src.start(at);
-    const rec = { src, at }; pendingNotes.push(rec); src.onended = () => { g.disconnect(); const i = pendingNotes.indexOf(rec); if (i >= 0) pendingNotes.splice(i, 1); };
+    const g=ctx.createGain();g.gain.value=gain*l.level;g.connect(l.g);const rec={src:null,at:Math.max(when,ctx.currentTime)},epoch=effectEpoch;pendingNotes.push(rec);
+    const done=()=>{rec.src?.dispose();g.disconnect();const i=pendingNotes.indexOf(rec);if(i>=0)pendingNotes.splice(i,1);};
+    try{rec.src=await sidSource(l.buf,g,{rate:Math.pow(2,semis/12)});if(rec.cancelled||l.dead||epoch!==effectEpoch){done();return;}
+      rec.src.onended=done;await rec.src.play(rec.at);
+    }catch(error){done();console.warn('[SIDAmbience] note unavailable:',error.message);}
   }
 
   // --- ambience rhythm ---
@@ -351,7 +340,7 @@
   const evLog = [];
   function rampTo(param, v0, v1, t0, t1) { param.linearRampToValueAtTime(v1, t1); } // consecutive ramps are continuous (v1 of one bar = v0 of next), so no setValueAtTime: after a mode switch/seek the first ramp glides from the held value, no jump
   function resetAutomation(now) {
-    for (const r of pendingNotes.slice()) if (r.at > now + 0.005) { try { r.src.stop(); } catch {} }
+    for (const r of pendingNotes.slice()) if (r.at > now + 0.005) { r.cancelled=true;try { r.src?.stop(); } catch {} }
     for (let i = evLog.length - 1; i >= 0 && evLog[i].when > now + 0.005; i--) evLog[i].cancelled = true;
     for (const l of ambLayers) for (const p of [l.mod && l.mod.gain, l.filt && l.filt.frequency]) if (p) { p.cancelScheduledValues(now); p.setValueAtTime(p.value, now); }
   }
@@ -437,20 +426,19 @@
         const g = ctx.createGain(), mod = ctx.createGain(), ao = ambOut(l.tag, roomKey); g.gain.value = 0; g.connect(mod); mod.connect(ao.node);
         g.gain.linearRampToValueAtTime((l.tag === 'chant' ? AMB_TRIM.chant : 1) * l.level, ctx.currentTime + 3);
         if (l.tag === 'chant') {
-          const k = songKeyNow(), src = ctx.createBufferSource(); src.buffer = kb; src.loop = true;
-          src.playbackRate.value = k ? Math.pow(2, wrap(k.pc - 9) / 12) : 1; src.connect(g); src.start(ctx.currentTime, ((h >>> 3) % 997) / 997 * kb.duration);
+          const k = songKeyNow(),src=await sidSource(kb,g,{loop:true,rate:k?Math.pow(2,wrap(k.pc-9)/12):1,time:((h>>>3)%997)/997*kb.duration});
+          if(ambKey!==sig){src.dispose();g.disconnect();return;}await src.play();
           mod.gain.value = 0.8; ambLayers.push({ src, g, mod, keyed: 'drone', tag: l.tag, place: ao.place });
         } else ambLayers.push({ g, mod, keyed: 'note', tag: l.tag, place: ao.place, buf: kb, level: l.level, nextAt: ctx.currentTime + 0.5 + Math.random() * 2 });
         continue;
       }
       const buf = await load('amb_' + l.tag); if (!buf || ambKey !== sig) continue;
-      const src = ctx.createBufferSource(), g = ctx.createGain();
-      src.buffer = buf; src.loop = true;
-      src.playbackRate.value = 0.9 + ((h >> (i * 5)) & 31) / 155; // each room gets its own pitch/speed of the layer (0.9-1.1)
+      const g = ctx.createGain();
       // continuous layer: src -> g (fade/level) -> mod (phrase swells / gusts) -> low-pass (brightens with the swell)
       const mod = ctx.createGain(), filt = ctx.createBiquadFilter(); filt.type = 'lowpass'; filt.frequency.value = 2500; filt.Q.value = 0.7; mod.gain.value = 0.8;
-      const ao = ambOut(l.tag, roomKey); g.gain.value = 0; src.connect(g); g.connect(mod); mod.connect(filt); filt.connect(ao.node);
-      src.start(ctx.currentTime, ((h >>> 3) % 997) / 997 * buf.duration); // >>> keeps the offset positive
+      const ao = ambOut(l.tag, roomKey); g.gain.value = 0;g.connect(mod); mod.connect(filt); filt.connect(ao.node);
+      const src=await sidSource(buf,g,{loop:true,rate:.9+((h>>(i*5))&31)/155,time:((h>>>3)%997)/997*buf.duration});
+      if(ambKey!==sig){src.dispose();g.disconnect();return;}await src.play();
       g.gain.linearRampToValueAtTime((AMB_TRIM[l.tag] || 1) * l.level, ctx.currentTime + 3);
       ambLayers.push({ src, g, mod, filt, cont: true, tag: l.tag, place: ao.place });
     }
@@ -688,23 +676,22 @@
     return { ev: sig ? ev.concat(SOUNDSETS[sig].map(e => ({ ...e, t: e.t + evLen(ev) + 0.25 }))) : ev, sig, syl: ev.filter(e => e.semis !== undefined).length };
   }
   function speakVoice(name, line, opts = {}) {
-    if (!name || !line || !voiceOk()) return null;
-    const P = voiceProfile(name), U = utterance(P, line), now = ctx.currentTime;
-    const prev = speaking.get(P.name); if (prev) prev.stop(now);
-    if (speaking.size >= 2 && !prev) return null; // never more than two talkers at once
-    const r = synthVoice(ctx, spatialOut(name, 0, evLen(U.ev) + 2.5, voiceBus).node, P, U.ev, now + 0.03, { keySnap: keyForVoice(P), vol: 0.7 * (opts.vol ?? 1) });
-    speaking.set(P.name, r); setTimeout(() => { if (speaking.get(P.name) === r) speaking.delete(P.name); }, (r.end - now + 0.2) * 1000);
-    duck(r.end - now, 0.8);
-    const info = { speaker: P.name, kind: P.kind, f0: +P.f0.toFixed(1), syllables: U.syl, sig: U.sig, len: +(r.end - now).toFixed(2) };
-    voiceLog.push(info); if (voiceLog.length > 30) voiceLog.shift(); return info;
+    if(!name||!line||!voiceOk())return null;
+    return speakLine(name,line,opts).catch(error=>{console.warn('[SidVoice]',error.message);return null;});
   }
   const lastCry = new Map();
-  function voiceSound(name, what) { // Doom-style per-character cries: sight | pain | death | attack | laugh | sigh | grunt | hiss
+  async function voiceSound(name, what) { // Doom-style per-character cries, synthesized by SID registers too.
     if (!name || !SOUNDSETS[what] || !voiceOk()) return null;
-    const now = ctx.currentTime, key = name + what; if (now - (lastCry.get(key) || 0) < (what === 'pain' ? 0.6 : 1.2)) return null; lastCry.set(key, now);
-    const P = voiceProfile(name), r = synthVoice(ctx, spatialOut(name, 0, evLen(SOUNDSETS[what]) + 2.5, voiceBus).node, P, SOUNDSETS[what], now + 0.02, { vary: (Math.random() - 0.5) * 3, vol: what === 'death' ? 0.8 : 0.7 });
-    if (what === 'death' || what === 'sight') duck(r.end - now, 0.75);
-    voiceLog.push({ speaker: P.name, kind: P.kind, cry: what }); if (voiceLog.length > 30) voiceLog.shift(); return r.end - now;
+    const now = ctx.currentTime, key = name + what; if (lastCry.has(key)&&now-lastCry.get(key)<(what==='pain'?.6:1.2))return null;lastCry.set(key,now);
+    const P=voiceProfile(name),ticket=speechGeneration,voiceToken={};let player,sp;
+    const done=()=>{player?.dispose();sp?.done();speaking.delete(voiceToken);};
+    try{const score=await fetchSpeech(name,what,true);if(!voiceOk()||speaking.size>=2)return null;
+      if(ticket!==speechGeneration)return null;speaking.set(voiceToken,{stop:done});
+      sp=spatialOut(name,0,score.duration+.5,voiceBus);player=await window.HolodekSidPlayer.open(score.bytes,{context:ctx,destination:sp.node,source:await workerSource(),loop:false,onError:error=>{done();console.warn('[SidVoice] vocalization:',error.message);}});
+      if(ticket!==speechGeneration){done();return null;}player.onended=done;await player.play();
+      if(what==='death'||what==='sight')duck(player.duration,.75);
+      voiceLog.push({speaker:P.name,kind:P.kind,cry:what,transport:'live-sid-registers'});if(voiceLog.length>30)voiceLog.shift();return player.duration;
+    }catch(error){done();console.warn('[SidVoice] vocalization unavailable:',error.message);return null;}
   }
   const namesIn = line => (window.getDungeonLifeContext?.()?.actors || []).filter(a => a && a.name && line.includes(a.name)).sort((x, y) => line.indexOf(x.name) - line.indexOf(y.name)).map(a => a.name);
   function combatVoices(line) { // hooks on the existing combat log lines: "<A> hits <B> for N", "<B> is killed by <A>", misses
@@ -737,19 +724,23 @@
       if (who) { speakVoice(who.name, m[1]); break; }
     }
   }
-  // --- SID speech (server: Piper analysis -> 64-SID vocoder WAV per sentence; see retort/sidVoice) ---
+  // --- SID speech: register scores drive the same live worker/worklet as music. ---
   const speechBufs = new Map(); let speechNow = null, profileSig = '', profilePending = null;
   function speechKey(who, text, profile) { return sidMode() + '|' + voiceChip() + (voiceNotch() ? 'n' : '') + '|detail' + (settings.voiceDetail !== false) + '|' + JSON.stringify(profile) + '|' + who + '|' + text; }
-  function fetchSpeech(who, text) {
+  function fetchSpeech(who, text, cry=false) {
     const actor = actorByName(who), saved = window._partyCharacterRegistry?.[who];
     const profile = actor || saved ? voiceWireProfile(actor || { ...saved, name: who }) : null;
-    const k = speechKey(who, text, profile); if (speechBufs.has(k)) return speechBufs.get(k);
+    const k = speechKey(who, text, profile)+(cry?'|cry':''); if (speechBufs.has(k)) return speechBufs.get(k);
     const t0 = performance.now();
-    const p = fetch('/voice/line.wav', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    const p = fetch(cry?'/voice/cry.sidvoice':'/voice/line.sidvoice', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ speaker: who, text, profile, clock: sidMode(), chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false }) })
-      .then(r => { if (!r.ok) throw new Error('voice ' + r.status); return r.arrayBuffer(); })
-      .then(b => new Promise((res, rej) => audio().decodeAudioData(b, res, rej)))
-      .then(buf => { speechLog.push({ who, text: text.slice(0, 50), fetchMs: Math.round(performance.now() - t0), dur: +buf.duration.toFixed(2) }); if (speechLog.length > 30) speechLog.shift(); return buf; });
+      .then(async r => { if (!r.ok) throw new Error('voice ' + r.status);const duration=Number(r.headers.get('X-Voice-Dur'));
+        if(!Number.isFinite(duration)||duration<.05||duration>120)throw Error('Invalid SID voice duration');
+        const bytes=await r.arrayBuffer();if(bytes.byteLength>24*1024*1024)throw Error('SID voice score too large');return{bytes,duration}; })
+      .then(score => { p.bytes=score.bytes.byteLength;
+        speechLog.push({ who, text: text.slice(0, 50), transport:'live-sid-registers',chips:cry?3:64,bytes:p.bytes,fetchMs: Math.round(performance.now() - t0), dur: +score.duration.toFixed(2) }); if (speechLog.length > 30) speechLog.shift();
+        let size=0;for(const entry of speechBufs.values())size+=entry.bytes||0;
+        while(size>12*1024*1024&&speechBufs.size){const key=speechBufs.keys().next().value;size-=speechBufs.get(key).bytes||0;speechBufs.delete(key);}return score; });
     p.catch(() => speechBufs.delete(k)); speechBufs.set(k, p);
     while (speechBufs.size > 40) speechBufs.delete(speechBufs.keys().next().value);
     return p;
@@ -758,8 +749,9 @@
   const cleanSpeech = t => String(t || '').replace(/([^.!?,;:\s])\s*\n+/g, '$1.\n').replace(/(\w)\s+["\u201c](?=\w)/g, '$1, ').replace(/(\w)["\u201d]\s+(?=\w)/g, '$1, ').replace(/["\u201c\u201d]/g, '').replace(/\s+/g, ' ').trim();
   const sentencesOf = t => cleanSpeech(t).split(/(?<=[.!?]['\u2019)\]]*)\s+(?=\S)/).map(cleanSpeech).filter(Boolean); // same splitter as retort/sidVoice
   function voicePrefetch(who, chunks) { if (!audio()) return; let n = 0; for (const c of chunks || []) for (const s of sentencesOf(c)) if (n++ < 12) fetchSpeech(who, s).catch(() => {}); }
-  function stopSpeech() { if (!speechNow) return; const cur = speechNow, t = ctx.currentTime; speechNow = null; cur.cancelled = true;
-    for (const { src, g } of cur.parts) try { g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value, t); g.gain.linearRampToValueAtTime(0, t + 0.08); src.stop(t + 0.1); } catch {} }
+  let speechGeneration=0;
+  function stopSpeech() { speechGeneration++;for(const cry of speaking.values())cry.stop();speaking.clear();if (!speechNow) return; const cur = speechNow, t = ctx.currentTime; speechNow = null; cur.cancelled = true;cur.wake?.();
+    for (const part of cur.parts) {try{part.g.gain.cancelScheduledValues(t);part.g.gain.setValueAtTime(part.g.gain.value,t);part.g.gain.linearRampToValueAtTime(0,t+.08);}catch{}setTimeout(part.done,100);} }
   // Speaks one subtitle chunk sentence by sentence (gapless: sentence n+1 is fetched/pre-synthesized while n plays).
   // Resolves { dur } when the first sentence starts; opts.onSchedule(remainingMs, more) reports how long the scheduled audio
   // still runs and whether sentences are still coming, so the subtitle can hold exactly as long as the voice.
@@ -767,19 +759,32 @@
   async function speakLine(who, text, opts = {}) {
     const sents = sentencesOf(text); if (!who || !sents.length) throw new Error('empty');
     if (!audio() || ctx.state !== 'running') throw new Error('audio locked');
-    const bufs = sents.map(s => fetchSpeech(who, s)), first = await bufs[0];
-    if (opts.stillWanted && !opts.stillWanted()) throw new Error('stale');
+    const ticket=++speechGeneration,bufs = sents.map(s => fetchSpeech(who, s));for(const p of bufs)p.catch(()=>{});const first = await bufs[0];
+    if(ticket!==speechGeneration||opts.stillWanted&&!opts.stillWanted())throw new Error('stale');
     stopSpeech();
     const cur = { who, parts: [] }; speechNow = cur;
-    const silent = settings.muted || Number(settings.voice ?? 1) <= 0; let end = ctx.currentTime + 0.03;
-    const sched = buf => { if (!silent) { const src = ctx.createBufferSource(), g = ctx.createGain(); src.buffer = buf; g.gain.value = 0.95 * (opts.vol ?? 1);
-        const sp = spatialOut(who, 0, end - ctx.currentTime + buf.duration + 0.5, voiceBus); src.connect(g); g.connect(sp.node);
-        src.onended = () => { try { g.disconnect(); } catch {} sp.done(); }; src.start(end); cur.parts.push({ src, g }); duck(end - ctx.currentTime + buf.duration, 0.72); }
-      end += buf.duration; };
-    sched(first); opts.onSchedule?.((end - ctx.currentTime) * 1000, sents.length > 1);
-    (async () => { for (let i = 1; i < bufs.length; i++) { let b; try { b = await bufs[i]; } catch { break; }
-        if (cur.cancelled) return; end = Math.max(end + 0.12, ctx.currentTime + 0.03); sched(b); opts.onSchedule?.((end - ctx.currentTime) * 1000, i + 1 < bufs.length); }
-      if (!cur.cancelled) opts.onSchedule?.(Math.max(0, end - ctx.currentTime) * 1000, false); })();
+    let end=ctx.currentTime+.03;
+    const sched=async score=>{
+      const sp=spatialOut(who,0,Math.max(0,end-ctx.currentTime)+score.duration+.5,voiceBus),g=ctx.createGain();g.gain.value=.95*(opts.vol??1);g.connect(sp.node);
+      let player;
+      const done=()=>{player?.dispose();g.disconnect();sp.done();const at=cur.parts.findIndex(p=>p.src===player);if(at>=0)cur.parts.splice(at,1);};
+      try{player=await window.HolodekSidPlayer.open(score.bytes,{context:ctx,destination:g,source:await workerSource(),loop:false,
+        onError:error=>{console.warn('[SidVoice] live synthesis failed:',error.message);done();}});
+        if(cur.cancelled||opts.stillWanted&&!opts.stillWanted()){done();throw Error('stale');}
+        cur.parts.push({src:player,g,done});player.onended=done;end=Math.max(end,ctx.currentTime+.03);await player.play(end);
+        end+=player.duration;duck(end-ctx.currentTime,.72);
+      }catch(error){done();throw error;}
+    };
+    try{await sched(first);}catch(error){cur.cancelled=true;if(speechNow===cur)speechNow=null;throw error;}
+    opts.onSchedule?.((end-ctx.currentTime)*1000,sents.length>1);
+    (async()=>{try{for(let i=1;i<bufs.length;i++){
+        // Only the current and next sentence have running chip banks.
+        while(!cur.cancelled&&end-ctx.currentTime>1)await new Promise(resolve=>{const timer=setTimeout(resolve,Math.min(500,(end-ctx.currentTime-1)*1000));cur.wake=()=>{clearTimeout(timer);resolve();};});
+        if(cur.cancelled)return;const score=await bufs[i];if(cur.cancelled)return;
+        end=Math.max(end+.12,ctx.currentTime+.03);await sched(score);opts.onSchedule?.((end-ctx.currentTime)*1000,i+1<bufs.length);
+      }}catch(error){if(!cur.cancelled)console.warn('[SidVoice] next sentence unavailable:',error.message);}
+      if(!cur.cancelled)opts.onSchedule?.(Math.max(0,end-ctx.currentTime)*1000,false);
+    })();
     return { dur: first.duration, sentences: sents.length };
   }
   function postProfiles() { // room entered / roster changed: send voice mappings so the server can pre-synthesize in character
@@ -817,8 +822,7 @@
         case 'roomMusicReady':
           paletteGeneration++; palettePairs.clear(); // a replacement score at the same coordinates must not reuse an old pair
           songRoom = ''; // the room's song JSON may be new; refetch it for movement names
-          if (d.wav) queueRoomMusic(d);
-          else if (d.type === 'roomMusicUpdated' && d.isNew) queueRoomMusic({ wav: '/sid/current_room.wav?ts=' + Date.now(), coords: d.coords }); // pre-slot server
+          if (d.sid || d.wav) queueRoomMusic(d);
           if (d.coords && d.ambience) { ambByRoom.set(d.coords, d.ambience); if (d.coords === currentRoomKey()) applyRoomAmbience(d.coords); }
           break;
         case 'combat_log': combatSounds(d.log); break;
@@ -874,9 +878,12 @@
   }
 
   // --- room music transport: play/pause, rewind, fast-forward, time and movement ---
-  // Music plays through <audio id="room-music"> (index.html, reloaded per room) and sometimes game.js's #room-audio.
-  // The element that started most recently is "the" music; any other one that is playing is paused, so only one plays.
+  // Live SID uses the same transport interface as the legacy media players.
   let activeMusic = null, internalPlay = false, song = null, songRoom = '', songRunId = '', lastRew = 0, lastFf = 0;
+  let activeSid=null,workerSourcePromise=null;
+  const sidPlayers=new Set();
+  const workerSource=()=>workerSourcePromise||(workerSourcePromise=fetch('/music/sid-worker.js').then(r=>{if(!r.ok)throw Error('SID worker unavailable: '+r.status);return r.text();}).catch(error=>{workerSourcePromise=null;throw error;}));
+  function disposeSid(player){if(!player)return;player.isConnected=false;player.dispose();sidPlayers.delete(player);musicWide.delete(player);if(activeSid===player)activeSid=null;}
   const palettePairs = new Map();
   let paletteGeneration = 0;
   function paletteStatus(text) { const el = document.querySelector('#holodek-audio-panel .hx-palette'); if (el) el.textContent = text; }
@@ -893,7 +900,7 @@
       const pair = await palettePairs.get(key);
       if (clock !== sidMode() || runId !== songRunId || room !== currentRoomKey() || generation !== paletteGeneration) return;
       paletteStatus('Both versions ready: ' + compositionChip());
-      if (apply) queueRoomMusic({ coords:room, wav:pair.variants[compositionChip()], palette:true, preserveTime:room === shownRoom });
+      if (apply) queueRoomMusic({ ...pair, coords:room, palette:true, preserveTime:room === shownRoom });
       return pair;
     } catch (e) { paletteStatus('A/B unavailable: ' + e.message); console.warn('[AudioPalette]', e.message); }
   }
@@ -903,6 +910,7 @@
   }
   function playable(a) { return a && (a.currentSrc || a.getAttribute('src')); }
   function music() {
+    if(activeSid&&!activeSid.disposed)return activeSid;
     if (activeMusic && document.contains(activeMusic) && playable(activeMusic)) return activeMusic;
     const els = musicEls().filter(playable);
     return els.find(a => !a.paused) || els.find(a => a.id === 'room-music') || els[0] || null;
@@ -921,7 +929,7 @@
     const p = a.play(); (p && p.finally ? p.finally(() => { internalPlay = false; }) : (internalPlay = false));
     if (p && p.catch) p.catch(() => {});
   }
-  function musicPause() { settings.userPaused = true; save(); for (const a of musicEls()) if (!a.paused) a.pause(); }
+  function musicPause() { settings.userPaused = true; save(); for (const a of [...musicEls(),...sidPlayers]) if (!a.paused) a.pause(); }
   // Movement boundaries use structured bars/keys, with the old text form retained for cached scores.
   // plan.bars is the loop length; boundaries are scaled to the real audio length.
   function movements(dur) {
@@ -965,7 +973,7 @@
     if (!room || room === songRoom) return; songRoom = room; song = null;
     fetch('/get-room-music?coords=' + encodeURIComponent(room)).then(r => r.ok ? r.json() : null)
       .then(j => { if (songRoom === room) { song = j && j.music; songRunId = j && j.runId || ''; if (song && lastRoom) applyRoomAmbience(lastRoom);
-        if (song) preparePalette(room,compositionChip() === '10582'); } }).catch(() => {}); // re-key ambience and prepare the same-score A/B pair
+        if (song && !playingUrl && !pendingSong && !crossfading) preparePalette(room,true); } }).catch(() => {});
   }
   const fmt = s => !Number.isFinite(s) ? '0:00' : Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
   function transportUi(box) {
@@ -985,22 +993,20 @@
     render();
   }
 
-  // --- room song queue (two-slot files sid/room_A.wav / room_B.wav, see retort/musicSlots.js) ---
-  // The server renders the next room's song into the slot we are not playing and announces it (roomMusicUpdated /
-  // roomMusicReady). We hold it until game.js reports the new room spawned and drawn (roomShown), then crossfade.
-  // Only the latest announced song is kept; a render that finishes after the room appeared switches immediately.
-  let crossfading = false, pendingSong = null, shownRoom = '', playingUrl = '', cancelTransition = null;
-  const slotOf = url => (String(url).match(/room_([AB])\.wav/) || [])[1] || null;
+  // Hold the next SID selection until its room is drawn, then crossfade.
+  let crossfading = false, pendingSong = null, shownRoom = '', playingUrl = '', cancelTransition = null, transitionUrl='';
+  const slotOf = url => (String(url).match(/room_([AB])\.(?:wav|sid)/) || [])[1] || null;
   function reportSlot(url) {
     const slot = slotOf(url); if (!slot) return;
     fetch('/music/now-playing', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slot }) }).catch(() => {});
   }
   function queueRoomMusic(d) {
-    if (!d || !d.wav) return;
-    if (!d.palette && compositionChip() === '10582' && d.coords === currentRoomKey()) { preparePalette(d.coords,true); return; }
-    const url = d.wav;
-    if (url === playingUrl || (pendingSong && pendingSong.url === url)) return;
-    pendingSong = { url, coords: d.coords || '', preserveTime:!!d.preserveTime, startTime: d.startTime };
+    if (!d || !(d.sid||d.wav)) return;
+    if(d.runId&&songRunId&&d.runId!==songRunId)return;
+    if (!d.sid && !d.palette && compositionChip() === '10582' && d.coords === currentRoomKey()) { preparePalette(d.coords,true); return; }
+    const url = d.sid ? (d.variants?.[compositionChip()]||d.sid)+'?clock='+sidMode() : d.wav;
+    if (url === playingUrl || url === transitionUrl || (pendingSong && pendingSong.url === url)) return;
+    pendingSong = { ...d, url, coords: d.coords || '', preserveTime:!!d.preserveTime, startTime: d.startTime };
     if (!pendingSong.coords || pendingSong.coords === shownRoom) startPending(); // the room is already on screen
   }
   function roomShown(geoKey) {
@@ -1015,6 +1021,7 @@
   function startPending() {
     if (crossfading) return;
     const selection = pendingSong; pendingSong = null; if (!selection) return;
+    if(selection.sid){startPendingSid(selection);return;}
     const old = music(), next = old && old.id === 'room-music' ? musicPlayer('room-audio') : musicPlayer('room-music');
     let settled = false;
     crossfading = true;
@@ -1060,9 +1067,48 @@
     next.loop = true; next.__fade = 0; next.src = selection.url; next.load();
     reportSlot(selection.url);
   }
-  function loadLatestSong() { // page load: start the newest rendered song (index.html no longer autoplays a fixed file)
-    fetch('/music/latest').then(r => r.ok ? r.json() : { url: '/sid/current_room.wav' }).then(j => {
+  async function startPendingSid(selection){
+    const old=music();let next=null,cancelled=false;
+    crossfading=true;transitionUrl=selection.url;
+    cancelTransition=()=>{cancelled=true;transitionUrl='';if(next)disposeSid(next);};
+    const stale=()=>cancelled||(selection.coords&&selection.coords!==shownRoom)||(pendingSong&&pendingSong.url!==selection.url);
+    try{
+      const [bytes,source]=await Promise.all([fetch(selection.url).then(r=>{if(!r.ok)throw Error('SID file unavailable: '+r.status);return r.arrayBuffer();}),workerSource()]);
+      if(stale())return;
+      audio();const input=ctx.createGain(),side=makeWide(input,master);side.gain.value=.28*W();
+      next=await window.HolodekSidPlayer.open(bytes,{context:ctx,destination:input,source,seconds:selection.seconds,
+        clock:sidMode(),loop:true,time:Number.isFinite(selection.startTime)?selection.startTime:selection.preserveTime?(old?.currentTime||0):0,
+        onError:error=>paletteStatus('SID playback error: '+error.message)});
+      next.id='sid-room-music';next.isConnected=true;next.__fade=0;sidPlayers.add(next);musicWide.set(next,side);
+      const dispose=next.dispose.bind(next);next.dispose=()=>{dispose();input.disconnect();};
+      if(stale()){disposeSid(next);return;}
+      if(!settings.userPaused)await next.play();
+      const start=performance.now();
+      await new Promise(resolve=>{
+        const step=()=>{
+          if(stale()){disposeSid(next);resolve();return;}
+          const x=!old||old.paused||settings.userPaused?1:Math.min(1,(performance.now()-start)/1500);
+          next.__fade=x;if(old)old.__fade=1-x;setMusicVolume();
+          if(x<1)setTimeout(step,40);else resolve();
+        };step();
+      });
+      if(stale())return;
+      if(old?.dispose)disposeSid(old);else if(old){old.pause();old.removeAttribute('src');old.load();}
+      activeSid=next;activeMusic=null;playingUrl=selection.url;songRoom='';
+      next.__fade=1;setMusicVolume();paletteStatus('Live '+compositionChip()+' SID - no room WAV');
+      if(selection.slot)fetch('/music/now-playing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot:selection.slot})}).catch(()=>{});
+    }catch(error){
+      if(next)disposeSid(next);
+      if(!cancelled){paletteStatus('SID unavailable: '+error.message);console.error('[LiveSid]',error);}
+    }finally{
+      if(old&&!old.disposed){old.__fade=1;setMusicVolume();}
+      if(!cancelled){crossfading=false;transitionUrl='';cancelTransition=null;if(pendingSong&&(!pendingSong.coords||pendingSong.coords===shownRoom))startPending();}
+    }
+  }
+  function loadLatestSong() { // Reload the newest selection after its room is shown.
+    fetch('/music/latest').then(r => r.ok ? r.json() : null).then(j => {
       if (!j || !j.url || playingUrl || pendingSong || crossfading) return;
+      if(j.sid){queueRoomMusic(j);return;}
       const a = musicPlayer('room-music'); playingUrl = j.url; a.loop = true; a.src = j.url; activeMusic = a; reportSlot(j.url);
       if (!settings.userPaused) { internalPlay = true; const p = a.play(); if (p && p.finally) p.finally(() => { internalPlay = false; }).catch(() => {}); else internalPlay = false; }
     }).catch(() => {});
@@ -1070,16 +1116,18 @@
 
   function checkpoint() { const a = music(); return { time: Number.isFinite(a?.currentTime) ? a.currentTime : 0, paused: !!settings.userPaused }; }
   async function restoreCheckpoint(saved, preferences, rendered, room, runId) {
+    effectEpoch++;for(const player of effectPlayers){player.onended?.();player.dispose();}effectPlayers.clear();
     cancelTransition?.(); cancelTransition = null; stopSpeech();
     crossfading = false; pendingSong = null; playingUrl = ''; activeMusic = null;
+    for(const player of [...sidPlayers])disposeSid(player);
     paletteGeneration++; palettePairs.clear(); ambByRoom.clear(); ambKey = ''; lastRoom = '';
     song = null; songRoom = ''; songRunId = runId; shownRoom = room; profileSig = '';
     pcName = ''; pcHp = pcLevel = lastX = lastY = null; walked = 0;
     for (const a of musicEls()) { a.pause(); a.removeAttribute('src'); a.__fade = 1; try { a.load(); } catch {} }
     for (const k of Object.keys(DEF)) if (preferences && Object.hasOwn(preferences, k)) settings[k] = preferences[k];
     settings.userPaused = !!saved?.paused; save(); applyVolumes();
-    await postVoiceChip();
-    if (rendered?.url) queueRoomMusic({ coords: room, wav: rendered.url, palette: true, startTime: Number(saved?.time) || 0 });
+    await postVoiceChip();await postSidMode();
+    if (rendered?.url) queueRoomMusic({ ...rendered, coords: room, wav:rendered.sid?null:rendered.url, palette: true, startTime: Number(saved?.time) || 0 });
     loadSong(room); applyRoomAmbience(room);
   }
 
@@ -1182,6 +1230,7 @@
     if (!audio()) return;
     applyVolumes();
     if (ctx.state !== 'running') ctx.resume().then(() => { ambKey = ''; if (lastRoom) applyRoomAmbience(lastRoom); }).catch(() => {});
+    if(activeSid&&!settings.userPaused&&activeSid.paused)activeSid.play().catch(()=>{});
     ['step1', 'step2', 'hit', 'miss', 'dice', 'door', 'pickup', 'room_enter'].forEach(load);
   }
   function init() {
@@ -1206,8 +1255,8 @@
       window.DungeonActionNotices.observeItems = function (...a) { const taken = orig.apply(this, a); if (taken?.length) play(taken.some(i => /gold|coin|gem|jewel/i.test(i.name || '')) ? 'coins' : 'pickup'); return taken; };
     }
   }
-  const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, compositionChip: compositionChip(), voiceChip: voiceChip(), clock: sidMode(), active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length,
-    music: musicEls().map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused })) });
+  const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, compositionChip: compositionChip(), voiceChip: voiceChip(), clock: sidMode(), active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length, liveEffects:effectPlayers.size,
+    music: [...musicEls(),...sidPlayers].map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused, format:a.dispose?'sid':'media',time:a.currentTime })) });
   window.HolodekSfx = { voiceSpecOf, speakLine, stopSpeech, voicePrefetch, speechLog: () => speechLog.slice(), stereo: stereoInfo, listener, ctxNow: () => ctx && ctx.currentTime, speakVoice, voiceSound, voiceProfile, renderVoiceDemo, voices: () => voiceLog.slice(), play, onServerEvent, setAmbience, keywordAmbience, settings, applyVolumes, state, musicPlay, musicPause, rewind, fastForward, queueRoomMusic, roomShown, songKeyNow, rhythm: () => ({ mode: rhythmMode, clkOff, evLog: evLog.slice(-200) }), ambLayersInfo: () => ambLayers.map(l => ({ tag: l.tag, keyed: l.keyed || null, rate: l.src ? +l.src.playbackRate.value.toFixed(4) : null })) };
   Object.assign(window.HolodekSfx, { checkpoint, restoreCheckpoint });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();

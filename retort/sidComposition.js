@@ -2,8 +2,10 @@
 const Theory = require('./sidMusicTheory');
 const Contracts = require('./generationContracts');
 const Extended = require('./sid10582');
+const Grammar = require('./sidMusicGrammar');
+const Diversity = require('./sidMusicDiversity');
 const { createHash } = require('node:crypto');
-const VERSION = 3, spec = Theory.planPromptSpec();
+const VERSION = 4, spec = Theory.planPromptSpec();
 const TRANSFORMS = spec.developmentTransforms;
 const PERCUSSION = ['none','sparse','backbeat','driving'];
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -18,17 +20,23 @@ const motifFields = {
   frameArp:{type:Boolean}, picardy:{type:Boolean}, leitmotif:enumField(['none','vary','quote']),
   motifRhythm:numbers([4,8,16]), motifContour:numbers(Array.from({length:12},(_,i)=>i-4)),
   answerRhythm:numbers([4,8,16]), contrastRhythm:numbers([4,8,16]),
+  contrastContour:numbers(Array.from({length:12},(_,i)=>i-4)),
   answerTransform:enumField(TRANSFORMS), contrastTransform:enumField(TRANSFORMS),
   developmentPath:[enumField(TRANSFORMS)], arrangementArc:enumField(spec.arrangementArcs)
+};
+const performanceField = {
+  groove:enumField(Grammar.GROOVES), harmonicRhythm:enumField(['bar','two_bars']),
+  bassVariation:enumField(['steady','answering','interlock']), rhythmicDevelopment:[enumField(Grammar.RHYTHMIC_OPS)]
 };
 const parameters = {
   title:Contracts.text(30), rationale:Contracts.text(360), style:enumField(['modal_procession','chamber_counterpoint','folk_dance','sparse_lament','driving_ostinato','crystal_arpeggio','shadow_groove']),
   key:enumField(spec.keys), bpm:{type:Number,enum:spec.bpm}, suiteForm:enumField(Object.keys(spec.suiteForms)),
   leadPatch:enumField(spec.leadPatches), bassPatch:enumField(spec.bassPatches), arpPatch:enumField(spec.arpPatches),
   ...motifFields,
+  performance:performanceField,
   extensions:{ profile:enumField(Object.keys(Extended.PROFILES)), motion:enumField(Extended.MOTION),
     depth:{type:Number,enum:Extended.DEPTHS}, transients:enumField(Extended.TRANSIENTS) },
-  themes:Contracts.list({role:enumField(['reflective','danger','mortacia']),keyShift:{type:Number,enum:Array.from({length:14},(_,i)=>i-6)},...motifFields}),
+  themes:Contracts.list({role:enumField(['reflective','danger','mortacia']),keyShift:{type:Number,enum:Array.from({length:14},(_,i)=>i-6)},...motifFields,performance:performanceField}),
   ambience:Contracts.list({tag:enumField(['wind','sandstorm','drips','fire','howls','chant','rumble','water']),level:{type:Number,minimum:0,maximum:1}})
 };
 function rhythm(value,label){
@@ -37,6 +45,14 @@ function rhythm(value,label){
 }
 function choice(value,choices,label){if(!choices.includes(value))throw Error(label+': choose exactly '+choices.join(', '));}
 function validateTheme(p,label){
+  if(p.performance){
+    for(const [field,choices]of Object.entries({groove:Grammar.GROOVES,harmonicRhythm:['bar','two_bars'],bassVariation:['steady','answering','interlock']}))
+      choice(p.performance[field],choices,label+'.performance.'+field);
+    const ops=p.performance.rhythmicDevelopment;
+    if(!Array.isArray(ops)||ops.length<2||ops.length>4||new Set(ops).size!==ops.length||ops.some(op=>!Grammar.RHYTHMIC_OPS.includes(op)))
+      throw Error(label+'.performance.rhythmicDevelopment: 2-4 distinct executable rhythm operations required.');
+    if(ops.includes('diminish_repeat')&&p.motifRhythm?.includes(16))throw Error(label+': diminish_repeat needs a motif without sixteenths.');
+  }
   for(const [field,choices]of Object.entries({mood:spec.moods,scale:spec.scales,progression:Object.keys(spec.progressions),bassStyle:spec.bassStyles,
     arpStyle:spec.arpStyles,phraseForm:spec.phraseForms,texture:spec.textures,percussion:PERCUSSION,register:['middle','high'],
     answerTransform:TRANSFORMS,contrastTransform:TRANSFORMS,leitmotif:['none','vary','quote']}))choice(p[field],choices,label+'.'+field);
@@ -57,6 +73,12 @@ function validateTheme(p,label){
   const intervals=c.slice(1).map((n,i)=>Math.abs(n-c[i]));
   if(intervals.some(n=>n>5)||intervals.filter(n=>n>=3).length>2)throw Error(label+'.motifContour: mostly steps, optionally one or two expressive leaps of 3-5 scale steps.');
   if(Math.max(...c)-Math.min(...c)>8||intervals.filter(n=>n===0).length>Math.floor(intervals.length/2))throw Error(label+'.motifContour: keep within eight scale steps and avoid excessive repeated notes.');
+  if(p.contrastContour!==undefined){
+    const b=p.contrastContour;
+    if(!Array.isArray(b)||b.length!==p.contrastRhythm.length||b[0]!==0||new Set(b).size<3||
+      b.some((n,i)=>!Number.isInteger(n)||n < -4||n>7||i>0&&Math.abs(n-b[i-1])>5)||Math.max(...b)-Math.min(...b)>8)
+      throw Error(label+'.contrastContour: a singable second cell must start at zero, match contrastRhythm and stay within -4..7.');
+  }
 }
 function motifOf(song){
   if(song.composition?.acceptedPlan)return song.composition.acceptedPlan;
@@ -72,7 +94,9 @@ function recentSummaries(songs){
   return (songs||[]).slice(-8).map(s=>{
     const song=s.song||s,p=motifOf(song);
     return{roomKey:s.roomKey,title:song.title,key:song.key,scale:song.scale,bpm:song.bpm,
-      motifRhythm:p.motifRhythm,motifContour:p.motifContour,phraseForm:p.phraseForm,texture:p.texture,suiteForm:p.suiteForm};
+      motifRhythm:p.motifRhythm,motifContour:p.motifContour,phraseForm:p.phraseForm,texture:p.texture,suiteForm:p.suiteForm,
+      leadPatch:p.leadPatch,bassPatch:p.bassPatch,arpPatch:p.arpPatch,bassStyle:p.bassStyle,arpStyle:p.arpStyle,
+      progression:p.progression,contrastProgression:p.contrastProgression,performance:p.performance};
   });
 }
 function statementOf(song, startBar=4){
@@ -102,6 +126,7 @@ function validate(raw,recent=[]){
   if(!Array.isArray(raw.ambience)||raw.ambience.length<1||raw.ambience.length>3||new Set(raw.ambience.map(a=>a.tag)).size!==raw.ambience.length||
     raw.ambience.some(a=>!parameters.ambience[0].type.tag.enum.includes(a.tag)||typeof a.level!=='number'||!Number.isFinite(a.level)||a.level<0||a.level>1))throw Error('ambience: 1-3 distinct valid tags with level 0..1. Quiet layers such as 0.1 are valid.');
   for(const p of recent)if(motifSignature(raw)===motifSignature(motifOf(p.song||p)))throw Error('The room motif repeats a recent song, even ignoring transposition. Compose a different rhythmic/interval cell, not just a new key or title.');
+  Diversity.check(raw,recent);
   if(motifSignature(raw)===motifSignature({motifRhythm:Theory.LEITMOTIF.rhythm,motifContour:Theory.LEITMOTIF.contour}))throw Error('Do not replace this room\'s identity with the shared Mortacia motif. Use a new motif; a lore quote can appear separately.');
   return raw;
 }
@@ -110,12 +135,15 @@ function transform(contour,operation,count,step){
   return Theory.developContour(contour,operation,count,step);
 }
 function develop(raw){
-  const p={...raw,compositionVersion:VERSION};
+  const p={...raw,compositionVersion:3};
+  if(raw.performance || !['sentence','period','arch','call_response','ostinato'].includes(raw.phraseForm))
+    p.performance=structuredClone(raw.performance||Grammar.DEFAULT);
   // Select complete harmonic paths, not independent random chord roots.
   p.harmonyA=Theory.PROGRESSIONS[p.progression].A.map(String);
   p.harmonyB=Theory.PROGRESSIONS[p.contrastProgression].B.map(String);
   p.answerContour=transform(p.motifContour,p.answerTransform,p.answerRhythm.length,p.sequenceStep);
-  p.contrastContour=transform(p.motifContour,p.contrastTransform,p.contrastRhythm.length,-p.sequenceStep);
+  p.contrastContour=p.performance&&raw.contrastContour?raw.contrastContour.slice():transform(p.motifContour,p.contrastTransform,p.contrastRhythm.length,-p.sequenceStep);
+  if(p.performance&&raw.contrastContour)p.authoredContrastContour=raw.contrastContour.slice();
   p.themes=(raw.themes||[]).map(t=>develop({...t,themes:[]}));
   return p;
 }
@@ -144,6 +172,7 @@ function assertScore(song){
 }
 async function generate($,{description='',roomKey='',runId='',context={},recent=[]}={}){
   const seed=`${runId}|${roomKey}|${description}`;
+  const diversity=Diversity.brief(seed,spec,recent);
   await $.system`Compose original, coherent Commodore-64-style dark-fantasy room music, not imitations of an existing tune. The player may be Mortacia, Suzerain or the Children of the Grave. The arc is exile from Hades, Mortacia's lost Sepulchra, Dantuea's rising undead, Arithus's occupation, and the struggle to restore judgment and balance. Score this PLACE and the current aspiration, not the same lament merely because Mortacia is present.
 The proven arranger owns chord-tone anchoring, voice ranges, synchronized tracker cells, gate articulation, bass/arp execution and motif development. You compose the room's short rhythmic/scale-degree cell, harmony and explicit development enums. NEVER write assembly, every note of a ten-minute song, or prose instructions for the arranger to interpret. Rationale is display/log metadata, never executable music.
 Use the nostalgic range of SID writing: modal processions, chamber counterpoint, folk dances, spare lament, driving ostinato, crystalline arpeggios and syncopated shadow grooves. Original melodies only; do not borrow a game's tune. The same patch bank and timing engine stay in use. Build a memorable statement, an answer and contrast from it, not random unrelated bars. A rest still occupies the shared grid.
@@ -155,14 +184,21 @@ Music and environmental ambience are independently switchable layers. Compose a 
 Also choose an extensions palette for players who enable our custom emulated 10582: reed_resonance adds a woody resonator; spectral_choir a breath-shaped sacred halo; glass_halo a crystalline resonance; ember_air a restrained noisy resonance. motion is still, breath or phrase; depth is 0.15, 0.25 or 0.4; transients is off, soft or crisp. These enums drive actual 10582 registers for 8-bit levels, mute, fast burst envelopes, formant resonance and a soft output notch. This optional companion layer never replaces your melody, harmony, rhythm or the complete traditional SID arrangement. It is not stock C64 hardware. Select restraint for quiet rooms; do not add percussion via transients to a drumless score.
 Choose a suiteForm appropriate to this room; it controls which extra themes are required. A single_theme score still develops for roughly ten minutes. Extra movements each have their own motif and choices; per-room SID instruments are shared across movements. Instrument palette: hollow/bright pulses and saw for urgency; flute/reed for modal or lyrical writing; plucked pulse and triangle for dance; bell/chime triangles for wonder. Do not default every song to the same key, rhythm, patch trio and suite. Return the strict Retort answer fields, no prose outside them.`;
   await $.user`Plan a ten-minute exploration arc, not a short loop padded to length. developmentPath is 3-6 ordered transformation enums, with no adjacent duplicates: each transforms the original motif for a development cycle. Keep the answer recognizable and use stronger transformations for contrast. arrangementArc controls long-range orchestration: gradual_reveal = spare opening, growing body, counterpoint, crest, withdrawal; ebb_and_flow = repeated spacious breathing and renewal; long_journey = two separated crests with a quiet middle. The first statement and final theme return remain identifiable. Dynamics here mean changes of register, note density and texture, not extra voices. These are executed templates, never free-form sentences.`;
+  await $.user`The expanded arranger executes performance choices literally. groove: straight=eighth-note flow; offbeat=spaces on downbeats; tresillo=3+3+2 accents in 4/4; clave=spacious syncopation; held_rush=held opening then faster tail; motor=sixteenth ostinato. These are NOT changes to a 6/8 time signature. harmonicRhythm two_bars slows harmonic turnover; bar changes each bar. bassVariation answering leaves response gaps; interlock leaves weak lead onsets free. Rhythmic development: rotate moves the first event to the tail; augment_fragment doubles the first half-bar into a whole bar; diminish_repeat halves the whole cell and repeats it (only if the motif contains no sixteenths); displace delays it by an eighth; fragment_rest answers half a cell with half a bar of silence. Choose 2-4 distinct rhythm ops, not sentences. Original motif, answer and contrast still anchor the work.
+Phrase cycles now differ in length: sentence/period/call_response/binary 8 bars; processional 6; asymmetric 10 (3+3+4); ostinato/rounded_binary 12; arch/rondo 16. All remain on a shared 4/4 grid. Pick a form that fits the setting, not arch in every dark room. Each extra movement also needs its own performance object. Instruments are still shared across movements. Include the required performance fields; archived plans without them use the old renderer.
+This room's instrument shortlist is a deterministic rotation away from recent rooms, not a procedural replacement song. Choose leadPatch/bassPatch/arpPatch ONLY from these shortlists: ${JSON.stringify(diversity.allowed)}. The rest of the full patch list describes available sounds, not permission to ignore this rotation. Suggested unused rhythm cells (you may compose your own): ${JSON.stringify(diversity.startingRhythms)}. Avoid simply repeating this last recipe: ${JSON.stringify(diversity.avoidLastRecipe)}. Change actual foreground, rhythm, harmonic route and phrase behavior, not merely title/key.`;
   await $.user`ROOM ${roomKey}: ${String(description).slice(0,3500)}
 Read-only setting and aspiration: ${JSON.stringify(context)}
 Supported choices and suite roles: ${JSON.stringify({...spec,leitmotif:parameters.leitmotif.enum})}
 Recent room identities to contrast with, without merely transposing: ${JSON.stringify(recentSummaries(recent))}
 Provide title and a concise rationale tied to THIS room. All musical choices must use the provided enums. themes must contain exactly suiteForm's required roles (zero for single_theme).`;
-  const result=await Contracts.request($,{component:'sid-composition',context:{geoKey:roomKey,runId},parameters,maxTokens:4200,attempts:3,
+  await $.user`Author contrastContour as a real second, singable cell matching contrastRhythm, starting at zero and using the same degree/leap bounds as the room motif. It may share an interval or gesture with the statement, but it need not be only its mechanical inversion. contrastTransform develops that cell later. Keep both identities recognizable. Style/rationale labels do not change the notes: the rhythm, contours and performance choices must carry the distinction.`;
+  const roomParameters={...parameters,...Object.fromEntries(Object.entries(diversity.allowed).map(([field,choices])=>[field,enumField(choices)]))};
+  const result=await Contracts.request($,{component:'sid-composition',context:{geoKey:roomKey,runId},parameters:roomParameters,maxTokens:4800,attempts:3,
     validate:value=>{
-      const accepted=validate(value,recent),song=assertScore(Theory.arrangeSuite(develop(accepted),description,seed));
+      const accepted=validate(value,recent);
+      Diversity.check(accepted,recent,diversity.allowed);
+      const song=assertScore(Theory.arrangeSuite(develop(accepted),description,seed));
       if(recent.some(row=>(row.song||row).composition?.realizedMotifSignature===realizedMotifSignature(song)))
         throw Error('After chord anchoring, the melody still repeats a recent room. Change the rhythmic/interval cell, not just title or key.');
       return{accepted,song};
@@ -171,7 +207,7 @@ Provide title and a concise rationale tied to THIS room. All musical choices mus
   const {accepted,song}=result.value;
   song.ambience=structuredClone(accepted.ambience);
   song.composition={version:VERSION,source:'llm-validated-plan',roomKey,runId,seed,attempt:result.attempt,
-    acceptedPlan:structuredClone(accepted),motifSignature:motifSignature(accepted),realizedMotifSignature:realizedMotifSignature(song),scoreSignature:digest(song.voices),
+    acceptedPlan:structuredClone(accepted),diversityBrief:diversity,motifSignature:motifSignature(accepted),realizedMotifSignature:realizedMotifSignature(song),scoreSignature:digest(song.voices),
     responsibilities:{ai:'room motif, rhythm, modal harmony, patches, phrase form, texture and explicit development operations',
       arranger:'derived answer/contrast, voice leading, accompaniment, synchronization, articulation and tracker compilation'}};
   console.info('[SidComposition]',JSON.stringify({roomKey,title:song.title,style:accepted.style,form:accepted.suiteForm,

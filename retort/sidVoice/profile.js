@@ -7,8 +7,8 @@ const bound = (value, fallback, min, max) => {
   const n = value === '' || value == null ? NaN : Number(value);
   return Math.max(min, Math.min(max, Number.isFinite(n) ? n : fallback));
 };
-const OVERRIDES = { mortacia: { f0: 182, fs: 1.04, alpha: 1, breath: 0.1, rasp: 0, range: 2.3, rate: 4, conf: 0.85,
-  warm: 0.3, vibAmt: 0.7, vibRate: 4.8, pull: 0, accent: 2.2, decl: 2.5 } };
+const OVERRIDES = { mortacia: { f0: 205, fs: 1.04, alpha: 1, breath: 0.06, rasp: 0, range: 3, rate: 4.6, conf: 0.85,
+  warm: 0.22, bright: 1.08, vibAmt: 0.2, vibRate: 5.2, pause: 0.95, pull: 0, accent: 1.6, decl: 1.7 } };
 function normalize(P = {}) {
   const name = String(P.name || '').trim().replace(/\s+/g, ' ').slice(0, 100);
   const base = { v: VERSION, name, kind: ['humanoid', 'regal', 'undead', 'beast'].includes(P.kind) ? P.kind : 'humanoid',

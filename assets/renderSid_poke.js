@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // --- DROP-IN REPLACEMENT ---
 // Build PRG-oriented ASM AND a PSID-ready ASM + .sid (no defaults, strict).
-// Requires: xa (assembler).
+// Uses xa when available; the bundled strict assembler covers this emitted player.
 
 const fs = require('fs');
 const { spawnSync } = require('child_process');
@@ -791,19 +791,17 @@ function haveCmd(cmd) {
     : spawnSync('sh', ['-lc', `command -v "${cmd}" >/dev/null 2>&1`], { stdio: 'ignore' });
   return probe.status === 0;
 }
-if (!haveCmd('xa')) {
-  console.error('WARN: xa not found in PATH; skipping .sid build.');
-  process.exit(0);
+let prg;
+if (haveCmd('xa')) {
+  const a1 = spawnSync('xa', ['-v', sidAsmOut, '-o', sidPrgOut], {stdio:'inherit'});
+  if (a1.status !== 0) throw Error('xa failed on SID-core; .sid not produced.');
+  prg = fs.readFileSync(sidPrgOut);
+} else {
+  const assembled = require('../retort/sidAssembler').assemble(emitSidAsm());
+  if (assembled.loadAddress !== 0x1000 || assembled.symbols.Play !== 0x1003) throw Error('Invalid SID entry points');
+  prg = assembled.data;
+  console.log('SID core assembled with the bundled 6502 subset assembler.');
 }
-
-const a1 = spawnSync('xa', ['-v', sidAsmOut, '-o', sidPrgOut], {stdio:'inherit'});
-if (a1.status !== 0) {
-  console.error('xa failed on SID-core; .sid not produced.');
-  process.exit(1);
-}
-
-// Read the assembler output
-let prg = fs.readFileSync(sidPrgOut);
 
 // Ensure the PRG begins with the 2-byte load address $1000 (00 10).
 let core = prg;

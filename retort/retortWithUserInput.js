@@ -400,39 +400,8 @@ const characterClasses = [
     // Add other classes here
 ];
 
-const { renderArrangementToWav } = require('./renderAudio');
-
-function writeLatestJsonAndRender(musicJson, lengthSec = 60, coordsKeyStr = null) {
-  // Two-slot scheme (retort/musicSlots.js): never overwrite the WAV the browser is playing.
-  const MusicSlots = require('./musicSlots');
-  // Revisit: this room's song may still sit in a slot (e.g. pre-rendered when the move was synced). Reuse it.
-  const held = MusicSlots.find(coordsKeyStr);
-  if (held) {
-    console.log(`[music] ${coordsKeyStr} song already in slot ${held}; no render`);
-    return { wavUrl: MusicSlots.use(held), slot: held, jsonPath: null, sidOut: null, wavOut: MusicSlots.base(held) + '.wav', renderer: 'slot-reuse' };
-  }
-  const slot = MusicSlots.nextSlot();
-  const jsonPath = path.join(RETORT_DIR, 'current_room.json');
-  const asmOut = path.join(SID_DIR, `room_${slot}.asm`);
-  const sidOut = path.join(SID_DIR, `room_${slot}.sid`);
-  const { wavPath, renderer, sidOut: builtSidOut } = renderArrangementToWav(musicJson, {
-    jsonPath,
-    asmOut,
-    sidOut,
-    outBaseNoExt: MusicSlots.base(slot),
-    seconds: lengthSec,
-    renderJsPath: RENDER_JS,
-    cwd: ROOT,
-  });
-
-  return {
-    wavUrl: wavPath ? MusicSlots.rendered(slot, coordsKeyStr) : null,
-    slot,
-    jsonPath,
-    sidOut: builtSidOut,
-    wavOut: wavPath,
-    renderer,
-  };
+function prepareLiveRoomMusic(musicJson, coordsKeyStr) {
+  return require('./liveRoomMusic').prepare(musicJson,{coords:coordsKeyStr,runId:sharedState.getDungeonRunId()});
 }
 
 async function generateImage(prompt) {
@@ -1618,11 +1587,10 @@ async function getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom
       console.log(`Loaded existing music for room ${key}`);
     }
 
-    // Always refresh "latest" outputs and WAV
-    const { wavUrl, renderer } = writeLatestJsonAndRender(musicJson, 60, key);
-    console.log(`Room music rendered for ${key} via ${renderer}`);
+    const playback = prepareLiveRoomMusic(musicJson, key);
+    console.log(`Room music prepared for ${key} via ${playback.renderer}`);
 
-    return { musicJson, wavUrl, isNew: !sharedState.getRoomMusicWasHit, key, coords: c };
+    return { musicJson, playback, isNew: !sharedState.getRoomMusicWasHit, key, coords: c };
   } catch (err) {
     console.error(`getOrGenerateRoomMusic failed for ${key}:`, err);
     throw err;
@@ -11633,15 +11601,15 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       });
     }
     
-    let musicArrangement = null, musicWavUrl = null;
+    let musicArrangement = null, musicPlayback = null;
 
     if (isNewRoom) {
       try {
-        const { musicJson, wavUrl, isNew, key, coords: c } =
+        const { musicJson, playback, isNew, key, coords: c } =
           await $.run($ => getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom));
         
-        musicArrangement = musicJson; musicWavUrl = wavUrl || null;
-        console.log(`Music updated for room at ${coordsKey(coords)}${wavUrl ? ` (${wavUrl})` : ''}`);
+        musicArrangement = musicJson; musicPlayback = playback;
+        console.log(`Music updated for room at ${coordsKey(coords)} (${playback.sid})`);
       } catch (musicErr) {
         console.error('Music generation failed:', musicErr);
         musicArrangement = null;
@@ -11652,7 +11620,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     }
     
     // Broadcast to clients to reload audio (SSE)
-    broadcast({ type: 'roomMusicUpdated', coords: coordsKey(coords), isNew: isNewRoom, wav: musicWavUrl, ambience: (musicArrangement && Array.isArray(musicArrangement.ambience)) ? musicArrangement.ambience : null });
+    broadcast({ ...musicPlayback, type: 'roomMusicUpdated', coords: coordsKey(coords), isNew: isNewRoom, ambience: (musicArrangement && Array.isArray(musicArrangement.ambience)) ? musicArrangement.ambience : null });
     
     // Parse and initialize roomNameDatabase
     // Parse and initialize roomNameDatabase

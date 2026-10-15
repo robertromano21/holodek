@@ -2,8 +2,10 @@
 
 ## Scope And Ownership
 
-New rooms use `roomMusicComposer.js` -> `sidComposition.js` -> the version-3 path
-in `sidMusicTheory.js`. Existing cached arrangements stay cached. New songs use
+New rooms use `roomMusicComposer.js` -> `sidComposition.js` -> the version-4
+grammar in `sidMusicGrammar.js`, retaining the version-3 score/player format.
+Archived plans without a performance object keep their original arranger path.
+Existing cached arrangements stay cached. New songs use
 the normal two-slot WAV/ASM publishing path. Reference recordings are preserved
 separately before a recovery replaces a live slot; campaign data and speech code
 are not replaced. Speech now defaults to 10582, without changing voice identities
@@ -21,6 +23,41 @@ Development is an executable enum, never prose:
 `fragment_sequence`, `tail_answer`. A separate ordered `developmentPath` selects
 successive developments of the original motif. Rationale and style labels are
 descriptive metadata; they are not parsed into musical instructions.
+
+## Variety Revision
+
+Recent room logs reused flute/round-triangle pairs, arch form and long_journey.
+The full patch bank was already available to valid AI plans: the old mood
+fallback lists were not the primary restriction on this path. More importantly,
+the original frame-arpeggio branch ignored arpStyle, and repeating lore quotes
+could replace a room's contrast cell. The new grammar executes the selected
+arp style and quotes Mortacia once in a separate bar, not over every contrast.
+
+The palette now offers nine lead, six bass and six third-voice patches. A seeded,
+least-used shortlist per role excludes the previous room's patch and is enforced
+in Retort's per-request enums. Recent context includes instrument, harmony and
+groove choices. Repeated pairs, recipes and near-identical rhythmic/interval
+cells are rejected with a concrete retry reason, never silently randomized.
+
+Ten phrase templates span 6, 8, 10, 12 and 16-bar cycles, including 3+3+4
+subphrases. Six accompaniment grooves, thirteen bass styles and nine arp styles
+share the original sixteenth clock. Tresillo means accents in 4/4 here, not a
+claim of true 6/8 support. AI-authored contrast contours allow an independent
+second cell rather than requiring every B section to be the same transformation.
+
+Rhythmic development executes rotation, half-cell augmentation, eighth-note
+displacement, fragmentation with silence, and exact diminution/repetition.
+Diminution rejects source sixteenths because this player has no thirty-seconds.
+The source motif still returns; duration, range and pattern-memory checks remain.
+These operations follow ordinary motivic development, not free-form prose
+interpretation. [Melodic alteration](https://musictheory.pugetsound.edu/mt21c/MelodicAlteration.html)
+
+`node tools/audition-room-music.cjs` writes four labeled, hand-authored capability
+studies with paired 8580/10582 clips and full ASM/score files under ignored
+`sid/music-auditions/`. `--generate` requests real Retort plans using the terminal's
+configured API key. No new live-model generation was measured during the offline
+verification; schema/arranger tests and studies are not evidence of model variety.
+See [SID Music Archive](SID-MUSIC-ARCHIVE.md) for permanent shareable exports.
 
 ## Reference Audit
 

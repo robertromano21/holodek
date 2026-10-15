@@ -3,6 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const Extended=require('../retort/sid10582'),Effects=require('../retort/sidEffectPalette'),Audio=require('../retort/renderAudio');
 const Composition=require('../retort/sidComposition'),Theory=require('../retort/sidMusicTheory');
 const Palette=require('../retort/audioPalette'),{waveStats}=require('../tools/analyze-room-music.cjs');
+const Archive=require('../retort/sidArchive'),Converter=require('../retort/sidToWav');
 const plan=require('./fixtures/sid-leaving-threshold.json');
 const palette={profile:'spectral_choir',motion:'phrase',depth:.25,transients:'off'};
 function preview(){
@@ -43,10 +44,12 @@ test('the companion really writes 10582 registers and produces bounded, distinct
   assert.equal(signatures.size,4);
 });
 
-test('same-score 8580 and 10582 render pair has identical timing and distinct unclipped PCM',async()=>{
+test('same-score SID pair has identical timing and distinct unclipped live-engine PCM',async()=>{
   const s=preview(),before=JSON.stringify(s);
   const pair=await Palette.pair(s,{clock:'2x',runId:'offline-extended-regression-v2',coords:'0,0,0'});
-  const a=fs.readFileSync(path.join(__dirname,'..',pair.variants['8580'])),b=fs.readFileSync(path.join(__dirname,'..',pair.variants['10582']));
+  const file=chip=>path.join(Archive.DIRECTORY,pair.archiveId,chip+'.sid');
+  const a=Buffer.from(Converter.wav(Converter.render(fs.readFileSync(file('8580')),{seconds:3,sampleRate:22050}).samples,22050));
+  const b=Buffer.from(Converter.wav(Converter.render(fs.readFileSync(file('10582')),{seconds:3,sampleRate:22050}).samples,22050));
   const sa=waveStats(a),sb=waveStats(b);
   assert.equal(sa.seconds,sb.seconds);assert.equal(sa.sampleRate,sb.sampleRate);
   assert.equal(sa.clippedSamples,0);assert.equal(sb.clippedSamples,0);assert.notDeepEqual(a,b);
@@ -57,7 +60,7 @@ test('same-score 8580 and 10582 render pair has identical timing and distinct un
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sid-traditional-'));
   try{
     const rendered=Audio.renderArrangementToWav(s,{outBaseNoExt:path.join(dir,'default'),clock:'2x'});
-    assert.deepEqual(fs.readFileSync(rendered.wavPath),a);
+    assert.ok(waveStats(fs.readFileSync(rendered.wavPath)).rms>.001);
   }finally{fs.rmSync(dir,{recursive:true,force:true});}
 });
 
@@ -95,6 +98,7 @@ test('actual HTTP routes prepare both variants and serve a register-rendered eff
   const express=require('express'),http=require('node:http'),app=express();app.use(express.json());
   const song=preview();
   Palette.install(app,{getDungeonRunId:()=> 'http-palette-test',getRoomMusic:()=>song});
+  Archive.install(app,express);
   app.use('/sid',express.static(path.resolve(__dirname,'../sid')));
   const server=http.createServer(app);await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const origin='http://127.0.0.1:'+server.address().port;
@@ -102,9 +106,10 @@ test('actual HTTP routes prepare both variants and serve a register-rendered eff
     const r=await fetch(origin+'/music/palette',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({coords:'0,0,0',clock:'2x',runId:'http-palette-test'})});
     assert.equal(r.status,200);const pair=await r.json();
-    assert.equal(pair.source,'same-score-pair');
+    assert.equal(pair.source,'same-score-sid-pair');assert.equal(pair.format,'sid');
     for(const url of Object.values(pair.variants)){
-      const wav=await fetch(origin+url);assert.equal(wav.status,200);assert.ok(waveStats(Buffer.from(await wav.arrayBuffer())).rms>.01);
+      const sid=await fetch(origin+url);assert.equal(sid.status,200);const bytes=Buffer.from(await sid.arrayBuffer());
+      assert.equal(bytes.toString('ascii',0,4),'PSID');assert.ok(Converter.render(bytes,{seconds:1,sampleRate:22050}).report.rms>.001);
     }
     const fx=await fetch(origin+'/audio/palette/spell.wav?clock=2x&seconds=0.5');
     assert.equal(fx.status,200);assert.match(fx.headers.get('content-type'),/audio\/wav/);
@@ -165,25 +170,19 @@ test('voice defaults to 10582 independently of the traditional composition defau
   assert.match(backend,/SIDVOICE_CHIP \|\| '10582'/);
 });
 
-test('effect loading isolates traditional/extended caches and retains the original on a reported extension error',async()=>{
-  const make=values=>({numberOfChannels:1,length:values.length,sampleRate:44100,duration:.1,getChannelData:()=>Float32Array.from(values)});
-  const dry=make([.1,.2,.3]),wet=make([.01,.02,.03]),requests=[],messages=[];
+test('live effects isolate chip caches and report failures without a recorded-audio fallback',async()=>{
+  const requests=[],messages=[];
   let chip='8580',broken=false;
   const c=vm.createContext({buffers:new Map(),loading:new Map(),sidMode:()=> '2x',compositionChip:()=>chip,
-    SFX_DIRS:{'2x':'/assets/sfx-enh/'},
-    fetch:async url=>{requests.push(url);return{ok:!broken,status:503,arrayBuffer:async()=>url.includes('/audio/')?'wet':'dry'};},
-    audio:()=>({decodeAudioData:(bytes,resolve)=>resolve(bytes==='wet'?wet:dry),createBuffer:()=>{
-      const data=new Float32Array(3);return{numberOfChannels:1,length:3,sampleRate:44100,getChannelData:()=>data};}}),
+    fetch:async url=>{requests.push(url);return{ok:!broken,status:503,headers:{get:k=>k==='X-SID-Duration'?'.5':'false'},arrayBuffer:async()=>new ArrayBuffer(8)};},
+    audio:()=>{throw Error('Effects must not decode recordings');},
     console:{warn:(...args)=>messages.push(args)},paletteStatus:s=>messages.push(s)});
   vm.runInContext(slice('function load(name)', '// --- music ducking'),c);
-  const a=await c.load('spell');assert.equal(a,dry);assert.equal(requests.length,1);
-  chip='10582';const b=await c.load('spell');assert.notEqual(b,dry);assert.equal(requests.length,3);
-  assert.ok(Math.abs(b.getChannelData(0)[0]-.11)<1e-6);
-  chip='8580';assert.equal(await c.load('spell'),dry);assert.equal(requests.length,3);
+  const a=await c.load('spell');assert.equal(a.duration,.5);assert.equal(requests.length,1);assert.match(requests[0],/registers\/spell.sidregs.*chip=8580/);
+  chip='10582';const b=await c.load('spell');assert.notEqual(b,a);assert.equal(requests.length,2);assert.match(requests[1],/chip=10582/);
+  chip='8580';assert.equal(await c.load('spell'),a);assert.equal(requests.length,2);
   chip='10582';broken=true;
-  // Break only the companion request: the dry recording must remain playable.
-  c.fetch=async url=>({ok:!url.includes('/audio/'),status:503,arrayBuffer:async()=>'dry'});
-  assert.equal(await c.load('hit'),dry);assert.ok(messages.length);
+  assert.equal(await c.load('hit'),null);assert.ok(messages.length);assert.ok(requests.every(url=>!url.includes('.wav')&&!url.includes('.ogg')));
 });
 
 test('late palette results cannot switch a different room or a different clock setting',async()=>{
@@ -201,7 +200,7 @@ test('late palette results cannot switch a different room or a different clock s
 });
 
 test('room-entry optimistic playback routes through the same palette-aware manager as SSE',()=>{
-  const game=fs.readFileSync('assets/game.js','utf8'),start=game.indexOf('if (resp?.ok && resp?.wav)');
+  const game=fs.readFileSync('assets/game.js','utf8'),start=game.indexOf('if (resp?.ok && (resp?.sid || resp?.wav))');
   const end=game.indexOf('\n                    })',start),snippet=game.slice(start,end);
   assert.ok(start>0&&end>start);
   let queued=0,fresh=0;

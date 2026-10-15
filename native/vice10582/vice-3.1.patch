@@ -1,0 +1,287 @@
+diff --git a/src/sid/sid.h b/src/sid/sid.h
+index 8cef9f3..325d5ee 100644
+--- a/src/sid/sid.h
++++ b/src/sid/sid.h
+@@ -54,6 +54,7 @@ struct sid_snapshot_state_s;
+ #define SID_MODEL_8580D          2
+ #define SID_MODEL_6581R4         3
+ #define SID_MODEL_DTVSID         4
++#define SID_MODEL_10582          5
+ #define SID_MODEL_DEFAULT       99
+ 
+ /* these definitions are the only valid combinations of
+@@ -64,6 +65,7 @@ struct sid_snapshot_state_s;
+ #define SID_RESID_6581            ((SID_ENGINE_RESID << 8) | SID_MODEL_6581)
+ #define SID_RESID_8580            ((SID_ENGINE_RESID << 8) | SID_MODEL_8580)
+ #define SID_RESID_8580D           ((SID_ENGINE_RESID << 8) | SID_MODEL_8580D)
++#define SID_RESID_10582           ((SID_ENGINE_RESID << 8) | SID_MODEL_10582)
+ #define SID_RESID_DTVSID          ((SID_ENGINE_RESID << 8) | SID_MODEL_DTVSID)
+ #define SID_CATWEASELMKIII        (SID_ENGINE_CATWEASELMKIII << 8)
+ #define SID_HARDSID               (SID_ENGINE_HARDSID << 8)
+diff --git a/src/sid/sid.c b/src/sid/sid.c
+index 52a1bc4..d3ae873 100644
+--- a/src/sid/sid.c
++++ b/src/sid/sid.c
+@@ -65,7 +65,14 @@ static sid_engine_t sid_engine;
+ static BYTE lastsidread;
+ 
+ /* register data */
+-static BYTE siddata[SOUND_SIDS_MAX][32];
++static BYTE siddata[SOUND_SIDS_MAX][64];
++
++static unsigned int sid_register_mask(void)
++{
++    int model = 0;
++    resources_get_int("SidModel", &model);
++    return model == SID_MODEL_10582 ? 0x3f : 0x1f;
++}
+ 
+ static int (*sid_read_func)(WORD addr, int chipno);
+ static void (*sid_store_func)(WORD addr, BYTE val, int chipno);
+@@ -113,7 +120,7 @@ static BYTE sid_read_chip(WORD addr, int chipno)
+ {
+     int val = -1;
+ 
+-    addr &= 0x1f;
++    addr &= sid_register_mask();
+ 
+     machine_handle_pending_alarms(0);
+ 
+@@ -163,7 +170,7 @@ static BYTE sid_read_chip(WORD addr, int chipno)
+ 
+ static BYTE sid_peek_chip(WORD addr, int chipno)
+ {
+-    addr &= 0x1f;
++    addr &= sid_register_mask();
+ 
+     /* FIXME: get 0x1b and 0x1c from engine */
+     return siddata[chipno][addr];
+@@ -172,7 +179,7 @@ static BYTE sid_peek_chip(WORD addr, int chipno)
+ /* write register value to sid */
+ static void sid_store_chip(WORD addr, BYTE byte, int chipno)
+ {
+-    addr &= 0x1f;
++    addr &= sid_register_mask();
+ 
+     siddata[chipno][addr] = byte;
+ 
+diff --git a/src/sid/resid.cc b/src/sid/resid.cc
+index ed22adc..ffb384d 100644
+--- a/src/sid/resid.cc
++++ b/src/sid/resid.cc
+@@ -70,6 +70,9 @@ extern char *strcpy(char *s1, char *s2);
+ } // extern "C"
+ 
+ #include "resid/sid.h"
++#include "holodek10582.h"
++#include "holodek10582bank.h"
++#include <cstdlib>
+ /* resid-dtv/ is used for DTVSID, but the API is the same */
+ 
+ using namespace reSID;
+@@ -83,6 +86,8 @@ struct sound_s
+ 
+     /* resid sid implementation */
+     reSID::SID *sid;
++    Holodek10582 *extended;
++    Holodek10582Bank *voicebank;
+ };
+ 
+ typedef struct sound_s sound_t;
+@@ -111,6 +116,8 @@ static sound_t *resid_open(BYTE *sidstate)
+ 
+     psid = new sound_t;
+     psid->sid = new reSID::SID;
++    psid->extended = NULL;
++    psid->voicebank = NULL;
+ 
+     for (i = 0x00; i <= 0x18; i++) {
+         psid->sid->write(i, sidstate[i]);
+@@ -156,6 +163,31 @@ static int resid_init(sound_t *psid, int speed, int cycles_per_sec, int factor)
+ 
+     psid->factor = factor;
+ 
++    delete psid->voicebank;
++    psid->voicebank = NULL;
++
++    if (model == SID_MODEL_10582) {
++        const char *score = std::getenv("HOLODEK_SIDVOICE_SCORE");
++        if (score && *score) {
++            psid->voicebank = new Holodek10582Bank;
++            std::string error;
++            if (!psid->voicebank->load(score, speed, cycles_per_sec, error)) {
++                log_error(LOG_DEFAULT, "Holodek SID voice: %s", error.c_str());
++                delete psid->voicebank;
++                psid->voicebank = NULL;
++                return 0;
++            }
++            log_message(LOG_DEFAULT, "Holodek SID voice: %u native 10582 chips, %u register writes; no PCM input or PSID speech driver", psid->voicebank->chipCount(), psid->voicebank->eventCount());
++            return 1;
++        }
++        if (!psid->extended) psid->extended = new Holodek10582;
++        psid->extended->configure(speed, cycles_per_sec);
++        log_message(LOG_DEFAULT, "Holodek 10582: native register-driven synthesis, %d Hz; no sample or JSON playback", speed);
++        return 1;
++    }
++    delete psid->extended;
++    psid->extended = NULL;
++
+     switch (model) {
+       default:
+       case 0:
+@@ -231,6 +263,8 @@ static int resid_init(sound_t *psid, int speed, int cycles_per_sec, int factor)
+ static void resid_close(sound_t *psid)
+ {
+     delete psid->sid;
++    delete psid->extended;
++    delete psid->voicebank;
+     delete psid;
+ 
+     if (buf) {
+@@ -241,17 +275,23 @@ static void resid_close(sound_t *psid)
+ 
+ static BYTE resid_read(sound_t *psid, WORD addr)
+ {
++    if (psid->voicebank) return 0;
++    if (psid->extended) return psid->extended->read(addr);
+     return psid->sid->read(addr);
+ }
+ 
+ static void resid_store(sound_t *psid, WORD addr, BYTE byte)
+ {
++    if (psid->voicebank) return;
++    if (psid->extended) { psid->extended->write(addr, byte); return; }
+     psid->sid->write(addr, byte);
+ }
+ 
+ static void resid_reset(sound_t *psid, CLOCK cpu_clk)
+ {
+     psid->sid->reset();
++    if (psid->voicebank) psid->voicebank->reset();
++    if (psid->extended) psid->extended->reset();
+ }
+ 
+ static int resid_calculate_samples(sound_t *psid, SWORD *pbuf, int nr,
+@@ -260,6 +300,9 @@ static int resid_calculate_samples(sound_t *psid, SWORD *pbuf, int nr,
+     SWORD *tmp_buf;
+     int retval;
+ 
++    if (psid->voicebank) return psid->voicebank->clock(*delta_t, pbuf, nr, interleave);
++    if (psid->extended) return psid->extended->clock(*delta_t, pbuf, nr, interleave);
++
+     if (psid->factor == 1000) {
+         return psid->sid->clock(*delta_t, pbuf, nr, interleave);
+     }
+@@ -283,6 +326,12 @@ static void resid_state_read(sound_t *psid, sid_snapshot_state_t *sid_state)
+     reSID::SID::State state;
+     unsigned int i;
+ 
++    if (psid && psid->extended) {
++        log_error(LOG_DEFAULT, "10582 VICE snapshots are not supported by this experimental build");
++        memset(sid_state, 0, sizeof(*sid_state));
++        return;
++    }
++
+     /* when sound is disabled *psid is NULL */
+     if (psid) {
+         state = psid->sid->read_state();
+@@ -320,6 +369,11 @@ static void resid_state_write(sound_t *psid, sid_snapshot_state_t *sid_state)
+     reSID::SID::State state;
+     unsigned int i;
+ 
++    if (psid->extended) {
++        log_error(LOG_DEFAULT, "10582 VICE snapshot restore is unsupported");
++        return;
++    }
++
+     for (i = 0; i < 0x20; i++) {
+         state.sid_register[i] = (char)sid_state->sid_register[i];
+     }
+diff --git a/src/sid/sid-resources.c b/src/sid/sid-resources.c
+index 1bc83cf..e563cc8 100644
+--- a/src/sid/sid-resources.c
++++ b/src/sid/sid-resources.c
+@@ -205,6 +205,7 @@ static int set_sid_model(int val, void *param)
+         case SID_MODEL_8580:
+         case SID_MODEL_8580D:
+         case SID_MODEL_6581R4:
++        case SID_MODEL_10582:
+ #ifdef HAVE_RESID
+         case SID_MODEL_DTVSID:
+ #endif
+@@ -398,6 +399,7 @@ static sid_engine_model_t sid_engine_models_fastsid[] = {
+ static sid_engine_model_t sid_engine_models_resid[] = {
+     { "6581 (ReSID)", SID_RESID_6581 },
+     { "8580 (ReSID)", SID_RESID_8580 },
++    { "10582 (experimental Holodek)", SID_RESID_10582 },
+     { "8580 + digi boost (ReSID)", SID_RESID_8580D },
+     { NULL, -1 }
+ };
+@@ -506,6 +508,7 @@ static int sid_check_engine_model(int engine, int model)
+         case SID_RESID_6581:
+         case SID_RESID_8580:
+         case SID_RESID_8580D:
++        case SID_RESID_10582:
+ #endif
+             return 0;
+ #ifdef HAVE_RESID_DTV
+diff --git a/src/sid/sid-cmdline-options.c b/src/sid/sid-cmdline-options.c
+index e92a158..1bd5343 100644
+--- a/src/sid/sid-cmdline-options.c
++++ b/src/sid/sid-cmdline-options.c
+@@ -65,6 +65,9 @@ static struct engine_s engine_match[] = {
+     { "residold", SID_RESID_6581 },
+     { "resid6581", SID_RESID_6581 },
+     { "257", SID_RESID_8580 },
++    { "261", SID_RESID_10582 },
++    { "10582", SID_RESID_10582 },
++    { "holodek10582", SID_RESID_10582 },
+     { "residnew", SID_RESID_8580 },
+     { "resid8580", SID_RESID_8580 },
+     { "258", SID_RESID_8580D },
+diff --git a/src/sid/sid-snapshot.c b/src/sid/sid-snapshot.c
+index 2f101d1..22f4bf9 100644
+--- a/src/sid/sid-snapshot.c
++++ b/src/sid/sid-snapshot.c
+@@ -1044,6 +1044,12 @@ int sid_snapshot_write_module(snapshot_t *s)
+ {
+     int sids = 0;
+     int i;
++    int model = 0;
++    resources_get_int("SidModel", &model);
++    if (model == SID_MODEL_10582) {
++        snapshot_set_error(SNAPSHOT_MODULE_INCOMPATIBLE);
++        return -1;
++    }
+ 
+     resources_get_int("SidStereo", &sids);
+ 
+diff --git a/src/sound.c b/src/sound.c
+index 0c83bdc..a070353 100644
+--- a/src/sound.c
++++ b/src/sound.c
+@@ -276,11 +276,16 @@ static int sound_machine_calculate_samples(sound_t **psid, SWORD *pbuf, int nr,
+ 
+ static void sound_machine_store(sound_t *psid, WORD addr, BYTE val)
+ {
++    if (machine_class == VICE_MACHINE_VSID && addr < 64) {
++        sound_calls[0]->store(psid, addr, val);
++        return;
++    }
+     sound_calls[addr >> 5]->store(psid, (WORD)(addr & 0x1f), val);
+ }
+ 
+ static BYTE sound_machine_read(sound_t *psid, WORD addr)
+ {
++    if (machine_class == VICE_MACHINE_VSID && addr < 64) return sound_calls[0]->read(psid, addr);
+     return sound_calls[addr >> 5]->read(psid, (WORD)(addr & 0x1f));
+ }
+ 
+@@ -1084,6 +1089,7 @@ int sound_open(void)
+                 snddata.sound_output_channels = channels;
+             }
+         }
++        if (!pdev->init) snddata.sound_output_channels = channels;
+         snddata.issuspended = 0;
+ 
+         for (c = 0; c < snddata.sound_output_channels; c++) {

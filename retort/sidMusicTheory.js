@@ -4,6 +4,7 @@
 // The LLM supplies a compact musical plan + motif; this module turns it into a
 // coherent 12-bar loop (A / A' / B) with chord-aware melody, bass and arpeggios.
 'use strict';
+const Grammar = require('./sidMusicGrammar');
 
 const NOTES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const BPM_ALLOWED = [96,104,112,120,128,136,144];
@@ -47,25 +48,31 @@ const PATCHES = {
     plucked_pulse:{ waveform:'PULSE', pulseWidth:640, adsr:{attack:0,decay:6,sustain:2,release:2}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:8, vibrato:0 },
     reed_saw:    { waveform:'SAW', pulseWidth:0, adsr:{attack:1,decay:9,sustain:8,release:5}, filter:{type:'LP',cutoff:1152,resonance:5}, pwmSpeed:0, vibrato:1 },
     bell_tri:    { waveform:'TRI', pulseWidth:0, adsr:{attack:0,decay:11,sustain:1,release:8}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0, vibrato:0 },
+    nasal_pulse: { waveform:'PULSE',pulseWidth:384,adsr:{attack:0,decay:8,sustain:7,release:3},filter:{type:'NONE',cutoff:1024,resonance:0},pwmSpeed:3,vibrato:1 },
+    bowed_saw: { waveform:'SAW',pulseWidth:0,adsr:{attack:4,decay:8,sustain:10,release:6},filter:{type:'LP',cutoff:720,resonance:3},pwmSpeed:0,vibrato:1 },
   },
   BASS: {
     thick_pulse:  { waveform:'PULSE', pulseWidth:1536, adsr:{attack:0,decay:9,sustain:6,release:2},  filter:{type:'LP',cutoff:768,resonance:6},  pwmSpeed:12 },
     round_tri:    { waveform:'TRI',   pulseWidth:0,    adsr:{attack:0,decay:9,sustain:8,release:2},  filter:{type:'NONE',cutoff:768,resonance:0}, pwmSpeed:0 },
     growl_saw:    { waveform:'SAW',   pulseWidth:0,    adsr:{attack:0,decay:8,sustain:5,release:2},  filter:{type:'LP',cutoff:640,resonance:10}, pwmSpeed:0 },
     plucked_tri:  { waveform:'TRI', pulseWidth:0, adsr:{attack:0,decay:7,sustain:2,release:2}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0 },
+    rubber_pulse: {waveform:'PULSE',pulseWidth:512,adsr:{attack:0,decay:5,sustain:1,release:1},filter:{type:'LP',cutoff:896,resonance:5},pwmSpeed:4},
+    bowed_bass: {waveform:'SAW',pulseWidth:0,adsr:{attack:3,decay:8,sustain:9,release:5},filter:{type:'LP',cutoff:512,resonance:2},pwmSpeed:0},
   },
   ARP: {
     glass_tri:    { waveform:'TRI',   pulseWidth:0,    adsr:{attack:0,decay:6,sustain:3,release:3},  filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0 },
     chip_pulse:   { waveform:'PULSE', pulseWidth:768,  adsr:{attack:0,decay:5,sustain:2,release:2},  filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:30 },
     soft_pulse:   { waveform:'PULSE', pulseWidth:2048, adsr:{attack:1,decay:6,sustain:4,release:4},  filter:{type:'LP',cutoff:896,resonance:4},  pwmSpeed:16 },
     chime_tri:    { waveform:'TRI', pulseWidth:0, adsr:{attack:0,decay:10,sustain:1,release:7}, filter:{type:'NONE',cutoff:1024,resonance:0}, pwmSpeed:0 },
+    muted_pulse: {waveform:'PULSE',pulseWidth:320,adsr:{attack:0,decay:4,sustain:1,release:1},filter:{type:'NONE',cutoff:1024,resonance:0},pwmSpeed:2},
+    soft_saw: {waveform:'SAW',pulseWidth:0,adsr:{attack:2,decay:7,sustain:3,release:4},filter:{type:'LP',cutoff:704,resonance:2},pwmSpeed:0},
   },
 };
-const BASS_STYLES = ['octave_pump','root_fifth','gallop','walking','pedal','lament','ostinato_fourth'];
+const BASS_STYLES = ['octave_pump','root_fifth','gallop','walking','pedal','lament','ostinato_fourth','syncopated','march','broken_tenths','sustained','tresillo','answering'];
 // Mortacia / Sepulchra leitmotif (story theme): tonic, rising 5th, minor-6th sigh, falling back — film-score style
 // bold interval + lament. Rhythm: long-short-short, then a held resolution.
 const LEITMOTIF = { rhythm:[4,8,8,8,8,4], contour:[0,4,5,4,2,1] };
-const ARP_STYLES  = ['up','updown','alberti','broken_octave','rolling'];
+const ARP_STYLES  = ['up','updown','alberti','broken_octave','rolling','descending','pendulum','offbeat','harp'];
 
 // Mood presets: used when the LLM omits fields; also keyword detection on the description.
 const MOODS = {
@@ -125,7 +132,7 @@ function inRange(midi, lo, hi) { while (midi < lo) midi += 12; while (midi > hi)
 // ---------- rhythm ----------
 // durations in sixteenths units: 16->1, 8->2, 4->4
 const U = { 16:1, 8:2, 4:4, 2:8, 1:16 };
-const PHRASE_FORMS = ['sentence','period','arch','call_response','ostinato'];
+const PHRASE_FORMS = Object.keys(Grammar.FORMS);
 const TEXTURES = ['arpeggios','counterpoint','drone','sparse'];
 const DEVELOPMENT_TRANSFORMS = ['transpose_up','transpose_down','invert','retrograde','fragment_sequence','tail_answer'];
 const ARRANGEMENT_ARCS = {
@@ -219,14 +226,14 @@ function buildLead(ctx) {
     }
     // smooth leaps > 7 semitones by octave folding toward previous
     for (let i=1;i<out.length;i++){ const a=out[i-1].midi; let b=out[i].midi; while (b-a>7 && b-12>=LO) b-=12; while (a-b>7 && b+12<=HI) b+=12; out[i].midi=b; }
-    out.forEach(n => steps.push(n.rest ? REST(n.d) : midiToStep(n.midi, n.d)));
+    out.forEach((n,i) => steps.push(n.rest || opts.rests?.[i] ? REST(n.d) : midiToStep(n.midi, n.d)));
     return out[out.length-1].midi;
   }
   const tonicPc = NOTES.indexOf(key), fifthPc = (tonicPc+7)%12;
   if (ctx.compositionVersion === 3) {
     const statement = { rhythm:motifR, contour:motifC }, answer = { rhythm:answerR, contour:ctx.answerC },
       contrast = { rhythm:ctx.bR, contour:ctx.bC };
-    const phrases = {
+    const phrases = ctx.phraseCells || {
       sentence: [statement,statement,answer,answer,statement,statement,answer,answer,contrast,contrast,contrast,answer],
       period: [statement,answer,statement,answer,contrast,answer,statement,answer,contrast,contrast,statement,answer],
       arch: [statement,statement,answer,answer,contrast,contrast,contrast,answer,statement,statement,answer,answer],
@@ -236,15 +243,15 @@ function buildLead(ctx) {
     const anchor = tonicMidi + (ctx.startHigh ? 4 : 0);
     phrases.forEach((phrase,i) => {
       if (!phrase) { steps.push(REST(1)); return; }
-      if (i===8 && ctx.leitmotif==='quote') {
+      if (i===(ctx.quoteIndex??8) && ctx.leitmotif==='quote') {
         renderBar(i,LEITMOTIF.rhythm,LEITMOTIF.contour,anchor); return;
       }
-      if (i===8 && ctx.leitmotif==='vary') {
+      if (i===(ctx.quoteIndex??8) && ctx.leitmotif==='vary') {
         renderBar(i,LEITMOTIF.rhythm,motifC,anchor); return;
       }
       renderBar(i,phrase.rhythm,phrase.contour,anchor+(phrase===contrast?5:0),{
-        shift: i===1||i===5?ctx.seqStep:0, breath:i===6,
-        ...(i===3?{endPc:fifthPc}:i===7?{endPc:tonicPc}:i===11?{endPc:barsChords[11].pcs[1]}:{})
+        shift: i===1||i===5?ctx.seqStep:0, breath:i===6, rests:phrase.rests,
+        ...(ctx.phraseCells ? ctx.cadences[i] || {} : i===3?{endPc:fifthPc}:i===7?{endPc:tonicPc}:i===11?{endPc:barsChords[11].pcs[1]}:{})
       });
     });
     return steps;
@@ -430,6 +437,24 @@ function chantBar(ch, idx) { // martial modal chant: four quarter notes on chord
 
 // Build one 12-bar cycle (A, A', B) with the room's material; opts vary it for development.
 function buildCycle(p, r, prog, opts = {}) {
+  if(p.performance){
+    const groups=Grammar.layout(p),cells=groups.flatMap(g=>g.cells),chords=[],cadences={};
+    const source={S:{rhythm:p.motifRhythm,contour:p.motifContour,rests:p.motifRests},
+      A:{rhythm:p.answerRhythm,contour:p.answerContour},C:{rhythm:p.contrastRhythm,contour:p.contrastContour}};
+    for(const group of groups){
+      const path=group.part==='B'?prog.B:prog.A;
+      group.cells.forEach((_,i)=>chords.push(chordFor(path[(p.performance.harmonicRhythm==='two_bars'?Math.floor(i/2):i)%path.length],p.key,p.scale)));
+      const end=chords.length-1,last=end===cells.length-1;
+      chords[end]=chordFor(last||group.part==='B'?0:['major','lydian','mixolydian'].includes(p.scale)?4:'V',p.key,p.scale);
+      if(last&&p.picardy)chords[end]=chordFor('I+',p.key,p.scale);
+      cadences[end]={endPc:chords[end].root};
+    }
+    const lead=buildLead({compositionVersion:3,phraseCells:cells.map(c=>source[c]||null),cadences,quoteIndex:-1,
+      leitmotif:p.leitmotif,r,key:p.key,scale:p.scale,barsChords:chords,motifR:p.motifRhythm,motifC:p.motifContour,
+      answerR:p.answerRhythm,answerC:p.answerContour,bR:p.contrastRhythm,bC:p.contrastContour,
+      seqStep:opts.seqStep??p.sequenceStep,startHigh:!!opts.startHigh});
+    return{chords,lead:toBars(lead)};
+  }
   const degs = [...prog.A, ...prog.A.slice(0,2), ...(p.scale==='major'||p.scale==='mixolydian'||p.scale==='lydian' ? [4,0] : ['V',0]), ...(opts.bProg || prog.B)];
   if (p.picardy && !opts.noPicardy) degs[7] = 'I+';
   if (p.compositionVersion===3 && p.phraseForm!=='ostinato') degs[3]=['major','mixolydian','lydian'].includes(p.scale)?4:'V';
@@ -452,6 +477,11 @@ function arrangeFromPlan(plan, description = '', seedStr = '') {
 // One theme rendered as a full section list (used alone for single-theme songs, or as a movement of a suite).
 // opts: targetBars, intro (bool), coda (bool), maxDev, feel ('half'|'normal'|'driving'), counter (bool), raw (bool)
 function themeBody(p, r, opts = {}) {
+  if(p.performance)return Grammar.themeBody(p,r,opts,{buildCycle,buildBass,toBars,scalePcs,stepMidi,midiToStep,nearestPc,inRange,
+    REST,chordFor,octaveUp,sparseLead,developContour,arcs:ARRANGEMENT_ARCS,
+    loreQuote:()=>{const ch=chordFor(0,p.key,p.scale),rhythm=LEITMOTIF.rhythm,contour=p.leitmotif==='quote'?LEITMOTIF.contour:p.motifContour;
+      return{chords:[ch],lead:toBars(buildLead({compositionVersion:3,phraseCells:[{rhythm,contour}],cadences:{},quoteIndex:-1,
+        key:p.key,scale:p.scale,barsChords:[ch],motifR:rhythm,motifC:contour,seqStep:0,leitmotif:'none'}))};}});
   const authored = p.compositionVersion === 3;
   const prog = authored ? { A:p.harmonyA.map(d=>d==='V'?d:Number(d)), B:p.harmonyB.map(d=>d==='V'?d:Number(d)),
     label:PROGRESSIONS[p.progression].label+' / '+PROGRESSIONS[p.contrastProgression].label } : PROGRESSIONS[p.progression];
@@ -731,6 +761,8 @@ function arrangeAuthoredSuite(plan,description,seedStr,lengthScale){
     });
     [raw.leadBars,raw.bassBars,raw.arpBars].forEach((rows,j)=>V[j].push(...rows));
     forms.push({role:m.role,startBar:start,bars:bar()-start,key:p.key,scale:p.scale,phraseForm:p.phraseForm,texture:p.texture,
+      ...(p.performance?{performance:p.performance,phraseBars:Grammar.layout(p).map(g=>g.cells.length),
+        sectionBars:raw.sections.map(s=>s.chords.length)}:{}),
       sections:raw.sections.map(s=>s.name),orchestration:raw.sections.map(s=>s.orchestration),
       motifRhythm:p.motifRhythm,motifContour:p.motifContour,harmonyA:p.harmonyA,harmonyB:p.harmonyB});
   }
@@ -745,7 +777,8 @@ function arrangeAuthoredSuite(plan,description,seedStr,lengthScale){
     throw Error('Authored score exceeds SID pattern memory. Simplify the development path or suite; do not shorten the exploration score.');
   }
   const bars=bar(),song={bpm:home.bpm,key:home.key,scale:home.scale,title:home.title,author:'AI composition / Holodek SID arrangement',voices,
-    plan:{compositionVersion:3,suite:true,suiteForm:home.suiteForm,mood:home.mood,leitmotif:home.leitmotif,
+    plan:{compositionVersion:3,...(home.performance?{grammarVersion:4,performance:home.performance}:{}),suite:true,suiteForm:home.suiteForm,mood:home.mood,leitmotif:home.leitmotif,
+      ...(home.performance?{leadPatch:home.leadPatch,bassPatch:home.bassPatch,arpPatch:home.arpPatch,bassStyle:home.bassStyle,arpStyle:home.arpStyle}:{}),
       motifRhythm:home.motifRhythm,motifContour:home.motifContour,phraseForm:home.phraseForm,texture:home.texture,
       progression:home.progression,contrastProgression:home.contrastProgression,
       progressionLabel:PROGRESSIONS[home.progression].label+' / '+PROGRESSIONS[home.contrastProgression].label,

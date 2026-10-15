@@ -67,6 +67,7 @@
   function setOpen(open, focus = false) {
     if (!menu || !toggle) return;
     menu.hidden = !open;
+    if(open)fit();
     toggle.setAttribute('aria-expanded', String(open));
     toggle.setAttribute('aria-label', open ? 'Close game menu' : 'Open game menu');
     if (focus) toggle.focus();
@@ -74,7 +75,7 @@
   function fit() {
     if (!menu || !toggle) return;
     const bounds = toggle.getBoundingClientRect(), zoom = toggle.offsetWidth ? bounds.width / toggle.offsetWidth : 1;
-    menu.style.width = Math.max(130, Math.min(210, root.innerWidth / zoom - 20)) + 'px';
+    menu.style.width = Math.max(130, Math.min(195, root.innerWidth / zoom - 20)) + 'px';
     menu.style.top = bounds.bottom / zoom + 4 + 'px';
     menu.style.maxHeight = Math.max(80, root.innerHeight / zoom - parseFloat(menu.style.top) - 8) + 'px';
   }

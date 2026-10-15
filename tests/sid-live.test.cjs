@@ -1,0 +1,62 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),vm=require('node:vm');
+const Archive=require('../retort/sidArchive'),Converter=require('../retort/sidToWav');
+const Theory=require('../retort/sidMusicTheory'),Composition=require('../retort/sidComposition');
+const fixture=require('./fixtures/sid-leaving-threshold.json');
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sid-live-'));
+const score=Theory.arrangeSuite(Composition.develop(fixture),'temple','live-test');
+score.voices.forEach(v=>v.order=v.order.slice(0,7));
+const archive=Archive.record(score,{clock:'2x'},dir);
+test.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+test('file detection chooses the matching chip but explicit playback overrides work both ways',()=>{
+  const classic=fs.readFileSync(path.join(archive.directory,'8580.sid'));
+  const enhanced=fs.readFileSync(path.join(archive.directory,'10582.sid'));
+  assert.equal(Converter.createEngine(classic).report().model,'8580');
+  assert.equal(Converter.createEngine(enhanced).report().model,'10582');
+  const plain=Converter.createEngine(classic),downgraded=Converter.createEngine(enhanced,{model:'8580'});
+  assert.equal(downgraded.report().model,'8580');
+  assert.deepEqual(downgraded.read(44100),plain.read(44100));
+  const upgraded=Converter.createEngine(classic,{model:'10582'});
+  assert.equal(upgraded.report().model,'10582');
+  assert.ok(upgraded.read(44100).some(x=>Math.abs(x)>.001));
+  assert.deepEqual(upgraded.report().extendedRegisters,[]);
+  assert.throws(()=>Converter.createEngine(classic,{model:'unknown'}),/Choose 8580 or 10582/);
+});
+for(const chip of ['8580','10582'])for(const sr of [22050,44100,48000])test(chip+' incremental native frames do not depend on output chunk size at '+sr,()=>{
+  const bytes=fs.readFileSync(path.join(archive.directory,chip+'.sid')),a=Converter.createEngine(bytes,{sampleRate:sr}),b=Converter.createEngine(bytes,{sampleRate:sr});
+  const expected=a.read(sr),actual=new Float32Array(sr);let at=0;
+  for(const count of [1,127,2048,13,500,4096,1000,sr]){const n=Math.min(count,sr-at);actual.set(b.read(n),at);at+=n;if(at===sr)break;}
+  if(at<sr)actual.set(b.read(sr-at),at);
+  assert.deepEqual(actual,expected);assert.equal(a.position,sr);assert.equal(b.position,sr);
+  assert.ok(actual.some(x=>Math.abs(x)>.001));assert.ok(actual.every(Number.isFinite));
+});
+test('live worker seeks deterministically, bounds chunks, rejects bad inputs and loops',async()=>{
+  const outputs=[],self={postMessage:value=>outputs.push(value)},context={self,TextDecoder,TextEncoder,setTimeout,DOMException};
+  vm.runInNewContext(Archive.workerBundle(),context);
+  const bytes=fs.readFileSync(path.join(archive.directory,'10582.sid'));
+  await self.onmessage({data:{action:'open',epoch:1,bytes,seconds:2,sampleRate:48000,loop:true}});
+  assert.equal(outputs.at(-1).ready,true);
+  await self.onmessage({data:{action:'pull',epoch:1}});const first=outputs.at(-1).chunk;
+  assert.equal(first.length,2048);
+  await self.onmessage({data:{action:'seek',epoch:2,time:.5}});
+  assert.equal(outputs.at(-1).position,24000);
+  await self.onmessage({data:{action:'pull',epoch:2}});const sought=outputs.at(-1).chunk;
+  const expected=Converter.createEngine(bytes,{sampleRate:48000});expected.read(24000);
+  assert.deepEqual([...sought],[...expected.read(2048)]);
+  const count=outputs.length;await self.onmessage({data:{action:'pull',epoch:1}});assert.equal(outputs.length,count);
+  await self.onmessage({data:{action:'seek',epoch:3,time:0}});
+  await self.onmessage({data:{action:'pull',epoch:3}});assert.deepEqual([...outputs.at(-1).chunk],[...first]);
+  for(let i=0;i<50;i++)await self.onmessage({data:{action:'pull',epoch:3}});
+  assert.equal(outputs.at(-1).end,false);assert.equal(outputs.at(-1).chunk.length,2048);
+  await self.onmessage({data:{action:'open',epoch:4,bytes,seconds:1,sampleRate:48000,loop:false}});
+  for(let i=0;i<24;i++)await self.onmessage({data:{action:'pull',epoch:4}});
+  assert.equal(outputs.at(-1).end,true);assert.equal(outputs.at(-1).chunk.length,896);
+  await self.onmessage({data:{action:'open',epoch:5,bytes,seconds:Infinity,sampleRate:48000}});
+  assert.match(outputs.at(-1).error,/Duration/);
+});
+test('game production music paths compile SIDs without invoking WAV rendering',()=>{
+  const server=fs.readFileSync('server.js','utf8'),retort=fs.readFileSync('retort/retortWithUserInput.js','utf8');
+  for(const source of [server,retort])assert.ok(!source.includes('renderArrangementToWav'));
+  assert.match(server,/LiveRoomMusic.prepare/);assert.match(retort,/liveRoomMusic/);
+  assert.match(fs.readFileSync('assets/index.html','utf8'),/assets\/sidPlayer.js/);
+});

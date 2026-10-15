@@ -33,4 +33,4 @@ function render(name, seconds, clock) {
   if(peak>.18)for(let i=0;i<samples.length;i++)samples[i]*=.18/peak;
   return { samples, sampleRate, report:layer.report() };
 }
-module.exports={names,render};
+module.exports={names,render,designs};

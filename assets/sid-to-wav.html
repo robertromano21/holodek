@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Underworld SID Workshop</title>
+<style>
+:root{--ink:#f2e6ca;--muted:#c4b496;--paper:#191b18;--line:#62705a;--gold:#dfb56b}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);background:radial-gradient(ellipse at top left,#3c4230,transparent 60%),repeating-linear-gradient(0deg,#171a17 0 3px,#1b1e1a 3px 6px);font:18px Georgia,serif;min-height:100vh}
+main{max-width:860px;margin:auto;padding:42px 24px}h1{font-size:clamp(2.4rem,7vw,4.8rem);font-weight:normal;margin:.2em 0}h2{font-weight:normal;color:var(--gold)}.eyebrow{font:12px monospace;letter-spacing:.3em;color:var(--gold)}p{line-height:1.55;color:var(--muted)}section{background:#191b18ed;border:1px solid var(--line);padding:24px;margin:28px 0}.fields{display:flex;flex-wrap:wrap;gap:18px}label{display:grid;gap:8px;margin-bottom:20px}input,select,button,a.download{font:inherit;background:#30362a;color:var(--ink);border:1px solid #8c9779;padding:10px;max-width:100%}button,a.download{cursor:pointer}button:disabled{opacity:.4;cursor:default}button.primary{background:var(--gold);color:#171a17}a{color:var(--gold)}progress,audio{display:block;width:100%;margin:18px 0}#status{color:var(--ink);white-space:pre-wrap}#library article{border-top:1px solid var(--line);padding:12px 0}#library a{display:inline-block;margin:5px 20px 5px 0}small{font:13px monospace;color:var(--muted)}[hidden]{display:none!important}
+</style>
+<main>
+<div class="eyebrow">CHILDREN OF THE GRAVE / MUSIC ARCHIVE</div>
+<h1>Underworld<br>SID Workshop</h1>
+<p>Play a room's portable SID score live, or export a WAV you can keep and share. Playback synthesizes the SID as you listen, without creating a full recording first. This page works offline: your file stays in this browser.</p>
+<section>
+<label>Open a SID or register-score file<input id="file" type="file" accept=".sid,.sidvoice,.sidregs"></label>
+<p id="info">Choose 8580.sid for the classic arrangement, or 10582.sid for the custom register layer as well.</p>
+<div class="fields"><label>Duration (seconds)<input id="seconds" type="number" min="1" max="1200" step="0.01" value="600"></label><label>Sample rate<select id="rate"><option value="44100">44.1 kHz</option><option value="22050">22.05 kHz</option></select></label><label>Subtune<input id="subtune" type="number" min="1" value="1"></label></div>
+<label>Playback chip<select id="chip"><option value="8580">8580: traditional SID</option><option value="10582">10582: expanded registers</option></select></label>
+<p>The file selects its chip automatically. Switch at any time to compare the same SID at the same position. WAV export uses the selected chip too. An 8580 has no 10582 extensions; a traditional score does not gain new register instructions just by choosing 10582.</p>
+<button id="play" class="primary" disabled>Play SID</button> <button id="pause" disabled>Pause</button> <button id="stop" disabled>Stop SID</button>
+<label>SID position<input id="seek" type="range" min="0" max="600" step="0.1" value="0" disabled></label><span id="live-time">0:00 / 0:00</span>
+<label><span><input id="loop" type="checkbox" checked> Loop SID</span></label>
+<button id="render" disabled>Export Full WAV</button> <button id="cancel" disabled>Cancel Export</button>
+<progress id="progress" max="1" value="0" aria-label="Render progress"></progress>
+<p id="status" role="status" aria-live="polite">Ready.</p>
+<h2 id="player-title" hidden>WAV Player</h2><audio id="audio" controls preload="metadata" aria-label="Rendered SID playback" hidden></audio><a id="download" class="download" hidden>Download WAV</a>
+</section>
+<p><strong>Compatibility:</strong> this is the game's bounded PSID player, not a complete C64 emulator. Game exports are supported. RSID, multi-chip tunes, CIA timing, ROM-dependent drivers and unsupported instructions fail explicitly. Native SID timing can differ from the game's nominal-tempo WAV. Conventional players play the three-voice core of a 10582 export; only an extension-aware renderer adds its custom layer.</p>
+<p>Voice exports use the private <code>.sidvoice</code> register-score format: 64 emulated chips, no speech samples. These are not PSID files and do not work in stock SID players. They use this same live synthesis worker.</p>
+<section id="library-section" hidden><h2>Saved Compositions</h2><p>Both SID variants are small, permanent files. WAVs are generated only when you request them.</p><div id="library"></div></section>
+<small>Live playback uses a bounded audio queue, a synthesis worker and an AudioWorklet. WAV export is separate. Sharing a SID does not share your save game.</small>
+</main>
+<script id="sid-worker" type="text/plain">/*SID_WORKER_BUNDLE*/</script>
+<script>/*SID_PLAYER_CLIENT*/</script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id),source=$('sid-worker').textContent;
+let worker=null,input=null,name='room',url=null,live=null,context=null,liveGeneration=0;
+const busy=on=>{$('render').disabled=on||!input;$('play').disabled=on||!input;$('cancel').disabled=!on;$('file').disabled=on;$('chip').disabled=on;};
+function stop(){worker?.terminate();worker=null;busy(false);}
+function clearOutput(){$('audio').pause();if(url)URL.revokeObjectURL(url);url=null;$('audio').removeAttribute('src');$('audio').hidden=true;$('player-title').hidden=true;$('download').hidden=true;}
+function stopLive(){liveGeneration++;live?.dispose();live=null;$('pause').disabled=$('stop').disabled=$('seek').disabled=true;$('seek').value=0;}
+function start(action,autoplay=false){
+  stop();if(!input)return;busy(true);
+  const blob=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));worker=new Worker(blob);URL.revokeObjectURL(blob);
+  worker.onerror=event=>{$('status').textContent='Renderer error: '+event.message;stop();};
+  worker.onmessage=event=>{
+    const m=event.data;
+    if(m.error){$('status').textContent=m.error;stop();return;}
+    if(m.progress!==undefined){$('progress').value=m.progress;return;}
+    if(m.info){const registers=!!m.info.kind;$('info').textContent=m.info.title+' / '+(registers?m.info.model+' register synthesis; no recorded audio':m.info.registerDriver?'Native 6502-driven 10582':m.info.extension?'10582 custom layer':'8580-compatible core')+(registers?'':' / '+m.info.songs+' subtune(s)');$('subtune').max=m.info.songs||1;$('subtune').disabled=registers;$('seconds').min=registers?'.05':'1';
+      $('chip').value=registers?m.info.model:m.info.extension||m.info.registerDriver?'10582':'8580';
+      if(Number.isFinite(m.info.seconds))$('seconds').value=Math.min(1200,m.info.seconds);stop();return;}
+    if(m.wav){clearOutput();url=URL.createObjectURL(new Blob([m.wav],{type:'audio/wav'}));$('audio').src=url;$('audio').hidden=false;$('player-title').hidden=false;$('download').href=url;$('download').download=name+'-'+m.report.model+'.wav';$('download').hidden=false;
+      $('status').textContent='Full WAV ready. '+m.report.synthesis+'. Use the player below to play, pause or seek. No file was uploaded.';$('progress').value=1;stop();
+      if(autoplay)$('audio').play().catch(()=>{$('status').textContent+=' Press Play to start playback.';});}
+  };
+  const bytes=input.slice(0);worker.postMessage({action,bytes,seconds:Number($('seconds').value),sampleRate:Number($('rate').value),subtune:Number($('subtune').value),model:$('chip').value},[bytes]);
+}
+$('file').addEventListener('change',async()=>{const file=$('file').files[0];if(!file)return;
+  if(file.size>(/\.(sidvoice|sidregs)$/i.test(file.name)?24:1)*1024*1024){$('status').textContent='SID files must be at most 1 MB; register scores at most 24 MB.';return;}
+  stopLive();clearOutput();input=await file.arrayBuffer();name=file.name.replace(/\.(sid|sidvoice|sidregs)$/i,'');$('subtune').value=1;start('inspect');});
+$('render').addEventListener('click',()=>{clearOutput();$('status').textContent='Rendering locally. You can stop at any time.';$('progress').value=0;start('render');});
+async function playSid({time=0,paused=false}={}){
+  if(live){await live.play();$('status').textContent='Playing live SID in '+$('chip').value+' mode. No WAV is being generated.';return;}
+  stopLive();clearOutput();const generation=liveGeneration;$('play').disabled=true;
+  try{
+    context=context||new AudioContext();context.resume();$('status').textContent='Starting live SID...';
+    const player=await HolodekSidPlayer.open(input.slice(0),{context,source,seconds:Number($('seconds').value),subtune:Number($('subtune').value),loop:$('loop').checked,model:$('chip').value,time,
+      onError:error=>{$('status').textContent='SID playback error: '+error.message;}});
+    if(generation!==liveGeneration){player.dispose();return;}
+    live=player;$('seek').max=live.duration;$('pause').disabled=$('stop').disabled=$('seek').disabled=false;
+    live.onended=()=>{$('status').textContent='SID ended.';stopLive();};
+    if(!paused)await live.play();$('status').textContent=(paused?'SID paused':'Playing live SID')+' in '+$('chip').value+' mode. No WAV is being generated.';
+  }catch(error){if(generation===liveGeneration){$('status').textContent='SID playback error: '+error.message;stopLive();$('play').disabled=!input;}}
+  finally{if(generation===liveGeneration)$('play').disabled=!input;}
+}
+$('play').addEventListener('click',()=>playSid());
+$('chip').addEventListener('change',()=>{const checkpoint=live?{time:live.currentTime,paused:live.paused}:null;stopLive();clearOutput();if(checkpoint)playSid(checkpoint);else $('status').textContent=$('chip').value+' mode selected.';});
+$('pause').addEventListener('click',()=>{live?.pause();$('status').textContent='SID paused. Play resumes at the same position.';});
+$('stop').addEventListener('click',()=>{stopLive();$('status').textContent='SID stopped.';});
+$('seek').addEventListener('change',async()=>{const player=live;if(!player)return;try{$('status').textContent='Seeking SID...';await player.seek(Number($('seek').value));if(player===live)$('status').textContent='SID position restored.';}catch(error){if(error.name!=='AbortError')$('status').textContent=error.message;}});
+for(const id of ['seconds','subtune','loop'])$(id).addEventListener('change',stopLive);
+const fmt=seconds=>Math.floor(seconds/60)+':'+String(Math.floor(seconds%60)).padStart(2,'0');
+setInterval(()=>{if(live){$('seek').value=live.currentTime;$('live-time').textContent=fmt(live.currentTime)+' / '+fmt(live.duration);}},150);
+$('cancel').addEventListener('click',()=>{stop();$('status').textContent='Render stopped.';});
+window.addEventListener('pagehide',()=>{stopLive();stop();clearOutput();context?.close();});
+const archiveBase='/music-archive/';
+if(location.protocol!=='file:')fetch(archiveBase+'catalog.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json();}).then(rows=>{
+  $('library-section').hidden=false;
+  for(const row of rows){if(!/^[a-z0-9-]+$/.test(row.id))continue;const article=document.createElement('article'),title=document.createElement('strong');title.textContent=row.title;article.append(title,document.createElement('br'));
+    for(const chip of ['8580','10582']){const a=document.createElement('a');a.href=archiveBase+encodeURIComponent(row.id)+'/'+chip+'.sid';a.download=chip+'.sid';a.textContent='Download '+chip+'.sid';article.append(a);} $('library').append(article);}
+}).catch(()=>{});
+</script>
+</html>

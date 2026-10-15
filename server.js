@@ -23,7 +23,7 @@ const populationService = createPopulationService(sharedState);
 DialogueTurns.install(sharedState, Inhabitants);
 const fs = require('fs');
 const path = require('path');
-const { renderArrangementToWav } = require('./retort/renderAudio');
+const LiveRoomMusic = require('./retort/liveRoomMusic');
 const MusicSlots = require('./retort/musicSlots');
 const SidVoice = require('./retort/sidVoice'); // 64-SID speech (Piper analysis -> SID vocoder), pre-synthesized at dialogue creation
 const characterTraits = require('./retort/characterTraitSpec');
@@ -42,7 +42,8 @@ app.use(createGameJsonParser());
 app.use(cors());
 require('./retort/gameModels').install(app);
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
-require('./retort/audioPalette').install(app, sharedState); // same-score 8580/10582 audition pairs, rendered off-thread
+require('./retort/audioPalette').install(app, sharedState); // same-score SID variants; effects rendered off-thread
+require('./retort/sidArchive').install(app, express);
 // Stock / Enhanced SID switch (♫ panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
 const SidMode = require('./retort/sidMode');
 app.get('/sid-mode', (req, res) => res.json({ mode: SidMode.get() }));
@@ -1004,7 +1005,7 @@ app.post('/updateState7', async (req, res) => {
     // Revisit pre-render: the client syncs the new room's coordinates before the turn runs. If that room already has a
     // saved song (no LLM needed) and it is not in a slot, render it into the free slot now and announce it; the browser
     // queues it and switches when the room is on screen. The turn's own render then reuses the slot.
-    if (geoKey) setImmediate(() => prerenderRoomSong(geoKey));
+    if (geoKey) setImmediate(() => prepareRoomSong(geoKey));
 });
 
 // NEW: Endpoint to get room music JSON by coordinates
@@ -1041,64 +1042,30 @@ app.post('/music/commit', async (req, res) => {
     const arrangement = musicJson || sharedState.getRoomMusic(coordsObj);
     if (!arrangement) return res.status(404).json({ error: `No music JSON for ${key}` });
 
-    // Ensure directories
-    const retortDir = path.join(__dirname, 'retort');
-    const sidDir    = path.join(__dirname, 'sid');
-    fs.mkdirSync(retortDir, { recursive: true });
-    fs.mkdirSync(sidDir, { recursive: true });
-
-    // Two-slot scheme: render into the slot the browser is not playing (retort/musicSlots.js).
-    const slot = MusicSlots.nextSlot();
-    const jsonPath = path.join(retortDir, 'current_room.json');
-    const asmOut = path.join(sidDir, `room_${slot}.asm`);
-    const sidPath = path.join(sidDir, `room_${slot}.sid`);
-    const renderSeconds = 60;
-    const wavBase = MusicSlots.base(slot);
-    const sidCore = path.join(__dirname, 'assets', 'renderSid_poke.js');
-    const { wavPath, renderer } = renderArrangementToWav(arrangement, {
-      jsonPath,
-      asmOut,
-      sidOut: sidPath,
-      outBaseNoExt: wavBase,
-      seconds: renderSeconds,
-      renderJsPath: sidCore,
-      cwd: __dirname,
-    });
-    if (!wavPath || !fs.existsSync(wavPath)) {
-      return res.status(500).json({ error: 'WAV not produced at expected path' });
-    }
-
-    // 4) broadcast + reply (cache-busted URL for clients)
+    const playback = LiveRoomMusic.prepare(arrangement,{coords:key,runId:sharedState.getDungeonRunId()});
+    // The browser executes the SID; preparing music no longer creates a room WAV.
     const token = Date.now();
-    const wavUrl = MusicSlots.rendered(slot, key);
     // SFX pass: the LLM's ambience tags ride along so the browser can start the room's ambient loops.
     const ambience = Array.isArray(arrangement.ambience) ? arrangement.ambience : null;
-    broadcast({ type: 'roomMusicReady', coords: key, wav: wavUrl, token, renderer, ambience });
+    broadcast({ ...playback, type: 'roomMusicReady', coords: key, token, ambience });
 
-    return res.json({ ok: true, coords: key, wav: wavUrl, renderer, ambience });
+    return res.json({ ...playback, ok: true, coords: key, ambience });
   } catch (err) {
     console.error('POST /music/commit error:', err);
     res.status(500).json({ error: String(err && err.message || err) });
   }
 });
 
-function prerenderRoomSong(geoKey) {
+function prepareRoomSong(geoKey) {
   try {
     const [x, y, z] = geoKey.split(',').map(Number);
     const song = sharedState.getRoomMusic({ x, y, z });
     if (!song || MusicSlots.find(geoKey)) return;
     if (MusicSlots.latest().playing && MusicSlots.state.holds[MusicSlots.state.playing] === geoKey) return;
-    const t0 = Date.now(), slot = MusicSlots.nextSlot(), sidDir = path.join(__dirname, 'sid');
-    fs.mkdirSync(sidDir, { recursive: true });
-    const { wavPath, renderer } = renderArrangementToWav(song, {
-      jsonPath: path.join(__dirname, 'retort', 'current_room.json'), asmOut: path.join(sidDir, `room_${slot}.asm`),
-      sidOut: path.join(sidDir, `room_${slot}.sid`), outBaseNoExt: MusicSlots.base(slot), seconds: 60,
-      renderJsPath: path.join(__dirname, 'assets', 'renderSid_poke.js'), cwd: __dirname });
-    if (!wavPath || !fs.existsSync(wavPath)) return;
-    const wav = MusicSlots.rendered(slot, geoKey);
-    console.log(`[music] pre-rendered saved song for revisit ${geoKey} into slot ${slot} via ${renderer} in ${Date.now() - t0}ms`);
-    broadcast({ type: 'roomMusicUpdated', coords: geoKey, isNew: true, wav, ambience: Array.isArray(song.ambience) ? song.ambience : null, prerendered: true });
-  } catch (err) { console.warn('[music] revisit pre-render failed:', err && err.message); }
+    const playback=LiveRoomMusic.prepare(song,{coords:geoKey,runId:sharedState.getDungeonRunId()});
+    console.log(`[music] prepared saved SID for revisit ${geoKey}`);
+    broadcast({ ...playback, type: 'roomMusicUpdated', coords: geoKey, isNew: true, ambience: Array.isArray(song.ambience) ? song.ambience : null });
+  } catch (err) { console.warn('[music] revisit SID preparation failed:', err && err.message); }
 }
 
 // Two-slot room music: the browser reports which slot it is playing, and asks for the latest song on page load.
@@ -1145,9 +1112,9 @@ require('./saveGames').install(app, { state: sharedState,
     const population = sharedState.getRoomPopulation(checkpoint.roomKey);
     if (population) population.dialogueResumePending = true;
     SidMode.set(checkpoint.settings.sidMode);
-    prerenderRoomSong(checkpoint.roomKey);
+    prepareRoomSong(checkpoint.roomKey);
     const audio = MusicSlots.latest();
-    if (sharedState.getRoomMusic(sharedState.getLastCoords()) && !audio.url) throw Error('Room music renderer did not produce a WAV.');
+    if (sharedState.getRoomMusic(sharedState.getLastCoords()) && !audio.sid) throw Error('Room music compiler did not produce a SID.');
     return audio; }
 });
 

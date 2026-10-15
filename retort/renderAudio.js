@@ -348,6 +348,10 @@ function renderArrangementToWav(musicJson, options = {}) {
   if (options.clock && !require('./sidMode').norm(options.clock)) throw Error('clock must be 1x, 2x or 4x');
 
   fs.mkdirSync(path.dirname(outBaseNoExt), { recursive: true });
+  if(options.archiveContext){
+    try { require('./sidArchive').record(musicJson,options.archiveContext); }
+    catch(error){console.error('[SidArchiveFailure]',JSON.stringify({context:options.archiveContext,reason:error.message}));}
+  }
 
   if (jsonPath) {
     fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
