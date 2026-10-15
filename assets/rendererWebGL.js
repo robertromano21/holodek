@@ -690,9 +690,9 @@
     getArtLampMesh(lamp,flame=false){
       if(!window.ArtPresentation)return null;
       this.surfaceArtMeshes ||= new Map();
-      const key=`art-lamp:${lamp.axis}:${lamp.sign}:${flame}`;
+      const key=`art-lamp:${lamp.mount||'wall'}:${lamp.axis}:${lamp.sign}:${flame}`;
       if(this.surfaceArtMeshes.has(key))return this.surfaceArtMeshes.get(key);
-      const mesh=window.ArtPresentation.mesh(flame,lamp.axis,lamp.sign);
+      const mesh=window.ArtPresentation.mesh(flame,lamp.axis,lamp.sign,lamp.mount);
       const record=this._createCharacterGpuMeshRecord(mesh,[.25,.25,.25],[1,1,1],[1,1,1],{unlit:flame?1:0,toonSteps:5});
       record.lightingScope='art';
       this.surfaceArtMeshes.set(key,record);return record;

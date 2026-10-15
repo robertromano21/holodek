@@ -173,7 +173,7 @@ function deriveLevelSpecFromText({ roomName = '', description = '', puzzle = '' 
   let wallMat = 'stone'; for (const [m, r] of MAT_WORDS) if (r.test(text)) { wallMat = m; break; }
   if (wallMat === 'stone' && /swamp|bog|marsh|mire|forest|grove|woods/.test(text) && !/stone wall|walls of stone/.test(text)) wallMat = /root|cypress|tree|wood/.test(text) ? 'roots' : 'earth';
   const floorMat = /\bsand|dune|desert/.test(text) ? 'sand' : /\bmud|bog|swamp|marsh/.test(text) ? 'earth' : /\bice|frozen|snow/.test(text) ? 'ice' : /plank|tavern|wooden floor/.test(text) ? 'wood' : wallMat === 'sandstone' ? 'sand' : wallMat;
-  const arch = /temple|shrine|sanctum|necropolis/.test(text) ? 'temple' : /crypt|tomb|catacomb|ossuary/.test(text) ? 'crypt' : /swamp|bog|marsh|mire/.test(text) ? 'swamp' : /tavern|inn\b|alehouse/.test(text) ? 'tavern' : /ice cave|glacier|frozen cave/.test(text) ? 'ice_cave' : /cave|cavern|grotto/.test(text) ? 'cave' : /forest|woods|grove/.test(text) ? 'forest' : /street|alley|market|plaza/.test(text) ? 'city_street' : /castle|keep|fortress/.test(text) ? 'castle' : 'dungeon';
+  const arch = /temple|shrine|sanctum|necropolis/.test(text) ? 'temple' : /crypt|tomb|catacomb|ossuary/.test(text) ? 'crypt' : /swamp|bog|marsh|mire/.test(text) ? 'swamp' : /tavern|inn\b|alehouse/.test(text) ? 'tavern' : /ice cave|glacier|frozen (?:cave|grotto)/.test(text) ? 'ice_cave' : /\bmines?\b|mining gallery/.test(text) ? 'mine' : /cave|cavern|grotto|(?:lava|volcanic) tube|basalt tunnel/.test(text) ? 'cave' : /forest|woods|grove/.test(text) ? 'forest' : /street|alley|market|plaza/.test(text) ? 'city_street' : /castle|keep|fortress/.test(text) ? 'castle' : 'dungeon';
   const decals = [];
   if (/glyph|rune|sigil|inscription|etched|carving/.test(text)) decals.push({ kind: 'glyphs', color: /gold/.test(text) ? '#c8a040' : '#3a2a1a', density: 0.6 });
   if (/vine|creeper|ivy/.test(text)) decals.push({ kind: 'vines', color: /skeletal|dead|withered|dry/.test(text) ? '#8a7a5a' : '#3a6a2a', density: 0.6 });
@@ -196,7 +196,7 @@ function deriveLevelSpecFromText({ roomName = '', description = '', puzzle = '' 
   return normalize({
     architecture: arch, shape: /round|circular/.test(text) ? 'round' : /corridor|passage|tunnel/.test(text) ? 'corridor' : 'hall', size: /vast|huge|sprawl|great hall|enormous/.test(text) ? 'large' : 'medium',
     layoutFeatures: [], wallStyle, floorTreat, wall: { material: wallMat, color: colorNear(text, text.indexOf(wallMat)) || wc[0], color2: wc[1] }, floor: { material: floorMat, color: fc[0], color2: fc[1] },
-    ceiling: { kind: /open sky|sky above|outdoors/.test(text) ? 'open_sky' : /cave|cavern/.test(text) ? 'rock' : 'vault', color: null },
+    ceiling: { kind: /open sky|sky above|outdoors/.test(text) ? 'open_sky' : ['cave', 'mine', 'ice_cave'].includes(arch) ? 'rock' : 'vault', color: null },
     structures, decals, scatter, lighting: { color: lightColor, level: /dark|gloom|shadow/.test(text) ? 0.35 : 0.55, sources: [] },
     atmosphere: { particles, color: pColor, density: particles === 'none' ? 0 : /storm|howl|blizzard|thick/.test(text) ? 0.7 : 0.4, grade: particles === 'sand' ? '#c89a5a' : null }
   });
@@ -222,6 +222,7 @@ function buildMessages(input, problems) {
     'state:cracked, material:sandstone, ornament:cracks). Also pick room-wide wallStyle and floorTreat. Strong hex colours from the words.',
     'Non-physical text (lore, quotes, abstract mood) must be ignored. Named characters are NOT props.',
     'An environmentIntent is an earlier planning cue, not permission to replace the room description or an existing building. Use its architecture and physical features where consistent with the text.',
+    'Caverns, volcanic lava tubes, mines and ice caves are covered underground interiors, never open-sky courtyards. Use cave, mine or ice_cave architecture and rock ceilings, with irregular grottoes or worked haulage galleries. Crypts and catacombs use crypt architecture and stone vaults. Put water or lava beside connected dry paths, not across every walkable floor; cooled lava tubes have basalt floors, not molten floors everywhere.',
     'Quest constructionTasks are read-only, bound to this exact location. Give their existing actions appropriate reachable space, such as a ritual court, inscribed monument, gate or engagement area. Never duplicate quest inventory objects or actors as scenery, move targets, invent prerequisites, complete tasks, unlock doors or award rewards. Existing engine adjudication owns success.',
     'Respond with ONE JSON object with exactly these keys:', JSON.stringify(SCHEMA)].join(' ');
   const msgs = [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ roomName: input.roomName, description: input.description, puzzle: input.puzzle,

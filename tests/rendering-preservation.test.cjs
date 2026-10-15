@@ -115,7 +115,7 @@ test('NPC map frames fill the normal token while PC art and world sprites remain
   }
 });
 
-function scene(artEnabled,kind='fresco'){
+function scene(artEnabled,kind='fresco',surface='wall'){
   const worldCalls=[],draws=[],state={},gl=new Proxy({getParameter:()=>false,isEnabled:()=>false,
     uniform1i:(name,v)=>{state[name]=v;},uniform1f:(name,v)=>{state[name]=v;},
     bindBuffer:(kind,b)=>{if(kind==='ARRAY_BUFFER')state.buffer=b;},
@@ -128,6 +128,7 @@ function scene(artEnabled,kind='fresco'){
   for(let y=0;y<8;y++)for(let x=0;x<8;x++)cells[`${x},${y}`]={tile:'floor',floorHeight:0,ceilHeight:3};
   cells['3,3']={tile:'pillar',floorHeight:0,ceilHeight:3};cells['4,2']={tile:'torch',floorHeight:0,ceilHeight:3};
   const art={tile:'painting',kind,surface:'wall',axis:'x',sign:-1,position:{x:6,y:3,z:.4},size:{x:.02,y:1,z:1}};
+  if(surface==='floor')Object.assign(art,{surface,position:{x:6,y:3,z:.01},size:{x:1,y:1,z:.02}});
   const d={geoKey:'0,0,0',_geometryStamp:'stable',layout:{width:8,height:8},cells,
     tiles:{pillar:{spriteSpec:{baseWidth:.6}}},surfaceArt:artEnabled?[art]:[]};
   Object.assign(context.window,{currentDungeon:d,dungeonTextures:{},dungeonTexturesMeta:{pillar:{baseWidth:.6}},
@@ -152,8 +153,8 @@ test('artwork lamps illuminate paintings without changing world torches or pilla
     const plain=scene(false);
     assert.ok(plain.pillars.length>0);
     assert.equal(plain.world[0].worldTorchCount,1,'Only the original room torch reaches the world shader');
-    for(const kind of['fresco','mosaic']){
-      const withArt=scene(true,kind);
+    for(const[kind,surface]of[['fresco','wall'],['mosaic','wall'],['mosaic','floor']]){
+      const withArt=scene(true,kind,surface);
       assert.equal(withArt.pillars.length,plain.pillars.length);
       assert.equal(withArt.world[0].worldTorchCount,plain.world[0].worldTorchCount);
       for(let i=0;i<plain.pillars.length;i++)for(const field of['torchCount','torchRadiusScale','shadowStrength'])

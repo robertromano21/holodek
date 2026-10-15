@@ -12,12 +12,13 @@ function fixture() {
   const pc = actor('PC', 'pc', 3, 4), enemy = actor('Guard', 'monster', 4, 4), ally = actor('Ally', 'npc', 3, 5);
   const space = Reach.createCombatSpace(dungeon, [pc, enemy, ally], dungeon.geoKey), dice = new ActionDice();
   dice.begin('combat', dungeon.geoKey); dice.active.turn = { turnId: 'turn', combatant: 'PC', actionId: dice.active.id };
-  let paused = false; const state = { getDungeonRunId: () => 'run', getGamePaused: () => paused };
+  let paused = false; const state = { getDungeonRunId: () => 'run', getGamePaused: () => paused,
+    getLastCoords: () => ({ x: 1, y: 0, z: 0 }) };
   const events = [], opportunities = [];
   const t = T.attach({ space, dice, state, actor: pc, targets: [enemy],
     step: async tile => events.push(tile), opportunity: async enemy => opportunities.push(enemy.name) });
   const input = (x, y, extra = {}) => ({ x, y, actionId: dice.active.id, turnId: 'turn', combatant: 'PC', geoKey: dungeon.geoKey, runId: 'run', revision: dice.active.turn.movement.revision, ...extra });
-  return { dungeon, pc, enemy, ally, space, dice, t, input, events, opportunities, pause(value) { paused = value; } };
+  return { dungeon, pc, enemy, ally, space, dice, state, t, input, events, opportunities, pause(value) { paused = value; } };
 }
 test('bounded cardinal paths respect living occupancy, walls, doors and terrain height', () => {
   const f = fixture(); f.dungeon.cells['2,4'].tile = 'wall'; f.dungeon.cells['3,3'] = { tile: 'door', door: { isOpen: false } };
@@ -57,6 +58,13 @@ test('movement locks actions until all steps resolve and repeated clicks cannot 
   assert.equal(f.dice.active.turn.movement.busy, true);
   await assert.rejects(f.dice.moveCombatant(f.input(3, 2)), /resolving/);
   release(); await pending; assert.equal(f.dice.active.turn.movement.remaining, 5);
+});
+test('a storey change rejects old movement even when the posted room and turn tokens are still valid', async () => {
+  const f = fixture(), old = f.input(3, 3);
+  f.state.getLastCoords = () => ({ x: 1, y: 0, z: 1 });
+  await assert.rejects(f.dice.moveCombatant(old), /stale/);
+  assert.equal(f.dice.active.turn.movement.remaining, 6);
+  assert.equal(f.events.length, 0);
 });
 test('ranged attacks use catalog range and LOS; ranged enemies cannot make retreat free shots', () => {
   const f = fixture(); f.space.move(f.enemy, { x: 14, y: 4 }); f.pc.equipped = { Weapon: 'shortbow' };

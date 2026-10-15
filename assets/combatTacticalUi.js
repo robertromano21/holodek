@@ -5,6 +5,24 @@
 })(typeof window === 'object' ? window : globalThis, function(root) {
   'use strict';
   let active = false, saved = null, savedScroll = null, turn = null, moving = false, angle = null;
+  let roomKey = null, specialFloor = false, floorEpoch = 0;
+  function changeFloor(key, special = false) {
+    const changed = roomKey !== key, reset = changed && (specialFloor || special);
+    roomKey = key; specialFloor = special;
+    if (!changed) return;
+    floorEpoch++; moving = false;
+    if (!reset) return;
+    receive(null);
+    root.CombatTurnUi?.receive(null);
+    turn = null; angle = null;
+    const s = scene();
+    if (s) {
+      s._lastDungeonDraw = null; s.combatActorHitTargets = []; s._userScrolledCombatMap = false;
+      s.renderRT?.clear(); s.actorRT?.clear();
+      if (s.domContainer) { s.domContainer.scrollLeft = 0; s.domContainer.scrollTop = 0; }
+    }
+    redraw();
+  }
   function tileAt(draw, x, y, scale = 1) {
     if (!draw || !Number.isFinite(x) || !Number.isFinite(y)) return null;
     const dx = x / scale - draw.centerX, dy = y / scale - draw.centerY, c = Math.cos(draw.combatAngle), s = Math.sin(draw.combatAngle);
@@ -41,6 +59,8 @@
     redraw();
   }
   function receive(state) {
+    const incomingKey = state?.active?.turn?.geoKey || state?.active?.geoKey;
+    if (incomingKey && roomKey && incomingKey !== roomKey) return;
     const next = state?.active?.kind === 'combat'; turn = state?.active?.turn || null;
     if (next && !active) {
       const box = document.getElementById('combat-popup'), s = scene();
@@ -58,6 +78,7 @@
   }
   async function move(tile) {
     const current = turn;
+    const epoch = floorEpoch;
     if (!active || !current?.tactical || moving || current.movement?.busy || root.gamePaused || root.actionDiceState?.paused) return false;
     if (!current.movement.tiles.some(t => t.x === tile?.x && t.y === tile?.y)) return false;
     moving = true;
@@ -66,11 +87,12 @@
         x: tile.x, y: tile.y, revision: current.movement.revision, runId: current.runId, geoKey: current.geoKey,
         actionId: current.actionId, turnId: current.turnId, combatant: current.combatant }) });
       const result = await response.json(); if (!response.ok) throw Error(result.error || 'Movement could not resolve.');
+      if (epoch !== floorEpoch) return false;
       if (turn?.turnId === current.turnId && result.turn?.turnId === current.turnId && result.turn.movement.revision >= turn.movement.revision) {
         turn = result.turn; root.CombatTurnUi?.receive(turn);
       }
-    } catch (error) { root.CombatTurnUi?.notice(error.message); }
-    finally { moving = false; redraw(); }
+    } catch (error) { if (epoch === floorEpoch) root.CombatTurnUi?.notice(error.message); }
+    finally { if (epoch === floorEpoch) { moving = false; redraw(); } }
     return true;
   }
   function click(actor, draw, x, y, scale) {
@@ -92,6 +114,6 @@
     gfx.setPosition(draw.centerX, draw.centerY); gfx.setRotation(draw.combatAngle); scene.renderRT.draw(gfx); gfx.destroy();
   }
   root.addEventListener?.('resize', () => layout());
-  return { receive, layout, move, click, draw, tileAt, dimensions, active: () => active,
+  return { receive, changeFloor, layout, move, click, draw, tileAt, dimensions, active: () => active,
     angle(value) { if (!active) return value; if (angle === null) angle = value; return angle; } };
 });

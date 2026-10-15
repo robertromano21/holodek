@@ -117,6 +117,7 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     if (!rootTemple && indoor.value !== true) { reject(indoor.value === false ? 'outdoor-destination' : 'unknown-indoor-metadata'); continue; }
     const selection = rootTemple ? { family: 'temple', evidence: 'known-root-temple-name', ruined: true } :
       chooseArchitecture({ ...scene, indoor: true, source: { roomName, description },
+        worldContext: { ...scene.worldContext, fortifiedFloor: room.fortifiedFloor },
         architecture: scene.architecture || room.architecture || room.classification?.architecture });
     if (!selection || !BUILDINGS.has(selection.family)) { reject('no-building-evidence'); continue; }
     const complexIdentity = String(room.complexId || room.siteId || (rootTemple ? 'ruined-temple' : targetKey));
@@ -124,15 +125,21 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     const roofless = /\b(roofless|unroofed|without (?:a )?roof|no roof|collapsed roof|open[- ]sky)\b/i.test(description);
     const roofs = selection.family === 'rotunda' ? ['domed', 'domed', 'flat'] :
       selection.family === 'castle' ? ['pitched', 'flat', 'open'] : ['pitched', 'barrel', 'flat', 'open'];
-    const roofFamily = roofless ? 'open' : roofs[Math.floor(random() * roofs.length)];
+    const site = room.fortifiedSite;
+    const roofFamily = site ? site.patron ? 'domed' : 'pitched' : roofless ? 'open' : roofs[Math.floor(random() * roofs.length)];
     const transverse = 13 + 2 * Math.floor(random() * 4), depth = 11 + 2 * Math.floor(random() * 3);
     const forecourtDepth = 2 + Math.floor(random() * 3), wallHeight = 5 + Math.floor(random() * 3);
+    const sacred = site?.patron && require('../assets/shrineIconography').pantheon[site.patron];
     const palette = Materials.tintPalette({ primary: room.classification?.wallColor || '#81988c',
       secondary: room.classification?.floorColor || '#496656', highlight: '#eadfc6', shadow: '#30352f' }, scene.palette || {}, 'marble');
+    if (sacred) Object.assign(palette, { secondary: sacred.color, highlight: sacred.glow || sacred.color });
     plan.buildings.push({ direction: name, targetKey, targetName: roomName, targetIndoor: indoor.value, complexIdentity,
       family: selection.family, ruined: !!selection.ruined, roofFamily, transverse, depth, forecourtDepth,
       wallHeight, towerHeight: wallHeight + 2 + Math.floor(random() * 3),
       entrance: 'closed-gate', palette,
+      ...(site ? { fortifiedSite: { id: site.id, template: site.template, levels: site.levels, patron: site.patron },
+        monumental: { transverse: site.template === 'wizard_tower' ? 19 : 29, depth: 23,
+          wallHeight: 10, towerHeight: Math.min(35, 10 + site.levels * 4) } } : {}),
       ...(rootTemple ? { monumental: { transverse: 29 + 2 * Math.floor(random() * 4), depth: 19 + 2 * Math.floor(random() * 3),
         wallHeight: 12 + Math.floor(random() * 4), towerHeight: 20 + Math.floor(random() * 5) } } : {}),
       evidence: { databaseKey: targetKey, roomName, description, indoorSource: indoor.source,
@@ -352,7 +359,8 @@ function stageParts(dungeon, building, stage) {
     const palette = finish === 'terrain' ? dungeon.visualStyle?.palette : finish === 'trim' ?
       { ...building.palette, primary: building.palette?.secondary } : building.palette;
     tiles[tile] ||= { url: dungeon.tiles.wall.url, spriteSpec: { voxelShape: shape,
-      material: finish === 'stone' ? 'marble' : Voxels.architecture[shape].material || 'stone',
+      material: finish === 'stone' ? building.family === 'castle' && building.fortifiedSite ? 'stone' : 'marble' : Voxels.architecture[shape].material || 'stone',
+      ...(building.fortifiedSite?.patron ? { shrine: { deity: building.fortifiedSite.patron }, inscription: { motif: building.fortifiedSite.patron } } : {}),
       ...(palette ? { palette } : {}), profile: 'flat', heightRatio: 1, baseWidth: 1, gridWidth: 1 } };
     return tile;
   };
@@ -373,7 +381,7 @@ function stageParts(dungeon, building, stage) {
         { x: end - i, y: 1, z: first.top - first.floor }, first.tower ? 'exterior-tower-box' : 'exterior-wall-box');
     if (first.v === 0) part('entablature', { x: first.x, y: first.y, z: first.floor + building.wallHeight * 0.7 },
       { x: end - i, y: 1, z: 0.3 }, 'exterior-colored-frieze', 'trim');
-    if (first.tower) part('battlement', { x: first.x, y: first.y, z: first.top },
+    if (first.tower || building.fortifiedSite && building.family === 'castle') part('battlement', { x: first.x, y: first.y, z: first.top },
       { x: end - i, y: 1, z: 0.7 }, 'exterior-tower-crown', 'trim');
     i = end;
   }
@@ -390,7 +398,8 @@ function stageParts(dungeon, building, stage) {
         { x: lintelSize.x, y: lintelSize.y, z: 1.2 }, 'exterior-pediment', 'trim');
     }
     for (const p of stage.site.filter(p => supports.some(s => s.key === p.key))) {
-      part('fluted_column', { x: p.x, y: p.y, z: stage.base }, { x: 1, y: 1, z: building.wallHeight }, 'exterior-portico-column');
+      part(building.family === 'castle' ? 'entablature' : 'fluted_column', { x: p.x, y: p.y, z: stage.base },
+        { x: 1, y: 1, z: building.wallHeight }, building.family === 'castle' ? 'exterior-gate-pier' : 'exterior-portico-column');
     }
   }
   if (stage.gate.length) {
@@ -398,7 +407,27 @@ function stageParts(dungeon, building, stage) {
     part(stage.forward.y ? 'grand_gate' : 'grand_gate_side', { x, y, z: stage.base },
       { x: stage.forward.y ? 3 : 1, y: stage.forward.x ? 3 : 1, z: building.wallHeight }, 'exterior-closed-gate', 'gate');
   }
-  if (building.large) {
+  if (building.fortifiedSite) {
+    const patron = building.fortifiedSite.patron;
+    const front = stage.site.find(p => p.v === 0 && p.u === 3);
+    if (patron && front) {
+      const side = stage.forward.x ? '_side' : '';
+      part('patron_relief' + side, { x: front.x - stage.forward.x * .7, y: front.y - stage.forward.y * .7, z: stage.base + building.wallHeight * .55 },
+        { x: 1, y: 1, z: 2 }, 'exterior-patron-relief', 'trim');
+      for (const p of stage.site.filter(p => p.v === -1 && Math.abs(p.u) === stage.half - 2))
+        part('patron_standard' + side, { x: p.x, y: p.y, z: stage.base }, { x: 1, y: 1, z: 4 }, 'exterior-patron-standard', 'trim');
+    }
+    // Roofed upper chambers give the intact building a multi-storey silhouette.
+    const rear = stage.site.filter(p => p.v >= building.depth - 6 && Math.abs(p.u) <= 3);
+    if (rear.length) {
+      const x = Math.min(...rear.map(p => p.x)), y = Math.min(...rear.map(p => p.y));
+      const w = Math.max(...rear.map(p => p.x)) - x + 1, h = Math.max(...rear.map(p => p.y)) - y + 1;
+      part('entablature', { x, y, z: stage.base }, { x: w, y: h, z: building.towerHeight - 2 }, 'exterior-upper-chambers');
+      part(patron ? 'dome_shell' : 'pitched_roof_shell', { x, y, z: stage.base + building.towerHeight - 2 },
+        { x: w, y: h, z: 2 }, 'exterior-upper-chamber-roof');
+    }
+  }
+  if (building.large && !building.fortifiedSite) {
     const rear = stage.site.filter(p => p.v >= building.depth - 6 && Math.abs(p.u) < stage.half);
     // A handful of coarse masses implies buried wings and mountain masonry without thousands of voxel props.
     for (const side of [-1, 1]) {

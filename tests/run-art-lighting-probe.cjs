@@ -5,7 +5,7 @@ const http=require('node:http'),os=require('node:os'),{spawn}=require('node:chil
 const root=path.resolve(__dirname,'..');
 const supplied=process.argv.slice(2).find(a=>!a.startsWith('--')),legacy=process.argv.includes('--legacy-anchor');
 const plaqueMode=process.argv.includes('--plaque'),stoneworkMode=process.argv.includes('--stonework'),reverse=process.argv.includes('--reverse');
-const mosaicMode=process.argv.includes('--mosaic'),darkControl=process.argv.includes('--dark-control');
+const mosaicMode=process.argv.includes('--mosaic'),floorMosaicMode=process.argv.includes('--floor-mosaic'),darkControl=process.argv.includes('--dark-control');
 const logs=path.join(root,'logs/dungeons');
 const file=supplied?path.resolve(supplied):fs.readdirSync(logs).filter(f=>f.startsWith('0,0,0-')&&f.endsWith('.json.gz'))
   .map(f=>path.join(logs,f)).sort((a,b)=>fs.statSync(b).mtimeMs-fs.statSync(a).mtimeMs)[0];
@@ -14,6 +14,7 @@ const fixture=d.physicalPuzzle?.fixtures?.find(f=>f.id==='plaque');
 const [fx,fy]=fixture?.key.split(',').map(Number)||[];
 const art=plaqueMode&&fixture?{tile:fixture.tiles[0],label:'Saved engraved plaque',axis:fixture.axis,sign:reverse?1:-1,surface:'object',
   position:{x:fx+.5-fixture.width/2,y:fy+.5-fixture.width/2,z:(d.cells[fixture.key].floorHeight||0)+.42},size:{x:fixture.width,y:fixture.width,z:.48}}:
+  floorMosaicMode?d.surfaceArt.find(a=>a.kind==='mosaic'&&a.surface==='floor'&&!a.puzzleClue):
   mosaicMode?(d.surfaceArt.find(a=>a.kind==='mosaic'&&a.surface==='wall'&&a.style==='byzantine')||d.surfaceArt.find(a=>a.kind==='mosaic'&&a.surface==='wall')):
   d.surfaceArt.find(a=>stoneworkMode?a.carvingStyle&&a.surface==='wall':a.kind==='fresco'&&a.axis==='y'&&a.sign===-1);
 if(!art)throw Error('Saved room has no requested artwork to replay.');
@@ -40,11 +41,12 @@ ${scripts.map(s=>'<script src="/assets/'+s+'.js"></script>').join('')}
     c.complete=true;c.naturalWidth=c.naturalHeight=8;textures[tile]=c;}
   window.currentDungeon=d;window.dungeonTextures=textures;window.WEBGPU_VOXEL_PREWARM=false;
   if(${darkControl})window.ArtPresentation.lights=()=>[];
-  const target={x:art.position.x+art.size.x/2,y:art.position.y+art.size.y/2},distance=plaqueMode?1.3:stoneworkMode?3:6;
+  const target={x:art.position.x+art.size.x/2,y:art.position.y+art.size.y/2},distance=${floorMosaicMode}?2.5:plaqueMode?1.3:stoneworkMode?3:6;
   window.playerPosX=target.x+(art.axis==='x'?art.sign*distance:0);window.playerPosY=target.y+(art.axis==='y'?art.sign*distance:0);
   window.playerDungeonX=Math.floor(playerPosX);window.playerDungeonY=Math.floor(playerPosY);
   window.playerAngle=Math.atan2(target.y-playerPosY,target.x-playerPosX);
   window.playerZ=art.position.z+art.size.z/2;
+  if(${floorMosaicMode}){window.playerZ=art.position.z+.45;window.dungeonViewShift=-.1;}
   // Specialize only world lighting; art still uses the unchanged production voxel shader and real cell texture.
   r.canvas=document.createElement('canvas');const context=r.canvas.getContext('webgl2'),shaderSource=context.shaderSource.bind(context);
   context.shaderSource=(shader,source)=>{
@@ -106,10 +108,11 @@ server.listen(0,'127.0.0.1',()=>{
   child.on('close',()=>{clearTimeout(timer);try{
     const raw=out.match(/<pre id="results">([^<]*)<\/pre>/)?.[1],report=received||JSON.parse(raw?.replace(/&quot;/g,'"').replace(/&amp;/g,'&'));
     if(report.png){const dir=path.join(root,'logs/probes');fs.mkdirSync(dir,{recursive:true});
-      fs.writeFileSync(path.join(dir,mosaicMode?'saved-room-mosaic-'+(darkControl?'dark-control':'lighting')+'.png':plaqueMode?'saved-room-plaque-'+(reverse?'back':'front')+'.png':stoneworkMode?'saved-room-stonework.png':legacy?'saved-room-art-dark-control.png':'saved-room-art-lighting.png'),Buffer.from(report.png.split(',')[1],'base64'));delete report.png;}
+      fs.writeFileSync(path.join(dir,floorMosaicMode?'saved-room-floor-mosaic-'+(darkControl?'dark-control':'lighting')+'.png':mosaicMode?'saved-room-mosaic-'+(darkControl?'dark-control':'lighting')+'.png':plaqueMode?'saved-room-plaque-'+(reverse?'back':'front')+'.png':stoneworkMode?'saved-room-stonework.png':legacy?'saved-room-art-dark-control.png':'saved-room-art-lighting.png'),Buffer.from(report.png.split(',')[1],'base64'));delete report.png;}
     const pass=report.error===0&&(plaqueMode?report.passes===3&&report.queries?.some(q=>q.count>0)&&report.bright>20:
+      floorMosaicMode?report.queries?.some(q=>darkControl?q.own===0:q.own>0)&&report.bright>20:
       stoneworkMode?report.modules>1&&report.mean>20:report.queries?.some(q=>q.own===(legacy||darkControl?0:2))&&(legacy||darkControl?report.mean<35:report.mean>=35));
-    console.log(JSON.stringify({file,legacy,plaqueMode,stoneworkMode,mosaicMode,darkControl,reverse,pass,...report},null,2));process.exitCode=pass?0:1;
+    console.log(JSON.stringify({file,legacy,plaqueMode,stoneworkMode,mosaicMode,floorMosaicMode,darkControl,reverse,pass,...report},null,2));process.exitCode=pass?0:1;
   }catch(e){console.error('Incomplete replay:',e.message,err);process.exitCode=1;}
   server.closeAllConnections();server.close();});
 });

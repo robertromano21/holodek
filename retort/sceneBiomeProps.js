@@ -2,6 +2,7 @@
 
 const V = require('../assets/scenePropVoxels');
 const { makeNavigation, reachable } = require('./sceneArchitecture');
+const { appearanceKind } = require('./undergroundEnvironments');
 const VERSION = 1;
 const LIMITS = Object.freeze({ maxProps: 80, maxClusters: 10, variantsPerShape: 3,
   maxCustomTiles: 232, centerAttempts: 48, placementAttempts: 96 });
@@ -38,18 +39,19 @@ function excludesOrganic(spec, text) {
 function prepareSceneBiomeProps(spec = {}, options = {}) {
   const text = sceneText(spec).toLowerCase();
   const gardenRequested = GARDEN.test(text);
+  const underground = appearanceKind(spec);
   const organicExcluded = excludesOrganic(spec, text) || options.vegetation === false;
-  const profiles = Object.keys(PROFILE_RULES).filter(profile => PROFILE_RULES[profile].test(text));
+  const profiles = underground ? [underground] : Object.keys(PROFILE_RULES).filter(profile => PROFILE_RULES[profile].test(text));
   const shapes = V.biomeShapes.filter(shape => {
     const meta = V.biomeProps[shape];
     return profiles.some(profile => meta.biomes.includes(profile)) && !(organicExcluded && meta.organic) &&
-      !(/\b(no fungi|no mushrooms|without fungi)\b/.test(text) && /fungi|toadstool/.test(shape));
+      !(/\b(no fungi|no mushrooms|without fungi)\b/.test(text) && /fungi|mushroom|toadstool/.test(shape));
   });
   const indoor = spec.indoor !== false;
-  const enabled = options.enabled !== false && (!indoor || gardenRequested) && shapes.length > 0;
+  const enabled = options.enabled !== false && (!indoor || gardenRequested || !!underground) && shapes.length > 0;
   const plan = spec.biomePropsPlan = { version: VERSION, enabled, profiles,
     profile: profiles.length > 1 ? 'mixed' : profiles[0] || null, evidence: 'scene-biome-clues',
-    gardenRequested, organicExcluded, shapes, variantsPerShape: LIMITS.variantsPerShape,
+    gardenRequested, underground, organicExcluded, shapes, variantsPerShape: LIMITS.variantsPerShape,
     maxProps: bounded(options.maxProps, profiles.length > 1 ? 80 : 64, indoor ? 16 : LIMITS.maxProps),
     maxClusters: bounded(options.maxClusters, indoor ? 3 : 8, LIMITS.maxClusters) };
   // Repreparation removes only our own prior additions, never authored landmarks.
@@ -78,8 +80,9 @@ function applySceneBiomeProps(dungeon, spec = {}) {
   const plan = spec.biomePropsPlan;
   if (!plan?.enabled) return skip('no-biome-prop-plan');
   const indoor = spec.indoor !== false || dungeon?.classification?.indoor === true;
+  const underground = appearanceKind(spec);
   const text = sceneText(spec).toLowerCase();
-  if (indoor && (!plan.gardenRequested || !GARDEN.test(text))) return skip('not-explicit-garden');
+  if (indoor && !underground && (!plan.gardenRequested || !GARDEN.test(text))) return skip('not-explicit-garden');
   const { width: w, height: h } = dungeon?.layout || {};
   if (!dungeon?.cells || !Number.isInteger(w) || !Number.isInteger(h) || w < 16 || h < 16 || w > 512 || h > 512)
     return skip('invalid-layout');
@@ -89,8 +92,8 @@ function applySceneBiomeProps(dungeon, spec = {}) {
   const organicExcluded = plan.organicExcluded || excludesOrganic(spec, text);
   const shapes = V.biomeShapes.filter(shape => Array.isArray(plan.shapes) && plan.shapes.includes(shape) &&
     !(organicExcluded && V.biomeProps[shape].organic) &&
-    !(/\b(no fungi|no mushrooms|without fungi)\b/.test(text) && /fungi|toadstool/.test(shape)));
-  const profiles = Object.keys(PROFILE_RULES).filter(profile => plan.profiles?.includes(profile) &&
+    !(/\b(no fungi|no mushrooms|without fungi)\b/.test(text) && /fungi|mushroom|toadstool/.test(shape)));
+  const profiles = (underground ? [underground] : Object.keys(PROFILE_RULES)).filter(profile => plan.profiles?.includes(profile) &&
     shapes.some(shape => V.biomeProps[shape].biomes.includes(profile)));
   if (!profiles.length) return skip('no-eligible-shapes');
   const maxProps = bounded(plan.maxProps, 64, indoor ? 16 : LIMITS.maxProps);
@@ -112,7 +115,11 @@ function applySceneBiomeProps(dungeon, spec = {}) {
     const p = part.position, size = part.size;
     if (![p?.x, p?.y, size?.x, size?.y].every(Number.isFinite)) continue;
     for (let y = Math.max(0, Math.floor(p.y)); y < Math.min(h, Math.ceil(p.y + size.y)); y++) {
-      for (let x = Math.max(0, Math.floor(p.x)); x < Math.min(w, Math.ceil(p.x + size.x)); x++) mark(x, y);
+      for (let x = Math.max(0, Math.floor(p.x)); x < Math.min(w, Math.ceil(p.x + size.x)); x++) {
+        const floor = dungeon.cells[`${x},${y}`]?.floorHeight || 0;
+        if (underground && Number.isFinite(p.z) && p.z - floor >= 2.5) continue;
+        mark(x, y);
+      }
     }
   }
   const gardens = (dungeon.sceneArchitecture?.zones || []).filter(zone => GARDEN_ROLES.has(zone.role) &&
@@ -125,9 +132,9 @@ function applySceneBiomeProps(dungeon, spec = {}) {
     // A clear, nearly level 5x5 ring both protects content and leaves a walk-around.
     for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
       const nx = x + dx, ny = y + dy, i = nx + ny * w, cell = dungeon.cells[`${nx},${ny}`];
-      if (!cell || cell.tile !== 'floor' || PROTECTED.some(key => cell[key]) || occupied[i] || blocked[i] ||
+      if (!cell || cell.tile !== 'floor' || PROTECTED.some(key => cell[key] && !(underground && key === 'roof')) || occupied[i] || blocked[i] ||
           !before.seen[i] || !Number.isFinite(cell.floorHeight ?? 0) || Math.abs(nav.floors[i] - floor) > .5 ||
-          cell.architectureRole && !(indoor && GARDEN_ROLES.has(cell.architectureRole)) || indoor && !inGarden(nx, ny, cell)) return false;
+          cell.architectureRole && !underground && !(indoor && GARDEN_ROLES.has(cell.architectureRole)) || indoor && !underground && !inGarden(nx, ny, cell)) return false;
     }
     return true;
   };
@@ -200,7 +207,8 @@ function applySceneBiomeProps(dungeon, spec = {}) {
       const variant = Math.floor(rnd() * LIMITS.variantsPerShape);
       const height = Math.round((meta.heightRange[0] + rnd() * (meta.heightRange[1] - meta.heightRange[0])) * 100) / 100;
       const cell = dungeon.cells[`${x},${y}`], floor = nav.floors[x + y * w];
-      if (Number.isFinite(cell.ceilHeight) && cell.ceilHeight - floor < height + .15) continue;
+      const ceiling = Math.min(cell.ceilHeight ?? Infinity, cell.roof?.height ?? Infinity);
+      if (Number.isFinite(ceiling) && ceiling - floor < height + .15) continue;
       const tile = tileFor(shape, variant);
       if (!tile) continue;
       const i = x + y * w;

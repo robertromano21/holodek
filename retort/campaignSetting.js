@@ -4,6 +4,8 @@ const Diagnostics = require('./generationDiagnostics');
 const I = require('../assets/dungeonInhabitants');
 const Pantheon = require('../assets/pantheonCharacters');
 const { coordinates, keyOf, indoor } = require('../assets/outdoorRoutes');
+const Underground = require('./undergroundEnvironments');
+const Fortified = require('./fortifiedSites');
 
 const REGIONS = [
   { id: 'tartarus', name: 'Tartarus Frontier', ecology: 'Ash dunes, basalt uplands and rare spring-fed oases; sheltered gardens depend on maintained cisterns.',
@@ -26,9 +28,9 @@ const FAITH = { wellkeepers: { patron: 'Dyanetzia', allegiance: 'Neutral' }, tol
 const EVIL_PATRONS = ['Arithus', 'Dantuea', 'Sharlynn', 'Nameless Drake'];
 function hostileTemple(setting, roomName = '') {
   return !!setting?.religion?.patron && Pantheon.canon(setting.religion.patron)?.allegiance === 'Hostile' &&
-    (['roman_temple', 'byzantine_basilica'].includes(setting.siteKind) || /temple|basilica|sanctuary|shrine|chapel/i.test(roomName));
+    (['roman_temple', 'byzantine_basilica', 'deity_temple'].includes(setting.siteKind) || /temple|basilica|sanctuary|shrine|chapel/i.test(roomName));
 }
-const BUILDINGS = new Set(['inn', 'house', 'guildhall', 'roman_temple', 'byzantine_basilica', 'castle', 'gatehouse', 'wizard_citadel', 'villa']);
+const BUILDINGS = new Set(['inn', 'house', 'guildhall', 'roman_temple', 'byzantine_basilica', 'castle', 'gatehouse', 'wizard_citadel', 'villa', ...Fortified.TYPES]);
 const COMMUNITIES = new Set(['oasis', 'hamlet', 'market', ...BUILDINGS]);
 const AUTHORITY = ['elected wellkeepers', 'a council of household elders', 'a guild charter and rotating magistrate', 'a castellans court constrained by an old civic oath'];
 const PREFIXES = ['Amber', 'Reed', 'Flint', 'Laurel', 'Copper', 'Juniper', 'Cinder', 'Willow'];
@@ -58,6 +60,8 @@ function plan(input = {}) {
     (patrons.length ? patrons : [faction.patron])[h % (patrons.length || 1)];
   return { version: 1, zone, chapter: stage, regionId: `${region.id}:${zone}`, region: region.name,
     ecology: region.ecology, livelihoods: region.livelihoods, pressure: region.pressure,
+    underground: region.underground || Underground.REGIONAL_LAYERS[stage],
+    subterranean: c.z < 0 || Underground.isUndergroundTemplate(template),
     communityId: `${region.id}:${zone}:settlement`, community, inhabited: COMMUNITIES.has(template),
     authority: AUTHORITY[Math.floor(h / 256) % AUTHORITY.length], faction: { ...faction },
     hostilePatron,
@@ -71,6 +75,7 @@ function plan(input = {}) {
 function frontierTemplate(input = {}) {
   if (input.constraint || !coordinates(input.targetKey)) return input.template;
   const c = coordinates(input.targetKey);
+  if (c.z < 0 || Underground.isUndergroundTemplate(input.template) || Fortified.TYPES.includes(input.template)) return input.template;
   const n = I.hash(`${input.seed || ''}:local-site:${input.targetKey}`) % 20;
   // Occasional inhabited sites, not a replacement for wilderness or existing complexes.
   if (input.sourceIndoor === true) return n === 0 ? 'inn' : n === 1 ? 'house' : n === 2 ? 'guildhall' : input.template;
@@ -88,6 +93,7 @@ function install(database, roomKey, context) {
 function describe(setting) {
   if (!setting) return '';
   return `[CAMPAIGN-SETTING] Read-only regional facts: ${JSON.stringify(setting)}.
+${setting.subterranean ? 'This site is underground: use the saved underground ecology and existing entrances, with covered passages rather than a surface oasis or sky courtyard. Mines may have workers and crypts may have custodians; caves may instead have unaligned wildlife.' : 'The underground layer describes potential neighboring interiors, not a ceiling over this surface site.'}
 Name actual physical places rather than interchangeable halls of sorrow. For a NEW inhabited site's name, use the saved community name and physical venue as the anchor; add a distinct local qualifier rather than repeating another room's name. Never rename an existing published destination. Describe water, shelter, work and daily community life, with one concrete local tension. A fertile oasis has real water and green vegetation, not dead trees with a poetic name. Graveyards have burial plots and caretaker paths. An inhabited place is not automatically hostile. Interiors use indoor plans; an outdoor approach may only mention entrances backed by real neighboring indoor rooms. Keep the published room name, routes, inhabitants, inventory and quest requirements authoritative. Faction aspirations are not completed events. Never mint silver, invent quests, award rewards, open boss gates or move named targets in prose. [/CAMPAIGN-SETTING]`;
 }
 function seedResidents(population, setting) {
@@ -109,7 +115,21 @@ function snapshot(room) {
   return s ? { ...s, indoor: indoor(room) } : null;
 }
 function inferKind(room) {
+  const planned = room?.environmentIntent?.template || room?.campaignSetting?.siteKind;
+  if (Fortified.TYPES.includes(planned)) return planned;
+  if (Underground.isUndergroundTemplate(planned)) return planned;
   const n = String(room?.name || '').toLowerCase();
+  if (indoor(room) !== false) {
+    if (/crypt|ossuary|tomb/.test(n)) return 'crypt';
+    if (/catacomb/.test(n)) return 'catacomb';
+    if (/lava tube|volcanic tube|basalt tunnel/.test(n)) return 'lava_tube';
+    if (/\bmines?\b|mining gallery/.test(n)) return 'mine';
+    if (/ice cave|frozen grotto/.test(n)) return 'ice_cave';
+    if (/fungal|mushroom/.test(n) && /cave|cavern|grotto/.test(n)) return 'fungal_cavern';
+    if (/crystal|geode/.test(n) && /cave|cavern|grotto/.test(n)) return 'crystal_cavern';
+    if (/river cavern|underground river|subterranean watercourse/.test(n)) return 'underground_river';
+    if (/cave|cavern|grotto/.test(n)) return 'cavern';
+  }
   if (/oasis|spring gardens/.test(n)) return 'oasis';
   if (/graveyard|cemetery|burial grounds/.test(n)) return 'graveyard';
   if (/market|exchange|bazaar/.test(n)) return 'market';
@@ -126,11 +146,12 @@ function validateAtlas(raw, runId) {
   if (!raw || !Array.isArray(raw.regions) || raw.regions.length !== REGIONS.length ||
       !Array.isArray(raw.factions) || raw.factions.length !== FACTIONS.length) return null;
   const regions = raw.regions.map((r, i) => ({ id: REGIONS[i].id, name: clean(r.name, 80), ecology: clean(r.ecology, 300),
+    underground: r.underground === undefined ? Underground.REGIONAL_LAYERS[i] : clean(r.underground, 500),
     livelihoods: Array.isArray(r.livelihoods) ? r.livelihoods.slice(0, 3).map(s => clean(s, 60)) : [],
     pressure: clean(r.pressure, 160) }));
   const factions = raw.factions.map((f, i) => ({ id: FACTIONS[i].id, name: clean(f.name, 80),
     purpose: clean(f.purpose, 200), rival: FACTIONS[i].rival, ...FAITH[FACTIONS[i].id] }));
-  if (regions.some(r => !r.name || !r.ecology || !r.pressure || r.livelihoods.length < 2 || r.livelihoods.some(s => !s)) ||
+  if (regions.some(r => !r.name || !r.ecology || !r.underground || !r.pressure || r.livelihoods.length < 2 || r.livelihoods.some(s => !s)) ||
       factions.some(f => !f.name || !f.purpose) || new Set(factions.map(f => f.name.toLowerCase())).size !== factions.length) return null;
   return { version: 1, runId, source: 'validated-campaign-plan', origin: 'Tartarus', destination: 'Hades', regions, factions,
     connections: regions.slice(1).map((r, i) => ({ from: regions[i].id, to: r.id, kind: 'trade-and-pilgrim-route' })) };
@@ -142,10 +163,12 @@ async function prepareAtlas($, state) {
   if (process.env.CAMPAIGN_SETTING !== 'off') try {
     $.model = 'gpt-4.1-mini'; $.temperature = .9;
     await $.user`Faction roles in array order are fixed: wellkeepers (Dyanetzia, neutral), coercive tollwardens (Arithus or another evil deity, hostile), burial masons (Mordicar, neutral), caravan salvagers (Poena, neutral). Evil temples are defended hostile sanctuaries, not public healing shops. Neutral healing temples are separate. Patronage is metadata; worship never spawns the actual god. Fit the four faction purposes to these roles.`;
+    await $.user`${Underground.PLANNING_GUIDANCE} Each region MUST include an underground field (<=500 characters) explaining its geology, subterranean ecology, livelihoods and connections to the surface. This is broad planning, not new exits or quest placement.`;
+    await $.user`Also plan intact castles, working fortresses, fantastic citadels, wizard towers and deity-aligned temples as occasional regional institutions. Explain their supply, governance, patronage and relation to nearby communities. They are approached outdoors and have stair-linked storeys with practical service spaces, upper halls and cellars. Some upper halls can later host quest bosses, but do not assign a boss, key or reward. Worship does not spawn a god. Arithus temples are hostile; Arithus himself appears only at the final throne room.`;
     await $.user`Plan broad campaign geography for a journey from Tartarus to the approaches of occupied Hades, ruled by Arithus. Return JSON only with four ordered regions [{name,ecology,livelihoods:[three trades],pressure}] and four factions [{name,purpose}]. Start in ash wastelands, then caravan marches, riverlands, and finally citadel approaches. Include occasional FERTILE spring oases, graveyards, inhabited settlements, wells, trade, neutral equipment shops and healing temples, guilds and competing governance. Explain what water or resource sustains each community and why travel routes connect it to the next region. These are broad districts, NOT specific rooms, exits, portable items, monsters, characters, quests, keys, rewards or events. Do not relocate quest targets or grant entry to Hades. Preserve the Ruined Temple starting point, Mortacia's lost Sepulchra and the existing campaign. Keep each ecology under 45 words and each pressure/purpose under 25 words. No commands or mechanics.`;
-    const result = await Contracts.request($, { component: 'campaign-atlas', context: { runId }, maxTokens: 1100,
+    const result = await Contracts.request($, { component: 'campaign-atlas', context: { runId }, maxTokens: 1900,
       parameters: { regions: Contracts.list({ name: Contracts.text(80), ecology: Contracts.text(300),
-        livelihoods: [String], pressure: Contracts.text(160) }), factions: Contracts.list({ name: Contracts.text(80), purpose: Contracts.text(200) }) },
+        underground: Contracts.text(500), livelihoods: [String], pressure: Contracts.text(160) }), factions: Contracts.list({ name: Contracts.text(80), purpose: Contracts.text(200) }) },
       validate(raw) {
         for (const [field, count] of [['regions', REGIONS.length], ['factions', FACTIONS.length]])
           if (!Array.isArray(raw?.[field]) || raw[field].length !== count) throw Error(`${field}: expected ${count} rows, in the supplied order.`);
@@ -161,7 +184,8 @@ async function prepareAtlas($, state) {
   } catch (error) { failure = error.message; Diagnostics.report('campaign-atlas', { status: 'rejected', runId, phase: 'prompt', reason: error }); }
   if (!atlas) Diagnostics.report('campaign-atlas', { status: 'fallback', runId, reason: failure, replacement: 'seeded-campaign-fallback' });
   atlas ||= { version: 1, runId, source: 'seeded-campaign-fallback', origin: 'Tartarus', destination: 'Hades',
-    regions: REGIONS, factions: FACTIONS, connections: REGIONS.slice(1).map((r, i) => ({ from: REGIONS[i].id, to: r.id, kind: 'trade-and-pilgrim-route' })) };
+    regions: REGIONS.map((r, i) => ({ ...r, underground: Underground.REGIONAL_LAYERS[i] })), factions: FACTIONS,
+    connections: REGIONS.slice(1).map((r, i) => ({ from: REGIONS[i].id, to: r.id, kind: 'trade-and-pilgrim-route' })) };
   // Re-read after the optional request so other initialized room fields are retained.
   const latest = JSON.parse(state.getRoomNameDatabase() || '{}'); latest['0,0,0'] ||= {};
   if (latest['0,0,0'].campaignAtlas?.runId !== runId) latest['0,0,0'].campaignAtlas = atlas;

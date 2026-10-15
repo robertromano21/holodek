@@ -113,6 +113,8 @@ function buildRoomWorldContext(database, coords, options = {}) {
     quest: cloneQuest(options.quest),
     environmentIntent: room.environmentIntent ? cloneMetadata(room.environmentIntent) : null,
     settlement: Campaign.snapshot(room),
+    fortifiedFloor: room.fortifiedFloor ? cloneMetadata(room.fortifiedFloor) : null,
+    nearbySites: (room.fortifiedApproaches || []).slice(0, 2).map(a => ({ ...a, name: rooms.get(a.entryKey)?.name })),
     factionMemory: require('./factionMemory').project(database),
     regionalSite: room.regionalSite ? { flavor: room.regionalSite.flavor, storyId: room.regionalSite.storyId } : null,
     campaign: { origin: 'Ruined Temple Entrance in Tartarus', destination: 'Hades, the City of the Dead',

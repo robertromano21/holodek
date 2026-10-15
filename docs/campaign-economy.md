@@ -19,6 +19,36 @@ oases use the existing living-tree and green-reed voxel forms, not dead-grove
 recolors. Descriptions and inhabitant generation receive the same saved regional
 facts. Regional flavor does not unlock Hades or waive campaign victory checks.
 
+Each newly generated atlas also plans a bounded `underground` layer for every
+region: geology, resources, communities, wildlife and connections to the surface.
+These model-authored fields are saved with the atlas and included in the campaign
+planning text log. Older atlases receive regional underground guidance when new
+sites are planned, without rewriting their published rooms.
+
+Underground destinations include caverns, worked mines, volcanic lava tubes,
+fungal and crystal grottoes, river caverns, ice caves, crypts and catacombs. New
+negative-depth neighbors must be indoors, except the existing starting-exit
+constraint. Underground selections are not replaced by the settlement scheduler.
+Natural caves use irregular connected chambers and a continuous rock canopy;
+mines use worked galleries, while crypts retain their vaulted burial architecture.
+Water/lava scenery must leave dry routes. This does not introduce mining,
+swimming, fluid simulation or overlapping stacked floors. Existing rooms, boss
+bindings and quest item placements remain authoritative.
+
+Underground graphics select a saved-template/physical-biome appearance profile:
+rough cavern strata, tool-cut mine faces and haulage ruts, cooled lava folds,
+fungal veining, quartz seams, water-worn river stone, fractured ice, or crypt
+flagstones and niche masonry. These use the existing material/palette pipeline,
+not a new lighting model. Lava-tube walking floors remain cooled obsidian;
+molten pools are separate scenery rather than a room-wide lava overlay.
+
+Covered interiors now receive bounded biome clusters: stalagmites, flowstone,
+ore outcrops, timber braces, cave mushrooms, quartz fans, rounded river boulders,
+burial niches, basalt formations or ice spires as appropriate. Ceiling clearance,
+route/door/quest-object buffers, vegetation exclusions and connected walking
+space remain checked. Overhead roofs do not reserve the entire floor against
+scenery. No new surface profile or prop pass migrates a saved compiled room.
+
 `CAMPAIGN_SETTING=off` disables new regional decoration. Stored rooms are not
 rewritten. No campaign or paid model requests are needed to run the tests.
 
@@ -82,6 +112,39 @@ an actual assistant takes over the existing stock or contract, not a new reward.
 
 This first local-contract implementation is delivery-based; escorts, faction
 reputation, schedules and evolving political control are not implemented here.
+
+## Intact Multi-Storey Sites
+
+New outdoor frontiers can lead into maintained castles, fortresses, fantastic
+citadels, wizard towers and deity temples. Vast expanses reserve one or two
+additional building approaches where an unused coordinate column is available;
+the onward wilderness route remains intact. Already visited rooms, occupied
+coordinates, boss bindings and current task placements are never overwritten.
+
+Retort authors each site's history, purpose, heraldry and distinct floor plans.
+Invalid structured plans are repaired, then reported as errors if still invalid;
+no generic authored history is silently substituted. Accepted plans and exact
+floor names are appended to the campaign-planning log.
+
+Each storey is an ordinary room at shared world X/Y and a distinct world Z.
+Real two-flight stair wings lead to reciprocal up/down room transitions. Lower
+storeys have an overhead floor/ceiling, while the outdoor facade shows the upper
+chambers. This is separate loaded storey maps, not simultaneous stacked collision
+surfaces in one map. Combat overlays and stale movement responses reset across
+these floor transitions; actor HP and saved populations do not reset.
+
+Temple facades and interiors use canonical deity standards, sculpted reliefs,
+altars and effigies, with patron-specific sprite cache keys and voxel geometry.
+Their symbols and effigy anatomy come from the existing pantheon, not invented
+replacement gods. Evil temples attack intruders through the existing hostile
+temple population rules. Decorative effigies do not spawn deity characters;
+Arithus himself remains exclusive to the final throne room.
+
+Upper rooms can be selected as later boss destinations without changing their
+names or coordinates. Only the existing quest/boss-gate loop assigns the boss
+and releases its key. These sites do not award treasure, create missions or
+mint spare keys merely by existing. Ordinary rooms and saved scenes retain their
+existing layout behavior; this is not an automatic migration of old geometry.
 
 ## Research
 

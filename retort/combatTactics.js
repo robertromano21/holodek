@@ -24,6 +24,10 @@ function attach({ dice, state, space, actor, targets, refresh, step, opportunity
   const turn = dice.active.turn, action = dice.active;
   let remaining = MOVE_TILES, revision = 0, busy = false, closed = false;
   const usedOpportunities = new Set();
+  const onFloor = () => {
+    const c = state.getLastCoords?.();
+    return !c || I.roomKey(typeof c === 'object' ? `${c.x},${c.y},${c.z}` : c) === action.geoKey;
+  };
   function update() {
     const routes = paths(space, actor, remaining), at = space.point(actor);
     turn.tactical = true; turn.geoKey = action.geoKey; turn.runId = state.getDungeonRunId();
@@ -33,7 +37,7 @@ function attach({ dice, state, space, actor, targets, refresh, step, opportunity
     refresh?.(turn); dice.publish(); return routes;
   }
   async function move(input) {
-    if (closed || busy || dice.active !== action || action.turn !== turn || dice.paused || state.getGamePaused?.() || actor.hp <= 0 ||
+    if (closed || busy || !onFloor() || dice.active !== action || action.turn !== turn || dice.paused || state.getGamePaused?.() || actor.hp <= 0 ||
         input.runId !== turn.runId || input.geoKey !== turn.geoKey || input.actionId !== action.id || input.turnId !== turn.turnId ||
         input.combatant !== actor.name || input.revision !== revision || !Number.isInteger(input.x) || !Number.isInteger(input.y))
       throw Error('That movement is stale, paused or already resolving.');
@@ -43,7 +47,7 @@ function attach({ dice, state, space, actor, targets, refresh, step, opportunity
     try {
       for (const tile of route) {
         await dice.waitUntilResumed();
-        if (closed || dice.active !== action || actor.hp <= 0) break;
+        if (closed || !onFloor() || dice.active !== action || actor.hp <= 0) break;
         const from = space.point(actor), to = { x: tile.x + .5, y: tile.y + .5 };
         for (const enemy of targets) {
           if (usedOpportunities.has(enemy.name) || enemy.hp <= 0 || !space.canStrike(enemy, actor) ||

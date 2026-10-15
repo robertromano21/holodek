@@ -20,6 +20,7 @@ const SurfaceArt = require('../assets/surfaceArt');
 const ArtPresentation = require('../assets/artPresentation');
 const {wallFaces,mountWall}=require('./surfaceArtPlacement');
 const { roofStyle } = require('./sceneRoofs');
+const { appearanceKind } = require('./undergroundEnvironments');
 
 const SPRITE_DIR = process.env.HOLODEK_SPRITE_DIR || path.join(__dirname, '../sid/sprites');
 const LIBRARY_FILE = path.join(SPRITE_DIR, '_library.json');
@@ -107,13 +108,16 @@ function coverList(spec) {
 function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   if (!dungeon || !spec) return { textures: [], landmarks: [] };
   const report = { textures: [], landmarks: [] };
-  const cover = coverList(spec);
+  const undergroundProfile = appearanceKind(spec);
+  const cover = coverList(spec).filter(type => !undergroundProfile || type !== 'lava');
   const pal = { ...(spec.palette || {}), ...(dungeon.visualStyle?.palette || {}) };
   const surfaceSeed = dungeon.generation?.seed || spec.generation?.seed || spec.textHash || geoKey;
-  const floorMat = spec.floorStyleMaterial || spec.floorMaterial || (spec.biome === 'cave' ? 'earth' : null);
+  const surfaceAppearance = undergroundProfile ? { undergroundProfile } : {};
+  const defaultMaterial = undergroundProfile === 'lava_tube' ? 'obsidian' : undergroundProfile === 'ice_cave' ? 'ice' : 'stone';
+  const floorMat = undergroundProfile === 'lava_tube' ? 'obsidian' : spec.floorStyleMaterial || spec.floorMaterial || (undergroundProfile ? defaultMaterial : null);
   const wallText = String(spec.source?.description || '').split(/[.;!?]/)
     .filter(s => /wall|masonry|brickwork|facade/i.test(s)).join(' ');
-  const wallMat = Masonry.fromDescription(wallText) || spec.wallStyleMaterial || spec.wallMaterial || (spec.biome === 'cave' ? 'earth' : null);
+  const wallMat = Masonry.fromDescription(wallText) || spec.wallStyleMaterial || spec.wallMaterial || (undergroundProfile ? defaultMaterial : null);
   const roof = roofStyle(spec);
   if (roof) {
     const material = roof === 'timber' ? 'wood' : (wallMat || 'stone');
@@ -128,19 +132,19 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const floorPalette = dungeon.visualStyle?.floorPalette || { primary: pal.floorPrimary || pal.primary, secondary: pal.floorSecondary || pal.secondary, highlight: pal.highlight, shadow: pal.shadow };
     const style = dungeon.visualStyle?.floor || {};
     const scatter = spec.scatter || [];
-    const r = librarySprite({ kind: 'floor', appearanceVersion: 2, material, cover, palette: floorPalette, scatter, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_floor_${material}`,
-      ctx => drawSceneSurface(ctx, createCanvas, 'floor', { material, palette: floorPalette, groundCover: cover, scatter, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
+    const r = librarySprite({ kind: 'floor', appearanceVersion: 2, ...surfaceAppearance, material, cover, palette: floorPalette, scatter, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_floor_${material}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'floor', { ...surfaceAppearance, material, palette: floorPalette, groundCover: cover, scatter, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
     dungeon.tiles.floor = { ...(dungeon.tiles.floor || {}), url: r.url };
-    report.textures.push({ tile: 'floor', material, pattern: style.pattern || null, seed: surfaceSeed, cover, reused: r.reused });
+    report.textures.push({ tile: 'floor', material, ...surfaceAppearance, pattern: style.pattern || null, seed: surfaceSeed, cover, reused: r.reused });
   }
   if (wallMat && hasMaterial('wall', wallMat)) {
     const wallCover = cover.filter(c => ['water', 'moss', 'ash', 'blood', 'cobweb', 'snow', 'ice'].includes(c));
     const decals = spec.decals || [];
     const style = dungeon.visualStyle?.wall || {};
-    const r = librarySprite({ kind: 'wall', appearanceVersion: 2, material: wallMat, cover: wallCover, palette: pal, decals, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_wall_${wallMat}`,
-      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { material: wallMat, palette: pal, groundCover: wallCover, decals, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
+    const r = librarySprite({ kind: 'wall', appearanceVersion: 2, ...surfaceAppearance, material: wallMat, cover: wallCover, palette: pal, decals, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_wall_${wallMat}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { ...surfaceAppearance, material: wallMat, palette: pal, groundCover: wallCover, decals, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
     dungeon.tiles.wall = { ...(dungeon.tiles.wall || {}), url: r.url };
-    report.textures.push({ tile: 'wall', material: wallMat, cover: wallCover, reused: r.reused });
+    report.textures.push({ tile: 'wall', material: wallMat, ...surfaceAppearance, cover: wallCover, reused: r.reused });
   }
 
   // Landmarks: make sure each spec landmark has a custom tile, then draw it.
@@ -175,9 +179,9 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     tile.name = name;
     const assembly = (tile.sceneLandmark && tile.sceneLandmark.assembly) || (prim && prim.assembly) || null;
     const descriptor = { kind: 'landmark', drawer, material, condition: condition.slice().sort(), light: lightColor || null, accent: pal.highlight || null, prim: prim || null, assembly,sculpture,
-      ...(lm.inscription?{inscriptionMotif:lm.inscription.motif}: {}) };
+      ...(lm.inscription?{inscriptionMotif:lm.inscription.motif}: {}), ...(lm.shrine?{shrine:lm.shrine}: {}) };
     const r = librarySprite(descriptor, `custom_${assembly ? 'asm_' + assembly.kit + '_' + assembly.state : (prim ? 'prim_' + prim.shape : drawer)}`, ctx => drawLandmarkSprite(ctx, createCanvas, prim ? tile.type : drawer, {
-      material: material || undefined, condition, light: lightColor, accent: drawer === 'portal' || drawer === 'obelisk' ? lightColor : undefined, seed: drawer, prim: prim || undefined, assembly: assembly || undefined,inscription:lm.inscription
+      material: material || undefined, condition, light: lightColor, accent: drawer === 'portal' || drawer === 'obelisk' ? lightColor : undefined, seed: drawer, prim: prim || undefined, assembly: assembly || undefined,inscription:lm.inscription,shrine:lm.shrine
     }));
     const sculpted = shape==='statue' ? librarySprite({...descriptor,sculptureVersion:4},'custom_effigy',ctx=>{
       ctx.fillStyle=pal.secondary||'#b6a58c';ctx.fillRect(OUT_SIZE*.25,OUT_SIZE*.89,OUT_SIZE*.5,OUT_SIZE*.08);

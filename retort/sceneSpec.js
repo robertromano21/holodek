@@ -50,7 +50,7 @@ function splitList(line) {
 const BIOMES = {
   crypt: ['crypt', 'tomb', 'ossuar', 'catacomb', 'sepulch', 'mausole', 'grave', 'burial', 'sarcophag', 'coffin'],
   temple: ['temple', 'chapel', 'shrine', 'sanctum', 'sanctuar', 'cathedral', 'altar', 'nave', 'reliquar'],
-  cave: ['cave', 'cavern', 'grotto', 'tunnel', 'burrow', 'stalactite', 'stalagmite', 'mine\\b', 'chasm'],
+  cave: ['cave', 'cavern', 'grotto', 'tunnel', 'burrow', 'stalactite', 'stalagmite', 'mines?\\b', 'mining gallery', '(?:lava|volcanic) tubes?', 'chasm'],
   fortress: ['fortress', 'keep\\b', 'barrack', 'armory', 'armoury', 'rampart', 'battlement', 'garrison', 'citadel', 'gatehouse'],
   palace: ['palace', 'throne', 'hall of', 'court\\b', 'ballroom', 'gallery', 'royal'],
   ruins: ['ruin', 'collapsed', 'crumbl', 'rubble', 'shattered', 'toppled', 'broken column'],
@@ -58,7 +58,7 @@ const BIOMES = {
 };
 
 const OUTDOOR_WORDS = ['sky', 'open air', 'horizon', 'wasteland', 'plain', 'desert', 'dune', 'field', 'forest', 'meadow', 'hillside', 'valley', 'shore', 'beach', 'riverbank', 'courtyard', 'garden', 'outside', 'beneath the stars', 'under the sky', 'clouds', 'sun\\b', 'moon\\b'];
-const INDOOR_WORDS = ['room', 'chamber', 'hall', 'corridor', 'passage', 'ceiling', 'vault', 'crypt', 'chapel', 'cell', 'cellar', 'tunnel', 'cave', 'cavern', 'stair', 'library', 'kitchen', 'interior', 'doorway', 'walls', 'barrack', 'armory', 'armoury', 'bunk', 'shrine', 'temple', 'tomb', 'sanctum'];
+const INDOOR_WORDS = ['room', 'chamber', 'hall', 'corridor', 'passage', 'ceiling', 'vault', 'crypt', 'chapel', 'cell', 'cellar', 'tunnel', 'cave', 'cavern', 'grotto', 'mines?\\b', 'mining gallery', '(?:lava|volcanic) tubes?', 'stair', 'library', 'kitchen', 'interior', 'doorway', 'walls', 'barrack', 'armory', 'armoury', 'bunk', 'shrine', 'temple', 'tomb', 'sanctum'];
 
 const MATERIALS = {
   // value: [triggers]; order = priority when tied

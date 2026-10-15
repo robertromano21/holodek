@@ -396,6 +396,71 @@ function drawWallBlocks(P, colors, rng, style) {
   }
 }
 
+const UNDERGROUND_PROFILES = ['cavern', 'mine', 'lava_tube', 'fungal_cavern', 'crystal_cavern', 'underground_river', 'ice_cave', 'crypt'];
+function drawUndergroundSurface(P, c, rng, kind, profile) {
+  const wall = kind === 'wall';
+  if (profile === 'crypt') {
+    (wall ? WALL : FLOOR).stone(P, c, rng);
+    if (wall) for (const y of [3, 19]) {
+      P.rect(4, y, 9, 10, c[1]); P.rect(5, y + 1, 7, 8, c[3]);
+      P.rect(4, y + 10, 9, 1, c[2]);
+    }
+    else for (let i = 0; i < 24; i++) P.rect(rng() * 32, rng() * 32, 2, 1, c[1]);
+    return;
+  }
+  P.fill(c[0]);
+  for (let i = 0; i < 100; i++) P.px(rng() * 32, rng() * 32, rng() < .65 ? c[1] : c[2]);
+  if (profile === 'cavern') {
+    for (let k = 0; k < 5; k++) for (let x = 0; x < 32; x++) {
+      const y = k * 7 + Math.round(Math.sin((x + k * 4) / 4) * 2);
+      P.px(x, y, c[1]); if (wall) P.px(x, y + 1, c[2]);
+    }
+  } else if (profile === 'mine') {
+    for (let y = 1; y < 32; y += 4) for (let x = 0; x < 32; x++)
+      P.px(x, y + (wall ? Math.floor(x / 8) % 2 : 0), c[1]);
+    if (wall) for (let y = 0; y < 32; y++) {
+      const x = 16 + Math.round(Math.sin(y / 4) * 3);
+      P.px(x, y, mix(c[2], '#b8874b', .45)); P.px(x + 1, y, c[3]);
+    }
+    else for (const x of [7, 24]) P.rect(x, 0, 2, 32, c[1]);
+  } else if (profile === 'lava_tube') {
+    for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
+      const band = (y + Math.round(Math.sin(x / 5) * 3)) % 8;
+      if (band === 0) P.px(x, y, c[3]);
+      if (band === 1) P.px(x, y, c[2]);
+    }
+  } else if (profile === 'fungal_cavern') {
+    for (let k = 0; k < 7; k++) {
+      let x = rng() * 32, y = rng() * 32;
+      for (let i = 0; i < 13; i++) {
+        P.px(x, y, mix(c[1], '#78816a', .4));
+        if (i % 3 === 0) P.px(x + 1, y, mix(c[2], '#b8bf9a', .3));
+        x++; y += rng() < .5 ? 1 : -1;
+      }
+    }
+  } else if (profile === 'crystal_cavern') {
+    for (let k = 0; k < 9; k++) {
+      const x = rng() * 32, y = rng() * 32, h = 3 + Math.floor(rng() * 5);
+      for (let i = 0; i < h; i++) { P.px(x, y + i, c[2]); P.px(x + 1, y + i, c[1]); }
+      P.px(x + 1, y - 1, mix(c[2], '#deedf0', .45));
+    }
+  } else if (profile === 'underground_river') {
+    for (let k = 0; k < 8; k++) {
+      const x = rng() * 32, y = rng() * 32;
+      P.rect(x, y, 5, 2, mix(c[1], '#556563', .25));
+      P.rect(x + 1, y - 1, 3, 1, c[2]);
+      if (wall) P.rect(x, y, 1, 4 + Math.floor(rng() * 5), c[1]);
+    }
+  } else if (profile === 'ice_cave') {
+    for (let k = 0; k < 5; k++) {
+      let x = rng() * 32, y = rng() * 32;
+      for (let i = 0; i < 24; i++) {
+        P.px(x, y, c[1]); P.px(x + 1, y, c[2]); x++; y += i % 3 === 0 ? 1 : -1;
+      }
+    }
+  }
+}
+
 function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
   const material = opts.material || 'stone';
   const table = kind === 'wall' ? WALL : FLOOR;
@@ -403,9 +468,11 @@ function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
   const small = createCanvas(BASE, BASE);
   const sctx = small.getContext('2d');
   const P = painter(sctx);
-  const rng = makeRng(seedFrom(`${kind}|${material}|${opts.seed || ''}`));
+  const profile = UNDERGROUND_PROFILES.includes(opts.undergroundProfile) ? opts.undergroundProfile : null;
+  const rng = makeRng(seedFrom(`${kind}|${material}|${opts.seed || ''}${profile ? '|' + profile : ''}`));
   const colors = materialColors(MAT[material] ? material : 'stone', opts.palette, opts.paletteStrength ?? 0.35);
-  if (material === 'stone' && kind === 'floor' && opts.style?.pattern) drawStonePattern(P, colors, rng, opts.style);
+  if (profile) drawUndergroundSurface(P, colors, rng, kind, profile);
+  else if (material === 'stone' && kind === 'floor' && opts.style?.pattern) drawStonePattern(P, colors, rng, opts.style);
   else if (['stone', 'brick'].includes(material) && kind === 'wall' && opts.style?.brickSize) drawWallBlocks(P, colors, rng, opts.style);
   else fn(P, colors, rng);
   const cover = Array.isArray(opts.groundCover) ? opts.groundCover : [];
@@ -431,4 +498,4 @@ function drawRoofSurface(ctx, createCanvas, opts = {}) {
   upscale(small, ctx);
 }
 
-module.exports = { drawSceneSurface, drawRoofSurface, hasMaterial, materialColors, overlayDecals, overlayScatter };
+module.exports = { drawSceneSurface, drawRoofSurface, hasMaterial, materialColors, overlayDecals, overlayScatter, UNDERGROUND_PROFILES };

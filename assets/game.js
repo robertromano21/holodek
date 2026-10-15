@@ -280,6 +280,7 @@ async function switchDungeonForCoordinates(coordString) {
 
   currentDungeon = ensureDungeonGeometryStamp(cached, geoKey);
   currentDungeon.geoKey = geoKey;
+  window.CombatTacticalUi?.changeFloor(geoKey, currentDungeon.sceneSpec?.worldContext?.fortifiedFloor?.version === 1);
   if (cached.inhabitants) window.DungeonLife?.receivePopulation({ population: cached.inhabitants, runId: window.dungeonRunId });
 
   const rawStart  = currentDungeon.start || { x: 10, y: 18 };
@@ -781,6 +782,7 @@ eventSource.onmessage = function(event) {
         // 🔒 REINFORCE GEO KEY (covers cached + fresh + fallback)
         if (geoKey && currentDungeon) {
           currentDungeon.geoKey = geoKey;
+          window.CombatTacticalUi?.changeFloor(geoKey, currentDungeon.sceneSpec?.worldContext?.fortifiedFloor?.version === 1);
           if (currentDungeon.inhabitants) window.DungeonLife?.receivePopulation({ population: currentDungeon.inhabitants, runId: window.dungeonRunId });
           logDungeonLayout(currentDungeon);
         }
@@ -4418,6 +4420,8 @@ const unconnectedRooms = new Set();
 
 // Function to generate unique exits for a room based on its coordinates
 function generateUniqueExits(coordinates, updatedGameConsole) {
+  const planned = roomNameDatabase.get(coordinatesToString(coordinates));
+  if (planned?.fortifiedFloor?.version === 1) return Object.keys(planned.exits || {});
   // For demonstration purposes, let's assume that the exits are randomly generated.
   // You should replace this with your actual exit generation logic.
   const possibleExits = ["north", "south", "east", "west", "northeast", "southeast", "northwest", "southwest", "up", "down"];

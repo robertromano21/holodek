@@ -2,6 +2,7 @@
 
 const { random } = require('./dungeonGeneration');
 const Terrain = require('./outdoorTerrain');
+const { isNaturalUnderground } = require('./undergroundEnvironments');
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const BUILDINGS = new Set(['temple', 'basilica', 'castle', 'rotunda', 'bathhouse', 'catacomb', 'ruins',
   'amphitheater', 'theater', 'circus', 'forum', 'domus', 'villa', 'insula', 'warehouse', 'infrastructure']);
@@ -16,7 +17,8 @@ function enrich(blueprint, { classification = {}, size = 512, generation, sceneS
   if (classification.indoor === true) {
     const plan = blueprint.indoorPlan, rooms = Array.isArray(plan?.rooms) ? plan.rooms : [];
     const modules = Array.isArray(plan?.modules) ? plan.modules : [];
-    if (!modules.length && !rooms.some(r => ['shrine', 'sanctum', 'rotunda'].includes(r?.role))) {
+    if (!isNaturalUnderground({ ...sceneSpec, indoor: true, biome: classification.biome }) &&
+        !modules.length && !rooms.some(r => ['shrine', 'sanctum', 'rotunda'].includes(r?.role))) {
       const types = /crypt|catacomb|cave|sewer/.test(text) ? ['vaulted_bay', 'staircase', 'switchback_stair'] :
         /castle|keep|fort/.test(text) ? ['staircase', 'raised_gallery', 'vaulted_bay', 'split_raised_gallery'] :
         ['portico', 'rotunda_section', 'colonnade', 'sanctuary', 'cloister', 'apsidal_chapel'];

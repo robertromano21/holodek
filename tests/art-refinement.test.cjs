@@ -67,6 +67,48 @@ test('nearby mosaics recover missing saved sconces before the bounded frame allo
   d.surfaceArt[17].surface='floor';assert.ok(!Lamps.lights(d,22,21,30).some(l=>l.id.startsWith('art_17:')),'Do not mount candles on floor mosaics');
 });
 
+test('floor mosaics receive bounded freestanding candlesticks outside their tesserae without changing saved geometry',()=>{
+  const d=room(),art={tile:'pavement',kind:'mosaic',surface:'floor',position:{x:10.05,y:10.05,z:.01},size:{x:1.9,y:1.9,z:.02}};
+  d.surfaceArt=[art];const before=JSON.stringify(d),lamps=Lamps.plan(art,d);
+  assert.equal(lamps.length,2);assert.equal(JSON.stringify(d),before);
+  for(const lamp of lamps){
+    assert.equal(lamp.mount,'floor');assert.ok(lamp.radius<=5&&lamp.intensity<=1);
+    assert.ok(lamp.x+.12<art.position.x||lamp.x-.12>art.position.x+art.size.x||lamp.y+.12<art.position.y||lamp.y-.12>art.position.y+art.size.y);
+    assert.equal(d.cells[`${Math.floor(lamp.x)},${Math.floor(lamp.y)}`].tile,'floor');
+    for(const flame of[false,true])assert.ok(Lamps.mesh(flame,lamp.axis,lamp.sign,lamp.mount).vertices.every(Number.isFinite));
+    const a=Lamps.flamePose(lamp,.75),b=Lamps.flamePose(lamp,1.2);
+    assert.ok(Math.abs(a.position.z+.76*a.size.z-(b.position.z+.76*b.size.z))<1e-9);
+  }
+  assert.notDeepEqual(Lamps.mesh(false,'y',-1,'floor'),Lamps.mesh(false,'y',-1),'No wall bracket on freestanding candlesticks');
+  assert.equal(Lamps.lights(d,11,11).length,2,'Saved mosaics recover lighting without regeneration');
+  assert.deepEqual(Lamps.plan({...art,kind:'relief'},d),[],'Do not add candles to ordinary paving or carved thresholds');
+  for(const c of Object.values(d.cells))c.navigationReserved=true;
+  assert.deepEqual(Lamps.plan(art,d),[],'Never put stands in reserved walking routes');
+});
+
+test('floor mosaic lighting avoids other artworks, objects, raised ledges and blocked cells',()=>{
+  const d=room(),art={tile:'pavement',kind:'mosaic',surface:'floor',position:{x:10.05,y:10.05,z:.01},size:{x:1.9,y:1.9,z:.02}};
+  d.surfaceArt=[art];const original=Lamps.plan(art,d);
+  d.sceneObjects=original.map(l=>({x:l.x,y:l.y}));
+  const moved=Lamps.plan(art,d);assert.ok(moved.every(l=>d.sceneObjects.every(o=>Math.hypot(o.x-l.x,o.y-l.y)>=.7)));
+  d.sceneObjects=[];d.surfaceArt.push({...art,tile:'neighbor',position:{x:9,y:9,z:.01},size:{x:4,y:4,z:.02}});
+  assert.deepEqual(Lamps.plan(art,d),[]);
+  d.surfaceArt=[art];for(const c of Object.values(d.cells))c.floorHeight=2;
+  assert.deepEqual(Lamps.plan(art,d),[]);
+  for(const c of Object.values(d.cells)){c.floorHeight=0;c.tile='wall';}
+  assert.deepEqual(Lamps.plan(art,d),[]);
+});
+
+test('floor mosaic anchors see their perimeter candlesticks through the real torch LOS selector',()=>{
+  const source=fs.readFileSync(require.resolve('../assets/rendererWebGL'),'utf8'),context={window:{},console};vm.runInNewContext(source,context);
+  const renderer=context.window.webglDungeonRenderer,d=room();
+  const art={tile:'floor-art',kind:'mosaic',surface:'floor',position:{x:10.05,y:10.05,z:.01},size:{x:1.9,y:1.9,z:.02}};d.surfaceArt=[art];
+  const lights=Lamps.plan(art,d).map((l,order)=>({...l,order})),byId=new Map(lights.map(l=>[`${l.x},${l.y},${l.radius}`,l]));
+  const frame={dungeon:d,stamp:'floor-mosaic',lights,byId,membership:[...byId.keys()].join('|')},p=Lamps.lightAnchor(art);
+  const los=new Function('dungeon','isSolidCell',source.slice(source.indexOf('const hasLineOfSight ='),source.indexOf('const makeTorchUniformData ='))+'return hasLineOfSight;')(d,c=>['wall','torch'].includes(c.tile));
+  assert.equal(renderer.getCachedTorchLights(frame,p.x,p.y,1.5,los).length,2);
+});
+
 test('indoor ornament supplements paintings, has reachable broad wall bands and safe entrance paving',()=>{
   const d=room(),rows=Art.plan({indoor:true,source:{roomName:'Ruined Temple Entrance',description:'A stone temple of Mortacia.'}});
   assert.equal(rows.filter(a=>a.kind==='fresco').length,4);assert.equal(rows.filter(a=>a.carvingStyle).length,4);

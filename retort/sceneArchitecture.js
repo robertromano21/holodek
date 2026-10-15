@@ -28,6 +28,8 @@ function compassExits(spec = {}) {
 }
 
 function chooseArchitecture(spec = {}) {
+  if (spec.worldContext?.fortifiedFloor?.version === 1) return {
+    family: spec.worldContext.fortifiedFloor.patron ? 'temple' : 'castle', evidence: 'authoritative-multi-storey-site', ruined: false };
   const source = spec.source || {};
   const name = String(source.roomName || '').toLowerCase();
   const families = [
@@ -109,6 +111,7 @@ function reachable(nav, start) {
 }
 
 function castleVariant(spec = {}) {
+  if (spec.worldContext?.fortifiedFloor?.version === 1) return spec.worldContext.fortifiedFloor.template === 'wizard_tower' ? 'watchtower' : 'stone-keep';
   const text = `${spec.source?.roomName || ''} ${spec.source?.description || ''}`.toLowerCase();
   if (/watchtower|watch tower/.test(text)) return 'watchtower';
   if (/motte|bailey.*wooden keep/.test(text)) return 'motte-bailey';
@@ -380,6 +383,7 @@ function addVerticalRoutes(dungeon, spec, architecture, mutableKeys) {
       // New modular partitions/posts may yield to a stair wing; preserved scene content may not.
       const plannedMasonry = mutableKeys.has(key) && (c?.tile === 'wall' || c?.tile === 'pillar' && c.feature === 'pillar');
       if (!c || c.tile !== 'floor' && !plannedMasonry || c.feature && !plannedMasonry || c.door || c.exit || c.complexExit || c.interactable || c.blocked || c.obstacle ||
+          spec.worldContext?.fortifiedFloor && c.stairRoute ||
           Math.hypot(x - dungeon.start.x, y - dungeon.start.y) < 2) {
         conflict = key; break;
       }
@@ -814,4 +818,4 @@ function applySceneArchitecture(dungeon, spec, options = {}) {
   return report;
 }
 
-module.exports = { applySceneArchitecture, chooseArchitecture, castleVariant, complexDimensions, compassExits, ARCHITECTURE_VERSION, makeNavigation, reachable };
+module.exports = { applySceneArchitecture, chooseArchitecture, castleVariant, complexDimensions, compassExits, ARCHITECTURE_VERSION, makeNavigation, reachable, addVerticalRoutes };

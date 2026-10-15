@@ -14,6 +14,7 @@ function input(overrides = {}) {
 function assistant(response, failure) {
   const calls = { prompts: [], generations: [] };
   const $ = { model: 'unchanged-model', temperature: 0.7 };
+  $.user = async () => {};
   $.assistant = async (parts, ...values) => {
     assert.ok(Array.isArray(parts) && Array.isArray(parts.raw), 'Must use a retort tagged template');
     assert.ok(values.every(value => typeof value === 'string'), 'No undefined or object interpolation');
@@ -32,12 +33,15 @@ const choices = { directions: { east: { template: 'dead_grove', hint: 'Pale bran
   north: { template: 'byzantine_basilica', hint: 'Its mosaics turn remembered promises into colors, not a new quest.' } } };
 
 test('one optional tagged call retains model creativity and returns only canonical metadata', async () => {
-  const { $, calls } = assistant(`\`\`\`json\n${JSON.stringify(choices)}\n\`\`\``);
+  const { $, calls } = assistant(choices);
   const plan = await chooseEnvironmentIntents($, input());
   assert.equal(plan.version, 1);
   assert.equal(plan.status, 'planned');
   assert.equal(calls.prompts.length, 1);
-  assert.deepEqual(calls.generations, [{ maxTokens: 600 }]);
+  assert.equal(calls.generations.length, 1);
+  assert.equal(calls.generations[0].maxTokens, 600);
+  assert.equal(calls.generations[0].strictParameters, true);
+  assert.ok(calls.generations[0].parameters.directions.type.east.type.template.enum.includes('cavern'));
   assert.equal($.model, 'unchanged-model');
   assert.equal($.temperature, 0.7);
   assert.equal(plan.intents.east.narrativeHint, choices.directions.east.hint);
@@ -111,7 +115,7 @@ test('quest and boss prompt inputs are bounded and no full room database is tran
   assert.equal(context.nextBossMetadata.length, 250);
   assert.ok(!prompt.includes('DO_NOT_TRANSMIT_DB'));
   assert.ok(!prompt.includes('Private unrelated lore'));
-  assert.ok(prompt.length < 11000);
+  assert.ok(prompt.length < 18000, `Expanded physical catalog is bounded (${prompt.length} characters).`);
   assert.equal(plan.protected.currentQuest, source.currentQuest);
   assert.equal(plan.protected.nextBossRoom, source.nextBossRoom);
 });

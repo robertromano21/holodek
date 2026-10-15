@@ -20,6 +20,8 @@ function snapshot(state) {
     nextBoss: line('Next Boss'), bossRoom: line('Next Boss Room'), bossCoordinates: line('Boss Room Coordinates'), artifact: line('Next Artifact'),
     progress: line('Quests Achieved'), questLog: structuredClone(state.getQuestLog?.() || []),
     localMissions: Object.entries(db).flatMap(([key, room]) => Object.values(room?.minorMissions || {}).map(m => ({ ...m, roomKey: key, roomName: room.name }))),
+    fortifiedSites: Object.values(db).filter(r => r?.fortifiedSite).map(r => ({ ...r.fortifiedSite,
+      floors: r.fortifiedSite.rooms.map(key => ({ coordinates: key, name: db[key]?.name, plan: db[key]?.fortifiedFloor, exits: db[key]?.exits })) })),
     regional: root.regionalAdventure && { ...root.regionalAdventure, sites: (root.regionalAdventure.rooms || []).map(key => {
       const room = db[key] || {};
       return { coordinates: key, name: room.name, description: room.description, setting: room.campaignSetting,
@@ -43,6 +45,7 @@ function createLogger({ directory = defaultDirectory, files = fs, now = () => ne
     if (changed('atlas', data.atlas)) sections.push('CAMPAIGN GEOGRAPHY AND FACTIONS\n' + pretty(data.atlas));
     if (changed('attempt', data.attempt)) sections.push('FIRST CONNECTED ADVENTURE GENERATION\n' + pretty(data.attempt));
     if (changed('regional', data.regional)) sections.push('FIRST CONNECTED ADVENTURE: ACCEPTED ROOM PLAN\n' + pretty(data.regional));
+    for (const site of data.fortifiedSites) if (changed('fortified:' + site.id, site)) sections.push('MULTI-STOREY SITE: ACCEPTED ROOM AND STAIR PLAN\n' + pretty(site));
     for (const task of data.tasks) {
       const id = task.id || task.story?.id || digest([data.quest, task.type, task.desc]);
       if (!changed('task:' + id, task)) continue;

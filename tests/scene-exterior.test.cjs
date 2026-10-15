@@ -473,6 +473,24 @@ async function withExteriorLab(run) {
   }
 }
 
+test('temple patron standards, reliefs and altars use distinct rendered sprites, including the two moon deities', async () => {
+  await withExteriorLab((_lab, graphics, dir) => {
+    const sprites = new Set();
+    for (const patron of ['Mortacia', 'Arithus', 'Dantuea', 'Dyanetzia', 'Atinus', 'Sylanos', 'Syluria']) {
+      const input = { indoor: true, wallMaterial: 'stone', floorMaterial: 'stone', source: {},
+        worldContext: { fortifiedFloor: { version: 1, patron } } };
+      require('../retort/fortifiedDecor').prepare(input);
+      const d = room(); graphics.applySceneGraphics(d, input, { geoKey: patron, customTiles: [] });
+      const tile = Object.values(d.tiles).find(t => t.spriteSpec?.voxelShape === 'patron_standard');
+      assert.equal(tile.spriteSpec.shrine.deity, patron);
+      assert.equal(tile.spriteSpec.inscription.motif, patron);
+      const file = path.join(dir, path.basename(tile.url));
+      sprites.add(fs.readFileSync(file).toString('base64'));
+    }
+    assert.equal(sprites.size, 7);
+  });
+});
+
 test('the selectable outdoor lab builds two known destinations with real graphics and walkable physical entrances/perimeters', async () => {
   await withExteriorLab(({ buildEnvironmentLab }, graphics, dir) => {
     const d = buildEnvironmentLab('exteriors'), reset = buildEnvironmentLab('exteriors');
@@ -596,6 +614,7 @@ test('both actual production exterior call sites run against real compilers and 
       applyLevelSpecToScene(sceneSpec, deriveLevelSpecFromText(input));
       const trace = (name, fn) => (...args) => { calls.push(name); return fn(...args); };
       const context = { sceneSpec, dungeon, geoKey: '0,-1,0', process: { env: {} },
+        require: name => require('../retort/' + name.replace(/^\.\//, '')),
         sharedState: { getDungeonRunId: () => 'production-exterior-test' },
         [preparations[i][1]]: JSON.stringify(db), LivingEnvironments: Living,
         prepareSceneGeography: trace('prepare-geography', geography.prepareSceneGeography),

@@ -2,6 +2,7 @@
 
 const { random } = require('./dungeonGeneration');
 const { makeNavigation, reachable } = require('./sceneArchitecture');
+const { isNaturalUnderground } = require('./undergroundEnvironments');
 const ROLES = new Set(['entrance', 'hall', 'chapel', 'sanctum', 'shrine', 'rotunda', 'courtyard', 'chamber', 'gallery', 'crypt', 'keep']);
 const ROOFS = new Set(['stone', 'barrel', 'groin', 'ribbed', 'fan', 'timber', 'hammerbeam', 'boarded', 'coffered', 'gold-coffered', 'pendentive', 'squinch', 'domed', 'pitched']);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -15,6 +16,9 @@ function build(dungeon, plan = {}, base = {}) {
   const rng = random(`${dungeon.generation?.seed || dungeon.blueprint?.seed || 'indoor'}:blueprint`);
   const floor = finite(base.floor, 0), clearance = clamp(finite(base.ceil, 2.5), 2, 14);
   const cells = dungeon.cells;
+  const architecture = base.architecture || dungeon.sceneSpec?.architecture;
+  const underground = isNaturalUnderground({ indoor: true, architecture, biome: dungeon.classification?.biome });
+  const defaultShape = underground && architecture !== 'mine' ? 'irregular' : 'hall';
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) cells[`${x},${y}`] = {
     tile: 'wall', feature: null, floorHeight: floor, ceilHeight: floor + clearance
   };
@@ -27,6 +31,7 @@ function build(dungeon, plan = {}, base = {}) {
     rooms.push({ x: clamp(Math.floor(r.x * (width - 1)), 1, width - w - 1),
       y: clamp(Math.floor(r.y * (height - 1)), 1, height - h - 1), w, h,
       role: ROLES.has(r.role) ? r.role : 'chamber',
+      shape: ['hall', 'round', 'irregular'].includes(r.shape) ? r.shape : defaultShape,
       ...(ROOFS.has(r.roofStyle) ? { roofStyle: r.roofStyle } : {}),
       ...(['doric', 'ionic', 'corinthian'].includes(r.columnOrder) ? { columnOrder: r.columnOrder } : {}),
       floor: floor + clamp(finite(r.floor, finite(levels[rooms.length % (levels.length || 1)], 0)), -8, 12),
@@ -42,17 +47,24 @@ function build(dungeon, plan = {}, base = {}) {
         clamp(dungeon.start.x - Math.floor(w / 2), 1, width - w - 1),
       y: rooms.length ? 1 + Math.floor(rng() * (height - h - 2)) :
         clamp(dungeon.start.y - Math.floor(h / 2), 1, height - h - 1), w, h,
-      role: rooms.length ? 'chamber' : 'entrance', clearance,
+      role: rooms.length ? 'chamber' : 'entrance', shape: defaultShape, clearance,
       floor: floor + finite(levels[rooms.length % (levels.length || 1)], rooms.length ? Math.floor(rng() * 5) * 0.5 - 1 : 0) };
       if (rooms.some(a => r.x <= a.x + a.w && r.x + r.w >= a.x && r.y <= a.y + a.h && r.y + r.h >= a.y)) continue;
       rooms.push(r);
     }
   }
-  for (const r of rooms) for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) {
-    Object.assign(cells[`${x},${y}`], { tile: 'floor', floorHeight: r.floor, ceilHeight: r.floor + r.clearance });
+  for (const r of rooms) {
+    if ((underground || base.coveredStorey) && r.role === 'courtyard') r.role = 'chamber';
+    const phase = r.shape === 'irregular' ? rng() * Math.PI * 2 : 0;
+    for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) {
+      const dx = (x + .5 - r.x - r.w / 2) / (r.w / 2), dy = (y + .5 - r.y - r.h / 2) / (r.h / 2);
+      const edge = r.shape === 'irregular' ? .88 + .08 * Math.sin(Math.atan2(dy, dx) * 5 + phase) : 1;
+      if (r.shape !== 'hall' && Math.hypot(dx, dy) > edge) continue;
+      Object.assign(cells[`${x},${y}`], { tile: 'floor', floorHeight: r.floor, ceilHeight: r.floor + r.clearance });
+    }
   }
   const entrance = rooms.find(r => r.role === 'entrance') || rooms.find(r => inside(r, dungeon.start)) || rooms[0];
-  if (!rooms.some(r => inside(r, dungeon.start))) dungeon.start = center(entrance);
+  if (!rooms.some(r => inside(r, dungeon.start)) || cells[`${dungeon.start.x},${dungeon.start.y}`]?.tile !== 'floor') dungeon.start = center(entrance);
   const corridors = [];
   const endpoint = (value, index) => {
     if (Number.isInteger(index) && rooms[index]) return center(rooms[index]);

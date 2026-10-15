@@ -115,6 +115,7 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   };
   const sync = name => async (_agent, _coords, _db, text) => { state.synchronizers.push(name); return text; };
   const dependencies = { console: quiet, sharedState, PuzzleRewards, QuestDeliverySuccessors, Inhabitants, ...progress, ...bossGate, ...actualRoomHelpers,
+    FortifiedSites: require('../retort/fortifiedSites'), snapshotQuestContext: require('../retort/worldContext').snapshotQuestContext,
     Divinity: require('../retort/divineEncounters'), Pantheon: require('../assets/pantheonCharacters'), GeneratedNames: require('../retort/generatedNames'),
     QuestScenes: stories ? require('../retort/questScenes') : undefined,
     QuestWritings: stories ? require('../assets/questWritings') : undefined,
@@ -192,7 +193,7 @@ test('real quest manager seeds the first LLM regional adventure while retaining 
   assert.ok(!h.state.prompts.some(p=>/How many required elements/.test(p)));
 });
 test('real quest manager falls through to the unchanged generator after a rejected regional proposal',async()=>{
-  const h=regionalHarness();await h.turn({responses:['not JSON',{count:0}]});
+  const h=regionalHarness();await h.turn({responses:['not JSON','still not JSON',{count:0}]});
   assert.equal(h.state.tasks.length,0);assert.equal(h.db()['0,0,0'].regionalAdventure,undefined);
   assert.ok(h.state.prompts.some(p=>/How many required elements/.test(p)));
   assert.equal(h.db()[BOSS_KEY].bossGate.keySeeded,false);
@@ -256,6 +257,19 @@ test('second room still generates the original artifact boss and quest once the 
   assert.deepEqual(h.state.tasks, []);
   assert.equal(h.state.index, 0);
   assert.equal(h.state.seeded, false);
+});
+
+test('quest generation can bind an existing upper temple room without renaming it or minting its key', async () => {
+  const db = database();
+  db['6,6,0'] = { name: 'Temple Upper Sanctuary', indoor: true, exits: { down: { status: 'open', targetCoordinates: '6,6,-1' } },
+    objects: [], fortifiedFloor: { version: 1, level: 1, bossEligible: true, purpose: 'Upper sanctuary' }, complexId: 'temple-site' };
+  const h = harness({ db, text: consoleText({ roomKey: '0,1,0', 'Current Quest': 'None', 'Next Artifact': 'None', 'Rooms Visited': '2' }),
+    quest: 'None', tasks: [], seeded: false });
+  await h.generate(['Test Chalice', 'Test Guardian', 'Retrieve the Test Chalice from the temple.']);
+  assert.match(h.state.text, /^Next Boss Room: Temple Upper Sanctuary$/m);
+  assert.match(h.state.text, /^Boss Room Coordinates: X: 6, Y: 6, Z: 0$/m);
+  assert.deepEqual(h.db(), db);
+  assert.equal(h.state.requests.length, 3);
 });
 
 test('quest generation retains its original visited and artifact guards outside the entrance', async () => {

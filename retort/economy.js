@@ -580,7 +580,8 @@ function preserve(oldJSON, incomingJSON, options = {}) {
   const raidRooms = new Set(Object.values(old).flatMap(r => Object.values(r?.minorMissions || {}))
     .filter(m => m.type === 'raid').map(m => m.sourceRoomKey));
   const fields = ['economy', 'services', 'minorMissions', 'economySeeded', 'groundInventoryVersion', 'campaignSetting', 'campaignAtlas', 'itemTransfers', 'divineCourt', 'divineVisitChecked', 'templeSuppression', 'spellSystem', 'questFailures',
-    'factionMemory', 'adventureJournal', 'regionalAdventure', 'regionalAdventureAttempt', 'regionalSite', 'questStories', 'questScenes', 'combatLife'];
+    'factionMemory', 'adventureJournal', 'regionalAdventure', 'regionalAdventureAttempt', 'regionalSite', 'questStories', 'questScenes', 'combatLife',
+    'fortifiedSite', 'fortifiedFloor', 'fortifiedApproaches', 'fortifiedSiteScan'];
   for (const [key, room] of Object.entries(next)) {
     if (!room || typeof room !== 'object') continue;
     if (!options.trustedNewFields) {
@@ -592,13 +593,20 @@ function preserve(oldJSON, incomingJSON, options = {}) {
   }
   for (const [key, room] of Object.entries(old)) {
     if (!room) continue;
-    if (!next[key] && (key === '0,0,0' || room.groundInventoryVersion === 1 || room.services || room.minorMissions || room.templeSuppression || room.regionalSite || room.questStories || raidRooms.has(key) || room.objects?.some(o => o.currency_kind || o.minor_mission_id) ||
+    if (!next[key] && (key === '0,0,0' || room.fortifiedFloor || room.fortifiedApproaches || room.groundInventoryVersion === 1 || room.services || room.minorMissions || room.templeSuppression || room.regionalSite || room.questStories || raidRooms.has(key) || room.objects?.some(o => o.currency_kind || o.minor_mission_id) ||
         Object.values(room.inhabitants?.actors || {}).some(a => a.deityId))) next[key] = room;
     if (!next[key]) continue;
     for (const field of fields)
       if (room[field] !== undefined) next[key][field] = room[field];
     if (room.regionalSite) {
       for (const field of ['name', 'exits', 'environmentIntent', 'campaignSetting', 'indoor']) next[key][field] = room[field];
+    }
+    if (room.fortifiedFloor && !options.trustedNewFields) {
+      for (const field of ['name', 'exits', 'environmentIntent', 'indoor', 'isIndoor', 'isOutdoor', 'classification', 'complexId']) next[key][field] = room[field];
+    }
+    if (room.fortifiedApproaches && !options.trustedNewFields) {
+      next[key].exits ||= {};
+      for (const a of room.fortifiedApproaches) next[key].exits[a.direction] = room.exits[a.direction];
     }
     if (room.inscriptions?.some(r => r.questStoryId)) next[key].inscriptions = [
       ...(next[key].inscriptions || []).filter(r => !r.questStoryId), ...room.inscriptions.filter(r => r.questStoryId)];

@@ -3,6 +3,7 @@
 const { makeNavigation, reachable, chooseArchitecture, complexDimensions } = require('./sceneArchitecture');
 const { planIndoorRoofs, whollyRoofless, inside } = require('./indoorRoofPlan');
 const { random } = require('./dungeonGeneration');
+const { isNaturalUnderground } = require('./undergroundEnvironments');
 const VERSION = 6;
 
 function unsupportedWallRoofCorners(zone, supportKeys, cells) {
@@ -102,6 +103,7 @@ function shrineSites(dungeon, nav, connected, count, footprint, occupied, kind =
 }
 
 function architecturalStyle(spec = {}) {
+  if (spec.worldContext?.fortifiedFloor?.version === 1 && !spec.worldContext.fortifiedFloor.patron) return 'medieval';
   const text = `${spec.source?.roomName || ''} ${spec.source?.description || ''}`.toLowerCase();
   if (/byzantine|hagia sophia|pendentive|squinch/.test(text)) return 'byzantine';
   if (/romanesque/.test(text)) return 'romanesque';
@@ -151,6 +153,10 @@ function applySceneRoofs(dungeon, spec = {}) {
     return { status: 'skipped', reason: 'no-architecture' };
   }
   if (dungeon.sceneRoof?.version === VERSION) return dungeon.sceneRoof;
+  if (isNaturalUnderground({ ...spec, indoor: spec.indoor ?? dungeon.classification?.indoor,
+    biome: spec.biome || dungeon.classification?.biome })) {
+    return (dungeon.sceneRoof = require('./undergroundRoofs').build(dungeon, spec, VERSION));
+  }
   const idiom = architecturalStyle(spec), order = columnOrder(spec);
   const text = `${spec.source?.roomName || ''} ${spec.source?.description || ''}`;
   const explicitlyRoofless = whollyRoofless(spec);

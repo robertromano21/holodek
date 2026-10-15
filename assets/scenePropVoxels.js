@@ -33,15 +33,23 @@
     toadstool_ring: naturalProp('mushroom', 'moss', .9, [.25, .5], ['forest', 'wetland'], true, ['#a27556', '#e7d9b3']),
     fumarole_vent: naturalProp('boulder', 'obsidian', .9, [.35, .7], ['volcanic'], false, ['#4d5050', '#91836b']),
     mineral_cone: naturalProp('stalagmite', 'stone', .8, [.8, 1.5], ['volcanic'], false, ['#c4ad80', '#eee0b8']),
-    basalt_columns: naturalProp('boulder', 'obsidian', .95, [1, 1.8], ['volcanic'], false, ['#464c50', '#727b7f']),
-    lava_spatter: naturalProp('rubble', 'obsidian', .9, [.45, .8], ['volcanic'], false, ['#4d3d35', '#967050']),
+    basalt_columns: naturalProp('boulder', 'obsidian', .95, [1, 1.8], ['volcanic', 'lava_tube'], false, ['#464c50', '#727b7f']),
+    lava_spatter: naturalProp('rubble', 'obsidian', .9, [.45, .8], ['volcanic', 'lava_tube'], false, ['#4d3d35', '#967050']),
     sulfur_crust: naturalProp('rubble', 'stone', .95, [.15, .3], ['volcanic'], false, ['#b4a14a', '#e4d374']),
-    ice_spires: naturalProp('crystal_cluster', 'ice', .8, [.9, 1.7], ['icy'], false, ['#78b3c7', '#d6f0f3']),
+    ice_spires: naturalProp('crystal_cluster', 'ice', .8, [.9, 1.7], ['icy', 'ice_cave'], false, ['#78b3c7', '#d6f0f3']),
     ice_arch: naturalProp('archway', 'ice', .95, [.8, 1.5], ['icy'], false, ['#92c9d9', '#e2f6f7']),
     pressure_ridge: naturalProp('rubble', 'ice', .95, [.45, .9], ['icy'], false, ['#95b9c4', '#ecf6f4']),
     glacial_erratic: naturalProp('boulder', 'stone', .9, [.55, 1], ['icy', 'badlands'], false, ['#7c8e93', '#c1cbd0']),
     driftwood_tangle: naturalProp('vines', 'wood', .95, [.25, .55], ['wetland', 'forest'], true, ['#7d7c68', '#b8b498']),
-    reed_tussock: naturalProp('ash_flora', 'wood', .75, [.5, .9], ['wetland', 'forest'], true, ['#707b46', '#b7b17a'])
+    reed_tussock: naturalProp('ash_flora', 'wood', .75, [.5, .9], ['wetland', 'forest'], true, ['#707b46', '#b7b17a']),
+    cave_stalagmites: naturalProp('stalagmite', 'stone', .85, [.8, 1.6], ['cavern', 'crystal_cavern'], false, ['#8e8577', '#c9bd9e']),
+    flowstone_cascade: naturalProp('boulder', 'stone', .95, [.6, 1.3], ['cavern', 'fungal_cavern', 'underground_river'], false, ['#8b8472', '#c3b899']),
+    ore_outcrop: naturalProp('boulder', 'stone', .9, [.5, 1.1], ['mine'], false, ['#655f58', '#b99a62']),
+    mine_brace: naturalProp('gate', 'wood', .95, [1.6, 2.2], ['mine'], false, ['#70523c', '#ad8e65']),
+    cave_mushrooms: naturalProp('mushroom', 'moss', .85, [.5, 1.2], ['fungal_cavern'], true, ['#6a7f76', '#bdc7a1']),
+    quartz_fan: naturalProp('crystal_cluster', 'crystal', .9, [.7, 1.4], ['crystal_cavern'], false, ['#899da8', '#dae8e5']),
+    river_boulders: naturalProp('boulder', 'stone', .95, [.25, .65], ['underground_river'], false, ['#667478', '#a2b0a8']),
+    burial_niches: naturalProp('tomb', 'stone', .95, [1.1, 1.8], ['crypt'], false, ['#797268', '#b4ab92'])
   });
   const biomeShapes = Object.freeze(Object.keys(biomeProps));
   const architecture = {
@@ -84,6 +92,11 @@
     ribbed_vault: { drawer: 'archway', material: 'stone', heightRatio: 1, baseWidth: 1 },
     timber_truss: { drawer: 'archway', material: 'wood', heightRatio: 1, baseWidth: 1 },
     coffered_slab: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
+    rock_ceiling: { drawer: 'altar', material: 'stone', heightRatio: 1, baseWidth: 1 },
+    patron_standard: { drawer: 'banner', material: 'wood', heightRatio: 1, baseWidth: .75 },
+    patron_relief: { drawer: 'stone_tablet', material: 'stone', heightRatio: .85, baseWidth: .9 },
+    patron_standard_side: { drawer: 'banner', material: 'wood', heightRatio: 1, baseWidth: .75 },
+    patron_relief_side: { drawer: 'stone_tablet', material: 'stone', heightRatio: .85, baseWidth: .9 },
     barrel_vault_shell: { drawer: 'archway', material: 'stone', heightRatio: 1, baseWidth: 1 },
     pointed_vault_shell: { drawer: 'archway', material: 'stone', heightRatio: 1, baseWidth: 1 },
     pitched_roof_shell: { drawer: 'archway', material: 'wood', heightRatio: 1, baseWidth: 1 },
@@ -207,7 +220,7 @@
       }
       return rotated;
     }
-    if (shape === 'pediment_side' || shape === 'timber_gate_side' || shape === 'grand_gate_side') {
+    if (shape === 'pediment_side' || shape === 'timber_gate_side' || shape === 'grand_gate_side' || shape === 'patron_standard_side' || shape === 'patron_relief_side') {
       const source = build(shape.slice(0, -5), size, seed, appearance), rotated = new Uint8Array(source.length);
       for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         rotated[(size - 1 - y) + x * size + z * size * size] = source[x + y * size + z * size * size];
@@ -492,6 +505,26 @@
       box(0, 0, 0.7, 1, 1, 1);
       for (let x = 0; x < 1; x += 0.125) box(x, 0, 0.32, x + 0.09, 1, 0.7);
       for (const y of [0.1, 0.8]) box(0, y, 0, 1, y + 0.1, 0.32);
+    } else if (shape === 'patron_standard' || shape === 'patron_relief') {
+      const standard = shape === 'patron_standard';
+      box(.15, .15, 0, .85, .85, .08);
+      if (standard) { box(.46,.46,.08,.54,.54,1); box(.1,.42,.9,.9,.58,.98); }
+      else box(.17,.3,.08,.83,.7,.22);
+      const bottom = standard ? .34 : .24, top = .88;
+      box(.12,.44,bottom,.88,.56,top);
+      const glyph = iconography?.bitmap(appearance.shrine?.deity || appearance.inscription?.motif || 'Mortacia');
+      if (glyph) glyph.forEach((row, y) => [...row].forEach((bit, x) => {
+        if (bit !== '1') return;
+        const x0 = .18 + x / glyph.length * .64, z0 = top - .04 - (y + 1) / glyph.length * (top - bottom - .08);
+        box(x0,.38,z0,x0+.64/glyph.length,.44,z0+(top-bottom-.08)/glyph.length);
+        box(x0,.56,z0,x0+.64/glyph.length,.62,z0+(top-bottom-.08)/glyph.length);
+      }));
+    } else if (shape === 'rock_ceiling') {
+      box(0, 0, .45, 1, 1, 1);
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+        const low = ((x * 7 + y * 11) % 5) * .07;
+        box(x / 4, y / 4, low, (x + 1) / 4, (y + 1) / 4, .45);
+      }
     } else if (shape === 'coffered_slab' || shape === 'gold_coffered_slab') {
       box(0, 0, 0.65, 1, 1, 1);
       for (let i = 0; i < 4; i++) {
@@ -809,7 +842,54 @@
         return distance <= radius && distance >= inner;
       });
     };
-    if (shape === 'eroded_hoodoo') {
+    if (shape === 'cave_stalagmites') {
+      for (const [x, y, h] of [[.3, .34, .65], [.6, .58, 1], [.72, .24, .43]])
+        cone(x, y, 0, h - rnd() * .1, .16 + rnd() * .04, .018);
+    } else if (shape === 'flowstone_cascade') {
+      for (let i = 0; i < 6; i++) {
+        const x = .1 + i * .14, h = .5 + Math.sin(i + phase) * .17 + rnd() * .2;
+        cone(x, .5 + Math.sin(i * 2 + phase) * .08, 0, h, .14, .07);
+        ellipsoid(x, .5, h, .14, .16, .1);
+      }
+    } else if (shape === 'ore_outcrop') {
+      ellipsoid(.48, .5, .25, .4, .37, .29);
+      for (let i = 0; i < 8; i++) {
+        const a = i * GOLDEN_ANGLE + phase;
+        cone(.5 + Math.cos(a) * .24, .5 + Math.sin(a) * .24, .17, .5 + rnd() * .42, .11, .06, 0, true);
+      }
+    } else if (shape === 'mine_brace') {
+      const top = .72 + rnd() * .18, depth = .24 + rnd() * .12;
+      box(.05, depth, 0, .2, .74, top); box(.8, depth, 0, .95, .74, top);
+      box(0, depth - .04, top, 1, .8, top + .1);
+      curve([.16, .48, top - .27], [.23, .48, top - .12], [.4, .48, top], .055, .055);
+      curve([.84, .48, top - .27], [.77, .48, top - .12], [.6, .48, top], .055, .055);
+    } else if (shape === 'cave_mushrooms') {
+      for (let i = 0; i < 5; i++) {
+        const a = i * GOLDEN_ANGLE + phase, x = .5 + Math.cos(a) * .25, y = .5 + Math.sin(a) * .25;
+        const h = .3 + rnd() * .48;
+        box(x - .035, y - .035, 0, x + .035, y + .035, h);
+        ellipsoid(x, y, h, .17, .16, .075 + rnd() * .045);
+      }
+    } else if (shape === 'quartz_fan') {
+      for (let i = 0; i < 6; i++) {
+        const a = i * GOLDEN_ANGLE + phase, x = .5 + Math.cos(a) * .22, y = .5 + Math.sin(a) * .22;
+        const h = .4 + rnd() * .5;
+        cone(x, y, 0, h * .75, .11, .09, 0, true);
+        cone(x + lean * .75, y, h * .75, h, .1, .005, 0, true);
+      }
+    } else if (shape === 'river_boulders') {
+      for (let i = 0; i < 6; i++) {
+        const a = i * GOLDEN_ANGLE + phase, r = .12 + rnd() * .06;
+        ellipsoid(.5 + Math.cos(a) * .25, .5 + Math.sin(a) * .25, r * .6, r, r * .83, r * .75);
+      }
+    } else if (shape === 'burial_niches') {
+      const front = .14 + rnd() * .12;
+      box(0, .875, 0, 1, 1, .9375);
+      for (const x of [0, .4375, .9375]) box(x, front, 0, x + .0625, 1, .9375);
+      for (const z of [0, .4375, .875]) box(0, .125, z, 1, 1, z + .0625);
+      for (const z of [.17, .61]) for (const x of [.26, .68])
+        ellipsoid(x + (rnd() - .5) * .1, .46 + rnd() * .15, z + rnd() * .07, .06 + rnd() * .035, .09, .07);
+    } else if (shape === 'eroded_hoodoo') {
       cone(.5, .5, 0, .22, .32, .21);
       cone(.5, .5, .18, .8, .16, .09);
       ellipsoid(.5 + lean, .5, .86, .29 + rnd() * .05, .26, .14);
@@ -932,9 +1012,15 @@
   }
 
   function color(shape, x, y, z, normal, base, material, options = {}) {
+    if (shape === 'patron_standard_side' || shape === 'patron_relief_side')
+      return color(shape.slice(0, -5), y, 1 - x, z, [normal[1], -normal[0], normal[2]], base, material, options);
     const textures = options.textures !== false;
     const h = textures ? Math.abs(Math.sin(x * 12.9898 + y * 78.233 + z * 37.719)) : 0.5;
     const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
+    if (shape === 'patron_standard' || shape === 'patron_relief') {
+      const deity = iconography.name(options.shrine?.deity || options.inscription?.motif || 'Mortacia');
+      if (deity && z > .25 && (y < .44 || y > .56)) return rgb(iconography.pantheon[deity].color);
+    }
     if(shape==='candelabra'||sculptures.altarTypes.includes(shape)||shape.startsWith('puzzle_altar')){
       for(const site of candleSites(shape,options.shrine))if(Math.abs(x-site.x)<.07&&Math.abs(y-site.y)<.07&&z>site.z-.24)
         return z>site.z-.075?rgb('#ffce64'):rgb('#eee0bd');

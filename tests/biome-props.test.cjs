@@ -60,8 +60,8 @@ function checkConservation(d, prior, report) {
   assert.equal(changed, report.placed);
 }
 
-test('22 catalog entries expose bounded natural geometry metadata and stable selection', () => {
-  assert.equal(V.biomeShapes.length, 22);
+test('30 outdoor and underground catalog entries expose bounded geometry metadata and stable selection', () => {
+  assert.equal(V.biomeShapes.length, 30);
   assert.equal(biomeProps, V.biomeProps);
   assert.ok(Object.isFrozen(biomeProps));
   for (const shape of V.biomeShapes) {
@@ -346,7 +346,7 @@ test('placement, cluster and tile budgets stay capped even with oversized plan v
 test('navigation rejection rolls back staged cells and custom meshes as one batch', () => {
   const source = fs.readFileSync(require.resolve('../retort/sceneBiomeProps'), 'utf8');
   let calls = 0;
-  const context = { module: { exports: {} }, require: name => name.includes('scenePropVoxels') ? V : {
+  const context = { module: { exports: {} }, require: name => name.includes('scenePropVoxels') ? V : name.includes('undergroundEnvironments') ? require('../retort/undergroundEnvironments') : {
     makeNavigation, reachable: (nav, start) => {
       const result = reachable(nav, start);
       if (++calls === 2) result.count--;

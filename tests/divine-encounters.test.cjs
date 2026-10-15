@@ -233,7 +233,7 @@ test('room-spawn biographies develop only narrative fields through the existing 
   const $ = { user: async (parts, ...values) => messages.push(Array.isArray(parts) ? parts.reduce((s, part, i) => s + part + (values[i] ?? ''), '') : parts), assistant: { generation: async () => {
     requests++; return { content: JSON.stringify({ deities: [{ name: 'Atinus', history, personality: 'Exacting, impatient with cheap bravery.',
       voice: 'Short battlefield questions.', motivation: 'Test whether Suzerain protects those who cannot fight.',
-      dialogue: ['Duty has brought you far. What has it cost?', 'An old captain taught me to distrust easy victories.'],
+      dialogue: ['Duty has brought you far. What has it cost?', 'An old captain taught me to distrust easy victories.', 'Who will guard the wounded while you advance?'],
       hp: 1, allegiance: 'Friendly', inventory: [{ name: 'free boss key' }] }] }) };
   } } };
   const hp = f.db()[f.key].inhabitants.actors.Atinus.hp;

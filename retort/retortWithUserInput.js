@@ -95,6 +95,7 @@ const ItemTransfer = require('./itemTransfer');
 const QuestDeliverySuccessors = require('./questDeliverySuccessors');
 const CampaignMemory = require('./campaignMemory');
 const CampaignSetting = require('./campaignSetting');
+const FortifiedSites = require('./fortifiedSites');
 const Economy = require('./economy');
 const SpellSystem = require('./spellSystem');
 const CombatLife = require('./combatLife');
@@ -3640,6 +3641,7 @@ Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
   This campaign's room seed: ${generation?.seed || 'unspecified'}.
   Room description (the layout must realize this): ${roomDescription || 'unspecified'}.
   Architectural family: ${sceneSpec?.architecture || 'choose from the description'}.
+  Storey plan: ${sceneSpec?.worldContext?.fortifiedFloor ? JSON.stringify(sceneSpec.worldContext.fortifiedFloor) + '. Build only this storey, not the entire building again. Reserve separate unobstructed 3-by-16-tile stair wings for each declared up/down exit, connected to the entrance. If an upper storey exists, no roofless courtyard: its floor is the ceiling above this room. Preserve the patron and practical purpose.' : 'Ordinary room; no multi-storey override.'}
   Planned physical features: ${sceneSpec?.level?.layoutFeatures?.join('; ') || 'invent a fitting arrangement'}.
   Planned scenery: ${(sceneSpec?.landmarks || []).map(l => `${l.count || 1}x ${l.type} (${l.placement || 'scattered'})`).join('; ') || 'choose fitting physical scenery'}.
   Declared exits: ${(sceneSpec?.exits || []).map(e => typeof e === 'string' ? e : e.direction).join(', ') || 'not specified'}.
@@ -3653,7 +3655,7 @@ Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
   ${JSON.stringify(classification?.indoor === true ? {
     seed: 'campaign seed', base: { floor: 0, ceil: 5 },
     indoorPlan: { roomCount: '6-12', rooms: [{ x: '0..1', y: '0..1', w: '0..1', h: '0..1',
-      role: 'entrance|hall|chapel|sanctum|shrine|rotunda|courtyard|chamber|gallery|crypt|keep', clearance: '3..9',
+      role: 'entrance|hall|chapel|sanctum|shrine|rotunda|courtyard|chamber|gallery|crypt|keep', shape: 'hall|round|irregular', clearance: '3..9',
       roofStyle: 'barrel|groin|ribbed|fan|coffered|timber|hammerbeam|boarded|gold-coffered|pendentive|squinch|domed', columnOrder: 'doric|ionic|corinthian' }],
       heightLevels: [0, .5, -.5], corridors: [{ fromRoom: 'room index', toRoom: 'room index', style: 'L|H|V', width: '2..4 tiles' }],
       modules: [{ type: 'template or section type from toolbox', room: 'room index', x: '0..1 within room', y: '0..1 within room', width: 'grid tiles', height: 'grid tiles' }] },
@@ -3672,6 +3674,12 @@ Rules:
     distinct scenery clusters along paths and exit approaches, about 25-45 tiles apart. Do not put all content north of spawn.
   - Schema coordinates are field descriptions, not preset placements. Invent new coordinates and compositions for this campaign.
   - Indoor: include "indoorPlan" and use it to decide room sizes/positions/heights/corridors.
+  - UNDERGROUND: caverns, mines, ice caves and volcanic lava tubes use covered indoor plans, NOT surface terrain.
+    Natural caves use shape=irregular or round chambers with branching passages; mines use worked hall-shaped galleries,
+    timber supports, ore seams and side workings. Lava tubes have cooled basalt walking shelves beside any molten pools.
+    Underground rivers retain continuous dry bank paths. Crypts/catacombs use burial chambers and vaulted caretaker routes.
+    Natural underground interiors do NOT require classical modules, shrines, rotundas, sky courts or column orders;
+    omit those unless actual constructed ruins are described. Keep chambers, corridors and stairs connected, with no stacked floors.
   - Use the campaign room seed to invent a fresh arrangement, not a stock layout associated with the room name.
   - You own the indoor layout. Design 6-12 connected spaces with distinct sizes, offset wings, bends, branching corridors and optional loops, drawn from the description.
   - Include an entrance room. Do not reduce every building to one rectangular great hall or repeated symmetrical template.
@@ -3680,7 +3688,7 @@ Rules:
     routes: for example portico -> vestibule -> bent corridor -> sky court -> vaulted gallery -> raised sanctuary.
     Invent a different sequence for this room; this example is not a mandatory layout. Use monumental axes where justified,
     but break symmetry with ruined wings, crypt passages and side chapels. Avoid another identical great hall.
-  - Choose 1-3 fitting architectural set pieces and build the level around them with smaller connecting spaces and loops.
+  - In constructed interiors, choose 1-3 fitting architectural set pieces and build the level around them with smaller connecting spaces and loops.
     A pedimented portico can lead to a domed bay; a stair landing can overlook a court; a vaulted corridor can link a keep
     to a shrine. These are modular compositions INSIDE your blueprint, not a reason to erase its chambers or corridors.
   - Give every covered bay a coherent load path: columns/piers at its span edges, capitals below entablatures, pediments
@@ -3698,7 +3706,7 @@ Rules:
   - Roof styles: stone, coffered, barrel, groin, ribbed, fan, timber, hammerbeam, boarded, gold-coffered, pendentive, squinch, domed.
     Match the description's Roman, Gothic, Byzantine or medieval idiom. Columns (doric/ionic/corinthian) and walls support the ceilings.
   - Give grand halls 5-9 tiles of clearance and side chambers 3-5. Keep rooms distinct; avoid overlaps that erase dividing walls.
-  - Include at least one fitting architectural section/module or a shrine/sanctum/rotunda room role; do not omit the toolbox.
+  - Constructed interiors include at least one fitting architectural section/module or a shrine/sanctum/rotunda room role; natural caves, mines and lava tubes are exempt.
     Template modules are local buildings INSIDE your chosen rooms, not replacements for the complex:
     temple (colonnade, pedimented sanctum, quarter-tile steps, raised sanctuary, courtyard),
     basilica (columned nave), rotunda (columned dome), bathhouse (vaulted bays and court),
@@ -3971,7 +3979,8 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   function buildIndoorFromPlan(plan) {
-    IndoorBlueprint.build(dungeon, plan, { floor: baseFloor, ceil: baseCeil });
+    IndoorBlueprint.build(dungeon, plan, { floor: baseFloor, ceil: baseCeil, architecture: sceneSpec?.architecture,
+      coveredStorey: sceneSpec?.worldContext?.fortifiedFloor?.stairs?.includes('up') });
     console.info('[IndoorLayout]', JSON.stringify({ geoKey: dungeon.geoKey || null, ...dungeon.indoorLayout }));
   }
 
@@ -4425,6 +4434,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
   LivingEnvironments.enrichSceneSpec(sceneSpec);
   prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
   prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
+  require('./fortifiedDecor').prepare(sceneSpec);
 
   const isOutdoor = classification && classification.indoor === false;
     const size = sceneSpec.generation.gridSize;
@@ -4606,6 +4616,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
 
     logDungeonConstruction('layout', dungeon);
     applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+    require('./fortifiedStairs').install(dungeon, sceneSpec);
     applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
     logDungeonConstruction('geography', dungeon);
     console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
@@ -4685,6 +4696,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
     try {
       applySceneRoofs(dungeon, sceneSpec);
+      require('./fortifiedDecor').cover(dungeon, sceneSpec);
       logDungeonConstruction('roof-structure', dungeon);
       const placement = placeSceneLandmarks(dungeon, sceneSpec);
       console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
@@ -5762,9 +5774,19 @@ async function generateMissingRoomDetails($, object) {
     };
     setRoomSafeLocal(roomNameDatabasePlain, coordKey, currentRoomData);
   } else {
-    currentRoomData.name = roomName || currentRoomData.name;
+    if (FortifiedSites.isFloor(currentRoomData)) roomName = currentRoomData.name;
+    else currentRoomData.name = roomName || currentRoomData.name;
     ensureRoomFlagsConsistent(currentRoomData);
     setRoomSafeLocal(roomNameDatabasePlain, coordKey, currentRoomData);
+  }
+  if (FortifiedSites.isFloor(currentRoomData)) {
+    updatedGameConsole = updatedGameConsole.replace(/^Room Name:.*$/m, `Room Name: ${currentRoomData.name}`);
+    const fixed = Object.keys(currentRoomData.exits);
+    roomExitsArray.splice(0, roomExitsArray.length, ...fixed);
+    existingAdjacentRooms.splice(0, existingAdjacentRooms.length, ...fixed.filter(d => roomNameDatabasePlain[currentRoomData.exits[d].targetCoordinates]?.name));
+    updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${fixed.join(', ')}`);
+    const adjacent = fixed.map(d => `${d}: ${roomNameDatabasePlain[currentRoomData.exits[d].targetCoordinates]?.name || 'None'}`).join(', ');
+    updatedGameConsole = updatedGameConsole.replace(/^Adjacent Rooms:.*$/m, `Adjacent Rooms: ${adjacent}`);
   }
 
   // Repair empty/missing classification everywhere (including boss room cases that had `{}`) :contentReference[oaicite:2]{index=2}
@@ -5945,6 +5967,8 @@ async function generateMissingRoomDetails($, object) {
 // Generate room description
 // Generate room description
     // Generate room description (only when missing)
+    const floorGuidance = FortifiedSites.describe(currentRoomData);
+    if (floorGuidance) await $.assistant`${floorGuidance}`;
     const existingIntent = describeEnvironmentIntent(currentRoomData.environmentIntent);
     if (existingIntent) await $.assistant`${existingIntent}`;
     const worldContext = buildRoomWorldContext(roomNameDatabasePlain, currentCoordinates,
@@ -6270,6 +6294,16 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       }
     }
 
+    // Post-hoc sites add real named rooms and reciprocal storeys on unused routes.
+    const siteReports = await $.run(agent => FortifiedSites.extend(agent, roomNameDatabasePlain, coordKey, {
+      ...snapshotQuestContext(sharedState, updatedGameConsole), seed: sharedState.getDungeonRunId?.() || '', description: roomDescription
+    }));
+    if (siteReports.length) console.info('[FortifiedSites]', JSON.stringify(siteReports));
+    if (currentRoomData.fortifiedApproaches?.length) {
+      roomExitsArray.splice(0, roomExitsArray.length, ...Object.keys(currentRoomData.exits));
+      updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${roomExitsArray.join(', ')}`);
+    }
+
     // Final scrub + repair + persist after all mutations
     propagateComplexIdentity(roomNameDatabasePlain, currentCoordinates);
     const bossGateReport = ensureBossGate(roomNameDatabasePlain, updatedGameConsole);
@@ -6293,6 +6327,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     persistRoomDb(roomNameDatabasePlain);
 
     // Update Adjacent Rooms string (unchanged)
+    if (siteReports.length) await require('./campaignPlanningLog').capture(sharedState, 'multi-storey sites installed');
     const adjacentRoomsString = roomExitsArray
       .map(direction => {
         const roomData = roomNameDatabasePlain[coordKey] || {};
@@ -7665,6 +7700,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             // Parse roomNameDatabaseString (assume it's available as a string in scope)
             const parsedDatabase = JSON.parse(roomNameDatabaseString);
             const existingCoords = new Set(Object.keys(parsedDatabase));
+            const siteBossRooms = finalDivineStage ? [] : FortifiedSites.bossCandidates(parsedDatabase,
+              snapshotQuestContext(sharedState, updatedGameConsole));
+            const siteBossRoom = siteBossRooms.length && Math.random() < .35 ? siteBossRooms[Math.floor(Math.random() * siteBossRooms.length)] : null;
            
             // Extract current coordinates from updatedGameConsole to ensure it's available
             const currentCoordinatesMatch = updatedGameConsole.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
@@ -7706,7 +7744,10 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             }
            
             let bossCoordinates;
-            if (candidates.length === 0) {
+            if (siteBossRoom) {
+                const [x, y, z] = siteBossRoom.coordinates.split(',').map(Number);
+                bossCoordinates = `X: ${x}, Y: ${y}, Z: ${z}`;
+            } else if (candidates.length === 0) {
                 console.error('No valid boss room coordinates found even after increasing range.');
                 bossCoordinates = 'X: 0, Y: 0, Z: 0'; // Fallback with spaces to match the validation regex
             } else {
@@ -7734,9 +7775,12 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             }
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
+            if (siteBossRoom) bossRoom = siteBossRoom.name;
+            else {
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             const generationResultBossRoom = await $.assistant.generation({ maxTokens: 40 });
             bossRoom = generationResultBossRoom.content.trim();
+            }
             if (finalDivineStage) bossRoom = 'Throne Room of Hades';
             console.log("Generated bossRoom:", bossRoom);
            
@@ -12265,6 +12309,7 @@ try {
   prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
   prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
 
+  require('./fortifiedDecor').prepare(sceneSpec);
   const isOutdoor = classification && classification.indoor === false;
   const size = sceneSpec.generation.gridSize;
 
@@ -12446,6 +12491,7 @@ try {
     }
   logDungeonConstruction('layout', dungeon);
   applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+  require('./fortifiedStairs').install(dungeon, sceneSpec);
   applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
   logDungeonConstruction('geography', dungeon);
   console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
@@ -12498,6 +12544,7 @@ try {
   // 🔴 STEP 6 — put the landmarks the text names into the room
   try {
     applySceneRoofs(dungeon, sceneSpec);
+    require('./fortifiedDecor').cover(dungeon, sceneSpec);
     logDungeonConstruction('roof-structure', dungeon);
     const placement = placeSceneLandmarks(dungeon, sceneSpec);
     console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
