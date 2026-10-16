@@ -12,6 +12,7 @@ function needsQuestIntroduction(quest, rooms, geoKey, taskIndex = 0) {
   return !Object.values(rooms || {}).some(room => room?.inhabitants?.questIntroduction?.questId === questId);
 }
 
+// Regular residents and supplemental encounters share this generation path.
 async function generateInhabitants($, { roomName, roomDescription, geoKey, indoor, campaignSetting, partyNames = [], usedNames = [], quest = '', questSeed = false, encounter = null }, rules) {
   questSeed = questSeed && geoKey !== '0,0,0' && !!String(quest).trim() && !/^none$/i.test(String(quest).trim());
   const starting = geoKey === '0,0,0';
