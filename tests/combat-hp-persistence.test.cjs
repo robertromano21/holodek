@@ -31,7 +31,7 @@ test('each hit commits PC, companion and enemy HP before the next turn and survi
     getRoomPopulation:()=>population,setRoomPopulation(){},getRoomNameDatabase:()=>db,setRoomNameDatabase:v=>db=v,
     getDungeonRunId:()=> 'run'};
   const events=[],dice={active:{id:'battle',kind:'combat',geoKey:'1,0,0'}};
-  const context={Inhabitants:I,sharedState:state,actionDice:dice,combatSpace:null,combatPopulation:population,
+  const context={Inhabitants:I,sharedState:state,actionDice:dice,combatSpace:null,combatTurnFlow:null,combatPopulation:population,
     updatedGameConsole:text,populationService:createPopulationService(state),broadcast:e=>events.push(structuredClone(e))};
   vm.runInNewContext(code,context);
   const hero={name:'Hero',type:'pc',hp:15,maxHp:23},companion={name:'Companion',type:'npc',hp:12,maxHp:23};

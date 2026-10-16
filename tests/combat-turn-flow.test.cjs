@@ -9,7 +9,7 @@ const SpellSystem = require('../retort/spellSystem');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
 const source = fs.readFileSync('retort/retortWithUserInput.js', 'utf8');
 const combat = source.slice(source.indexOf('let combatSpace = null;'), source.indexOf('// Global variable to hold the current situation'));
-function fixture({ retreatRound = 1, lethal = false, spell = false, turning = false, tactical = false, life = false, aid = false } = {}) {
+function fixture({ retreatRound = 1, lethal = false, spell = false, turning = false, tactical = false, life = false, aid = false, provocation = false, autoApproach = false } = {}) {
   const d = { geoKey: '1,0,0', start: { x: 4, y: 4 }, layout: { width: 24, height: 24 }, cells: {} };
   for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) d.cells[`${x},${y}`] = { tile: 'floor' };
   const names = ['Guard', 'Guard 2', 'Far Guard'], p = I.createPopulation(d.geoKey, names.map(name => ({ name, allegiance: 'Hostile', encounterId: name === 'Far Guard' ? 'remote' : 'guards' })));
@@ -19,6 +19,7 @@ function fixture({ retreatRound = 1, lethal = false, spell = false, turning = fa
   let wire = JSON.stringify([['PC', 'pc', 4, 4], ['Companion', 'npc', 4, 5], ['Guard', 'monster', 5, 4],
     ['Guard 2', 'monster', 5, 6], ['Far Guard', 'monster', 20, 20]].map(([name, type, mazeX, mazeY]) =>
     ({ name, type, hp: name === 'Companion' && lethal ? 2 : 1000, mazeX, mazeY, x: mazeX, y: mazeY, mazeRoomKey: d.geoKey })));
+  if (autoApproach) wire = JSON.stringify(JSON.parse(wire).map(a => a.name === 'Guard' ? { ...a, mazeX: 9 } : a));
   let database = JSON.stringify({ '0,0,0': {}, '1,0,0': { name: 'Hall', inhabitants: p } });
   if (spell || turning) {
     const scroll = SpellSystem.Rules.scroll(turning ? 'turn_undead' : 'missile', 'test');
@@ -47,14 +48,14 @@ function fixture({ retreatRound = 1, lethal = false, spell = false, turning = fa
     if (event.type === 'target_prompt' && aid && event.round === 1 && event.combatant === 'PC') {
       const care = event.care.find(c => c.kind === 'bandage' && c.target === 'Companion');
       setImmediate(() => emitter.emit('target_response_PC', { actionId: event.actionId, turnId: event.turnId, action: 'care', ...care }));
-    } else if (event.type === 'target_prompt' && tactical && event.round === 1 && event.combatant === 'PC') {
+    } else if (event.type === 'target_prompt' && tactical && !autoApproach && event.round === 1 && event.combatant === 'PC') {
       setImmediate(async () => {
         await dice.moveCombatant({ actionId: event.actionId, turnId: event.turnId, combatant: 'PC', runId: 'run', geoKey: d.geoKey,
           revision: event.movement.revision, x: 4, y: 3 });
         emitter.emit('target_response_PC', { actionId: event.actionId, turnId: event.turnId, action: 'hold', cancelled: true });
       });
     } else if (event.type === 'target_prompt') setImmediate(() => emitter.emit(`target_response_${event.combatant}`,
-      { actionId: event.actionId, turnId: event.turnId, action: (spell || turning) && event.combatant === 'PC' && event.round === 1 ? 'cast' : event.allowRetreat && event.round >= retreatRound ? 'retreat' : 'attack', target: 'Guard',
+      { actionId: event.actionId, turnId: event.turnId, action: (spell || turning) && event.combatant === 'PC' && event.round === 1 ? 'cast' : event.allowRetreat && event.round >= retreatRound ? 'retreat' : 'attack', target: provocation ? event.targets[0] : 'Guard',
         itemId: event.spells?.find(s => s.target === 'Guard')?.itemId, spellId: turning ? 'turn_undead' : 'missile' }));
   };
   const context = { CombatTurnFlow: Flow, Inhabitants: I, ActionFeedback, actionDice: dice, createCombatSpace, sharedState: state,
@@ -65,11 +66,53 @@ function fixture({ retreatRound = 1, lethal = false, spell = false, turning = fa
     getDelayedUpdatedGameConsole: async () => text, Math: Object.assign(Object.create(Math), { random: () => 0 }),
     setTimeout: (fn, ms) => setTimeout(fn, ms === 200 ? 0 : ms), clearTimeout, setInterval, clearInterval };
   if (tactical) Object.assign(context, { CombatTactics: require('../retort/combatTactics'), EquipmentRules: require('../assets/equipmentRules') });
+  if (provocation) context.CombatProvocation = require('../retort/combatProvocation');
   if (life) context.CombatLife = require('../retort/combatLife');
   vm.runInNewContext(combat, context);
   return { context, events, dice, p, state, d };
 }
 for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map']) {
+  for (const natural of [1, 20]) test(`${mode}: ${natural === 20 ? 'unconscious' : 'dying'} companions roll no initiative and receive no actions`, async () => {
+    const Life = require('../retort/combatLife'), f = fixture({ life: true, retreatRound: 2 });
+    const db = JSON.parse(f.state.getRoomNameDatabase()), ally = Life.actors(f.state.getUpdatedGameConsole()).find(a => a.name === 'Companion');
+    const injury = Life.apply(db, 'run', ally, 0, natural, { geoKey: '1,0,0', damage: 1000 });
+    injury.remaining = 10; injury.recoverAt = 100;
+    Life.commit(f.state, db);
+    await f.context.handleCombatRound({}, 'attack Guard', mode);
+    assert.equal(f.events.some(e => e.type === 'dice_state' && e.results?.some(r => r.actor === 'Companion')), false);
+    assert.equal(f.events.some(e => e.type === 'target_prompt' && e.combatant === 'Companion'), false);
+    assert.ok(f.events.filter(e => e.active?.ledger).every(e => !e.active.ledger.initiative.some(a => a.name === 'Companion')));
+  });
+  test(`${mode}: a named attack walks the PC into range before the attack roll and still allows later retreat`, async () => {
+    const f = fixture({ tactical: true, autoApproach: true, retreatRound: 2 });
+    const result = await f.context.handleCombatRound({}, 'attack Guard', mode);
+    const steps = f.events.filter(e => e.type === 'combat_maze_step' && e.character === 'PC');
+    assert.ok(steps.length > 0);
+    const attack = f.events.findIndex(e => e.type === 'dice_state' && e.results?.some(r => r.actor === 'PC' && r.label === 'Attack'));
+    const step = f.events.findIndex(e => e.type === 'combat_maze_step' && e.character === 'PC');
+    assert.ok(attack > step);
+    assert.ok(result.retreated);
+  });
+  test(`${mode}: choosing a distant target during an encounter also approaches before attacking`, async () => {
+    const f = fixture({ tactical: true, autoApproach: true, retreatRound: 2 });
+    const result = await f.context.handleCombatRound({}, '__ENCOUNTER_DEFENCE__', mode);
+    assert.ok(f.events.some(e => e.type === 'combat_maze_step' && e.character === 'PC'));
+    assert.ok(f.events.some(e => e.type === 'dice_state' && e.results?.some(r => r.actor === 'PC' && r.label === 'Attack')));
+    assert.ok(result.retreated);
+  });
+  test(`${mode}: attacking a companion commits hostility and party removal before any initiative roll`, async () => {
+    const f = fixture({ provocation: true });
+    const result = await f.context.handleCombatRound({}, 'attack Companion', mode);
+    const change = f.events.findIndex(e => e.type === 'realtime_combat_result' && e.passive);
+    const initiative = f.events.findIndex(e => e.type === 'dice_state' && e.results?.some(r => r.label === 'Initiative'));
+    assert.ok(change >= 0 && change < initiative);
+    const event = f.events[change];
+    assert.deepEqual(I.parseSheets(event.updatedGameConsole, 'NPCs in Party').map(a => a.name), []);
+    assert.equal(JSON.parse(event.combatCharactersString).find(a => a.name === 'Companion').type, 'monster');
+    assert.equal(f.p.actors.Companion.allegiance, 'Hostile');
+    assert.match(result.combatLog, /Companion becomes hostile/);
+    assert.ok(!f.events.some(e => e.type === 'target_prompt' && e.targets.includes('Companion') && e.combatant !== 'PC'));
+  });
   test(`${mode}: fatal damage visibly rolls Survival Save and retreat carries a stable unconscious companion`, async () => {
     const f = fixture({ life: true, lethal: true });
     const result = await f.context.handleCombatRound({}, 'attack Guard', mode);
@@ -134,8 +177,64 @@ for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map'
     assert.ok(f.events.some(e => e.type === 'combat_maze_step' && e.character === 'PC'));
     assert.ok(f.events.some(e => e.type === 'combat_maze_step' && e.character === 'Companion'));
     assert.equal(f.dice.active, null); assert.ok(f.p.retreatUntil > Date.now());
+    const ledgers = f.events.filter(e => e.active?.ledger).map(e => e.active.ledger);
+    assert.ok(ledgers.some(l => l.initiative.some(a => a.name === 'PC' && a.roll === 20)));
+    const entries = ledgers.at(-1).entries;
+    assert.deepEqual(entries.filter(e => e.kind === 'hit').map(e => [e.actor, e.target, e.damage, e.hp]),
+      [['Guard', 'PC', 3, 997], ['Guard 2', 'Companion', 3, 997]]);
+    assert.equal(entries.at(-1).text, 'The party retreats together.');
   });
 }
+
+test('initiative itself refuses incapacitated actors without consuming RNG and accepts them after recovery', async () => {
+  let rolls = 0; const dice = new ActionDice({ animationMs: 0, random: () => { rolls++; return 10; } });
+  dice.begin('combat', '1,0,0'); const flow = Flow.create(dice, {});
+  for (const type of ['pc', 'npc', 'monster']) for (const state of ['Unconscious', 'Dying', 'Dead'])
+    assert.equal(await flow.initiative({ name: 'Down', type, hp: 0, state }), null);
+  assert.equal(rolls, 0); assert.equal(dice.snapshot().results.length, 0);
+  assert.equal(await flow.initiative({ name: 'Recovered', type: 'npc', hp: 1, state: 'Friendly' }), 10);
+  assert.equal(rolls, 1); dice.end();
+});
+
+test('knockout prunes the active initiative display while preserving historical roll results', () => {
+  const dice = new ActionDice(), flow = Flow.create(dice, {}), ally = { name: 'Ally', hp: 5, state: 'Friendly', initiative: 17 };
+  dice.begin('combat', '1,0,0'); flow.teams = { combatants: [ally] };
+  dice.recordCombat({ kind: 'initiative', order: [{ name: 'Ally', roll: 17 }] });
+  const initial = dice.snapshot().active.ledger;
+  ally.hp = 0; ally.state = 'Unconscious'; flow.refreshInitiative();
+  assert.deepEqual(dice.snapshot().active.ledger.initiative, []);
+  assert.equal(initial.initiative[0].roll, 17); dice.end();
+});
+
+test('an interrupted survival roll cannot publish an injury that did not happen', async () => {
+  const f = fixture({ life: true }), target = I.parseSheets(f.state.getUpdatedGameConsole(), 'PC')[0];
+  f.dice.begin('combat', '1,0,0', e => f.events.push(e));
+  f.dice.roll = async () => null;
+  const log = []; await f.context.applyCombatDamage(target, 1000, log, { name: 'Guard' });
+  assert.equal(target.hp, 1000); assert.match(log[0], /injury was not applied/);
+  assert.deepEqual(f.dice.snapshot().active.ledger.entries, []); f.dice.end();
+});
+
+test('ledger damage uses the post-ward injury, not the raw damage die', async () => {
+  const f = fixture(), target = I.parseSheets(f.state.getUpdatedGameConsole(), 'PC')[0], attacker = I.parseSheets(f.state.getUpdatedGameConsole(), 'Monsters in Room')[0];
+  f.context.SpellSystem = { ...SpellSystem, absorb: () => 1 };
+  f.dice.begin('combat', '1,0,0');
+  const damage = await f.context.rollCombatDamage(attacker, target, null, []);
+  assert.ok(f.dice.snapshot().results.at(-1).total > damage);
+  await f.context.applyCombatDamage(target, damage, [], attacker);
+  const entry = f.dice.snapshot().active.ledger.entries[0];
+  assert.equal(entry.damage, 1); assert.equal(entry.hp, 999); f.dice.end();
+});
+
+test('an actual missed attack publishes a miss, while an interrupted roll does not', async () => {
+  const f = fixture(), sheets = I.parseSheets(f.state.getUpdatedGameConsole()), attacker = sheets.find(a => a.name === 'Guard');
+  f.dice.begin('combat', '1,0,0');
+  await f.context.rollCombatAttack(attacker, { name: 'PC', ac: 50 }, null, []);
+  assert.equal(f.dice.snapshot().active.ledger.entries[0].kind, 'miss');
+  f.dice.roll = async () => null;
+  await f.context.rollCombatAttack(attacker, { name: 'PC', ac: 50 }, null, []);
+  assert.equal(f.dice.snapshot().active.ledger.entries.length, 1); f.dice.end();
+});
 test('successive rounds keep one action lock, reroll PC initiative, and reject old turn IDs', async () => {
   const f = fixture({ retreatRound: 2 }), result = await f.context.handleCombatRound({}, 'attack Guard', 'Combat Map-Based');
   assert.equal(result.retreated, true);

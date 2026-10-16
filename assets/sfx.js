@@ -10,7 +10,7 @@
   const AMB_TAGS = ['wind', 'sandstorm', 'drips', 'fire', 'howls', 'chant', 'rumble', 'water'];
   const KEY = 'holodekAudioSettings';
   // Defaults = the owner's tuned ♫ panel (Oct 2026): Music 0.20, Effects 0.80, Voices 0.85, Ambience 0.10, Stereo width 1.0, Swap off, SID 2x, Mute off.
-  const DEF = { muted: false, sfx: 0.8, amb: 0.1, music: 0.2, width: 1, swapLR: false, voice: 0.85, sidMode: '2x', voiceChip: '10582', voiceNotch: false, voiceDetail: true, compositionChip: '8580' };
+  const DEF = { muted: false, sfx: 0.8, amb: 0.1, music: 0.2, width: 1, swapLR: false, voice: 0.85, sidMode: '2x', voiceChip: '10582', voiceNotch: false, voiceDetail: true, voiceTimbre: 'soft', compositionChip: '8580' };
   const saved = (() => { try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; } })();
   const settings = Object.assign({}, DEF, saved || {}, saved ? {} : { v: 4, touched: {} });
   if (saved) {
@@ -23,6 +23,7 @@
       for (const k in OLD) if (!settings.touched[k] && Number(settings[k]) === OLD[k]) settings[k] = DEF[k];
       settings.v = 4; }
   }
+  if (!['original','continuous','soft'].includes(settings.voiceTimbre)) settings.voiceTimbre = DEF.voiceTimbre;
   try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch {}
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(settings)); } catch {} };
   const sidMode = () => { const m = settings.sidMode; return m === '1x' || m === 'stock' ? '1x' : m === '4x' ? '4x' : '2x'; }; // default 2x (best voice mode) unless a saved choice says otherwise
@@ -31,10 +32,19 @@
     .then(r => r.json()).then(j => console.info('[SidMode]', j)).catch(e => console.warn('[SidMode] server switch failed', e && e.message));
   postSidMode();
   const voiceChip = () => settings.voiceChip === '8580' ? '8580' : '10582', voiceNotch = () => voiceChip() === '10582' && !!settings.voiceNotch;
+  const timbrePreference = () => ['original','continuous','soft'].includes(settings.voiceTimbre) ? settings.voiceTimbre : 'soft';
+  const voiceTimbre = () => voiceChip() === '10582' ? timbrePreference() : 'original';
   const compositionChip = () => settings.compositionChip === '10582' ? '10582' : '8580';
-  const postVoiceChip = () => fetch('/voice/chip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false }) })
-    .then(r => r.json()).then(j => console.info('[VoiceChip]', j)).catch(e => console.warn('[VoiceChip] server switch failed', e && e.message));
+  const postVoiceChip = () => fetch('/voice/chip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false, timbre:timbrePreference() }) })
+    .then(r => r.json()).then(j => { console.info('[VoiceChip]', j); if(j.timbre==null)console.warn('[VoiceChip] Restart the server to enable the new voice styles.'); return j; }).catch(e => console.warn('[VoiceChip] server switch failed', e && e.message));
   postVoiceChip();
+  function syncVoiceTimbreUi() {
+    document.querySelectorAll('select[data-k="voiceTimbre"]').forEach(sel => { sel.value = timbrePreference(); sel.disabled = voiceChip() !== '10582'; });
+  }
+  function setVoiceTimbre(value) {
+    if (!['original','continuous','soft'].includes(value)) throw Error('Voice style must be original, continuous or soft.');
+    settings.voiceTimbre = value; save(); speechBufs.clear(); syncVoiceTimbreUi(); return postVoiceChip();
+  }
 
   let ctx = null, sfxBus = null, ambBus = null, voiceBus = null, master = null, swapG = null;
   const buffers = new Map(), loading = new Map(), lastPlayed = new Map();
@@ -76,6 +86,28 @@
     loading.set(key, p); return p;
   }
   const effectPlayers=new Set();let effectEpoch=0;
+  let effectCache=null,effectCachePromise=null,effectBufferEpoch=0,effectWarmPromise=null;
+  const shortEffectNodes=new Set(),effectLog=[];
+  const logEffect=row=>{effectLog.push(row);if(effectLog.length>40)effectLog.shift();};
+  async function prepareEffect(name,score){
+    if(!score||score.loop||score.duration>8)return null;
+    const epoch=effectBufferEpoch,key=sidMode()+'|'+compositionChip()+'|'+name;
+    if(!effectCachePromise){const pending=workerSource().then(source=>{
+        if(epoch!==effectBufferEpoch)throw new DOMException('SID effect preparation cancelled','AbortError');
+        return effectCache=new window.HolodekSidPlayer.EffectCache(ctx,source);
+      });effectCachePromise=pending;pending.catch(()=>{if(effectCachePromise===pending)effectCachePromise=null;});}
+    const cache=await effectCachePromise;if(epoch!==effectBufferEpoch)throw new DOMException('SID effect preparation cancelled','AbortError');return cache.get(key,score.bytes);
+  }
+  function warmEffects(){
+    if(!ctx||effectWarmPromise)return effectWarmPromise;
+    const epoch=effectBufferEpoch;
+    const pending=(async()=>{for(const name of Object.keys(SPEC)){if(epoch!==effectBufferEpoch)return;const score=await load(name);if(epoch!==effectBufferEpoch)return;await prepareEffect(name,score);}})();
+    effectWarmPromise=pending;pending.catch(error=>{if(error.name!=='AbortError')console.warn('[SIDEffect] preparation failed:',error.message);if(effectWarmPromise===pending)effectWarmPromise=null;});return pending;
+  }
+  function resetShortEffects(){
+    effectBufferEpoch++;effectWarmPromise=null;effectCachePromise=null;effectCache?.dispose();effectCache=null;
+    for(const node of [...shortEffectNodes]){node.onended?.();node.dispose();}shortEffectNodes.clear();
+  }
   async function sidSource(score,destination,{loop=false,rate=1,time=0}={}){
     let player;player=await window.HolodekSidPlayer.open(score.bytes,{context:ctx,destination,source:await workerSource(),seconds:score.duration,loop,time,
       onError:error=>{player?.onended?.();player?.dispose();console.warn('[SIDEffect]',error.message);}});
@@ -118,11 +150,19 @@
     if (!audio() || ctx.state !== 'running') return; // before the first click browsers keep audio locked
     voices++;const epoch=effectEpoch;let src,g,sp,finished=false;
     const done=()=>{if(finished)return;finished=true;voices--;src?.dispose();g?.disconnect();sp?.done();};
-    try{const score=await load(name);if(!score||epoch!==effectEpoch){done();return;}
+    try{const bufferEpoch=effectBufferEpoch,config=sidMode()+'|'+compositionChip(),score=await load(name);if(!score||epoch!==effectEpoch||bufferEpoch!==effectBufferEpoch||config!==sidMode()+'|'+compositionChip()){done();return;}
+      const buffer=await prepareEffect(name,score);
+      if(bufferEpoch!==effectBufferEpoch||config!==sidMode()+'|'+compositionChip()||epoch!==effectEpoch){done();return;}
+      if(/^step[12]$/.test(name)&&!opts.delay&&performance.now()-now>120){logEffect({name,dropped:'late footstep',waitMs:performance.now()-now});done();return;}
       g=ctx.createGain();g.gain.value=spec[0]*(opts.vol??1);sp=spatialOut(opts.at,opts.pan,score.duration/(opts.rate||1)+(opts.delay||0)+.2);g.connect(sp.node);
-      src=await sidSource(score,g,{rate:opts.rate||1});if(epoch!==effectEpoch){done();return;}src.onended=done;await src.play(ctx.currentTime+(opts.delay||0));
+      if(buffer){const rate=opts.rate||1;if(!Number.isFinite(rate)||rate<.25||rate>4)throw Error('SID effect rate must be 0.25-4');
+        src=ctx.createBufferSource();src.buffer=buffer;src.playbackRate.value=rate;src.connect(g);shortEffectNodes.add(src);
+        src.dispose=()=>{shortEffectNodes.delete(src);try{src.stop();}catch{}src.disconnect();};src.play=at=>src.start(at);
+      }else src=await sidSource(score,g,{rate:opts.rate||1});
+      if(epoch!==effectEpoch){done();return;}src.onended=done;await src.play(ctx.currentTime+(opts.delay||0));
+      logEffect({name,transport:buffer?'cached-sid-frames':'live-sid-registers',rate:opts.rate||1,waitMs:performance.now()-now});
       if(spec[2])duck(score.duration/(opts.rate||1)+(opts.delay||0),name==='death'||name==='levelup'?0.45:0.7);
-    }catch(error){done();console.warn('[SIDEffect] unavailable:',name,error.message);}
+    }catch(error){done();if(error.name!=='AbortError')console.warn('[SIDEffect] unavailable:',name,error.message);}
   }
   function sequence(names, gap = 0.22) { names.slice(0, 4).forEach((n, i) => setTimeout(() => Array.isArray(n) ? play(n[0], n[1] || {}) : play(n), i * gap * 1000)); }
 
@@ -533,6 +573,7 @@
     Object.assign(P, voiceDetails(P.name));
     if (S) for (const key of ['kind', 'f0', 'fs', 'range', 'rate', 'breath', 'rasp', 'accent', 'warm', 'bright', 'vibAmt', 'vibRate', 'fineKeep', 'decl', 'pauses', 'race']) if (S[key] != null) P[key] = S[key];
     if (S && S.v !== 2) { P.pauses = S.pauses ?? 1; P.race = S.race ?? ''; }
+    Object.assign(P, window.PantheonCharacters?.canon(P.name)?.voiceProfile || {});
     if (!P.accent) P.accent = accentFor(P, a);
     return P; }
   function voiceWireProfile(actor) { const P = voiceProfile(actor), out = { name: P.name };
@@ -541,11 +582,13 @@
   function voiceProfileRaw(nameOrActor) {
     const a = typeof nameOrActor === 'object' && nameOrActor ? nameOrActor : (actorByName(nameOrActor) || { name: nameOrActor });
     const name = String(a.name || ''), sp = a.sprite?.spec || {}, tr = sp.traits || {};
-    const race = sp.race || a.race || '', cls = sp.class || a.class || '', sex = sp.sex || a.sex || '';
+    const canon = window.PantheonCharacters?.canon(name);
+    const race = sp.race || a.race || '', cls = sp.class || a.class || '', sex = canon?.sex || sp.sex || a.sex || '';
     const desc = [name, race, cls, a.job, a.activity].filter(Boolean).join(' '), pers = [a.personality, a.voice, a.motivation, a.history].filter(Boolean).join(' ');
     const all = desc + ' ' + pers, hr = i => (hash(name + '#' + i) % 1000) / 1000, has = rx => rx.test(all);
     let kind = 'humanoid';
-    if (/mortacia|suzerain|\bking\b|\bqueen\b|\blord\b|emperor|empress|overlord|archon|goddess|\bgod\b|monarch|tyrant/i.test(desc) || (sp.level || 0) >= 18) kind = 'regal';
+    if (canon?.voiceProfile?.kind) kind = canon.voiceProfile.kind;
+    else if (/mortacia|suzerain|\bking\b|\bqueen\b|\blord\b|emperor|empress|overlord|archon|goddess|\bgod\b|monarch|tyrant/i.test(desc) || (sp.level || 0) >= 18) kind = 'regal';
     else if (/wraith|ghost|spirit|spectr|shade|lich|skelet|zombie|revenant|banshee|undead|vampir|ghoul|wight|phantom|bonecaller|necro|mummy/i.test(desc) || tr.bodyPlan === 'spectral' || (tr.translucency || 0) >= 0.35) kind = 'undead';
     else if (/wolf|bear|beast|hound|jackal|drake|dragon|wyrm|serpent|spider|scorpion|\brat\b|boar|lion|hyena|vulture|\bbat\b|worm|basilisk|hydra|chimera|manticore/i.test(desc) && (a.type === 'monster' || sp.isMonster || tr.head === 'beast')) kind = 'beast';
     const fem = /^f/i.test(sex), male = /^m/i.test(sex);
@@ -573,7 +616,7 @@
     if (has(/regret|weary|sorrow|bleak|melanch|grief|loss|mourn|tired/i)) sig.push('sigh');
     if (kind === 'beast' || has(/warrior|fighter|guard|brute|soldier|barbarian|knight/i)) sig.push('grunt');
     if (kind === 'undead' || has(/serpent|snake|naga|lizard|viper/i)) sig.push('hiss');
-    return { name, kind, race, f0, fs, mix, pw: 0.15 + hr(4) * 0.35, breath, rasp, vib, vibRate: 4.5 + hr(8) * 2 + (nervous ? 2 : 0), rate, range, pauses, vset, sig: sig.slice(0, 2) };
+    return { name, kind, race, f0, fs, mix, pw: 0.15 + hr(4) * 0.35, breath, rasp, vib, vibRate: 4.5 + hr(8) * 2 + (nervous ? 2 : 0), rate, range, pauses, vset, sig: sig.slice(0, 2), ...canon?.voiceProfile };
   }
   // text -> syllable events {t, dur, semis, semis2, v, v2, amp | br (breath only)}. Long lines: each sentence voices its
   // first ~8-11 words then trails off softly; breaths/pauses at commas and sentence ends; ? rises, ! stresses, . falls.
@@ -726,19 +769,19 @@
   }
   // --- SID speech: register scores drive the same live worker/worklet as music. ---
   const speechBufs = new Map(); let speechNow = null, profileSig = '', profilePending = null;
-  function speechKey(who, text, profile) { return sidMode() + '|' + voiceChip() + (voiceNotch() ? 'n' : '') + '|detail' + (settings.voiceDetail !== false) + '|' + JSON.stringify(profile) + '|' + who + '|' + text; }
+  function speechKey(who, text, profile, timbre = voiceTimbre()) { return sidMode() + '|' + voiceChip() + (voiceNotch() ? 'n' : '') + '|timbre' + timbre + '|detail' + (settings.voiceDetail !== false) + '|' + JSON.stringify(profile) + '|' + who + '|' + text; }
   function fetchSpeech(who, text, cry=false) {
     const actor = actorByName(who), saved = window._partyCharacterRegistry?.[who];
     const profile = actor || saved ? voiceWireProfile(actor || { ...saved, name: who }) : null;
-    const k = speechKey(who, text, profile)+(cry?'|cry':''); if (speechBufs.has(k)) return speechBufs.get(k);
+    const timbre = cry ? 'original' : voiceTimbre(), k = speechKey(who, text, profile, timbre)+(cry?'|cry':''); if (speechBufs.has(k)) return speechBufs.get(k);
     const t0 = performance.now();
     const p = fetch(cry?'/voice/cry.sidvoice':'/voice/line.sidvoice', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speaker: who, text, profile, clock: sidMode(), chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false }) })
+      body: JSON.stringify({ speaker: who, text, profile, clock: sidMode(), chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false, timbre }) })
       .then(async r => { if (!r.ok) throw new Error('voice ' + r.status);const duration=Number(r.headers.get('X-Voice-Dur'));
         if(!Number.isFinite(duration)||duration<.05||duration>120)throw Error('Invalid SID voice duration');
         const bytes=await r.arrayBuffer();if(bytes.byteLength>24*1024*1024)throw Error('SID voice score too large');return{bytes,duration}; })
       .then(score => { p.bytes=score.bytes.byteLength;
-        speechLog.push({ who, text: text.slice(0, 50), transport:'live-sid-registers',chips:cry?3:64,bytes:p.bytes,fetchMs: Math.round(performance.now() - t0), dur: +score.duration.toFixed(2) }); if (speechLog.length > 30) speechLog.shift();
+        speechLog.push({ who, text: text.slice(0, 50), timbre, transport:'live-sid-registers',chips:cry?3:64,bytes:p.bytes,fetchMs: Math.round(performance.now() - t0), dur: +score.duration.toFixed(2) }); if (speechLog.length > 30) speechLog.shift();
         let size=0;for(const entry of speechBufs.values())size+=entry.bytes||0;
         while(size>12*1024*1024&&speechBufs.size){const key=speechBufs.keys().next().value;size-=speechBufs.get(key).bytes||0;speechBufs.delete(key);}return score; });
     p.catch(() => speechBufs.delete(k)); speechBufs.set(k, p);
@@ -856,15 +899,20 @@
   // --- state watchers: room change, footsteps, PC hit points and level ---
   function currentRoomKey() { try { return (typeof currentDungeon !== 'undefined' && currentDungeon && currentDungeon.geoKey) || ''; } catch { return ''; } }
   let lastRoom = '', lastX = null, lastY = null, walked = 0, stepAlt = false, pcHp = null, pcLevel = null, pcName = '';
-  function tick() {
-    const room = currentRoomKey();
-    if (room && room !== lastRoom) { if (lastRoom) play('room_enter'); lastRoom = room; lastX = null; applyRoomAmbience(room); }
+  let walkingRoom='',lastMotion=-Infinity;
+  function walkTick() {
+    const room=currentRoomKey();if(room!==walkingRoom){walkingRoom=room;lastX=null;walked=0;lastMotion=-Infinity;}
     let x, y; try { x = playerPosX; y = playerPosY; } catch { x = window.playerPosX; y = window.playerPosY; }
     if (Number.isFinite(x) && Number.isFinite(y)) {
-      if (lastX !== null) { const d = Math.hypot(x - lastX, y - lastY); if (d < 3) walked += d; }
+      let starting=false;
+      if (lastX !== null) { const d = Math.hypot(x - lastX, y - lastY);if(d>=3){walked=0;lastMotion=-Infinity;}else if(d>.001){starting=performance.now()-lastMotion>180;walked+=d;lastMotion=performance.now();} }
       lastX = x; lastY = y;
-      if (walked >= 0.85) { walked = 0; stepAlt = !stepAlt; play(stepAlt ? 'step1' : 'step2', { rate: 0.94 + Math.random() * 0.12, pan: (stepAlt ? -0.06 : 0.06) }); }
+      if (starting||walked >= 0.85) { walked = starting?0:walked%.85; stepAlt = !stepAlt; play(stepAlt ? 'step1' : 'step2', { rate: 0.94 + Math.random() * 0.12, pan: (stepAlt ? -0.06 : 0.06) }); }
     }
+  }
+  function tick() {
+    const room = currentRoomKey();
+    if (room && room !== lastRoom) { if (lastRoom) play('room_enter'); lastRoom = room; applyRoomAmbience(room); }
     const pc = Array.isArray(window.combatCharacters) ? window.combatCharacters.find(c => c && c.type === 'pc') : null;
     if (pc) {
       const hp = Number(pc.hp ?? pc.HP), lvl = Number(pc.level ?? pc.Level);
@@ -905,6 +953,7 @@
     } catch (e) { paletteStatus('A/B unavailable: ' + e.message); console.warn('[AudioPalette]', e.message); }
   }
   function changeComposition() {
+    resetShortEffects();warmEffects();
     save(); ambKey = ''; if (lastRoom) applyRoomAmbience(lastRoom);
     const room = currentRoomKey(); if (room) preparePalette(room,true);
   }
@@ -1116,6 +1165,7 @@
 
   function checkpoint() { const a = music(); return { time: Number.isFinite(a?.currentTime) ? a.currentTime : 0, paused: !!settings.userPaused }; }
   async function restoreCheckpoint(saved, preferences, rendered, room, runId) {
+    resetShortEffects();walkingRoom='';lastMotion=-Infinity;
     effectEpoch++;for(const player of effectPlayers){player.onended?.();player.dispose();}effectPlayers.clear();
     cancelTransition?.(); cancelTransition = null; stopSpeech();
     crossfading = false; pendingSong = null; playingUrl = ''; activeMusic = null;
@@ -1125,8 +1175,10 @@
     pcName = ''; pcHp = pcLevel = lastX = lastY = null; walked = 0;
     for (const a of musicEls()) { a.pause(); a.removeAttribute('src'); a.__fade = 1; try { a.load(); } catch {} }
     for (const k of Object.keys(DEF)) if (preferences && Object.hasOwn(preferences, k)) settings[k] = preferences[k];
+    settings.voiceTimbre = timbrePreference(); syncVoiceTimbreUi();
     settings.userPaused = !!saved?.paused; save(); applyVolumes();
     await postVoiceChip();await postSidMode();
+    warmEffects();
     if (rendered?.url) queueRoomMusic({ ...rendered, coords: room, wav:rendered.sid?null:rendered.url, palette: true, startTime: Number(saved?.time) || 0 });
     loadSong(room); applyRoomAmbience(room);
   }
@@ -1149,6 +1201,7 @@
       '<label>SID clock <select data-k="sidMode" title="Stock = real C64 SID clock; 2x/4x = same SID clocked 2x/4x (oscillators to ~7.8/15.6 kHz) for voices, music, ambience and effects"><option value="1x">1x (1 MHz stock)</option><option value="2x">2x (2 MHz)</option><option value="4x">4x (4 MHz)</option></select></label>' +
       '<label>Composition <select data-k="compositionChip" title="Same song and playback position. 10582 adds custom emulated registers to music, ambience and effects; voices have their own selector."><option value="8580">8580: traditional SID</option><option value="10582">10582: extended registers</option></select></label>' +
       '<label>Voice chip <select data-k="voiceChip" title="Speech only: 10582 is the default; 8580 remains available."><option value="10582">10582</option><option value="8580">8580</option></select></label>' +
+      '<label>Voice style <select data-k="voiceTimbre" title="10582 only. Soft preserves unvoiced consonant gaps; Original and Continuous retain legacy bridging. All styles remain pure SID."><option value="soft">Soft (preserved gaps)</option><option value="continuous">Continuous levels</option><option value="original">Original</option></select></label>' +
       '<label>Voice articulation <select data-k="voiceDetail" title="10582 only. Both paths are pure synthesis; no sampled speech."><option value="detail">10582: detailed consonants</option><option value="legacy">Legacy articulation (compare)</option></select></label>' +
       '<label><input type="checkbox" data-k="voiceNotch"> 10582 /l/ notch</label>' +
       '<label><input type="checkbox" data-k="muted"> Mute all</label></div>';
@@ -1182,7 +1235,9 @@
     box.querySelectorAll('select[data-k="compositionChip"]').forEach(sel => { sel.value = compositionChip();
       sel.addEventListener('change', () => { settings.compositionChip = sel.value === '10582' ? '10582' : '8580'; changeComposition(); }); });
     box.querySelectorAll('select[data-k="voiceChip"]').forEach(sel => { sel.value = voiceChip();
-      sel.addEventListener('change', () => { settings.voiceChip = sel.value === '10582' ? '10582' : '8580'; (settings.touched = settings.touched || {})['voiceChip'] = true; save(); speechBufs.clear(); postVoiceChip(); unlock(); play('notice'); }); });
+      sel.addEventListener('change', () => { settings.voiceChip = sel.value === '10582' ? '10582' : '8580'; (settings.touched = settings.touched || {})['voiceChip'] = true; save(); speechBufs.clear(); syncVoiceTimbreUi(); postVoiceChip(); unlock(); play('notice'); }); });
+    box.querySelectorAll('select[data-k="voiceTimbre"]').forEach(sel => sel.addEventListener('change', () => { setVoiceTimbre(sel.value); }));
+    syncVoiceTimbreUi();
     box.querySelectorAll('select[data-k="voiceDetail"]').forEach(sel => { sel.value = settings.voiceDetail === false ? 'legacy' : 'detail';
       sel.addEventListener('change', () => { settings.voiceDetail = sel.value === 'detail'; save(); speechBufs.clear(); postVoiceChip(); }); });
     box.querySelectorAll('input[data-k="voiceNotch"]').forEach(inp => inp.addEventListener('change', () => { speechBufs.clear(); postVoiceChip(); }));
@@ -1231,12 +1286,15 @@
     applyVolumes();
     if (ctx.state !== 'running') ctx.resume().then(() => { ambKey = ''; if (lastRoom) applyRoomAmbience(lastRoom); }).catch(() => {});
     if(activeSid&&!settings.userPaused&&activeSid.paused)activeSid.play().catch(()=>{});
-    ['step1', 'step2', 'hit', 'miss', 'dice', 'door', 'pickup', 'room_enter'].forEach(load);
+    warmEffects();
   }
   function init() {
     try { panel(); } catch (e) { console.warn('[sfx] panel', e.message); }
     watchChat();
     watchVoices();
+    Object.keys(SPEC).forEach(load);
+    const footsteps=()=>{walkTick();requestAnimationFrame(footsteps);};requestAnimationFrame(footsteps);
+    window.addEventListener('pagehide',resetShortEffects);
     setInterval(tick, 100);
     setInterval(setMusicVolume, 250); // music elements are created/replaced per room; keep their volume in line
     // apply the saved volume the moment any music element starts or reloads (media events don't bubble: use capture)
@@ -1255,9 +1313,10 @@
       window.DungeonActionNotices.observeItems = function (...a) { const taken = orig.apply(this, a); if (taken?.length) play(taken.some(i => /gold|coin|gem|jewel/i.test(i.name || '')) ? 'coins' : 'pickup'); return taken; };
     }
   }
-  const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, compositionChip: compositionChip(), voiceChip: voiceChip(), clock: sidMode(), active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length, liveEffects:effectPlayers.size,
-    music: [...musicEls(),...sidPlayers].map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused, format:a.dispose?'sid':'media',time:a.currentTime })) });
+  const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, compositionChip: compositionChip(), voiceChip: voiceChip(), clock: sidMode(), active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length, liveEffects:effectPlayers.size+shortEffectNodes.size,effectCache:effectCache?.stats()||null,
+    sid:window.HolodekSidPlayer?.stats?.()||null,
+    music: [...musicEls(),...sidPlayers].map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused, format:a.dispose?'sid':'media',time:a.currentTime,failed:!!a.failed,error:a.error||null })) });
   window.HolodekSfx = { voiceSpecOf, speakLine, stopSpeech, voicePrefetch, speechLog: () => speechLog.slice(), stereo: stereoInfo, listener, ctxNow: () => ctx && ctx.currentTime, speakVoice, voiceSound, voiceProfile, renderVoiceDemo, voices: () => voiceLog.slice(), play, onServerEvent, setAmbience, keywordAmbience, settings, applyVolumes, state, musicPlay, musicPause, rewind, fastForward, queueRoomMusic, roomShown, songKeyNow, rhythm: () => ({ mode: rhythmMode, clkOff, evLog: evLog.slice(-200) }), ambLayersInfo: () => ambLayers.map(l => ({ tag: l.tag, keyed: l.keyed || null, rate: l.src ? +l.src.playbackRate.value.toFixed(4) : null })) };
-  Object.assign(window.HolodekSfx, { checkpoint, restoreCheckpoint });
+  Object.assign(window.HolodekSfx, { checkpoint, restoreCheckpoint, setVoiceTimbre, voiceTimbre, effectsLog:()=>effectLog.slice() });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

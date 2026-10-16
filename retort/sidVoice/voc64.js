@@ -39,13 +39,13 @@ const bestOf = item => { if ((process.env.SIDVOICE_BEST ?? '1') === '0' || proce
   if (item.P.guide === 'ryan') return BEST; return item.P.guide === 'lj' && BEST_F.k.tf > 0 ? BEST_F : null; };
 let CUR = MODES.stock; const hz2reg = hz => Math.max(0, Math.min(65535, Math.round(hz * 16777216 / CUR.clk))), cutReg = hz => { if (CUR.cut === 1) return cutReg0(hz); // enhanced: jsid maps reg r -> cutHz(r) * (1 + (cut-1) r/2047); invert by bisection
   let lo = 0, hi = 2047; while (lo < hi) { const m = (lo + hi) >> 1; if (cutHzJ(m) * (1 + (CUR.cut - 1) * m / 2047) < hz) lo = m + 1; else hi = m; } return lo; };
-function cleanF0(src) { // fill <=20 ms voicing dropouts and fold isolated octave errors back (pitch-tracker artifacts -> warble)
+function cleanF0(src, gap = K) { // optional gap bridging; always fold isolated octave errors back (pitch-tracker artifacts -> warble)
   const fr = src.map(f => [f[0], f[1], f[2]]), n = fr.length;
   for (let i = 1; i < n; i++) if (fr[i][0] <= 0 && fr[i - 1][0] > 0) { let j = i; while (j < n && fr[j][0] <= 0) j++;
     let apG = 0; for (let k = i; k < j && k < n; k++) apG += (fr[k][2][0] + fr[k][2][1] + fr[k][2][2]) / 3; apG /= Math.max(1, Math.min(j, n) - i);
     // bridge only pitch-tracker dropouts: short gaps, or gaps that are still periodic (low aperiodicity). Real voiceless consonants
     // (s, t, k, f...) are no longer bridged, so harmonic chips stop buzzing through them (was 13.5% of voiceless frames).
-    if (j < n && (j - i <= K.gapMin || (j - i <= (+process.env.SIDVOICE_GAP || 16) && apG < K.gapAp))) for (let k = i; k < j; k++) { const u = (k - i + 1) / (j - i + 1); fr[k][0] = Math.exp(Math.log(fr[i - 1][0]) * (1 - u) + Math.log(fr[j][0]) * u); } i = j; }
+    if (j < n && (j - i <= gap.gapMin || (j - i <= (gap.gapMax ?? +(process.env.SIDVOICE_GAP ?? 16)) && apG < gap.gapAp))) for (let k = i; k < j; k++) { const u = (k - i + 1) / (j - i + 1); fr[k][0] = Math.exp(Math.log(fr[i - 1][0]) * (1 - u) + Math.log(fr[j][0]) * u); } i = j; }
   for (let i = 4; i < n - 4; i++) { const f = fr[i][0]; if (f <= 0) continue; const nb = [fr[i - 4][0], fr[i + 4][0]].filter(x => x > 0); if (nb.length < 2) continue;
     const ref = Math.sqrt(nb[0] * nb[1]), r = Math.log2(f / ref); if (Math.abs(r) > 0.6) fr[i][0] = f * Math.pow(2, -Math.round(r)); }
   if (K.deHold) { // the analysis F0 is sample-and-hold (~9-frame plateaus = audible register stepping): re-draw it as a smooth
@@ -165,7 +165,8 @@ function intonation(fr, P, rs0, med, final, rnd, cad, syl) {
 const STATS = { gateFlips: 0, mJumps: 0, voicingFlips: 0, octJumps: 0, ticks: 0 };
 function voice(item, opts = {}) {
   const HZ = item.hz || HZ_BASE, K = item.k ? Object.assign({}, K_BASE, item.k) : K_BASE;
-  const M = CUR = modeOf(item.mode), P = item.P, fr = cleanF0(item.frames), neutral = !!P.neutral, hyb = !!(item.digi && item.digi.mix === 'hybrid' && item.audio);
+  const smoothLevels = X10 && XL && K.smoothLevels === true;
+  const M = CUR = modeOf(item.mode), P = item.P, fr = cleanF0(item.frames, X10 ? K : K_BASE), neutral = !!P.neutral, hyb = !!(item.digi && item.digi.mix === 'hybrid' && item.audio);
   const vf = fr.filter(f => f[0] > 0).map(f => f[0]).sort((a, b) => a - b), med = vf[vf.length >> 1] || 200;
   let seed = 11; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
   const male = P.f0 < 150, alpha = (male && P.guide !== 'ryan' ? 0.84 : 1.0) * (neutral ? 1 : P.fs) * (P.alpha || 1), rs0 = neutral ? 1 : Math.max(0.6, Math.min(1.9, P.range / 3.2)) * K.rng;
@@ -184,9 +185,11 @@ function voice(item, opts = {}) {
   for (let c = 0; c < 64; c++) { for (let v = 0; v < 3; v++) init.push([c, v * 7 + 5, (c >= 1 && c <= 50 ? K.att << 4 : 0)], [c, v * 7 + 6, 0xf0 | (c >= 1 && c <= 50 ? (VFIX ? (LIN ? (K.relL ?? 1) : K.relV) : K.rel) : 0)], [c, v * 7 + 2, 0], [c, v * 7 + 3, 8]);
     init.push([c, 23, (c >= 45 && c < 51 ? 0x47 : c >= 51 ? 0x67 : 0x07)]); }
   const units = (a, g = K.gam) => Math.round(45 * Math.pow(Math.max(0, Math.min(1, a)), LIN ? 1 : g)); // LINEAR: no gamma (harmonics 0.8, noise 0.6 dropped) // harmonic chips use K.gamH (closer to linear = natural tilt & level variation), noise/consonant chips keep K.gam
+  const harmonicUnits = (a, g) => smoothLevels ? 45 * Math.pow(Math.max(0, Math.min(1, a)), LIN ? 1 : g) : units(a, g);
   const rm = new Float64Array(64), rmD = Math.pow(10, -1.8 / (K.roomT * HZ)); // room: each chip's level decays as a ~roomT s (RT60) tail
   const LW = new Uint8Array(fr.length + 1); if (X10 && item.phones) for (const p of item.phones) if (/^[lɫ]$/.test(p.c)) for (let k = Math.max(0, Math.round(p.t0 * 400)); k < Math.min(fr.length, Math.round(p.t1 * 400)); k++) LW[k] = 1; // 10582: /l/ windows from phone times
   const xLv = new Int16Array(64).fill(-1), xMu = new Uint8Array(64), xFS = [500, 1500, 2500]; let brAge = 1e9, xFOn = false; // 10582 state
+  const smoothLv = new Int16Array(64 * 3).fill(-1);
   let fofM = 1, clos = false; // FOF-style per-glottal-cycle taper (pitch-synchronous level on harmonic chips), set per tick
   const setChip = (w, c, hz, wave, u, cutHz, mode) => { if (K.room && c >= 1 && c <= 44) { rm[c] = Math.max(u, rm[c] * rmD); u = Math.max(u, Math.round(rm[c] * K.room)); }
     // stops: noise chips may jump (sharp burst), and during a closure every chip drops at once (silence before the burst)
@@ -195,6 +198,19 @@ function voice(item, opts = {}) {
     if (hz > 0) lastHz[c] = hz; else hz = lastHz[c]; // voiced: always track k*f0 (keeps phase relations), unvoiced: hold // silent chips keep their pitch so release tails never jump
     const xMute = XM && cfi >= 0 && LW[cfi] === 1 && ((c >= 1 && c <= 44 && hz > 1150 && hz < 2700) || (c >= 53 && c <= 55)); // 10582: /l/ dip by hard mute (harmonics 1.15-2.7 kHz + noise bands 1.3/1.8/2.4 kHz)
     if (XM && ((c >= 1 && c <= 44) || (c >= 53 && c <= 55))) { const mb = xMute ? 7 : 0; if (mb !== xMu[c]) { w.push([c, 28, mb]); xMu[c] = mb; } }
+    if (smoothLevels && c >= 1 && c <= 44) {
+      // Keep ADSR gates stable. Distribute fine amplitude across the three voices,
+      // rather than retriggering envelopes when a coarse 15-step voice fills up.
+      const total = Math.max(0, Math.min(765, Math.round(last[c] * 17 * fofM))), fr = hz2reg(hz);
+      const r = cutReg(XM && hz > 0 && hz <= 1150 && cfi >= 0 && LW[cfi] ? hz * (K.xlCut ?? 0.9) : (cutHz || hz * 1.5));
+      for (let v = 0; v < 3; v++) {
+        const lv = Math.max(0, Math.min(255, total - v * 255)), index = c * 3 + v;
+        w.push([c, v * 7, fr & 255], [c, v * 7 + 1, fr >> 8], [c, v * 7 + 4, wave | 1]);
+        if (lv !== smoothLv[index]) { w.push([c, 25 + v, lv]); smoothLv[index] = lv; }
+      }
+      lastN[c] = total ? 3 : 0; lastVol[c] = 15;
+      w.push([c, 21, r & 7], [c, 22, r >> 3], [c, 24, mode | 15]); return;
+    }
     let n = lastN[c]; if (xMute && lastN[c] > 0) n = lastN[c]; else if (u === 0) n = 0; else if (!n || u > n * 15) n = Math.ceil(u / 15); else if (n > 1 && u < (n - 1) * 15 * 0.6) n = Math.ceil(u / 15); if (n !== lastN[c] && n && lastN[c]) STATS.gateFlips++; lastN[c] = n; const _n = n, vol = n ? Math.max(1, Math.min(15, Math.round(u / n))) : lastVol[c]; lastVol[c] = vol; const _ = 0, fr = hz2reg(hz), r = cutReg(XM && c >= 1 && c <= 44 && hz > 0 && hz <= 1150 && cfi >= 0 && LW[cfi] ? hz * (K.xlCut ?? 0.9) : (cutHz || hz * 1.5)); // 10582 /l/: LP pulled to the fundamental below the dip
     for (let v = 0; v < 3; v++) w.push([c, v * 7, fr & 255], [c, v * 7 + 1, fr >> 8], [c, v * 7 + 4, wave | (v < n ? 1 : 0)]);
     if (XL && ((c >= 1 && c <= 44) || (LIN && c >= 51))) { const lv = n ? Math.max(1, Math.min(255, Math.round(255 * Math.min(1, last[c] / (n * 15)) * (fofM !== 1 ? fofM : 1)))) : 0; // 10582: 8-bit level from the unrounded slewed amplitude
@@ -306,7 +322,7 @@ function voice(item, opts = {}) {
           a = envAt(f, hf) / G * Math.sqrt(1 - ap) * sh * tiltG(hf) * top * top * (warm && hf < 700 ? 1 + warm * (1 - hf / 700) : 1) * (CP && cfi >= 0 ? (cb === 2 ? (k <= 3 ? 0.5 : 0.04) : 1) * Cons.sonGain(CP.son[cfi], hf) : 1);
         let aa = a; if (hf < K.bassHz) { // bass (H1-H3 region): steady level, little flutter/shimmer, gentle low-shelf flatten (warmth kept)
           const bw = 1 - hf / K.bassHz; aa = a / sh * (1 + (sh - 1) * (1 - bw * 0.85)) * (1 - (1 - K.bassG) * bw); bassA[k] = bassA[k] ? bassA[k] * K.bassSm + aa * (1 - K.bassSm) : aa; aa = bassA[k]; } else bassA[k] = 0;
-        hw[k] = hw[k] * K.hwR + (rnd() - 0.5) * K.hwA * Math.min(1.5, 0.5 + k / 8) * (hf < K.bassHz ? K.bassFl : 1); setChip(w, c, hf + (k > (K.ldisp && f0 < 140 ? 2 : 4) ? det[k] * Math.min(1, (k - (K.ldisp && f0 < 140 ? 2 : 4)) / 6) * (K.ldisp && f0 < 140 ? K.ldet : 1) + pdn[k] : 0), 0x10, units(aa * Math.exp(hw[k]) * (fOn && hf > K.fx ? 1 - K.form * Math.min(1, (hf - K.fx) / 400) : 1) * (sOn && hf > K.fx ? 1 - K.sync * Math.min(1, (hf - K.fx) / 400) : 1) * (tOn ? 1 - K.tf : 1), M.mult === 1 ? K.gamH1 : K.gamH), Math.min(12000, hf * 1.5), 0x10); }
+        hw[k] = hw[k] * K.hwR + (rnd() - 0.5) * K.hwA * Math.min(1.5, 0.5 + k / 8) * (hf < K.bassHz ? K.bassFl : 1); setChip(w, c, hf + (k > (K.ldisp && f0 < 140 ? 2 : 4) ? det[k] * Math.min(1, (k - (K.ldisp && f0 < 140 ? 2 : 4)) / 6) * (K.ldisp && f0 < 140 ? K.ldet : 1) + pdn[k] : 0), 0x10, harmonicUnits(aa * Math.exp(hw[k]) * (fOn && hf > K.fx ? 1 - K.form * Math.min(1, (hf - K.fx) / 400) : 1) * (sOn && hf > K.fx ? 1 - K.sync * Math.min(1, (hf - K.fx) / 400) : 1) * (tOn ? 1 - K.tf : 1), M.mult === 1 ? K.gamH1 : K.gamH), Math.min(12000, hf * 1.5), 0x10); }
       if (XF) { const tk = voiced && !end ? fmPick(f) : null, isL = cfi >= 0 && LW[cfi] === 1; // 10582: one true formant voice per chip on chips 1-3 (F1, F2, F3), excited by chip k's voice-1 wraps / k = one pulse per glottal period
         for (let j = 0; j < 3; j++) { const c = j + 1; if (!tk) { if (xFOn) w.push([c, 35, 0]); continue; }
           const tgt = isL ? [360, 950, 2900][j] : tk[j]; xFS[j] = xFS[j] * (K.xfS ?? 0.6) + tgt * (1 - (K.xfS ?? 0.6)); const Fh = Math.min(M.maxHz * 0.95, xFS[j] * alpha), bw = [90, 110, 160][j];
@@ -454,4 +470,4 @@ function render0b(item) { const _bE = item.bEdge; if (!item._prepared) { item = 
   if(recorder)d.registerScore=recorder.finish();
   return d;
 }
-module.exports = { compile:item=>render({...item,captureRegisters:true,compileOnly:true}),stressTiming, phoneSnap, snapMeasure, STATS, voice, render, digiWeight, SR, MODES, modeOf, VERSION: 1000 + (X10 ? (NOTCH ? 43 : 41) : VFIX ? (CONS ? (!CLOCKFIX ? ((process.env.SIDVOICE_SNAP ?? '1') === '0' ? 29 : 30) : (process.env.SIDVOICE_SNAP ?? '1') === '0' ? 31 : 32) : 25) : 24) + (NOISEFORM ? 100 : 0) + (NOISEFORM && BEDGE ? 100 : 0) }; // +1000: identity/vibrato/detail-analysis revision; chip and detail mode also key the speech cache.
+module.exports = { compile:item=>render({...item,captureRegisters:true,compileOnly:true}),cleanF0,stressTiming, phoneSnap, snapMeasure, STATS, voice, render, digiWeight, SR, MODES, modeOf, VERSION: 2000 + (X10 ? (NOTCH ? 43 : 41) : VFIX ? (CONS ? (!CLOCKFIX ? ((process.env.SIDVOICE_SNAP ?? '1') === '0' ? 29 : 30) : (process.env.SIDVOICE_SNAP ?? '1') === '0' ? 31 : 32) : 25) : 24) + (NOISEFORM ? 100 : 0) + (NOISEFORM && BEDGE ? 100 : 0) }; // +2000: per-request preserved-gap Soft revision; chip and detail mode also key the speech cache.

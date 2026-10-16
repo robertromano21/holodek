@@ -31,7 +31,7 @@ function fixture() {
     getRoomPopulation:key=>map.get(key),setRoomPopulation:(key,value)=>map.set(key,value),getRoomNameDatabase:()=>db,
     setRoomNameDatabase:value=>db=value,setLiveWorldState:value=>calls.push({live:value})};
   const dice=new ActionDice({animationMs:0});
-  const context={require,Inhabitants:I,sharedState:state,actionDice:dice,inputTaskInFlight:false,
+  const context={require,Inhabitants:I,RandomEncounters:require('../retort/randomEncounters'),sharedState:state,actionDice:dice,inputTaskInFlight:false,
     populationService:createPopulationService(state),DialogueTurns:require('../retort/dialogueTurns'),
     app:{post:(url,handler)=>routes.set(url,handler),use(){}},broadcast:event=>events.push(event),
     console:{warn(){},info(){}},retortWithUserInput:async(...args)=>{calls.push({combat:args});return{content:'One combat round.',combatCharactersString:wire,combatRoundOnly:true};},

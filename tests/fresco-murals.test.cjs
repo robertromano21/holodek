@@ -37,6 +37,17 @@ test('fresco pigments ignore beige wall colors and retain probe-like contrast wi
   assert.equal(hashes.size,4);
 });
 
+test('retro fresco pigments are vivid without changing the stored composition, Modern art or puzzle clues',()=>{
+  const Retro=require('../assets/retroGraphics'),art=Art.plan(spec())[0],before=JSON.stringify(art),{width,height}=Art.rasterSize(art);
+  const draw=(row,retro)=>{const c=createCanvas(width,height);Art.paint(c.getContext('2d'),createCanvas,row,{},[],{retro});return c.getContext('2d').getImageData(0,0,width,height).data;};
+  const modern=draw(art,false),retro=Retro.palettePixels(draw(art,true),width,height),seen=new Set();
+  for(let i=0;i<retro.length;i+=4)seen.add([...retro.slice(i,i+3)].join(','));
+  for(const index of [2,5,6,7])assert.ok(seen.has(Retro.palette[index].join(',')),`Missing vivid pigment ${index}`);
+  assert.deepEqual(draw(art,false),modern);assert.equal(JSON.stringify(art),before);
+  const clue={...art,puzzleClue:true,clueStyle:'woven_banner'};
+  assert.deepEqual(draw(clue,true),draw(clue,false));
+});
+
 test('panoramic murals expand composition rather than figure anatomy and keep classic templates',()=>{
   const art=Art.plan(spec())[0],rows=Designs.figures(art),classic=Designs.layout(art,rows),wide=Designs.layout(art,rows,128);
   for(let i=0;i<rows.length;i++){

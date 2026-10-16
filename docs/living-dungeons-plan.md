@@ -252,6 +252,14 @@ temple naves remain open unless explicitly described as covered. Explicitly
 roofless descriptions still take precedence. Temple entrances request a compact
 walk-through shrine with capitals, entablatures, pediments and a pitched roof,
 plus a compact, column-supported rotunda where the existing layout permits it.
+Classical porticos use ten distinct pillars: four along each side and four across
+the rear, sharing the two rear corners. The front aisle stays open. Sites must fit
+all ten supports without blocking reserved paths; incomplete plans are rejected
+atomically. Existing cached porticos can receive additive pillars on complete-room
+load/revisit, not during door/puzzle deltas. The upgrade retains existing columns,
+roofs, terrain and artwork, checks occupied/protected cells and connectivity, and
+skips unsafe bays without partially changing them. Save files are not overwritten;
+an upgraded room is persisted only when the player next saves.
 
 Outdoor ruin/altar context (including puzzle descriptions), or wasteland/desert/
 ruins/volcanic biomes, requests at most three small, separated architectural clusters:

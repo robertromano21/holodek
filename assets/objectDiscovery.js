@@ -64,7 +64,7 @@
       root.DungeonActionNotices?.receive?.({id:'object:'+dungeon.geoKey+':'+name,runId:root.dungeonRunId,geoKey:dungeon.geoKey,
         kind:'object-discovered',title:target.label,message:'Discovered in view. Walk closer to inspect or take it.',icon});
     }
-    if(fresh.length)root.persistDungeonObjectDiscoveries?.(dungeon);
+    if(fresh.length){root.persistDungeonObjectDiscoveries?.(dungeon);root.DungeonExplorationMap?.refresh?.();}
     return fresh;
   }
   function reset(){room=null;visible=new Set();view=null;}

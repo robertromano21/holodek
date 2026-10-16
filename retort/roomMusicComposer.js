@@ -5,12 +5,30 @@ const { createHash } = require('node:crypto');
 const Composition = require('./sidComposition');
 const bounded = (value, limit) => (typeof value === 'string' ? value : JSON.stringify(value ?? '')).slice(0, limit);
 
+function createRetryGate({ now = Date.now, cooldown = 30000 } = {}) {
+  const failures = new Map(), key = (runId, roomKey) => `${runId}:${roomKey}`;
+  return {
+    canAttempt: (runId, roomKey) => (failures.get(key(runId, roomKey)) || 0) <= now(),
+    failed(runId, roomKey) {
+      failures.set(key(runId, roomKey), now() + cooldown);
+      if (failures.size > 128) failures.delete(failures.keys().next().value);
+    },
+    succeeded: (runId, roomKey) => failures.delete(key(runId, roomKey))
+  };
+}
+const retryGate = createRetryGate();
+
 function contextFor(state, roomKey, monsters) {
   let db = state.getRoomNameDatabase?.() || {};
   try { if (typeof db === 'string') db = JSON.parse(db); } catch { db = {}; }
   const room = db[roomKey] || {}, pc = state.getCurrentPC?.();
   return {
     roomName: room.name || room.roomName,
+    ...(room.planarRealm ? { plane: { name: room.planarRealm.name, nature: bounded(room.planarRealm.nature, 700),
+      population: bounded(room.planarRealm.population, 400),
+      factions: (room.planarRealm.factions || []).map(f => ({ name: f.name, relation: f.relation })).slice(0, 3),
+      gods: (room.planarRealm.gods || []).map(g => ({ name: g.name, relation: g.relation })).slice(0, 2) } } : {}),
+    ...(Object.values(room.exits || {}).some(e => e?.kind === 'portal') ? { portal: { kind: 'purple-arch', returnable: true } } : {}),
     setting: bounded(room.campaignSetting || room.classification || {}, 1300),
     protagonist: pc ? { name: pc.name || pc.Name, class: pc.class || pc.Class } :
       bounded(String(state.getUpdatedGameConsole?.() || '').match(/(?:^|\n)PC:\s*\n([\s\S]*?)(?:\n\s*\n|$)/)?.[1] || 'Current selected party', 400),
@@ -47,4 +65,4 @@ async function generate($, state, descriptionOrToken, monstersOrContext = {}, ro
   }
   return song;
 }
-module.exports = { generate, contextFor, logComposition };
+module.exports = { generate, contextFor, logComposition, createRetryGate, retryGate };

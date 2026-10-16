@@ -1,10 +1,14 @@
 <!doctype html><html><head><meta charset="utf-8"><style>__GAME_CSS__</style>
-<script src="/assets/combatTacticalUi.js"></script><script src="/assets/combatTurnUi.js"></script>
-<script src="/assets/partyRoster.js"></script><script src="/assets/partySpellbookUi.js"></script><script src="/assets/commandGate.js"></script></head><body>
+<script src="/assets/combatTacticalUi.js"></script><script src="/assets/combatTurnUi.js"></script><script src="/assets/combatCharacterUi.js"></script>
+<script src="/assets/partyRoster.js"></script><script src="/assets/partySpellbookUi.js"></script><script src="/assets/commandGate.js"></script><script src="/assets/mapShortcutUi.js"></script></head><body>
 <div id="combat-popup" style="display:none"><div id="combat-header">Combat Mode</div><div id="combat-container"><canvas width="775" height="775"></canvas></div></div>
+<div id="phaser-popup" style="display:block;position:fixed;right:5px;top:5px;width:200px;height:250px">Game Console</div>
 <div id="chatbotcontainer"><nav id="command-library-menu"><button data-read-only-reference onclick="PartySpellbookUi.open()">Spellbook</button></nav><textarea id="chatuserinput">unfinished draft</textarea><button id="ordinary-command-button">Command</button></div>
+<button id="dungeon-map-shortcut">Map</button><button id="dungeon-journal-shortcut">Journal</button><button id="dungeon-spellbook-shortcut">Book</button><button id="dungeon-inventory-shortcut">Pack</button>
+<div id="party-icon-dock"><div class="party-icon-slot"><button class="party-icon-button">Mortacia</button><span class="party-dice-wrap"><button class="party-d20 awaiting-roll" id="test-party-roll">d20</button></span></div></div>
 <pre id="results"></pre><script>
-window.dungeonRunId='ui-run'; const realFetch=window.fetch.bind(window), posts=[], checks={}, errors=[];
+__PARTY_DOCK_LAYOUT__
+window.dungeonRunId='ui-run'; const realFetch=window.fetch.bind(window), posts=[], checks={}, errors=[],layoutChecks=[];
 window.getDungeonLifeContext=()=>({dungeon:{geoKey:'1,0,0'},player:{x:4.5,y:4.5},actors:[]});
 window.drawPartySpriteCanvas=(canvas)=>{const ctx=canvas.getContext('2d');ctx.fillStyle='#e5bd72';ctx.fillRect(8,4,12,28);};
 let prepared=['missile'], magic=3;
@@ -22,19 +26,52 @@ window.applyRealtimeCombatResult=async()=>{};
 document.addEventListener('DOMContentLoaded',async()=>{
   try {
     const box=document.getElementById('combat-popup');
+    const dock=document.getElementById('party-icon-dock');
+    for(let i=1;i<7;i++){const slot=dock.firstElementChild.cloneNode(true);slot.querySelector('button').textContent='Companion '+i;slot.querySelector('.party-d20').removeAttribute('id');dock.appendChild(slot);}
     for(const zoom of [1,1.3125,1.75,2]){
       document.body.style.zoom=zoom;
+      dispatchEvent(new Event('resize'));
+      positionPartyIconDock();
       const saved=box.style.cssText;
-      const prompt={turnId:'turn-'+zoom,actionId:'battle',combatant:'Wizard of the Cistern',round:1,targets:['Guard'],attackTargets:['Guard'],allowRetreat:true,tactical:true,
+      const prompt={turnId:'turn-'+zoom,actionId:'battle',combatant:'Wizard of the Cistern',round:1,targets:['Guard','Far Guard'],attackTargets:['Guard'],approachTargets:[{name:'Far Guard',x:6,y:4,cost:2}],allowRetreat:true,tactical:true,
         runId:'ui-run',geoKey:'1,0,0',spells:[],initiative:[],movement:{remaining:6,total:6,revision:0,busy:false,position:{x:4.5,y:4.5},tiles:[{x:4,y:3,cost:1}]}};
-      window.actionDiceState={active:{kind:'combat',id:'battle',turn:prompt},paused:false};
+      window.actionDiceState={active:{kind:'combat',id:'battle',turn:prompt,ledger:{initiative:[{name:'Mortacia',roll:15},{name:'Dantuea',roll:19}],entries:[
+        {kind:'hit',actor:'Dantuea',target:'Mortacia',damage:15,hp:108},{kind:'miss',actor:'Mortacia',target:'Dantuea'}]}},paused:false};
       CombatTacticalUi.receive(window.actionDiceState);CombatTurnUi.receive(prompt);
       checks['hasAnimation-'+zoom]=box.getAnimations().length>0;
       await new Promise(r=>setTimeout(r,360));
-      const r=box.getBoundingClientRect(), map=document.getElementById('combat-container').getBoundingClientRect(),controls=document.getElementById('combat-turn-popup').getBoundingClientRect();
+      CombatTurnUi.renderDockControls(document.getElementById('party-icon-dock'));positionPartyIconDock();CombatTacticalUi.layout();
+      const r=box.getBoundingClientRect(), map=document.getElementById('combat-container').getBoundingClientRect(),controls=document.getElementById('combat-ledger').getBoundingClientRect();
       checks['expandedFits-'+zoom]=r.left>=0&&r.top>=0&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1;
-      checks['centered-'+zoom]=Math.abs((r.left+r.right)/2-innerWidth/2)<2&&Math.abs((r.top+r.bottom)/2-innerHeight/2)<2;
+      const pack=document.getElementById('dungeon-inventory-shortcut'),packBounds=pack.getBoundingClientRect(),consoleBounds=document.getElementById('phaser-popup').getBoundingClientRect();
+      const clear=b=>r.right<=b.left-11||r.left>=b.right+11||r.bottom<=b.top-11||r.top>=b.bottom+11;
+      checks['rightControlsClear-'+zoom]=clear(packBounds)&&(getComputedStyle(document.getElementById('phaser-popup')).visibility==='hidden'||clear(consoleBounds));
+      checks['packClickable-'+zoom]=document.elementFromPoint(packBounds.left+packBounds.width/2,packBounds.top+packBounds.height/2)===pack;
+      const dockBounds=document.getElementById('party-icon-dock').getBoundingClientRect(),die=document.getElementById('test-party-roll'),dieBounds=die.getBoundingClientRect();
+      checks['partyControlsClear-'+zoom]=r.left>=dockBounds.right+11||r.bottom<=dockBounds.top-11;
+      checks['diceClickable-'+zoom]=document.elementFromPoint(dieBounds.left+dieBounds.width/2,dieBounds.top+dieBounds.height/2)===die;
+      layoutChecks.push({zoom,map:r.toJSON(),dock:dockBounds.toJSON(),die:dieBounds.toJSON(),console:consoleBounds.toJSON(),pack:packBounds.toJSON(),hit:document.elementFromPoint(packBounds.left+packBounds.width/2,packBounds.top+packBounds.height/2)?.outerHTML.slice(0,160),dieHit:document.elementFromPoint(dieBounds.left+dieBounds.width/2,dieBounds.top+dieBounds.height/2)?.outerHTML.slice(0,160)});
+      checks['leftMargin-'+zoom]=document.body.classList.contains('combat-compact-map')?Math.abs(r.left-12)<2:Math.abs(r.left-Math.max(96,dockBounds.right+12))<2;
       checks['controlsSeparate-'+zoom]=map.right<=controls.left+1||map.bottom<=controls.top+1;
+      checks['ledgerReadOnly-'+zoom]=!document.querySelector('#combat-ledger button');
+      checks['noLedgerTurnFooter-'+zoom]=document.getElementById('combat-turn-popup').hidden&&!document.getElementById('combat-turn-popup').textContent;
+      checks['readableOutcomes-'+zoom]=document.getElementById('combat-ledger-entries').textContent==='Dantuea hits Mortacia for 15 damage.\nMortacia has 108 HP left.\n\nMortacia misses Dantuea.';
+      checks['initiativeOnce-'+zoom]=(document.getElementById('combat-ledger').textContent.match(/Initiative:/g)||[]).length===1;
+      checks['ledgerNotClipped-'+zoom]=getComputedStyle(document.getElementById('combat-ledger')).overflowY==='auto';
+      layoutChecks.at(-1).ledger={bounds:controls.toJSON(),entries:document.getElementById('combat-ledger-entries').getBoundingClientRect().toJSON(),scroll:document.getElementById('combat-ledger').scrollHeight,client:document.getElementById('combat-ledger').clientHeight};
+      checks['sevenPartyAvatars-'+zoom]=dock.querySelectorAll('.party-icon-slot').length===7;
+      checks['holdAtParty-'+zoom]=!!document.getElementById('combat-hold-position')?.closest('#party-icon-dock');
+      checks['attackAtParty-'+zoom]=!!document.getElementById('combat-attack-button')?.closest('#party-icon-dock');
+      checks['retreatAtParty-'+zoom]=!!document.getElementById('combat-retreat-button')?.closest('#party-icon-dock');
+      window.combatCharacters=[{name:'Guard',type:'monster'}];let sheetCalls=0;window.openCombatCharacterSheet=()=>sheetCalls++;
+      CombatCharacterUi.open(window.combatCharacters[0]);
+      const targetPopup=document.querySelector('.combat-target-actions'),targetBounds=targetPopup.getBoundingClientRect();
+      layoutChecks.at(-1).target={bounds:targetBounds.toJSON(),style:targetPopup.style.cssText};
+      checks['noCombatCharacterSheet-'+zoom]=sheetCalls===0;
+      checks['targetPopupFits-'+zoom]=targetBounds.left>=0&&targetBounds.top>=0&&targetBounds.right<=innerWidth+1&&targetBounds.bottom<=innerHeight+1;
+      checks['targetUnderConsole-'+zoom]=document.body.classList.contains('combat-compact-map')||Math.abs(targetBounds.top-consoleBounds.bottom-5*zoom)<2&&Math.abs(targetBounds.left-consoleBounds.left)<2;
+      checks['originalPopupStyle-'+zoom]=getComputedStyle(targetPopup).fontFamily.includes('Arial')&&getComputedStyle(targetPopup).backgroundImage==='none'&&getComputedStyle(targetPopup).borderTopColor==='rgb(255, 255, 255)';
+      targetPopup.remove();
       await PartySpellbookUi.open();
       let book=document.getElementById('party-spellbook-popup'),br=book.getBoundingClientRect();
       checks['bookFits-'+zoom]=br.left>=0&&br.top>=0&&br.right<=innerWidth+1&&br.bottom<=innerHeight+1;
@@ -44,8 +81,15 @@ document.addEventListener('DOMContentLoaded',async()=>{
       book.querySelectorAll('[role=tab]')[1].click();
       checks['pageSwitch-'+zoom]=book.querySelector('[role=tabpanel]').textContent.includes('Grave Mending (0)')&&!book.querySelector('[role=tabpanel]').textContent.includes('Magic Missile');
       book.querySelectorAll('[role=tab]')[0].click();checks['combatPreparationDisabled-'+zoom]=[...book.querySelectorAll('.spellbook-prepare')].every(b=>b.disabled);
-      PartySpellbookUi.close();CombatTurnUi.receive(null);CombatTacticalUi.receive({active:null});
-      checks['restored-'+zoom]=box.style.cssText===saved&&!box.classList.contains('combat-expanded');
+      PartySpellbookUi.close();
+      const actions=document.createElement('div');document.body.appendChild(actions);CombatTurnUi.addCharacterActions(actions,{name:'Far Guard',type:'monster'});
+      const approach=[...actions.querySelectorAll('button')].find(b=>b.textContent==='Move + Attack Far Guard (2 tiles)');
+      checks['approachEnabled-'+zoom]=!!approach&&!approach.disabled;
+      approach?.click();await new Promise(r=>setTimeout(r,5));
+      checks['approachSubmitted-'+zoom]=posts.at(-1)?.url==='/submit-target2'&&posts.at(-1)?.body.target==='Far Guard';
+      CombatTurnUi.receive(null);CombatTacticalUi.receive({active:null});
+      document.querySelector('.combat-end-controls')?.remove();
+      checks['restored-'+zoom]=box.style.cssText===saved&&!box.classList.contains('combat-expanded')&&!document.body.classList.contains('combat-compact-map');
     }
     window.actionDiceState={active:null};window.gamePaused=true;await PartySpellbookUi.open();
     checks.readablePaused=document.getElementById('party-spellbook-popup').textContent.includes('Magic Missile (3)');
@@ -63,7 +107,7 @@ document.addEventListener('DOMContentLoaded',async()=>{
     checks.readDoesNotPrepare=posts.filter(p=>p.url==='/spells/prepare').length===2;
     checks.draftPreserved=document.getElementById('chatuserinput').value==='unfinished draft';
   }catch(error){errors.push(error.stack);}
-  const report={pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors};document.getElementById('results').textContent=JSON.stringify(report);
+  const report={pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors,layoutChecks};document.getElementById('results').textContent=JSON.stringify(report);
   await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(report)});
 });
 </script></body></html>

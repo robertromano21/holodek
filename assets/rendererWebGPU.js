@@ -71,7 +71,7 @@
   }
 
   function isBloomEnabled() {
-    return window.WEBGPU_BLOOM !== false;
+    return !window.RetroGraphics?.fullbright?.() && window.WEBGPU_BLOOM !== false;
   }
 
   function getBloomIntensity() {
@@ -2066,7 +2066,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
       );
       // Until the native world pass supports per-cell roofs, present the complete
       // legacy GPU scene rather than overwriting its ceilings with the sky pass.
-      return this.mode === 'webgpu' && isNativeWorldEnabled() && !legacyHasDynamicActors &&
+      return this.mode === 'webgpu' && !window.RetroGraphics?.fullbright?.() && isNativeWorldEnabled() && !legacyHasDynamicActors &&
         !this.legacyRenderer?.hasRoofs && !this.legacyRenderer?.hasStructures;
     },
 
@@ -4090,7 +4090,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
     },
 
     shouldDriveSpriteTorch() {
-      return this.mode === 'webgpu'
+      return this.mode === 'webgpu' && !window.RetroGraphics?.fullbright?.()
         && isPostTorchMaskEnabled()
         && window.WEBGPU_DRIVE_SPRITE_VOXEL_TORCH !== false;
     },
@@ -4100,7 +4100,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
     },
 
     shouldDriveHaloFlame() {
-      return this.mode === 'webgpu'
+      return this.mode === 'webgpu' && !window.RetroGraphics?.fullbright?.()
         && (isGpuHaloFlameEnabled() || this.shouldUseNativeWorld());
     },
 

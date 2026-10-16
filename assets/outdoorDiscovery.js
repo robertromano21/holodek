@@ -40,7 +40,7 @@
     const landmarks = (d.sceneLandmarks || []).filter(a => /ruin|tower|altar|shrine|gate|fort|keep|tomb|cave/i.test(a.type || ''));
     for (const group of p.groups || []) {
       const records = group.members.map(name => p.actors[name]).filter(Boolean);
-      const bound = records.some(a => protect.has(norm(a.name)) || a.name === p.questIntroduction?.speaker);
+      const bound = p.settlement?.hub || records.some(a => protect.has(norm(a.name)) || a.name === p.questIntroduction?.speaker);
       const anchored = records.every(a => ['guard', 'work', 'rest'].includes(a.routine)) &&
         landmarks.some(lm => point(group.site) && distance(lm, group.site) < 14);
       if (bound || anchored || group.status !== 'unseen' || group.introPlayed) {
@@ -208,5 +208,5 @@
       return [placement?.status === 'placed' ? { ...item, x: placement.x, y: placement.y } : item];
     });
   }
-  return { eligible, setup, tick, release, objects, MAX_SEARCH, QUIET_MOVING_MS, SPAWN_MIN, SPAWN_MAX };
+  return { eligible, setup, tick, release, objects, candidates, MAX_SEARCH, QUIET_MOVING_MS, SPAWN_MIN, SPAWN_MAX };
 });

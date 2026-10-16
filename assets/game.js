@@ -246,6 +246,24 @@ function getLodSample(dungeon, x, y, factor) {
   return { floorHeight: cache.heights[idx], solid: cache.solids[idx] };
 }
 
+function presentRoomIllustration(dungeon = currentDungeon) {
+  const geoKey = window.RoomArtUi?.key(dungeon?.geoKey);
+  if (!geoKey || !window.dungeonRunId ||
+      (dungeon._meta?.runId && dungeon._meta.runId !== window.dungeonRunId)) return;
+  const room = roomNameDatabase.get(geoKey), source = dungeon.sceneSpec?.source;
+  const name = room?.name || source?.roomName;
+  const description = window.RoomIllustration?.description(room, source?.description);
+  window.RoomArtUi?.visit({ coordinates: geoKey, name, description, illustration: room?.illustration,
+    onSave: illustration => {
+      const latest = roomNameDatabase.get(geoKey);
+      if (!latest || (latest.name || source?.roomName) !== name ||
+          window.RoomIllustration?.description(latest, source?.description) !== description) return;
+      latest.illustration = illustration;
+      roomNameDatabasePlainObject = mapToPlainObject(roomNameDatabase);
+      roomNameDatabaseString = JSON.stringify(roomNameDatabasePlainObject);
+    } });
+}
+
 async function switchDungeonForCoordinates(coordString) {
   // coordString is like "X: 0, Y: 0, Z: 0"
   const match = coordString.match(/X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
@@ -258,7 +276,9 @@ async function switchDungeonForCoordinates(coordString) {
   let cached = null;
   try { cached = await idbGetDungeon(geoKey); }
   catch (error) { console.warn('[DungeonCache] Read failed:', geoKey, error); }
-  if (!cached || (cached._meta?.version || 0) < DUNGEON_CACHE_VERSION) {
+  const pendingPorticoUpgrade = cached?.sceneRoof?.bays?.some(b => b.role === 'shrine' &&
+    (b.idiom || cached.sceneRoof.idiom) === 'classical' && ['pitched', 'open-portico'].includes(b.style) && b.supports?.length < 10);
+  if (!cached || (cached._meta?.version || 0) < DUNGEON_CACHE_VERSION || pendingPorticoUpgrade) {
     try {
       const response = await fetch(`/get-room-dungeon?coords=${encodeURIComponent(geoKey)}`);
       if (!response.ok) throw new Error(`Room lookup failed (HTTP ${response.status}).`);
@@ -300,6 +320,7 @@ async function switchDungeonForCoordinates(coordString) {
   updatePlayerHeightFromCell();
   refreshPartyDungeonPresence(true);
   renderDungeonView();
+  presentRoomIllustration();
   // Revisited (cached) room is on screen: let the queued room song start (two-slot music, sfx.js).
   requestAnimationFrame(() => requestAnimationFrame(() => window.HolodekSfx?.roomShown?.(currentDungeon?.geoKey || geoKey)));
   logDungeonCombatSync('move');
@@ -805,6 +826,7 @@ eventSource.onmessage = function(event) {
         updatePlayerHeightFromCell();
         refreshPartyDungeonPresence(true);
         renderDungeonView();
+        presentRoomIllustration();
         // The room is spawned and drawn: let the queued room song start (after the next painted frames).
         requestAnimationFrame(() => requestAnimationFrame(() => window.HolodekSfx?.roomShown?.(currentDungeon?.geoKey || geoKey)));
       })();
@@ -855,6 +877,7 @@ eventSource.onmessage = function(event) {
         window.showCombatTargetPrompt?.(data);
     } else if (data.type === 'combat_log') {
         const { log } = data;
+        window.CombatTacticalUi?.receiveLog(log);
         updateChatLog("<br><br>" + log.replace(/\n/g, "<br>"));
     }
 };
@@ -1103,6 +1126,8 @@ const COMBAT_GRID_CENTER = Math.floor(COMBAT_GRID_SIZE / 2);
 const COMBAT_CANVAS_SIZE = COMBAT_GRID_SIZE * COMBAT_CELL_SIZE;
 const COMBAT_ACTOR_TOKEN_SCALE = 1.35;
 const COMBAT_MORTACIA_TOKEN_SCALE = 1.75;
+const COMBAT_HUMANOID_TOKEN_SCALE = 1.4;
+const COMBAT_MIN_BODY_TOKEN_SCALE = 1.28;
 
 function deriveFacingFromDelta(dx, dy, fallback = 'left') {
   const safeFallback = String(fallback || 'left').toLowerCase() === 'right' ? 'right' : 'left';
@@ -2078,8 +2103,11 @@ class MainScene extends Phaser.Scene {
         const adjacentRooms = consoleAdjacentRooms(roomNameDatabase, coordinates,
           window.OutdoorRoutes?.displayName?.(data?.adjacentRooms || "None") || data?.adjacentRooms || "None");
         
-        // In MainScene create method, before constructing fullText
-        const imageHtml = (window.roomImages && window.roomImages[coordinates]) ? `<img src="${window.roomImages[coordinates]}" alt="Room Image" style="max-width:100%;"><br>` : `<img src="https://childrenofthegrave.com/test22/Tartarus.png" alt="Default Room Image" style="max-width:100%;"><br>`;
+        const artKey = window.RoomArtUi?.key(coordinates);
+        const artRoom = roomNameDatabase.get(artKey);
+        const artName = artRoom?.name || roomName;
+        const artDescription = window.RoomIllustration?.description(artRoom, roomDescription) || roomDescription;
+        const imageHtml = `<div id="room-art-slot">${window.RoomArtUi?.markup({ coordinates, name: artName, description: artDescription }) || ''}</div>`;
         
         let exitsHtml = exits;
         if (exits !== "None") {
@@ -2128,6 +2156,7 @@ class MainScene extends Phaser.Scene {
             }
         
             // Wrap the PC block in a div with a class for indentation
+            updatedPcBlock = updatedPcBlock.replace(pcLines[0], () => `<span class="clickable-pc" data-pc="${escapedText(pcSheet?.name || pcName.trim())}">${escapedText(pcLines[0])}</span>`);
             pcHtml = `<div class="pc-block">${window.PartyRoster.displaySheet(updatedPcBlock)}</div>`;
         }
         
@@ -2258,6 +2287,16 @@ Adjacent Rooms:
         contentDiv.dataset.consoleGeoKey = window.DungeonInhabitants.roomKey(coordinates) || '';
         contentDiv.dataset.roomObjectProperties=objectsInRoomProperties;
         contentDiv.dataset.roomObjects=objects;
+        if (pc !== 'No PC data') window.RoomArtUi?.visit({ coordinates, name: artName, description: artDescription,
+          illustration: artRoom?.illustration, onSave: illustration => {
+            const room = roomNameDatabase.get(artKey);
+            if (!room || (room.name || roomName) !== artName ||
+                (window.RoomIllustration?.description(room, roomDescription) || roomDescription) !== artDescription) return;
+            room.illustration = illustration;
+            roomNameDatabasePlainObject = mapToPlainObject(roomNameDatabase);
+            roomNameDatabaseString = JSON.stringify(roomNameDatabasePlainObject);
+          } });
+        else if (currentDungeon) presentRoomIllustration();
         window.refreshDungeonConsoleStates?.();
         window.ObjectDiscovery?.refreshConsole();
         window.InventoryUi?.update({ inventory, inventoryProperties, pc, npcs, silverPieces });
@@ -2772,8 +2811,14 @@ function combatMapActorSize(character,cellSize) {
   const api=typeof window!=='undefined'?window.ProceduralCharacters:null;
   const spec=api?.getPresetProceduralSpec?.(name)||character?.sprite?.spec;
   const stature=api?.characterStature?.(spec);
-  if(stature)return cellSize*COMBAT_ACTOR_TOKEN_SCALE*stature.scale/(character._combatBodyFraction||1);
-  return cellSize*(/^mortacia\b/i.test(name)?COMBAT_MORTACIA_TOKEN_SCALE:COMBAT_ACTOR_TOKEN_SCALE);
+  const mortacia=/^mortacia\b/i.test(name);
+  const race=String(spec?.race||character?.race||character?.Race||'').toLowerCase();
+  const humanoid=/\b(human|elf|elves|half-elf)\b/.test(race);
+  const compact=/\b(dwarf|dwarves|gnome|halfling)\b/.test(race);
+  const scale=!mortacia&&humanoid?COMBAT_HUMANOID_TOKEN_SCALE:COMBAT_ACTOR_TOKEN_SCALE;
+  // Map readability only: retain saved/world stature and apply the same body floor to every role.
+  if(stature)return cellSize*Math.max(COMBAT_MIN_BODY_TOKEN_SCALE,scale*stature.scale)/(character._combatBodyFraction||1);
+  return cellSize*(mortacia?COMBAT_MORTACIA_TOKEN_SCALE:compact?COMBAT_MIN_BODY_TOKEN_SCALE:scale);
 }
 
 function setCombatPlayerTokenOwner(scene,composited) {
@@ -2799,7 +2844,9 @@ function ensureCombatTextureForCharacter(scene, character) {
   if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteSheetCanvas === 'function') {
     try {
       const drawSheet=window.NATIVE_COMBAT_SPRITES!==false&&window.createCombatSpriteSheetCanvas||window.createCharacterSpriteSheetCanvas;
-      const sheetCanvas = fitCombatNpcSpriteSheet(drawSheet(character, character.sprite && character.sprite.spec, 4),character,4);
+      const originalSheet = drawSheet(character, character.sprite && character.sprite.spec, 4);
+      const coloredSheet = window.RetroGraphics?.characterSheet?.(originalSheet, character, character.sprite?.spec) || originalSheet;
+      const sheetCanvas = fitCombatNpcSpriteSheet(coloredSheet,character,4);
       scene.textures.addCanvas(texKey, sheetCanvas);
       const tex = scene.textures.get(texKey);
       tex._combatBodyFraction=character._combatBodyFraction;
@@ -2816,7 +2863,9 @@ function ensureCombatTextureForCharacter(scene, character) {
   }
   if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteCanvas === 'function') {
     try {
-      const canvasEl = fitCombatNpcSpriteSheet(window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec),character,1);
+      const originalCanvas = window.createCharacterSpriteCanvas(character, character.sprite && character.sprite.spec);
+      const coloredCanvas = window.RetroGraphics?.characterSheet?.(originalCanvas, character, character.sprite?.spec) || originalCanvas;
+      const canvasEl = fitCombatNpcSpriteSheet(coloredCanvas,character,1);
       scene.textures.addCanvas(texKey, canvasEl);
       const tex = scene.textures.get(texKey);
       tex._combatBodyFraction=character._combatBodyFraction;
@@ -3018,6 +3067,7 @@ class CombatScene extends Phaser.Scene {
     
 
         this.PIXEL_SCALE = 2;
+        window.RetroGraphics?.bindCombat?.(this.game);
         this.gridSize = COMBAT_GRID_SIZE;
         this.cellSize = COMBAT_CELL_SIZE;
     
@@ -3044,15 +3094,7 @@ class CombatScene extends Phaser.Scene {
         this.input.on('pointerup', pointer => {
           if(pointer.button!==0||pointer.getDistance?.()>6)return;
           const point=this.cameras.main.getWorldPoint(pointer.x,pointer.y);
-          let targets=this.combatActorHitTargets||[];
-          if(!currentDungeon)targets=Object.entries(this.characters||{}).filter(([,v])=>v.sprite?.visible).map(([name,v])=>({
-            character:(window.combatCharacters||[]).find(c=>c.name===name),texKey:v.sprite.texture?.key,frameName:v.sprite.frame?.name,
-            flipped:!!v.sprite.flipX,x:v.sprite.x-v.sprite.displayWidth/2,y:v.sprite.y-v.sprite.displayHeight/2,size:v.sprite.displayWidth}));
-          const actor=window.CombatCharacterUi?.pick(targets,point.x,point.y,(t,u,v)=>{
-            if(!t.texKey||!this.textures.getPixelAlpha)return 255;
-            const f=this.textures.getFrame(t.texKey,t.frameName),w=f?.cutWidth||96,h=f?.cutHeight||96;
-            return this.textures.getPixelAlpha(Math.min(w-1,Math.floor(u*w)),Math.min(h-1,Math.floor(v*h)),t.texKey,t.frameName);
-          });
+          const actor=window.CombatCharacterUi?.pickScene(this,point.x,point.y);
           if(window.CombatTacticalUi?.click(actor,this._lastDungeonDraw,point.x,point.y,this.PIXEL_SCALE))return;
           if(actor)window.CombatCharacterUi.open(actor);
         });
@@ -3093,6 +3135,7 @@ class CombatScene extends Phaser.Scene {
         this.time.delayedCall(50, () => this.sys.game.loop.sleep());
         // Listen for scroll events on the DOM container to update the camera
         this.domContainer.addEventListener('scroll', () => this.syncCameraWithScroll(true), { passive: true }); // Use passive for performance
+        window.CombatTacticalUi?.bind(this);
         // Handle PC movement with arrow keys (up/down/left/right for grid position)
       /*  this.input.keyboard.on('keydown', (event) => {
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
@@ -3220,8 +3263,8 @@ class CombatScene extends Phaser.Scene {
             const [x, y] = key.split(',').map(Number);
             const tile = String(cell.tile || '');
             const lower = tile.toLowerCase();
-            const localX = (x + 1 - pos.x) * cs;
-            const localY = (y + 1 - pos.y) * cs;
+            const localX = (x + 0.5 - pos.x) * cs;
+            const localY = (y + 0.5 - pos.y) * cs;
             samples.push({
                 key, tile,
                 floor: Number.isFinite(cell.floorHeight) ? cell.floorHeight : 0,
@@ -3266,12 +3309,12 @@ class CombatScene extends Phaser.Scene {
         // Player-centered, rotates with facing, smooth frac movement, thick grid on top.
         const pos = getPlayerPosForMap();
         const combatAngle = window.CombatTacticalUi?.angle(getCombatMapRotationAngle()) ?? getCombatMapRotationAngle();
-        const cs = this.RT_CELL;
+        const cs = this.RT_CELL * (window.CombatTacticalUi?.cellScale?.() || 1);
         const half = Math.floor(this.gridSize / 2);
-        const centerX = (half + 0.5) * cs;
-        const centerY = (half + 0.5) * cs;
-        const fracX = pos.x - Math.floor(pos.x) - 0.5;
-        const fracY = pos.y - Math.floor(pos.y) - 0.5;
+        const centerX = (half + 0.5) * this.RT_CELL;
+        const centerY = (half + 0.5) * this.RT_CELL;
+        const fracX = pos.x - Math.floor(pos.x);
+        const fracY = pos.y - Math.floor(pos.y);
         const viewRadius = half;
         this._lastDungeonDraw = {
           dungeon: currentDungeon, pos, combatAngle, cs, centerX, centerY, viewRadius
@@ -3282,19 +3325,20 @@ class CombatScene extends Phaser.Scene {
         // 20% transparency on walls as requested. Full cell fills = no gaps between wall "sprites".
         // Torch and pillar markers added so they never go missing.
         const baseGfx = this.make.graphics({ add: false });
-        baseGfx.fillStyle(0x222222, 0.95);
+        const retroMap = !!window.RetroGraphics?.fullbright?.();
+        baseGfx.fillStyle(retroMap ? 0x474747 : 0x222222, retroMap ? 1 : 0.95);
 
         const wallGfx = this.make.graphics({ add: false });
-        wallGfx.fillStyle(0x550000, 0.7);   // walls on top of grid, strong enough to obscure lines (grid only faintly visible through walls when they are present)
+        wallGfx.fillStyle(retroMap ? 0x96282e : 0x550000, retroMap ? 1 : 0.7);
 
         const cliffGfx = this.make.graphics({ add: false });
-        cliffGfx.fillStyle(0x771111, 0.85);
+        cliffGfx.fillStyle(retroMap ? 0x96282e : 0x771111, retroMap ? 1 : 0.85);
 
         const torchGfx = this.make.graphics({ add: false });
-        torchGfx.fillStyle(0xffdd44, 0.95); // bright for torches
+        torchGfx.fillStyle(retroMap ? 0xeff347 : 0xffdd44, retroMap ? 1 : 0.95);
 
         const pillarGfx = this.make.graphics({ add: false });
-        pillarGfx.fillStyle(0x8844aa, 0.9);   // strong for real detected pillars (the ones the 3D is actually showing)
+        pillarGfx.fillStyle(retroMap ? 0x9f2dad : 0x8844aa, retroMap ? 1 : 0.9);
 
         for (let dy = -viewRadius; dy <= viewRadius; dy++) {
             for (let dx = -viewRadius; dx <= viewRadius; dx++) {
@@ -3427,7 +3471,7 @@ class CombatScene extends Phaser.Scene {
                 if(window.ObjectDiscovery&&!window.ObjectDiscovery.hasDiscovered(currentDungeon,obj.name))continue;
                 const ddx = obj.x - Math.floor(pos.x), ddy = obj.y - Math.floor(pos.y);
                 if (Math.abs(ddx) > viewRadius || Math.abs(ddy) > viewRadius) continue;
-                const tkey = 'scene-item-' + window.SceneItems.normName([obj.name, obj.type, obj.magic].join(' ')).replace(/ /g, '_') + '-' + isz;
+                const tkey = 'scene-item-' + window.SceneItems.normName([obj.name, obj.type, obj.magic, JSON.stringify(obj.assembly)].join(' ')).replace(/ /g, '_') + '-' + isz + (retroMap ? '-c64-5' : '');
                 if (!this.textures.exists(tkey)) {
                     const src = window.SceneItems.createItemCanvas(obj, { scale: 2 });
                     if (!src) continue;
@@ -3436,6 +3480,11 @@ class CombatScene extends Phaser.Scene {
                     const cx2 = cv.getContext('2d');
                     cx2.imageSmoothingEnabled = isz < src.width; // downscale smoothly, never blur upscales
                     cx2.drawImage(src, 0, 0, isz, isz);
+                    if (retroMap) {
+                      const pixels = cx2.getImageData(0, 0, isz, isz);
+                      pixels.data.set(window.RetroGraphics.treasurePixels(pixels).data);
+                      cx2.putImageData(pixels, 0, 0);
+                    }
                     this.textures.addCanvas(tkey, cv);
                 }
                 const lx = (ddx + 0.5 - fracX) * cs, ly = (ddy + 0.5 - fracY) * cs;
@@ -3447,7 +3496,7 @@ class CombatScene extends Phaser.Scene {
 
         // Draw the thick rotating grid lines (matching the good earlier 2D versions)
         const gridGfx = this.make.graphics({ add: false });
-        gridGfx.lineStyle(1, 0x888888, 0.35);  // fainter grid so walls on top obscure it strongly (only faint lines visible through walls)
+        gridGfx.lineStyle(1, retroMap ? 0xaeaeae : 0x888888, retroMap ? 1 : 0.35);
         const tileGridMin = -viewRadius;
         const tileGridMax = viewRadius + 1;
         for (let i = tileGridMin; i <= tileGridMax; i++) {
@@ -3488,8 +3537,9 @@ class CombatScene extends Phaser.Scene {
                 if (Math.abs(ddx) > viewRadius || Math.abs(ddy) > viewRadius) continue;
                 const tkey = ensureCombatTextureForCharacter(this, entry);
                 if (!tkey || !this.textures.exists(tkey)) continue;
-                const lx = (ddx + 0.5 - fracX) * cs;
-                const ly = (ddy + 0.5 - fracY) * cs;
+                const anchor = window.CombatTacticalUi?.actorPoint?.(entry, { x: mx, y: my }) || { x: mx + .5, y: my + .5 };
+                const lx = (anchor.x - pos.x) * cs;
+                const ly = (anchor.y - pos.y) * cs;
                 const rx = centerX + lx * Math.cos(combatAngle) - ly * Math.sin(combatAngle);
                 const ry = centerY + lx * Math.sin(combatAngle) + ly * Math.cos(combatAngle);
                 const tex = this.textures.get(tkey);
@@ -3544,7 +3594,11 @@ class CombatScene extends Phaser.Scene {
                 const pcAnimState = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw)
                   || (window.combatCharacters || []).find(c => c && c.type === 'pc')
                   || fullChar;
-                pcTokenDrawn = drawCombatTextureOnRT(this, pcKey, frameName, centerX - pcSize / 2, centerY - pcSize / 2, pcSize, pcAnimState);
+                const anchor = window.CombatTacticalUi?.active?.() ? window.CombatTacticalUi.actorPoint(pcAnimState, pos) : pos;
+                const lx = (anchor.x - pos.x) * cs, ly = (anchor.y - pos.y) * cs;
+                const rx = centerX + lx * Math.cos(combatAngle) - ly * Math.sin(combatAngle);
+                const ry = centerY + lx * Math.sin(combatAngle) + ly * Math.cos(combatAngle);
+                pcTokenDrawn = drawCombatTextureOnRT(this, pcKey, frameName, rx - pcSize / 2, ry - pcSize / 2, pcSize, pcAnimState);
             }
         }
 
@@ -3581,6 +3635,7 @@ class CombatScene extends Phaser.Scene {
         // would draw a second, differently flipped copy; retain its name label only.
         setCombatPlayerTokenOwner(this,pcTokenDrawn);
         this.forcePlayerToCenter();
+        window.CombatTacticalUi?.drawOverlay(this, this._lastDungeonDraw);
     }
 
   drawDungeonOverlayInto(gfx) {
@@ -4421,7 +4476,20 @@ const unconnectedRooms = new Set();
 // Function to generate unique exits for a room based on its coordinates
 function generateUniqueExits(coordinates, updatedGameConsole) {
   const planned = roomNameDatabase.get(coordinatesToString(coordinates));
-  if (planned?.fortifiedFloor?.version === 1) return Object.keys(planned.exits || {});
+  if (planned?.planarRealm) {
+    const exits = new Set(Object.keys(planned.exits || {})), anchor = window.OutdoorRoutes.coordinates(planned.planarRealm.anchorKey);
+    const offsets = { north: [0, 1], east: [1, 0], south: [0, -1], west: [-1, 0] };
+    const directions = Object.keys(offsets).sort((a, b) => window.DungeonInhabitants.hash(coordinatesToString(coordinates) + a) - window.DungeonInhabitants.hash(coordinatesToString(coordinates) + b));
+    for (const d of directions) {
+      if (exits.size >= (planned.exits?.portal ? 3 : 2)) break;
+      const [dx, dy] = offsets[d], p = { x: coordinates.x + dx, y: coordinates.y + dy, z: coordinates.z };
+      const other = roomNameDatabase.get(coordinatesToString(p));
+      if (anchor && p.x >= 0 && p.x <= 1000 && p.y >= 0 && p.y <= 1000 && Math.max(Math.abs(p.x - anchor.x), Math.abs(p.y - anchor.y)) <= 8 &&
+          (!other || other.planarRealm?.id === planned.planarRealm.id)) exits.add(d);
+    }
+    return [...exits];
+  }
+  if (planned?.fortifiedFloor?.version === 1 || planned?.villagePlan || planned?.villageBuilding || planned?.exits?.portal) return Object.keys(planned.exits || {});
   // For demonstration purposes, let's assume that the exits are randomly generated.
   // You should replace this with your actual exit generation logic.
   const possibleExits = ["north", "south", "east", "west", "northeast", "southeast", "northwest", "southwest", "up", "down"];
@@ -4619,6 +4687,11 @@ function areCoordinatesEqual(coord1, coord2) {
 function generateCoordinates(currentCoordinates, validDirection) {
   // Convert the validDirection to its full name if it exists in the directionMap
   const direction = directionMap[validDirection] || validDirection;
+  const source = roomNameDatabase.get(coordinatesToString(currentCoordinates));
+  const declared = source?.exits?.[direction]?.targetCoordinates;
+  const target = window.OutdoorRoutes?.coordinates(declared);
+  if (target) return target;
+  if (direction === 'portal') return { ...currentCoordinates };
 
   let { x, y, z } = currentCoordinates;
 
@@ -7543,376 +7616,7 @@ const characterRaces = [
 ];
 
 // Define monster races
-const monsterRaces = [
-  { name: 'Orc', description: 'Savage and brutal' },
-  { name: 'Goblin', description: 'Small and cunning' },
-  { name: 'Dragonborn', description: 'Dragon-like humanoids' },
-  { name: 'Aboleth', description: 'Mind-controlling horrors' },
-  { name: 'Aboleth Mage', description: 'Powerful aboleth spellcasters' },
-  { name: 'Achaierai', description: 'Four-legged, beak-faced fiends' },
-  { name: 'Allip', description: 'Tormented, babbling undead' },
-  { name: 'Angel', description: 'Celestial beings of light' },
-  { name: 'Angel, Astral Deva', description: 'Noble astral angels' },
-  { name: 'Angel, Planetar', description: 'Mighty planetar angels' },
-  { name: 'Angel, Solar', description: 'Radiant solar angels' },
-  { name: 'Animated Object', description: 'Inanimate objects brought to life' },
-  { name: 'Ankheg', description: 'Giant insectoid burrowers' },
-  { name: 'Aranea', description: 'Shape-shifting spider folk' },
-  { name: 'Archon', description: 'Celestial servants of law' },
-  { name: 'Lantern Archon', description: 'Small celestial beings of light' },
-  { name: 'Hound Archon', description: 'Celestial dog-like guardians' },
-  { name: 'Hound Archon Hero', description: 'Mighty hero among hound archons' },
-  { name: 'Trumpet Archon', description: 'Celestial horn-blowing warriors' },
-  { name: 'Arrowhawk', description: 'Airborne elemental creatures' },
-  { name: 'Assassin Vine', description: 'Lurking, deadly plant creatures' },
-  { name: 'Athach', description: 'Three-armed, one-eyed brutes' },
-  { name: 'Avoral', description: 'Eagle-headed celestial beings' },
-  { name: 'Azer', description: 'Fire-loving dwarf-like creatures' },
-  { name: 'Barghest', description: 'Fiendish wolf-like creatures' },
-  { name: 'Greater Barghest', description: 'Mightier fiendish barghests' },
-  { name: 'Basilisk', description: 'Stone-gazing reptilian monsters' },
-  { name: 'Abyssal Greater Basilisk', description: 'Monstrous abyssal variant' },
-  { name: 'Behir', description: 'Serpentine lightning-breathing creatures' },
-  { name: 'Belker', description: 'Smoke-form elemental creatures' },
-  { name: 'Blink Dog', description: 'Teleporting canine creatures' },
-  { name: 'Bodak', description: 'Horrific undead beings' },
-  { name: 'Bralani', description: 'Eladrin-like celestial creatures' },
-  { name: 'Bugbear', description: 'Large, vicious goblinoids' },
-  { name: 'Bulette', description: 'Burrowing, shark-like monsters' },
-  { name: 'Celestial Creature', description: 'Celestial beings' },
-  { name: 'Centaur', description: 'Humanoid with horse lower body' },
-  { name: 'Chaos Beast', description: 'Ever-changing, chaotic creatures' },
-  { name: 'Chimera', description: 'Multi-headed, hybrid monsters' },
-  { name: 'Choker', description: 'Stalking, tentacled creatures' },
-  { name: 'Chuul', description: 'Aquatic, crab-like monstrosities' },
-  { name: 'Cloaker', description: 'Cloak-like, shadowy creatures' },
-  { name: 'Cockatrice', description: 'Bird-like creatures with petrifying gaze' },
-  { name: 'Couatl', description: 'Feathered serpentine celestial beings' },
-  { name: 'Darkmantle', description: 'Ceiling-dwelling, dark creatures' },
-  { name: 'Delver', description: 'Subterranean tunneling creatures' },
-  { name: 'Demon', description: 'Chaotic evil fiends' },
-  { name: 'Babau', description: 'Abyssal demon assassins' },
-  { name: 'Balor', description: 'Demonic lords of destruction' },
-  { name: 'Bebilith', description: 'Abyssal arachnid demons' },
-  { name: 'Dretch', description: 'Lowly, chaotic demons' },
-  { name: 'Glabrezu', description: 'Powerful, monstrous demons' },
-  { name: 'Hezrou', description: 'Toad-like, foul demons' },
-  { name: 'Marilith', description: 'Serpentine, multi-armed demons' },
-  { name: 'Nalfeshnee', description: 'Grotesque, gluttonous demons' },
-  { name: 'Quasit', description: 'Impish, chaotic demons' },
-  { name: 'Retriever', description: 'Construct-like, demonic hunters' },
-  { name: 'Succubus', description: 'Seductive, shape-shifting demons' },
-  { name: 'Vrock', description: 'Vulture-like, chaotic demons' },
-  { name: 'Derro', description: 'Mad, subterranean dwarf-like creatures' },
-  { name: 'Destrachan', description: 'Sonic-wielding, blind subterranean creatures' },
-  { name: 'Devil', description: 'Lawful evil fiends' },
-  { name: 'Barbed Devil (Hamatula)', description: 'Thorn-covered devils' },
-  { name: 'Bearded Devil (Barbazu)', description: 'Bearded, spear-wielding devils' },
-  { name: 'Bone Devil (Osyluth)', description: 'Skeletal, manipulative devils' },
-  { name: 'Chain Devil (Kyton)', description: 'Chain-wielding, torturous devils' },
-  { name: 'Erinyes', description: 'Whip-wielding, tempting devils' },
-  { name: 'Hellcat (Bezekira)', description: 'Fiendish cat-like creatures' },
-  { name: 'Horned Devil (Cornugon)', description: 'Horned, brutal devils' },
-  { name: 'Ice Devil (Gelugon)', description: 'Icy, spear-wielding devils' },
-  { name: 'Imp', description: 'Tiny, mischievous devils' },
-  { name: 'Lemure', description: 'Blob-like, lowly devils' },
-  { name: 'Pit Fiend', description: 'Powerful, lordly devils' },
-  { name: 'Devourer', description: 'Soul-consuming undead beings' },
-  { name: 'Digester', description: 'Acid-spewing, monstrous creatures' },
-  { name: 'Dinosaur', description: 'Prehistoric reptilian creatures' },
-    { name: 'Deinonychus', description: 'Raptor-like, swift dinosaurs' },
-  { name: 'Elasmosaurus', description: 'Long-necked, aquatic dinosaurs' },
-  { name: 'Megaraptor', description: 'Giant, predatory theropods' },
-  { name: 'Triceratops', description: 'Horned, herbivorous dinosaurs' },
-  { name: 'Tyrannosaurus', description: 'Giant, fearsome carnivores' },
-  { name: 'Dire Animal', description: 'Enormous, enhanced natural creatures' },
-  { name: 'Dire Ape', description: 'Gigantic, powerful primates' },
-  { name: 'Dire Badger', description: 'Huge, ferocious badgers' },
-  { name: 'Dire Bat', description: 'Giant, winged mammals' },
-  { name: 'Dire Bear', description: 'Massive, formidable bear creatures' },
-  { name: 'Dire Boar', description: 'Huge, aggressive swine' },
-  { name: 'Dire Lion', description: 'Majestic, enormous feline predators' },
-  { name: 'Dire Rat', description: 'Giant, disease-carrying rodents' },
-  { name: 'Dire Shark', description: 'Huge, ocean-dwelling predators' },
-  { name: 'Dire Tiger', description: 'Powerful, immense tiger creatures' },
-  { name: 'Dire Weasel', description: 'Large, deadly mustelids' },
-  { name: 'Dire Wolf', description: 'Giant, pack-hunting wolves' },
-  { name: 'Dire Wolverine', description: 'Ferocious, oversized weasels' },
-  { name: 'Doppelganger', description: 'Shape-shifting, mimic creatures' },
-  { name: 'Dragon, True', description: 'Majestic, elemental dragons' },
-  { name: 'Chromatic Dragons', description: 'Evil-aligned elemental dragons' },
-  { name: 'Black Dragon', description: 'Corrupting, swamp-dwelling dragons' },
-  { name: 'Blue Dragon', description: 'Territorial, desert-dwelling dragons' },
-  { name: 'Green Dragon', description: 'Deceptive, forest-dwelling dragons' },
-  { name: 'Red Dragon', description: 'Destructive, volcanic dragons' },
-  { name: 'White Dragon', description: 'Icy, cold-dwelling dragons' },
-  { name: 'Metallic Dragons', description: 'Good-aligned elemental dragons' },
-  { name: 'Brass Dragon', description: 'Talkative, desert-dwelling dragons' },
-  { name: 'Bronze Dragon', description: 'Seafaring, ocean-dwelling dragons' },
-  { name: 'Copper Dragon', description: 'Trickster, jungle-dwelling dragons' },
-  { name: 'Gold Dragon', description: 'Noble, sun-dwelling dragons' },
-  { name: 'Silver Dragon', description: 'Elegant, arctic-dwelling dragons' },
-  { name: 'Dragon Turtle', description: 'Monstrous, aquatic dragonkin' },
-  { name: 'Dragonne', description: 'Winged, lion-like creatures' },
-  { name: 'Drider', description: 'Drow-spider hybrid creatures' },
-  { name: 'Dryad', description: 'Woodland guardian spirits' },
-  { name: 'Dwarf', description: 'Short and sturdy humanoids' },
-  { name: 'Deep Dwarf', description: 'Subterranean, resilient dwarves' },
-  { name: 'Duergar', description: 'Evil-aligned, dark dwarves' },
-  { name: 'Mountain Dwarf', description: 'Highland-dwelling, stout dwarves' },
-  { name: 'Eagle, Giant', description: 'Massive, majestic avian creatures' },
-  { name: 'Elemental', description: 'Primordial elemental beings' },
-  { name: 'Air Elemental', description: 'Whirling air creatures' },
-  { name: 'Earth Elemental', description: 'Earthen, rocky creatures' },
-  { name: 'Fire Elemental', description: 'Burning, fiery creatures' },
-  { name: 'Water Elemental', description: 'Watery, fluid creatures' },
-  { name: 'Elf', description: 'Graceful, long-lived humanoids' },
-  { name: 'Half-Elf', description: 'Mixed elf and human heritage' },
-  { name: 'Aquatic Elf', description: 'Sea-dwelling, aquatic elves' },
-  { name: 'Drow', description: 'Dark-skinned, subterranean elves' },
-  { name: 'Gray Elf', description: 'Mysterious, high elves' },
-  { name: 'Wild Elf', description: 'Savage, primal forest elves' },
-  { name: 'Wood Elf', description: 'Forest-dwelling, woodland elves' },
-  { name: 'Ethereal Filcher', description: 'Dimension-hopping thieves' },
-  { name: 'Ethereal Marauder', description: 'Ruthless ethereal raiders' },
-  { name: 'Ettercap', description: 'Web-spinning, spider-like creatures' },
-  { name: 'Ettin', description: 'Two-headed, brutish giants' },
-  { name: 'Fiendish Creature', description: 'Creatures infused with fiendish essence' },
-  { name: 'Formian', description: 'Ant-like insectoid creatures' },
-  { name: 'Worker', description: 'Basic formian caste' },
-  { name: 'Warrior', description: 'Formian warrior caste' },
-  { name: 'Taskmaster', description: 'Formian taskmaster caste' },
-  { name: 'Myrmarch', description: 'Formian ruler caste' },
-  { name: 'Queen', description: 'Formian queen caste' },
-  { name: 'Frost Worm', description: 'Icy, tunneling worm creatures' },
-  { name: 'Fungus', description: 'Mushroom-like, fungal creatures' },
-  { name: 'Shrieker', description: 'Audible alert fungal creatures' },
-  { name: 'Violet Fungus', description: 'Tentacle-laden fungal creatures' },
-  { name: 'Gargoyle', description: 'Stone guardians brought to life' },
-  { name: 'Kapoacinth', description: 'Aquatic, stone-skinned creatures' },
-  { name: 'Genie', description: 'Elemental beings of magic' },
-  { name: 'Djinni', description: 'Air-dwelling genie beings' },
-  { name: 'Noble Djinn', description: 'Mighty and noble air genies' },
-  { name: 'Efreeti', description: 'Fire-dwelling genie beings' },
-    { name: 'Ghaele', description: 'Celestial beings of beauty and grace' },
-  { name: 'Ghost', description: 'Restless spirits of the deceased' },
-  { name: 'Ghoul', description: 'Corpse-eating undead fiends' },
-  { name: 'Lacedon', description: 'Aquatic, savage ghoul variant' },
-  { name: 'Ghast', description: 'More powerful, horrifying undead' },
-  { name: 'Giant', description: 'Enormous humanoid creatures' },
-  { name: 'Cloud Giant', description: 'Sky-dwelling giants' },
-  { name: 'Fire Giant', description: 'Molten lava-dwelling giants' },
-  { name: 'Frost Giant', description: 'Glacial, ice-dwelling giants' },
-  { name: 'Frost Giant Jarl', description: 'Mighty frost giant lords' },
-  { name: 'Hill Giant', description: 'Huge, hill-dwelling giants' },
-  { name: 'Stone Giant', description: 'Rock-skinned giants' },
-  { name: 'Stone Giant Elders', description: 'Ancient, wise stone giants' },
-  { name: 'Storm Giant', description: 'Majestic, storm-controlling giants' },
-  { name: 'Gibbering Mouther', description: 'Mad, gibbering amalgamations' },
-  { name: 'Girallon', description: 'Four-armed, gorilla-like creatures' },
-  { name: 'Gnoll', description: 'Hyena-headed, savage humanoids' },
-  { name: 'Gnome', description: 'Small, inventive humanoids' },
-  { name: 'Svirfneblin', description: 'Subterranean deep gnomes' },
-  { name: 'Forest Gnome', description: 'Nature-loving gnomes' },
-  { name: 'Goblin', description: 'Small, mischievous humanoids' },
-  { name: 'Golem', description: 'Artificial, construct creatures' },
-  { name: 'Clay Golem', description: 'Mud and earth construct golems' },
-  { name: 'Flesh Golem', description: 'Stitched together humanoid golems' },
-  { name: 'Iron Golem', description: 'Metallic, powerful construct golems' },
-  { name: 'Stone Golem', description: 'Rock and stone construct golems' },
-  { name: 'Greater Stone Golem', description: 'Mighty stone construct golems' },
-  { name: 'Gorgon', description: 'Metallic, bull-like creatures' },
-  { name: 'Gray Render', description: 'Large, multi-limbed monstrosities' },
-  { name: 'Grick', description: 'Tentacled, subterranean creatures' },
-  { name: 'Griffon', description: 'Majestic, eagle-lion creatures' },
-  { name: 'Grimlock', description: 'Blind, subterranean humanoids' },
-  { name: 'Hag', description: 'Malevolent, monstrous spellcasters' },
-  { name: 'Annis', description: 'Hideous, brute-like hags' },
-  { name: 'Green Hag', description: 'Swamp-dwelling, cunning hags' },
-  { name: 'Sea Hag', description: 'Oceanic, cruel hags' },
-  { name: 'Half-Celestial', description: 'Celestial-infused mortals' },
-  { name: 'Half-Dragon', description: 'Dragonblood-infused creatures' },
-  { name: 'Half-Fiend', description: 'Fiendish-infused mortals' },
-  { name: 'Halfling', description: 'Small, jovial humanoids' },
-  { name: 'Tallfellow', description: 'Hobbit-like, stealthy halflings' },
-  { name: 'Deep Halfling', description: 'Subterranean halfling variant' },
-  { name: 'Harpy', description: 'Avian, seductive creatures' },
-  { name: 'Harpy Archer', description: 'Harpy ranged attackers' },
-  { name: 'Hell Hound', description: 'Infernal, fire-breathing hounds' },
-  { name: 'Nessian Warhound', description: 'Hellish, inferno-dwelling hounds' },
-  { name: 'Hippogriff', description: 'Horse-eagle hybrid creatures' },
-  { name: 'Hobgoblin', description: 'Militaristic, goblinoid humanoids' },
-  { name: 'Homunculus', description: 'Tiny, artificial humanoid constructs' },
-  { name: 'Howler', description: 'Terrifying, sonic creatures' },
-  { name: 'Hydra', description: 'Multi-headed, regenerating serpents' },
-  { name: 'Pyrohydra', description: 'Fire-breathing, multi-headed hydra' },
-  { name: 'Cryohydra', description: 'Cold-breathing, multi-headed hydra' },
-  { name: 'Inevitable', description: 'Lawful enforcers of reality' },
-  { name: 'Kolyarut', description: 'Inevitables of order and justice' },
-  { name: 'Marut', description: 'Inevitables of final judgment' },
-  { name: 'Zelekhut', description: 'Inevitables of pursuit and vengeance' },
-  { name: 'Invisible Stalker', description: 'Unseen, air elemental creatures' },
-  { name: 'Kobold', description: 'Small, cunning reptilian humanoids' },
-  { name: 'Kraken', description: 'Gigantic, sea-dwelling monsters' },
-  { name: 'Krenshar', description: 'Feline creatures with retractable faces' },
-  { name: 'Lamia', description: 'Serpentine, enchanting monsters' },
-  { name: 'Lammasu', description: 'Noble, celestial guardians' },
-  { name: 'Golden Protector', description: 'Noble, golden lammasu' },
-  { name: 'Leonal', description: 'Celestial lion guardians' },
-  { name: 'Lich', description: 'Undead spellcasters seeking power' },
-  { name: 'Lillend', description: 'Serpentine, musical celestial beings' },
-  { name: 'Lizardfolk', description: 'Reptilian, tribal humanoids' },
-    { name: 'Lizardfolk', description: 'Reptilian, tribal humanoids' },
-  { name: 'Locathah', description: 'Aquatic, fish-like humanoids' },
-  { name: 'Lycanthrope', description: 'Shape-changing, afflicted creatures' },
-  { name: 'Werebear', description: 'Noble, bear-like lycanthropes' },
-  { name: 'Wereboar', description: 'Savage, boar-like lycanthropes' },
-  { name: 'Hill Giant Dire Wereboar', description: 'Monstrous hybrid' },
-  { name: 'Wererat', description: 'Scheming, rat-like lycanthropes' },
-  { name: 'Weretiger', description: 'Majestic, tiger-like lycanthropes' },
-  { name: 'Werewolf', description: 'Savage, wolf-like lycanthropes' },
-  { name: 'Werewolf Lord', description: 'Powerful alpha werewolves' },
-  { name: 'Magmin', description: 'Fiery, elemental fire creatures' },
-  { name: 'Manticore', description: 'Lion-bodied, spiked-tailed monsters' },
-  { name: 'Medusa', description: 'Snake-haired, petrifying creatures' },
-  { name: 'Mephit', description: 'Small, elemental creatures' },
-  { name: 'Air Mephit', description: 'Airborne, mischievous mephits' },
-  { name: 'Dust Mephit', description: 'Dust and sand-based mephits' },
-  { name: 'Earth Mephit', description: 'Earthy and rocky mephits' },
-  { name: 'Fire Mephit', description: 'Flaming and fiery mephits' },
-  { name: 'Ice Mephit', description: 'Frosty and cold mephits' },
-  { name: 'Magma Mephit', description: 'Molten lava-based mephits' },
-  { name: 'Ooze Mephit', description: 'Slime and ooze-based mephits' },
-  { name: 'Salt Mephit', description: 'Salt and desert-themed mephits' },
-  { name: 'Steam Mephit', description: 'Steam and vapor-based mephits' },
-  { name: 'Water Mephit', description: 'Aquatic and watery mephits' },
-  { name: 'Merfolk', description: 'Aquatic, fish-like humanoids' },
-  { name: 'Mimic', description: 'Shape-shifting, mimic creatures' },
-  { name: 'Minotaur', description: 'Mighty, bull-headed creatures' },
-  { name: 'Mohrg', description: 'Undead, corpse-animated creatures' },
-  { name: 'Mummy', description: 'Ancient, desiccated undead' },
-  { name: 'Mummy Lord', description: 'Mighty, lordly mummies' },
-  { name: 'Naga', description: 'Serpentine, spellcasting beings' },
-  { name: 'Dark Naga', description: 'Serpentine, deceitful spellcasters' },
-  { name: 'Guardian Naga', description: 'Serpentine, protective beings' },
-  { name: 'Spirit Naga', description: 'Serpentine, spirit-controlling beings' },
-  { name: 'Water Naga', description: 'Serpentine, aquatic spellcasters' },
-  { name: 'Night Hag', description: 'Evil, dream-invading hags' },
-  { name: 'Nightmare', description: 'Nightmarish, demonic steeds' },
-  { name: 'Cauchemar', description: 'Fiery, demonic nightmares' },
-  { name: 'Nightshade', description: 'Shadowy, undead beings' },
-  { name: 'Nightcrawler', description: 'Shadowy, stealthy undead' },
-  { name: 'Nightwalker', description: 'Giant, shadowy undead' },
-  { name: 'Nightwing', description: 'Abyssal, winged undead' },
-  { name: 'Nymph', description: 'Enchanting, nature spirits' },
-  { name: 'Ogre', description: 'Brutish, giant humanoids' },
-  { name: 'Ogre Barbarian', description: 'Savage, raging ogres' },
-  { name: 'Merrow', description: 'Aquatic, brutish ogres' },
-  { name: 'Ogre Mage', description: 'Cunning, spellcasting ogres' },
-  { name: 'Ooze', description: 'Amorphous, blob-like creatures' },
-  { name: 'Black Pudding', description: 'Acidic, corrosive oozes' },
-  { name: 'Elder Black Pudding', description: 'Mighty, acidic oozes' },
-  { name: 'Gelatinous Cube', description: 'Translucent, cube-shaped oozes' },
-  { name: 'Gray Ooze', description: 'Sluggish, gray-colored oozes' },
-    { name: 'Ochre Jelly', description: 'Yellow, acidic oozes' },
-  { name: 'Oracle', description: 'Divine seers and prophets' },
-  { name: 'Orca', description: 'Gigantic, oceanic dolphins' },
-  { name: 'Otyugh', description: 'Foul, scavenging aberrations' },
-  { name: 'Owlbear', description: 'Bizarre owl-bear hybrid creatures' },
-  { name: 'Pegasus', description: 'Winged, celestial horse creatures' },
-  { name: 'Phantom Fungus', description: 'Ghostly, fungal specters' },
-  { name: 'Phase Spider', description: 'Dimension-hopping arachnids' },
-  { name: 'Phoenix', description: 'Resurrecting, fiery avian beings' },
-  { name: 'Pixie', description: 'Tiny, mischievous nature spirits' },
-  { name: 'Porpoise', description: 'Intelligent, aquatic dolphins' },
-  { name: 'Purple Worm', description: 'Enormous, burrowing earthworms' },
-  { name: 'Quaggoth', description: 'Savage, subterranean humanoids' },
-  { name: 'Quasit', description: 'Impish, chaotic demons' },
-  { name: 'Raakshasa', description: 'Deceptive, fiendish shape-shifters who often appear as cat-like humanoids.' },
-  { name: 'Rat', description: 'Small, common rodents' },
-  { name: 'Dire Rat', description: 'Giant, disease-carrying rodents' },
-  { name: 'Ravid', description: 'Energetic, aberrant creatures' },
-  { name: 'Remorhaz', description: 'Huge, fiery centipede-like creatures' },
-  { name: 'Retriever', description: 'Construct-like, demonic hunters' },
-  { name: 'Roc', description: 'Gigantic, legendary avian creatures' },
-  { name: 'Roper', description: 'Stalactite-like, cave-dwelling creatures' },
-  { name: 'Rust Monster', description: 'Metal-corroding, insect-like creatures' },
-  { name: 'Sahuagin', description: 'Aquatic, shark-like humanoids' },
-  { name: 'Salamander', description: 'Fire-dwelling, elemental beings' },
-  { name: 'Flamebrother', description: 'Fiery, cruel salamanders' },
-  { name: 'Noble Salamander', description: 'Mighty and regal salamanders' },
-  { name: 'Savage Species', description: 'Creatures of wild nature' },
-  { name: 'Scorpionfolk', description: 'Scorpion-like humanoid creatures' },
-  { name: 'Sea Cat', description: 'Aquatic, seafaring feline creatures' },
-  { name: 'Sea Hag', description: 'Oceanic, cruel hags' },
-  { name: 'Shadow', description: 'Dark, shadowy incorporeal beings' },
-  { name: 'Shadow Mastiff', description: 'Shadowy, hound-like creatures' },
-  { name: 'Shambling Mound', description: 'Plant-based, swampy creatures' },
-  { name: 'Shield Guardian', description: 'Construct guardians of magic' },
-  { name: 'Shocker Lizard', description: 'Electricity-charging reptiles' },
-  { name: 'Skeleton', description: 'Undead, animated skeletal remains' },
-  { name: 'Skum', description: 'Aquatic, fish-like humanoid creatures' },
-  { name: 'Slaad', description: 'Chaotic, amphibious outsiders' },
-  { name: 'Blue Slaad', description: 'Chaos-infused amphibians' },
-  { name: 'Death Slaad', description: 'Lethal, chaos-spreading slaad' },
-  { name: 'Gray Slaad', description: 'Mad, spellcasting slaad' },
-  { name: 'Green Slaad', description: 'Frog-like, disease-spreading slaad' },
-  { name: 'Red Slaad', description: 'Fire-breathing, destructive slaad' },
-  { name: 'Solar', description: 'Radiant, celestial angelic beings' },
-  { name: 'Spectre', description: 'Malevolent, ghostly undead' },
-  { name: 'Sphinx', description: 'Riddle-posing, enigmatic creatures' },
-  { name: 'Androsphinx', description: 'Noble, lion-headed sphinxes' },
-  { name: 'Criosphinx', description: 'Ram-headed, cunning sphinxes' },
-  { name: 'Gynosphinx', description: 'Elegant, human-headed sphinxes' },
-  { name: 'Hieracosphinx', description: 'Hawk-headed, vigilant sphinxes' },
-  { name: 'Spider Eater', description: 'Arachnid-hunting, tentacled creatures' },
-  { name: 'Sprite', description: 'Tiny, playful nature spirits' },
-  { name: 'Grig', description: 'Tiny, cricket-like sprites' },
-  { name: 'Nixie', description: 'Aquatic, water-loving sprites' },
-  { name: 'Pixie', description: 'Tiny, mischievous nature sprites' },
-  { name: 'Sprite, Dark', description: 'Shadowy and secretive sprites' },
-  { name: 'Sprite, Pixie, Pixie Queen', description: 'Mighty pixie monarch' },
-  { name: 'Sprite, Sprite, Sea', description: 'Maritime, water-loving sprites' },
-  { name: 'Sprite, Snow', description: 'Cold-dwelling, winter sprites' },
-  { name: 'Sprite, Twigjack', description: 'Plant-like, forest sprites' },
-  { name: 'Squid, Giant', description: 'Massive, oceanic cephalopods' },
-  { name: 'Stegosaurus', description: 'Herbivorous, plated dinosaurs' },
-  { name: 'Stirge', description: 'Blood-drinking, bat-like creatures' },
-  { name: 'Tarrasque', description: 'Legendary, world-devouring creature' },
-  { name: 'Thoon Hulk', description: 'Aberrant, tentacled monstrosities' },
-  { name: 'Thri-Kreen', description: 'Insectoid, mantis-like humanoids' },
-  { name: 'Titan', description: 'Mighty, giant celestial beings' },
-  { name: 'Toad, Giant', description: 'Enormous, amphibious creatures' },
-  { name: 'Treant', description: 'Majestic, ancient tree guardians' },
-  { name: 'Troglodyte', description: 'Reptilian, subterranean humanoids' },
-  { name: 'Troll', description: 'Regenerating, monstrous humanoids' },
-  { name: 'Scrag', description: 'Aquatic trolls with seaweed-like hair' },
-  { name: 'True Troll', description: 'Mighty, advanced troll variants' },
-  { name: 'Umber Hulk', description: 'Subterranean, tunneling horrors' },
-  { name: 'Vampire', description: 'Undead, blood-drinking immortals' },
-  { name: 'Vampire, Vampire Spawn', description: 'Newly created vampires' },
-  { name: 'Vampire, Vampire Lord', description: 'Mighty vampire rulers' },
-  { name: 'Vampire, Nosferatu', description: 'Hideous, monstrous vampires' },
-  { name: 'Vargouille', description: 'Fiendish, bat-like head creatures' },
-  { name: 'Violet Fungus', description: 'Tentacle-laden fungal creatures' },
-  { name: 'Vrock', description: 'Vulture-like, chaotic demons' },
-  { name: 'Water Weird', description: 'Aquatic, elemental water spirits' },
-  { name: 'Wight', description: 'Undead, life-draining creatures' },
-  { name: 'Will-o\'-Wisp', description: 'Mysterious, flickering lights' },
-  { name: 'Winter Wolf', description: 'Cold-breathing, wolf-like creatures' },
-  { name: 'Worg', description: 'Giant, wolf-like creatures' },
-  { name: 'Wraith', description: 'Spectral, life-draining undead' },
-  { name: 'Wyvern', description: 'Winged, dragon-like creatures' },
-  { name: 'Xorn', description: 'Earth-dwelling, elemental creatures' },
-  { name: 'Zombie', description: 'Shambling, undead reanimated corpses' },
-  { name: 'Zombie Lord', description: 'Powerful, necromantic undead lords' },
-  { name: 'Zuggtmoy', description: 'Fungal Demon Queen' },
-  { name: 'Hedrack', description: 'High Priest of the Elder Elemental Eye' },
-  { name: 'Obmi', description: 'Duergar Weaponsmith' },
-  { name: 'Ultraloth', description: 'Servants of the yugoloths' },
-  { name: 'Balor', description: 'Demonic, fiery terror' },
-  // Add more monster races here
-];
+const monsterRaces = window.MonsterRaces;
 
 // Define monster classes
 const monsterClasses = [
@@ -8821,6 +8525,7 @@ function getCombatTextureKey(character) {
   // Re-register cached generated sheets when combat body metrics change, without rerolling their art.
   if(spec?.kind==='procedural'&&spec.traits&&!/^mortacia\b/i.test(character?.name||''))artKey+='-combat-fit-2';
   if(spec?.kind==='procedural'&&spec.traits&&window.NATIVE_COMBAT_SPRITES!==false)artKey+='-native-1';
+  if(window.RetroGraphics?.fullbright?.())artKey+='-c64-materials-5';
   return spec && (spec.kind === 'procedural' || spec.kind === 'placeholder') && spec.key ? artKey + '-' + spec.key : artKey;
 }
 
@@ -9661,6 +9366,7 @@ window.applyLiveCombatHealth = event => {
   window._partyInfoPCString = window.latestUpdatedData.pc;
   window._partyInfoNPCString = window.latestUpdatedData.npcs;
   window._combatMonsterSheets = window.latestUpdatedData.monsters;
+  window.CombatTacticalUi?.refreshHealth?.();
   window.SpellUi?.hydrate(text);
   if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
   window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
@@ -10346,6 +10052,7 @@ async function chatbotprocessinput(textin) {
   }
   
     let userInput = completedStartResult ? '' : document.getElementById("chatuserinput").value;
+  if (!completedStartResult && window.CombatCharacterUi?.confirmAttackCommand(userInput) === false) return false;
   if (!completedStartResult) document.getElementById("chatuserinput").value = "";
   const divineRefusal = window.PantheonCharacters?.recruitmentRefusal(userInput, window.combatCharacters || []);
   if (!completedStartResult && divineRefusal) { updateChatLog('<br>' + divineRefusal + '<br>'); return; }
@@ -14092,13 +13799,15 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const focalLength = H / (2 * Math.tan(FOV / 2));
 
   const lighting = normalizeLight(currentDungeon && (currentDungeon.lighting || currentDungeon.classification?.lighting));
+  const fullbright = !!window.RetroGraphics?.fullbright?.();
+  const retroWasteland = fullbright && !!window.RetroGraphics?.environment?.(currentDungeon).wasteland;
   const TORCH_MOUNT_HEIGHT = 1.1;
   const TORCH_WALL_OFFSET = 0.49;
   const TORCH_MOUNT_RATIO = 0.55;
   const lightDirX = lighting.dirX;
   const lightDirY = lighting.dirY;
   const lightElev = lighting.elevation;
-  const lightIntensity = lighting.intensity;
+  const lightIntensity = fullbright ? 0 : lighting.intensity;
 
   const TORCH_LIGHT_RADIUS = 6.0;
   const TORCH_LIGHT_FALLOFF = 0.6;
@@ -14122,7 +13831,10 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   depthBuffer.fill(Infinity);
 
   // Floor texture setup (unchanged)
-  const floorTex = dungeonTextures && dungeonTextures.floor;
+  const sourceFloorTex = dungeonTextures && dungeonTextures.floor;
+  const floorTex = fullbright ? isTextureReady(sourceFloorTex) ?
+    window.RetroGraphics?.prepareImage?.(sourceFloorTex, retroWasteland ? 'wasteland' : 'surface') || sourceFloorTex :
+    window.RetroGraphics?.makeSurface?.(retroWasteland ? 'wasteland' : 'floor', currentDungeon.visualStyle?.palette) : sourceFloorTex;
   const hasFloorTexture = isTextureReady(floorTex);
   let floorImageData = null;
   let floorTexW = 0;
@@ -14141,7 +13853,12 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const wallTexCache = {};
   const RENDER_CUSTOM_AS_WALLS = false;
   function getWallTextureData(texName, texImg) {
+    if (fullbright && !isTextureReady(texImg) && texName === 'wall') {
+      texImg = window.RetroGraphics?.makeSurface?.('wall', currentDungeon.visualStyle?.palette);
+    }
     if (!isTextureReady(texImg)) return null;
+    if (fullbright && texName !== 'torch') texImg = window.RetroGraphics?.prepareImage?.(texImg,
+      texName === 'pillar' || texName.startsWith('custom_') ? 'prop' : 'wall') || texImg;
     let cached = wallTexCache[texName];
     if (!cached) {
       const w = texImg.naturalWidth;
@@ -14303,6 +14020,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     }
   }
   const skyGrad = ctx.createLinearGradient(0, 0, 0, H / 2);
+  if (retroWasteland) skyTop = skyBot = '#eff347';
   skyGrad.addColorStop(0, skyTop);
   skyGrad.addColorStop(1, skyBot);
   ctx.fillStyle = skyGrad;
@@ -14371,6 +14089,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   const TORCH_FLICKER_SPEED = 0.6;
 
   function torchFlicker(seed, timeMs) {
+    if (fullbright) return 0.85;
     const t = timeMs * 0.001 * TORCH_FLICKER_SPEED;
     const speedMod = 0.65
       + 0.25 * Math.sin(t * (0.35 + seed * 0.12) + seed * 5.1)
@@ -14455,6 +14174,10 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
   }
 
   function applyTorchLight(sample, shade, wx, wy, wz, normal, boost = 1.0) {
+    if (fullbright) {
+      if (retroWasteland && boost === TORCH_FLOOR_BOOST && window.RetroGraphics.groundFleck(wx, wy, sample.r)) return { r: 150, g: 40, b: 46 };
+      return { r: sample.r, g: sample.g, b: sample.b };
+    }
     if (!torchLights.length) {
       return {
         r: Math.round(sample.r * shade),
@@ -14489,7 +14212,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
     return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
   }
 
-  torchLights.push(...collectTorchLights());
+  if (!fullbright) torchLights.push(...collectTorchLights());
   // -----------------------------------
   // FLOOR PASS
   // -----------------------------------
@@ -14655,7 +14378,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
           }
 
           const horizDist = Math.abs((eyeZ - surfaceH) * focalLength / relY);
-          const shade = Math.max(0.2, 1.0 - horizDist / 10.0);
+          const shade = fullbright ? 1 : Math.max(0.2, 1.0 - horizDist / 10.0);
           const color = sampleFloorTexture(
             floorImageData,
             floorTexW,
@@ -14773,7 +14496,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
                   let drawStart = Math.max(0, Math.floor(ceilScreenY_raw));
                   let drawEnd = Math.min(H, Math.floor(floorScreenY_raw) + 1);
                   if (drawStart < drawEnd) {
-                    const shade = Math.max(0.2, 1.0 - perpDist / 10);
+                    const shade = fullbright ? 1 : Math.max(0.2, 1.0 - perpDist / 10);
                     const fracU = wallXFrac;
 
                     for (let sy = drawStart; sy < drawEnd; sy++) {
@@ -14840,7 +14563,7 @@ function renderDungeonViewCanvas(renderToOffscreen = false) {
                   let drawStart = Math.max(0, Math.floor(ceilScreenY_raw));
                   let drawEnd = Math.min(H, Math.floor(floorScreenY_raw) + 1);
                   if (drawStart < drawEnd) {
-                    const shade = Math.max(0.2, 1.0 - perpDist / 10);
+                    const shade = fullbright ? 1 : Math.max(0.2, 1.0 - perpDist / 10);
                     const fracU = wallXFrac;
 
                     for (let sy = drawStart; sy < drawEnd; sy++) {
@@ -14944,7 +14667,7 @@ if (!hit) continue;
     const nY = (side === 1) ? stepY : 0;
     const dot = nX * lightDirX + nY * lightDirY;
     const lightFactor = Math.max(0.2, Math.min(1.2, 0.6 + 0.4 * dot));
-    const litShade = finalShade * (1 - lightIntensity + lightIntensity * lightFactor);
+    const litShade = fullbright ? 1 : finalShade * (1 - lightIntensity + lightIntensity * lightFactor);
 
     const texInfo = texImg ? getWallTextureData(texName, texImg) : null;
 
@@ -14984,7 +14707,7 @@ if (!hit) continue;
         depthBuffer[idx] = perpWallDist;
 
         const grad = wallVerticalGradient(sy);
-        const rowShade = litShade * grad;
+        const rowShade = fullbright ? 1 : litShade * grad;
         const rr = Math.floor(180 * rowShade);
         const gg = Math.floor(30 * rowShade);
         const bb = Math.floor(30 * rowShade);
@@ -14998,7 +14721,7 @@ if (!hit) continue;
           if (perpWallDist >= depthBuffer[idx]) continue;
           depthBuffer[idx] = perpWallDist;
           const grad = wallVerticalGradient(sy);
-          const rowShade = litShade * grad;
+          const rowShade = fullbright ? 1 : litShade * grad;
           const rr = Math.floor(180 * rowShade);
           const gg = Math.floor(30 * rowShade);
           const bb = Math.floor(30 * rowShade);
@@ -15159,7 +14882,7 @@ if (!hit) continue;
     const gxc = gx;
     const gyc = gy + flickerShift;
     const radiusSq = glowRadius * glowRadius;
-    for (let y = gyc - glowRadius; y <= gyc + glowRadius; y++) {
+    for (let y = gyc - glowRadius; !fullbright && y <= gyc + glowRadius; y++) {
       if (y < 0 || y >= H) continue;
       const dy = y - gyc;
       for (let x = gxc - glowRadius; x <= gxc + glowRadius; x++) {
@@ -15289,6 +15012,10 @@ if (!hit) continue;
         spriteWorldHeight = Math.max(0.5, (spriteCeilH - spriteFloorH) * heightRatio);
         spriteWidthRatio = baseWidth;
       }
+      if (fullbright && isCustom) {
+        if (Number.isFinite(cell.structureHeight)) spriteWorldHeight = cell.structureHeight;
+        allowPad = false; allowShadow = false;
+      }
 
       const bottomScreenY = Math.floor(HORIZON + (eyeZ - spriteBaseZ) * focalLength / safeTransformY);
       let spriteScreenHeight = Math.floor(spriteWorldHeight * focalLength / safeTransformY);
@@ -15321,7 +15048,8 @@ if (!hit) continue;
       drawEndY = Math.min(H, drawEndY);
       if (drawStartY >= drawEndY) continue;
 
-      let spriteScreenWidth = Math.floor(spriteScreenHeight * spriteWidthRatio);
+      let spriteScreenWidth = Math.floor(fullbright && isCustom ?
+        baseWidth * focalLength / safeTransformY : spriteScreenHeight * spriteWidthRatio);
       if (isTorch && spriteScreenWidth < 1) spriteScreenWidth = 1;
 
       // Directional shadow projected onto the floor from a single light source.
@@ -15387,7 +15115,7 @@ if (!hit) continue;
         const texW = texInfo.w;
         const texH = texInfo.h;
 
-        if (spr.shadow) {
+        if (spr.shadow && !fullbright) {
           const sx = Math.floor(spr.shadow.x);
           const sy = Math.floor(spr.shadow.y);
           if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
@@ -15438,7 +15166,7 @@ if (!hit) continue;
             const sample = sampleTextureRGBA(texData, texW, texH, texX / texW, texY / texH);
             if (sample.a <= 10) continue;
 
-            let shade = Math.max(0.25, 1.0 - spriteDist / 12);
+            let shade = fullbright ? 1 : Math.max(0.25, 1.0 - spriteDist / 12);
             if (spr.type === 'torch') {
               const flicker = torchFlicker(spr.flickerSeed / (Math.PI * 2), now);
               shade = Math.max(0.75, shade * flicker);
@@ -15656,6 +15384,7 @@ function renderDungeonView() {
   if (!window.forceCanvasDungeon && hasWebGLRenderer) {
       if (typeof window.webglDungeonRenderer.renderScene === 'function') {
         window.webglDungeonRenderer.renderScene();
+        window.RetroGraphics?.presentRenderer(window.webglDungeonRenderer, container);
         scheduleDungeonRenderingDiagnostic();
         if (window.combatGame) {
           const scene = window.combatGame.scene.getScene('CombatScene');
@@ -15672,10 +15401,12 @@ function renderDungeonView() {
     const rasterCanvas = renderDungeonViewCanvas(true);
     if (typeof window.webglDungeonRenderer.render === 'function') {
       window.webglDungeonRenderer.render(rasterCanvas);
+      window.RetroGraphics?.presentRenderer(window.webglDungeonRenderer, container, rasterCanvas);
       return;
     }
     }
-    renderDungeonViewCanvas(false);
+    const rasterCanvas = renderDungeonViewCanvas(false);
+    window.RetroGraphics?.present(rasterCanvas, container);
     logDungeonCombatSync('render-canvas');
   }
 

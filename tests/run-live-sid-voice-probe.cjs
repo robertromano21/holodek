@@ -5,7 +5,7 @@ const Voc=require('../retort/sidVoice/voc64'),Score=require('../retort/sidVoice/
 (async()=>{
   const root=path.resolve(__dirname,'..'),profile=fs.mkdtempSync(path.join(os.tmpdir(),'sid-voice-live-'));
   const bytes=process.argv[2]?fs.readFileSync(process.argv[2]):Buffer.from(Score.withGain(Voc.compile(require('./fixtures/sid-voice-input.cjs').fixture('10582','2x','lj',500)).registerScore,1.5));
-  const info=Score.inspect(bytes),cry=require('../retort/sidVoice/cries').compile({f0:205,fs:1},'pain').score,bundle=Archive.workerBundle(),requests=[];
+  const info=Score.inspect(bytes),cry=require('../retort/sidVoice/cries').compile({f0:205,fs:1},'pain').score,bundle=Archive.workerBundle(),requests=[],speechRequests=[];
   let finish,timer;const result=new Promise(resolve=>finish=resolve);
   const script=`<script>
   const errors=[];addEventListener('error',e=>errors.push(e.message));addEventListener('unhandledrejection',e=>errors.push(String(e.reason)));
@@ -17,6 +17,8 @@ const Voc=require('../retort/sidVoice/voc64'),Score=require('../retort/sidVoice/
   (async()=>{const checks={},sound=HolodekSfx,pause=ms=>new Promise(r=>setTimeout(r,ms)),schedules=[];
     const wait=async(fn)=>{const end=Date.now()+20000;while(!fn()){if(Date.now()>end)throw Error('Timed out');await pause(25);}};
     try{
+      await wait(()=>document.querySelector('select[data-k="voiceTimbre"]'));
+      const style=document.querySelector('select[data-k="voiceTimbre"]');checks.softDefault=style?.value==='soft'&&sound.voiceTimbre()==='soft';
       const answer=await sound.speakLine('Mortacia','First sentence. Second sentence. Third sentence.',{onSchedule:(ms,more)=>schedules.push({ms,more})});
       const first=players[0];await wait(()=>first.currentTime>.1);
       checks.nativeBank=first.info.kind==='sid-voice'&&first.info.chips===64&&Math.abs(answer.dur-${info.seconds})<.001;
@@ -26,6 +28,16 @@ const Voc=require('../retort/sidVoice/voc64'),Score=require('../retort/sidVoice/
       checks.subtitleScheduling=schedules.length>=3&&schedules.some(s=>s.more)&&schedules.at(-1).more===false;
       checks.boundedQueue=players.every(p=>(p.pending||0)+(p.queued||0)<=12);
       sound.stopSpeech();await pause(150);checks.stopped=players.every(p=>p.disposed);
+      await wait(()=>players.every(p=>p.processorClosed));checks.finishedProcessorsRetire=true;
+      checks.noRetainedPlayers=HolodekSidPlayer.stats().active===0;
+      const worker=await fetch('/music/sid-worker.js').then(r=>r.text());
+      for(let n=0;n<8;n++){
+        const p=await open(Uint8Array.from(atob('${bytes.toString('base64')}'),c=>c.charCodeAt(0)),{context:first.context,source:worker,loop:false});
+        p.dispose();await wait(()=>p.processorClosed);
+      }
+      const lifecycle=HolodekSidPlayer.stats();checks.repeatedShutdownsReleaseProcessors=lifecycle.active===0&&lifecycle.retired===lifecycle.disposed;
+      await sound.setVoiceTimbre('original');checks.styleSelection=style.value==='original'&&JSON.parse(localStorage.getItem('holodekAudioSettings')).voiceTimbre==='original';
+      await sound.speakLine('Mortacia','Style check.');sound.stopSpeech();
       let wanted=true;const late=sound.speakLine('Mortacia','Delayed sentence.',{stillWanted:()=>wanted});wanted=false;
       checks.stale=await late.then(()=>false,error=>error.message==='stale');
       await sound.voiceSound('Mortacia','pain');await wait(()=>players.some(p=>p.info.chips===3&&p.currentTime>.05));checks.cry=players.at(-1).info.chips===3;
@@ -37,7 +49,7 @@ const Voc=require('../retort/sidVoice/voc64'),Score=require('../retort/sidVoice/
     if(u.pathname==='/report'){let body='';req.on('data',x=>body+=x);req.on('end',()=>{finish(JSON.parse(body));res.end('ok');});return;}
     if(u.pathname==='/')return res.end('<!doctype html><div id="chatlog"></div>'+script);
     if(['/voice/line.sidvoice','/voice/cry.sidvoice'].includes(u.pathname)){let body='';req.on('data',x=>body+=x);req.on('end',()=>{
-      const voice=u.pathname.includes('cry.')?cry:bytes;res.setHeader('X-Voice-Dur',String(Score.inspect(voice).seconds));res.setHeader('Content-Type','application/x-holodek-sid-voice');res.end(voice);});return;}
+      speechRequests.push(JSON.parse(body));const voice=u.pathname.includes('cry.')?cry:bytes;res.setHeader('X-Voice-Dur',String(Score.inspect(voice).seconds));res.setHeader('Content-Type','application/x-holodek-sid-voice');res.end(voice);});return;}
     if(u.pathname==='/music/sid-worker.js'){res.setHeader('Content-Type','application/javascript');return res.end(bundle);}
     if(['/sid-mode','/voice/chip','/voice/profiles'].includes(u.pathname))return json({ok:true});
     if(u.pathname==='/music/latest')return json({});if(u.pathname==='/get-room-music')return json({music:null});
@@ -48,6 +60,7 @@ const Voc=require('../retort/sidVoice/voc64'),Score=require('../retort/sidVoice/
   const browser=spawn(process.env.GPU_PROBE_BROWSER||'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',['--headless=new','--disable-gpu','--no-first-run','--autoplay-policy=no-user-gesture-required','--user-data-dir='+path.join(profile,'browser'),'http://127.0.0.1:'+server.address().port],{windowsHide:true});
   let stderr='';browser.stderr.on('data',x=>stderr+=x);const stopped=new Promise(resolve=>{browser.once('error',error=>resolve({pass:false,error:error.message}));browser.once('exit',()=>resolve({pass:false,error:'Browser exited',stderr:stderr.slice(-1500)}));});
   const timeout=new Promise(resolve=>timer=setTimeout(()=>resolve({pass:false,error:'Browser timeout',stderr:stderr.slice(-1500)}),60000));
-  const answer=await Promise.race([result,stopped,timeout]);answer.noVoiceWavRequests=!requests.some(u=>/\/voice\/.*\.wav/.test(u));answer.pass=answer.pass&&answer.noVoiceWavRequests;
+  const answer=await Promise.race([result,stopped,timeout]);answer.noVoiceWavRequests=!requests.some(u=>/\/voice\/.*\.wav/.test(u));
+  answer.styleRequests=speechRequests.slice(0,3).every(q=>q.timbre==='soft')&&speechRequests.some(q=>q.text==='Style check.'&&q.timbre==='original');answer.pass=answer.pass&&answer.noVoiceWavRequests&&answer.styleRequests;
   clearTimeout(timer);browser.kill();server.closeAllConnections();server.close();console.log(JSON.stringify(answer,null,2));process.exitCode=answer.pass?0:1;
 })().catch(error=>{console.error(error);process.exitCode=1;});

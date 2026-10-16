@@ -40,8 +40,20 @@ const parameters = {
   ambience:Contracts.list({tag:enumField(['wind','sandstorm','drips','fire','howls','chant','rumble','water']),level:{type:Number,minimum:0,maximum:1}})
 };
 function rhythm(value,label){
-  if(!Array.isArray(value)||value.length<5||value.length>9||!value.every(n=>[4,8,16].includes(n))||
-      value.reduce((n,d)=>n+16/d,0)!==16||new Set(value).size<2)throw Error(label+': use 5-9 notes, at least two durations, exactly 16 sixteenth units.');
+  const legal=Array.isArray(value)&&value.every(n=>[4,8,16].includes(n));
+  const total=legal?value.reduce((n,d)=>n+16/d,0):null;
+  if(legal&&value.length>=5&&value.length<=9&&total===16&&new Set(value).size>=2)return;
+  const count=Array.isArray(value)&&value.length>=5&&value.length<=9?value.length:6, examples=[];
+  function collect(cell,units){
+    const left=count-cell.length;
+    if(units+left>16||units+left*4<16)return;
+    if(!left){if(units===16&&new Set(cell).size>=2)examples.push(cell);return;}
+    for(const duration of[4,8,16])collect([...cell,duration],units+16/duration);
+  }
+  collect([],0);
+  const difference=cell=>cell.reduce((n,d,i)=>n+(d===value?.[i]?0:1),0);
+  examples.sort((a,b)=>difference(a)-difference(b));
+  throw Error(`${label}: ${JSON.stringify(value)} totals ${total??'invalid'} units; exactly 16 required. 4=4 units, 8=2, 16=1. Use 5-9 events and two durations. Valid ${count}-event choices: ${examples.slice(0,2).map(v=>JSON.stringify(v)).join(' or ')}. Keep the matching contour length.`);
 }
 function choice(value,choices,label){if(!choices.includes(value))throw Error(label+': choose exactly '+choices.join(', '));}
 function validateTheme(p,label){
@@ -66,7 +78,11 @@ function validateTheme(p,label){
     !p.developmentPath.every((op,i)=>TRANSFORMS.includes(op)&&(i===0||op!==p.developmentPath[i-1])))throw Error(label+'.developmentPath: 3-6 exact transform enums, without adjacent repeats.');
   for(const field of['frameArp','picardy'])if(typeof p[field]!=='boolean')throw Error(label+'.'+field+': boolean required.');
   if(p.percussion!=='none'&&(!p.frameArp||['drone','sparse'].includes(p.texture)))throw Error(label+': percussion needs frameArp and arpeggios/counterpoint texture.');
-  for(const field of['motifRhythm','answerRhythm','contrastRhythm'])rhythm(p[field],label+'.'+field);
+  const rhythmErrors=[];
+  for(const field of['motifRhythm','answerRhythm','contrastRhythm']){
+    try{rhythm(p[field],label+'.'+field);}catch(error){rhythmErrors.push(error.message);}
+  }
+  if(rhythmErrors.length)throw Error(rhythmErrors.join('\n'));
   const c=p.motifContour;
   if(!Array.isArray(c)||c.length!==p.motifRhythm.length||!c.every(n=>Number.isInteger(n)&&n>=-4&&n<=7)||c[0]!==0||new Set(c).size<3)
     throw Error(label+'.motifContour: match rhythm length, start at 0, use three distinct integer degrees within -4..7.');
@@ -170,10 +186,15 @@ function assertScore(song){
   }
   return song;
 }
+function suiteChoices(context = {}) {
+  return Object.keys(spec.suiteForms).filter(form => !(context.plane || context.portal) || spec.suiteForms[form].length > 0);
+}
 async function generate($,{description='',roomKey='',runId='',context={},recent=[]}={}){
   const seed=`${runId}|${roomKey}|${description}`;
   const diversity=Diversity.brief(seed,spec,recent);
-  await $.system`Compose original, coherent Commodore-64-style dark-fantasy room music, not imitations of an existing tune. The player may be Mortacia, Suzerain or the Children of the Grave. The arc is exile from Hades, Mortacia's lost Sepulchra, Dantuea's rising undead, Arithus's occupation, and the struggle to restore judgment and balance. Score this PLACE and the current aspiration, not the same lament merely because Mortacia is present.
+  if (context.plane || context.portal) await $.user`PORTAL / PLANAR SUITE WORK ORDER. This room must receive a complete, original multi-movement SID exploration suite, not a single_theme or the preceding room's song. Choose suiteForm only from ${suiteChoices(context).join(', ')}. Keep the existing arranger, enum grammar, diversity rotation and complete three-voice 8580 core plus optional 10582 layer. No new register effects or extra voices are implied.
+Score the actual supplied room and realm: the purple arch may suggest a threshold gesture, while the plane's terrain, inhabitants and concerns determine the body, contrast and return. YOU choose mode, timbres, rhythm, themes and arc; do not make every portal an identical crystalline arpeggio. When plane data is supplied, it overrides the default Tartarus/Hades narrative: an unaware or independent culture needs its own musical identity, not a mandatory Mortacia lament, war march or victory theme. A portal in Tartarus is still its established local setting; do not invent an alien landscape on this side of the arch. This work order controls suite form, not a claim that narrative events have occurred.`;
+  await $.system`Compose original, coherent Commodore-64-style dark-fantasy room music, not imitations of an existing tune. The player may be Mortacia, Suzerain or the Children of the Grave. The arc is exile from Hades, Mortacia's lost Sepulchra, Dantuea's rising undead, Arithus's occupation, and the struggle to restore judgment and balance. Score this PLACE and the current aspiration, not the same lament merely because Mortacia is present. Supplied planar identity takes precedence for unrelated realms beyond Tartarus: their inhabitants and culture need not know or participate in that war. A portal/planar suite work order requires a multi-movement form from its narrowed enum; ordinary rooms keep every form choice.
 The proven arranger owns chord-tone anchoring, voice ranges, synchronized tracker cells, gate articulation, bass/arp execution and motif development. You compose the room's short rhythmic/scale-degree cell, harmony and explicit development enums. NEVER write assembly, every note of a ten-minute song, or prose instructions for the arranger to interpret. Rationale is display/log metadata, never executable music.
 Use the nostalgic range of SID writing: modal processions, chamber counterpoint, folk dances, spare lament, driving ostinato, crystalline arpeggios and syncopated shadow grooves. Original melodies only; do not borrow a game's tune. The same patch bank and timing engine stay in use. Build a memorable statement, an answer and contrast from it, not random unrelated bars. A rest still occupies the shared grid.
 Durations are denominators: 4=quarter=4 units, 8=eighth=2, 16=sixteenth=1. EACH rhythm totals exactly 16, 5-9 events, with at least two lengths. Contour starts at zero, mostly steps, optionally one or two leaps of 3-5 scale steps, offsets -4..7. Stepwise melodies need no mandatory leap. Example rhythms are [8,8,4,8,8,4] and [4,8,8,4,4]; invent a fitting contour. Choose answer/contrast transforms ONLY from the enumerated set. They are executed directly, never parsed as sentences.
@@ -193,10 +214,11 @@ Supported choices and suite roles: ${JSON.stringify({...spec,leitmotif:parameter
 Recent room identities to contrast with, without merely transposing: ${JSON.stringify(recentSummaries(recent))}
 Provide title and a concise rationale tied to THIS room. All musical choices must use the provided enums. themes must contain exactly suiteForm's required roles (zero for single_theme).`;
   await $.user`Author contrastContour as a real second, singable cell matching contrastRhythm, starting at zero and using the same degree/leap bounds as the room motif. It may share an interval or gesture with the statement, but it need not be only its mechanical inversion. contrastTransform develops that cell later. Keep both identities recognizable. Style/rationale labels do not change the notes: the rhythm, contours and performance choices must carry the distinction.`;
-  const roomParameters={...parameters,...Object.fromEntries(Object.entries(diversity.allowed).map(([field,choices])=>[field,enumField(choices)]))};
+  const roomParameters={...parameters,suiteForm:enumField(suiteChoices(context)),...Object.fromEntries(Object.entries(diversity.allowed).map(([field,choices])=>[field,enumField(choices)]))};
   const result=await Contracts.request($,{component:'sid-composition',context:{geoKey:roomKey,runId},parameters:roomParameters,maxTokens:4800,attempts:3,
     validate:value=>{
       const accepted=validate(value,recent);
+      if (!suiteChoices(context).includes(accepted.suiteForm)) throw Error('Portal and planar rooms need a multi-movement suite, not single_theme.');
       Diversity.check(accepted,recent,diversity.allowed);
       const song=assertScore(Theory.arrangeSuite(develop(accepted),description,seed));
       if(recent.some(row=>(row.song||row).composition?.realizedMotifSignature===realizedMotifSignature(song)))
@@ -214,4 +236,4 @@ Provide title and a concise rationale tied to THIS room. All musical choices mus
     motif:song.composition.motifSignature.slice(0,12),score:song.composition.scoreSignature.slice(0,12),analysis:song.analysis}));
   return song;
 }
-module.exports={VERSION,TRANSFORMS,parameters,validate,develop,transform,assertScore,generate,motifSignature,realizedMotifSignature,recentSummaries};
+module.exports={VERSION,TRANSFORMS,parameters,validate,develop,transform,assertScore,generate,motifSignature,realizedMotifSignature,recentSummaries,suiteChoices};

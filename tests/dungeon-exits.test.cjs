@@ -11,8 +11,8 @@ function room() {
 test('all console directions have reachable distinct markers without carving geometry or inventing exits', () => {
   const d = room(), old = JSON.stringify(Object.entries(d.cells).map(([k, c]) => [k, c.tile, c.floorHeight, c.ceilHeight]));
   const directions = Object.keys(E.LABELS), result = E.install(d, directions);
-  assert.equal(result.status, 'built'); assert.equal(result.markers.length, 10);
-  assert.equal(new Set(result.markers.map(m => m.key)).size, 10);
+  assert.equal(result.status, 'built'); assert.equal(result.markers.length, directions.length);
+  assert.equal(new Set(result.markers.map(m => m.key)).size, directions.length);
   for (const m of result.markers) {
     assert.equal(d.cells[m.key].tile, 'floor');
     assert.equal(E.nearby(d, { x: m.x + 0.5, y: m.y + 0.5 }).direction, m.direction);

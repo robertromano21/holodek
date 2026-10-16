@@ -28,6 +28,7 @@ test('normal-play state over 100 KB reaches the real state-update route before t
   const start = server.indexOf("app.post('/updateState7'");
   const end = server.indexOf('// NEW: Endpoint to get room music', start);
   vm.runInNewContext(server.slice(start, end), { app, sharedState: setters, roomDatabaseReceiver: createRoomDatabaseReceiver(), inputTaskInFlight: false, console: quietConsole,
+    setImmediate: cb => cb(), prepareRoomSong() {},
     Economy: { preserveInventory: (_old, incoming) => incoming, preserve: (_old, incoming) => incoming, refresh() {} } });
   app.post('/processInput7', (req, res) => res.json({ console: state.console, testMode: state.testMode }));
   app.use(gameJsonErrorHandler);

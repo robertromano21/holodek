@@ -8,7 +8,8 @@ const root = path.resolve(__dirname, '..');
 const continuedDialogue = require('./fixtures/continued-dialogue.cjs');
 const zharokDialogue = require('./fixtures/zharok-dialogue.cjs');
 const index = fs.readFileSync(path.join(root, 'assets/index.html'), 'utf8');
-const css = [...index.matchAll(/<style>([\s\S]*?)<\/style>/g)].map(m => m[1]).join('\n');
+const css = ['gameUiFonts.css','gameUiPixels.css','artViewerUi.css'].map(file=>fs.readFileSync(path.join(root,'assets',file),'utf8')).join('\n') + '\n' +
+  [...index.matchAll(/<style>([\s\S]*?)<\/style>/g)].map(m=>m[1]).join('\n');
 const menu = index.slice(index.indexOf('<button id="game-menu-toggle"'), index.indexOf('<!-- Music control button'));
 const consoleToggle = index.slice(index.indexOf('function togglePopup()'), index.indexOf('function toggleDungeonPopup()'));
 const logToggle = index.slice(index.indexOf('function toggleGameLogPopup()'), index.indexOf('function togglePartyPopup()'));
@@ -19,6 +20,7 @@ const partySheetMarkup=index.slice(index.indexOf('<div id="party-popup">'),index
 const inventoryStart = index.indexOf('<button id="dungeon-inventory-shortcut"');
 const inventoryMarkup = index.slice(inventoryStart, index.indexOf('</section>', inventoryStart) + '</section>'.length);
 const game = fs.readFileSync(path.join(root, 'assets/game.js'), 'utf8');
+const roomArtPresentation = game.slice(game.indexOf('function presentRoomIllustration('), game.indexOf('async function switchDungeonForCoordinates('));
 const actionStart = game.indexOf('// Add event listener to clickable objects inside contentDiv');
 const actionHandlers = game.slice(actionStart, game.indexOf('// ---- Exit click handler', actionStart));
 const exitHandlers=game.slice(game.indexOf('// ---- Exit click handler'),game.indexOf('// ---- End exit click handler ----'));
@@ -44,6 +46,8 @@ scripts.splice(scripts.indexOf('surfaceArt')+1,0,'artPresentation');
 scripts.push('combatCharacterUi');
 scripts.push('combatTurnUi', 'itemGiveUi', 'actionDiceUi');
 scripts.push('gameModelUi');
+scripts.push('retroGraphics');
+scripts.push('gameUiPixels');
 const page = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
 ${scripts.map(name => `<script src="/assets/${name}.js"></script>`).join('')}
 </head><body>${menu}<button id="play-music-btn" style="display:none">Play Music</button>
@@ -451,29 +455,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     checks.delayedSpeechKeepsOrder = document.getElementById('dungeon-dialogue-words').textContent === 'First, mind the broken step.';
     DungeonLife.reset();
     delayed.state='Dead';
-    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'A corpse must not speak.'}]});
+    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'A corpse must not speak.',kind:'canned'}]});
     DungeonLife.tick();
     checks.deadStateCannotSpeak = document.getElementById('dungeon-dialogue').hidden;
     delete delayed.state;
     DungeonLife.reset();
-    delayed.mazeX=36;
+    delayed.mazeX=Math.floor(player.x+DungeonInhabitants.MONSTER_DIALOGUE_RANGE+2);
     DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'I must not speak from four tiles away.',kind:'canned'}]});
     DungeonLife.tick();
     checks.distantResidentCannotStartSubtitle=document.getElementById('dungeon-dialogue').hidden;
     checks.subtitleDistanceRejectionLogged = DungeonLife.subtitleDiagnostics().some(row => row.stage === 'skipped' && row.reason === 'out-of-range');
     DungeonLife.reset();
-    delayed.mazeX=35;
-    window.getPartyEntryRenderMazePosition=actor=>actor===delayed?{x:36,y:32}:null;
-    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'My logical destination is close, but I am still walking.'}]});
+    delayed.mazeX=Math.floor(player.x+DungeonInhabitants.MONSTER_DIALOGUE_RANGE-.5);
+    window.getPartyEntryRenderMazePosition=actor=>actor===delayed?{x:delayed.mazeX+1,y:32}:null;
+    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'My logical destination is close, but I am still walking.',kind:'canned'}]});
     DungeonLife.tick();
     checks.renderedResidentMustBeClose=document.getElementById('dungeon-dialogue').hidden;
+    delayed.mazeX=35;
     window.getPartyEntryRenderMazePosition=actor=>actor===delayed?{x:34.75,y:32}:null;
-    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'Now you are close enough to hear me.'}]});
+    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'Now you are close enough to hear me.',kind:'canned'}]});
     DungeonLife.tick();
     checks.closeResidentStartsSubtitle=!document.getElementById('dungeon-dialogue').hidden&&
       document.getElementById('dungeon-dialogue-words').textContent==='Now you are close enough to hear me.';
-    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'This queued line must not follow the player away.'}]});
-    player.x=28.5;
+    DungeonLife.receiveDialogue({geoKey:'0,0,0',runId:'ui-probe',dialogue:[{speaker:'Late Mason',line:'This queued line must not follow the player away.',kind:'canned'}]});
+    player.x=34.75-DungeonInhabitants.MONSTER_DIALOGUE_RANGE-2;
     DungeonLife.tick();
     checks.walkingAwayStopsResidentSubtitle=document.getElementById('dungeon-dialogue').hidden;
     DungeonLife.reset();player.x=32.5;delayed.mazeX=33;delete window.getPartyEntryRenderMazePosition;
@@ -615,7 +620,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     d.sceneLandmarks = [{ type: 'altar', label: 'Altar of Lost Names', x: 50, y: 12 }];
     DungeonLife.receivePopulation({ population: encounterPopulation, runId: 'ui-probe' });
     const encounterSelect = document.getElementById('exploration-map-landmarks');
-    checks.mapListsOnlyKnownLandmarks = encounterSelect.options.length === 3 && encounterSelect.options[0].textContent === 'Landmarks (2)' &&
+    checks.mapListsOnlyKnownLandmarks = encounterSelect.options.length === 3 && encounterSelect.options[0].textContent === 'Known places, people & items (2)' &&
       encounterSelect.textContent.includes('Ruined Temple Entrance') && !encounterSelect.textContent.includes('Altar of Lost Names') &&
       !encounterSelect.textContent.includes('Undiscovered Carver') && !encounterSelect.textContent.includes('Undiscovered Hound');
     document.getElementById('exploration-map-whole').click();
@@ -633,8 +638,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     const mapCanvas = document.getElementById('exploration-map-canvas'), hoverBounds = mapCanvas.getBoundingClientRect();
     mapCanvas.dispatchEvent(new PointerEvent('pointermove', { clientX: hoverBounds.left + hoverBounds.width * 56.5 / 64,
       clientY: hoverBounds.top + hoverBounds.height * 56.5 / 64 }));
-    checks.landmarkHoverShowsTitle = document.querySelector('#dungeon-area-title strong').textContent === 'Ruined Temple Entrance' &&
-      !document.getElementById('dungeon-area-title').hidden && getComputedStyle(document.getElementById('dungeon-area-title')).pointerEvents === 'none';
+    checks.landmarkHoverShowsTitle = document.getElementById('exploration-map-hover').textContent === 'Ruined Temple Entrance' &&
+      !document.getElementById('exploration-map-hover').hidden && getComputedStyle(document.getElementById('exploration-map-hover')).pointerEvents === 'none';
     DungeonAreaTitles.reset();
     DungeonAreaTitles.update({ dungeon: d, roomName: 'The Echoing Flats', player });
     checks.roomEntryShowsCinematicTitle = document.querySelector('#dungeon-area-title strong').textContent === 'The Echoing Flats' &&
@@ -667,11 +672,25 @@ window.addEventListener('DOMContentLoaded', async () => {
     checks.encounterPinUsesLastSighting = /Known Mason: 2 tiles E \(last seen\)/.test(document.getElementById('exploration-map-caption').textContent);
     knownMason.mazeX = 56; knownMason.mazeY = 56; DungeonLife.tick(); DungeonExplorationMap.refresh();
     checks.encounterPinDoesNotTrackOffscreen = /Known Mason: 2 tiles E \(last seen\)/.test(document.getElementById('exploration-map-caption').textContent);
-    mapCanvas.dispatchEvent(new PointerEvent('pointermove', { clientX: hoverBounds.left + hoverBounds.width * 34.5 / 64,
-      clientY: hoverBounds.top + hoverBounds.height * 32.5 / 64 }));
-    checks.encounterHoverShowsNameAndPortrait = document.querySelector('#dungeon-area-title strong').textContent === knownMason.name &&
-      document.querySelector('#dungeon-area-title small').textContent === 'Friendly Encounter - Last Seen' &&
-      document.querySelector('#dungeon-area-title img').src === knownMason.sprite.dataUrl && !document.querySelector('#dungeon-area-title img').hidden;
+    const residentHoverBounds = mapCanvas.getBoundingClientRect();
+    mapCanvas.dispatchEvent(new PointerEvent('pointermove', { clientX: residentHoverBounds.left + residentHoverBounds.width * 34.5 / 64,
+      clientY: residentHoverBounds.top + residentHoverBounds.height * 32.5 / 64 }));
+    checks.encounterHoverShowsLastSeenName = document.getElementById('exploration-map-hover').textContent === knownMason.name + ' (last seen)' &&
+      !document.getElementById('exploration-map-hover').hidden;
+    const priorObjects = d.sceneObjects, priorDiscoveries = d.objectDiscoveries;
+    d.objectDiscoveries = { names: ['silver dagger'] };
+    d.sceneObjects = [{ ...stock[5], x: 38, y: 30 }, { name: 'hidden crown', x: 39, y: 30 }];
+    DungeonExplorationMap.refresh();
+    checks.mapListsDiscoveredItemsOnly = encounterSelect.textContent.includes('silver dagger') && !encounterSelect.textContent.includes('hidden crown');
+    const iconPixel = mapContext.getImageData(385, 305, 1, 1).data;
+    checks.mapDrawsDiscoveredItemIcon = iconPixel[0] !== 8 || iconPixel[1] !== 8;
+    const itemHoverBounds = mapCanvas.getBoundingClientRect();
+    mapCanvas.dispatchEvent(new PointerEvent('pointermove', { clientX: itemHoverBounds.left + itemHoverBounds.width * 38.5 / 64,
+      clientY: itemHoverBounds.top + itemHoverBounds.height * 30.5 / 64 }));
+    checks.itemHoverShowsName = document.getElementById('exploration-map-hover').textContent === 'silver dagger';
+    d.sceneObjects.shift(); DungeonExplorationMap.refresh();
+    checks.mapRemovesPickedUpItem = !encounterSelect.textContent.includes('silver dagger');
+    d.sceneObjects = priorObjects; d.objectDiscoveries = priorDiscoveries; DungeonExplorationMap.refresh();
     document.getElementById('exploration-map-follow').click();
     document.getElementById('dungeon-map-shortcut').click();
     checks.parchmentClosesMap = document.getElementById('exploration-map-popup').style.display === 'none';
@@ -839,6 +858,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const noticeClose=document.getElementById('dungeon-action-notice-close'), noticeCloseBounds=noticeClose.getBoundingClientRect();
     checks.actionNoticeCloseIsClickable = noticeClose.getAttribute('aria-label')==='Dismiss action notice' && getComputedStyle(noticeClose).pointerEvents==='auto' &&
       document.elementFromPoint(noticeCloseBounds.left+noticeCloseBounds.width/2,noticeCloseBounds.top+noticeCloseBounds.height/2)===noticeClose;
+    if(!checks.actionNoticeCloseIsClickable)window.probeDiagnostics={noticeCloseBounds,noticeRect,hit:document.elementFromPoint(noticeCloseBounds.left+noticeCloseBounds.width/2,noticeCloseBounds.top+noticeCloseBounds.height/2)?.outerHTML?.slice(0,500)};
     GameCommandGate.transportStarted('/processInput7');
     const noticeCommands=commands.length;
     noticeClose.click();
@@ -849,6 +869,19 @@ window.addEventListener('DOMContentLoaded', async () => {
     DungeonActionNotices.receive({...notice,id:'probe-kill',kind:'defeat',title:'Defeated probe guard',subject:'Defeated probe guard',actor:'Mortacia',result:'defeated',message:'Killed by Mortacia.'});
     checks.defeatedActorNoticeKeepsPortrait = !noticePanel.hidden && noticePanel.textContent.includes('Killed by Mortacia') && noticePanel.querySelector('img').src.startsWith('data:image/svg+xml,');
     DungeonActionNotices.reset(); actors.pop();
+    DungeonActionNotices.receive({...notice,id:'probe-reading',kind:'document-read',result:'observed',title:'An Unfinished Covenant',
+      message:'Retrieve the verdant graveplate. Defeat the sentries or recruit them, then speak with Nera. '.repeat(7)});
+    DungeonActionNotices.receive({...notice,id:'probe-after-reading',kind:'item-taken',title:'A later pickup',message:'Added to your backpack.'});
+    const actualTime=DungeonLife.time;DungeonLife.time=()=>actualTime()+3600000;
+    try{DungeonActionNotices.tick();}finally{DungeonLife.time=actualTime;}
+    checks.readingWaitsForX=!noticePanel.hidden&&noticePanel.dataset.dismissal==='manual'&&noticePanel.textContent.includes('An Unfinished Covenant')&&noticePanel.textContent.includes('Close with X');
+    const readingRect=noticePanel.getBoundingClientRect(),readingBody=noticePanel.querySelector('.dungeon-action-content');
+    checks.readingFitsViewport=readingRect.left>=0&&readingRect.top>=0&&readingRect.right<=innerWidth+1&&readingRect.bottom<=innerHeight+1;
+    checks.readingCanScroll=getComputedStyle(readingBody).overflowY==='auto'&&getComputedStyle(noticePanel).pointerEvents==='auto';
+    const readingClose=noticeClose.getBoundingClientRect();
+    checks.longReadingXAccessible=document.elementFromPoint(readingClose.left+readingClose.width/2,readingClose.top+readingClose.height/2)===noticeClose;
+    noticeClose.click();checks.readingXClosesImmediately=noticePanel.hidden;
+    DungeonActionNotices.tick();checks.nextNoticeWaitedForReading=noticePanel.textContent.includes('A later pickup');DungeonActionNotices.reset();
     pd.cells[pf.key].tile='custom_probe_prop'; delete pd.cells[pf.key].puzzleFixture; delete pd.physicalPuzzle;
     pd.tiles.custom_probe_prop={landmark:{label:'Weathered survey pedestal'},spriteSpec:{baseWidth:.7,heightRatio:.4}}; pd._geometryStamp='new-prop';
     WorldInteractionUi.updateFrame(pd,camera,view,eye); view.dispatchEvent(new PointerEvent('pointermove',at));
@@ -1060,11 +1093,50 @@ window.addEventListener('DOMContentLoaded', async () => {
 
     const turnPosts=[], previousFetch=window.fetch;
     window.fetch=async(url,options)=>{if(url==='/submit-target2'){turnPosts.push(JSON.parse(options.body));return{ok:true,json:async()=>({status:'success'})};}return previousFetch(url,options);};
-    const turn={allowRetreat:true,turnId:'player-turn',actionId:'combat',round:2,combatant:'Mortacia',targets:[worldMonster.name],initiative:[{name:'Mortacia',roll:18}]};
+    const turn={allowRetreat:true,turnId:'player-turn',actionId:'combat',round:2,combatant:'Mortacia',targets:[worldMonster.name],initiative:[{name:'Mortacia',roll:18}],
+      care:[{kind:'bandage',target:worldNpc.name,label:'Bandage '+worldNpc.name}]};
+    window.renderPartyIconDock=()=>{
+      const dock=document.getElementById('party-icon-dock');
+      dock.querySelectorAll('.combat-target-controls,.party-roll-status,.combat-end-controls').forEach(n=>n.remove());window.renderPartyDice(dock,[]);
+    };
     window.actionDiceState={active:{id:'combat',kind:'combat',turn},paused:false};CombatTurnUi.receive(turn);
+    const combatNames=document.createElement('div');combatNames.innerHTML='<span class="clickable-npc" data-npc="'+worldNpc.name+'">'+worldNpc.name+'</span><span class="clickable-monster" data-monster="'+worldMonster.name+'">'+worldMonster.name+'</span>';
+    contentDiv.appendChild(combatNames);GameCommandGate.transportStarted('/processInput7');
+    combatNames.querySelector('.clickable-npc').click();
+    checks.consoleCanSelectObscuredAllyDuringCombat=!!document.querySelector('.combat-target-actions')?.textContent.includes('Bandage '+worldNpc.name)&&!document.getElementById('remove-button');
+    document.querySelector('.combat-target-actions button:last-child')?.click();
+    openPartySheet(1);
+    checks.partyPortraitOpensCombatCare=!!document.querySelector('.combat-target-actions')?.textContent.includes('Bandage '+worldNpc.name)&&document.getElementById('party-popup').style.display==='none';
+    document.querySelector('.combat-target-actions button:last-child')?.click();
+    combatNames.querySelector('.clickable-monster').click();
+    checks.consoleMonsterUsesTurnScopedAttack=!!document.querySelector('.combat-target-actions')?.textContent.includes('Attack '+worldMonster.name)&&turnPosts.length===0;
+    document.querySelector('.combat-target-actions button:last-child')?.click();
+    openPartySheet(1);document.querySelector('.combat-target-actions .popup-button')?.click();await new Promise(resolve=>setTimeout(resolve,5));
+    checks.avatarBandageUsesPublishedTurn=turnPosts.at(-1)?.action==='care'&&turnPosts.at(-1)?.target===worldNpc.name&&turnPosts.at(-1)?.turnId===turn.turnId;
+    turnPosts.length=0;CombatTurnUi.receive(turn);combatNames.remove();GameCommandGate.transportFinished('/processInput7',{completedStartResult:{}});
+    document.getElementById('combat-attack-button').click();
+    const enemySelect=document.getElementById('combat-attack-select');enemySelect.value=worldMonster.name;enemySelect.dispatchEvent(new Event('change'));
+    checks.attackDropdownIsLowerLeft=!!enemySelect.closest('#party-icon-dock');document.getElementById('combat-attack-confirm').click();
+    await new Promise(resolve=>setTimeout(resolve,5));
+    checks.attackDropdownSubmitsWithoutRedundantPopup=turnPosts.length===1&&turnPosts[0].action==='attack'&&turnPosts[0].target===worldMonster.name&&turnPosts[0].turnId===turn.turnId&&!document.querySelector('.combat-target-actions');
+    turnPosts.length=0;
+    const approachTurn={...turn,turnId:'approach-turn',tactical:true,movement:{remaining:6,total:6},attackTargets:[],approachTargets:[{name:worldMonster.name,cost:3}]};
+    CombatTurnUi.receive(approachTurn);document.getElementById('combat-attack-button').click();
+    checks.approachDropdownOffersDirectMoveAttack=document.getElementById('combat-attack-confirm').textContent==='Move + Attack';
+    document.getElementById('combat-attack-confirm').click();await new Promise(resolve=>setTimeout(resolve,5));
+    checks.approachDropdownSubmitsOnce=turnPosts.length===1&&turnPosts[0].action==='attack'&&turnPosts[0].turnId===approachTurn.turnId&&!document.querySelector('.combat-target-actions');
+    turnPosts.length=0;
+    const spellTurn={...turn,turnId:'spell-turn',tactical:true,movement:{remaining:6,total:6},attackTargets:[],approachTargets:[],spells:[{name:'Ranged Test Spell',target:worldMonster.name,cost:1,itemName:'staff',magic:3}]};
+    CombatTurnUi.receive(spellTurn);document.getElementById('combat-attack-button').click();
+    checks.spellOnlyTargetOffersSpellChoice=document.getElementById('combat-attack-confirm').textContent==='Choose Spell';
+    document.getElementById('combat-attack-confirm').click();
+    checks.spellOnlyTargetKeepsActionOptions=turnPosts.length===0&&document.querySelector('.combat-target-actions')?.textContent.includes('Ranged Test Spell');
+    document.querySelector('.combat-target-actions button:last-child')?.click();CombatTurnUi.receive(turn);
+    const threeControls=[...document.querySelectorAll('.combat-end-controls > button')];
+    checks.threeCombatControlsShareOneRow=threeControls.length===3&&threeControls.every(b=>Math.abs(b.getBoundingClientRect().top-threeControls[0].getBoundingClientRect().top)<2);
     const turnPanel=document.getElementById('combat-turn-popup'),turnBounds=turnPanel.getBoundingClientRect();
     checks.playerTurnPopupCentered=Math.abs((turnBounds.left+turnBounds.right)/2-innerWidth/2)<2&&Math.abs((turnBounds.top+turnBounds.bottom)/2-innerHeight/2)<2;
-    checks.playerTurnHasInitiativeAndRetreat=turnPanel.textContent.includes('Mortacia (18)')&&!!document.getElementById('combat-retreat-button');
+    checks.playerTurnHasInitiativeAndRetreat=turnPanel.textContent.includes('Mortacia (18)')&&!turnPanel.querySelector('button')&&!!document.getElementById('combat-retreat-button')?.closest('#party-icon-dock');
     window.gamePaused=true;CombatTurnUi.receive(turn);document.getElementById('combat-retreat-button').click();
     checks.pausedTurnCannotRetreat=turnPosts.length===0;
     window.gamePaused=false;CombatTurnUi.receive(turn);document.getElementById('combat-retreat-button').click();
@@ -1072,12 +1144,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     checks.retreatCarriesScopedTurnId=turnPosts[0]?.action==='retreat'&&turnPosts[0]?.turnId===turn.turnId&&turnPanel.hidden;
     window.renderPartyIconDock=()=>{
       const dock=document.getElementById('party-icon-dock');
-      dock.querySelectorAll('.combat-target-controls,.party-roll-status').forEach(n=>n.remove());window.renderPartyDice(dock,[]);
+      dock.querySelectorAll('.combat-target-controls,.party-roll-status,.combat-end-controls').forEach(n=>n.remove());window.renderPartyDice(dock,[]);
     };
     const npcTurn={...turn,allowRetreat:false,turnId:'npc-turn',combatant:'Companion'};
     window.receiveDiceState({type:'dice_state',epoch:'probe-turns',revision:1,active:{id:'combat',kind:'combat',turn:npcTurn},results:[],paused:false});
     const npcChoices=document.querySelector('.combat-target-controls');
-    checks.reconnectedNpcTurnRestoresScopedChoices=!!npcChoices&&npcChoices.textContent.includes('Companion')&&turnPanel.hidden;
+    checks.reconnectedNpcTurnRestoresScopedChoices=!!npcChoices&&npcChoices.textContent.includes('Companion')&&!turnPanel.querySelector('button');
     npcChoices.querySelector('button').click();await new Promise(resolve=>setTimeout(resolve,5));
     checks.npcAttackCarriesScopedTurnId=turnPosts.at(-1)?.turnId==='npc-turn'&&turnPosts.at(-1)?.action==='attack';
     window.receiveDiceState({type:'dice_state',epoch:'probe-turns',revision:2,active:null,results:[],paused:false});window.fetch=previousFetch;
@@ -1094,7 +1166,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     window.positionPartyIconDock=dockApi.position;dockApi.render();
     const dock=document.getElementById('party-icon-dock'),names=[...dock.querySelectorAll('.party-icon-name')];
     checks.partyDockShowsFullNames=names.every((n,i)=>n.textContent===dockEntries[i].label&&n.scrollWidth<=n.clientWidth+1&&n.scrollHeight<=n.clientHeight+1);
-    checks.partyDockIconsAndLabelsLarger=[...dock.querySelectorAll('canvas')].every(c=>c.width===36&&c.height===36)&&names.every(n=>parseFloat(getComputedStyle(n).fontSize)>=9);
+    checks.partyDockKeepsIconsAndFitsPixelLabels=[...dock.querySelectorAll('canvas')].every(c=>c.width===36&&c.height===36)&&names.every(n=>parseFloat(getComputedStyle(n).fontSize)===6);
     const mortaciaAvatar=dock.querySelector('#party-icon-canvas-6'),avatarPixels=mortaciaAvatar.getContext('2d').getImageData(0,0,36,36).data;
     let bladePixels=0;for(let i=0;i<avatarPixels.length;i+=4)if(avatarPixels[i]===244&&avatarPixels[i+1]===206&&avatarPixels[i+2]===142&&avatarPixels[i+3]===255)bladePixels++;
     checks.partyMortaciaSwordVisibleBeforeStartup=bladePixels>=10;
@@ -1119,7 +1191,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     window.combatCharacters=originalActors;
     viewport.remove(); gpu._hiddenHost?.remove(); window.currentDungeon=undefined;
   } catch (error) { errors.push(error.stack); }
-  const report = { pass: Object.values(checks).every(Boolean) && !errors.length, checks, errors };
+  const report = { pass: Object.values(checks).every(Boolean) && !errors.length, checks, errors, diagnostics:window.probeDiagnostics };
   document.getElementById('results').textContent = JSON.stringify(report);
   await probeFetch('/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) });
 });
@@ -1164,7 +1236,8 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
 });
 </script></body></html>`;
-const tacticalPage=fs.readFileSync(path.join(__dirname,'tactical-ui-probe.html'),'utf8').replace('__GAME_CSS__',css);
+const tacticalPage=fs.readFileSync(path.join(__dirname,'tactical-ui-probe.html'),'utf8').replace('__GAME_CSS__',css)
+  .replace('__PARTY_DOCK_LAYOUT__',index.slice(index.indexOf('function positionPartyIconDock()'),index.indexOf('function renderPartyInfoPopup()')));
 const modelPage = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
 <script src="/assets/gameMenuUi.js"></script><script src="/assets/gameModelUi.js"></script></head><body>${menu}
 <textarea id="draft">unfinished command</textarea><script>
@@ -1212,7 +1285,155 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await originalFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
 });
 </script></body></html>`;
-for (const html of [page,journalPage,tacticalPage,modelPage])for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) if (script.trim()) new vm.Script(script);
+const fontsPage = String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
+<script src="/assets/consoleFontUi.js"></script><script src="/assets/gameMenuUi.js"></script><script src="/assets/retroGraphics.js"></script><script src="/assets/compassUi.js"></script><script src="/assets/gameUiPixels.js"></script></head><body>${menu}
+<div id="phaser-popup" style="display:block"><div id="phaser-header">Game Console</div><div id="phaser-container">${['Room: Ruined Temple Entrance','','Room Description: You find yourself standing in the first room of the afterlife at the Ruined Temple.','','PC:','Mortacia','Female','Goddess','Assassin-Fighter-Necromancer-Goddess','Level: 51','AC: 13','XP: 18817882','HP: 138','MaxHP: 138','Equipped: Weapon: None, Armor: None, Shield: None, Other: None','Attack: 0','Damage: 0','Armor: 0','Magic: 7','State: Alive','','Coordinates: X: 0, Y: 0, Z: 0','Exits: north, east, up'].join('\n')}</div></div>
+<div id="game-log-popup" style="display:block"><div id="game-log-header">Game Log</div><div id="game-log-container">Mortacia misses Dantuea.</div></div>
+<section class="popup-container" style="font:17px Georgia,serif;width:240px;position:absolute;left:10px;bottom:10px"><strong>Attack Party Member?</strong><button>Cancel</button></section>
+<div id="chatlog-background-panel"><div id="chatlog-background-content"><img src="/assets/children-of-the-grave-logo.png" style="width:75%;display:block;margin:10px auto 30px">You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise), high magical beings and other entities of pure energy and form, angels and powerful demons...<br><br>The game begins in the Ruined Temple. Good luck, adventurer! Type 'Start' with nothing else in the sentence and then choose a game mode from the start menu.</div></div>
+<div id="chatbotcontainer"><textarea id="chatuserinput" placeholder="Type a command">unfinished command</textarea><button id="chatbotbutton">Command</button></div>
+<button id="dungeon-map-shortcut" aria-label="Open exploration map"><img src="/assets/adventurers-map.svg" alt=""></button>
+<button id="dungeon-inventory-shortcut" aria-label="Inventory" style="left:auto;right:15px;bottom:60px"><img src="/assets/adventurers-pack.svg" alt=""></button>
+<button id="dungeon-journal-shortcut" aria-label="Journal" style="left:auto;right:65px;bottom:60px"><img src="/assets/adventurers-journal.svg" alt=""></button>
+<button id="dungeon-spellbook-shortcut" aria-label="Spellbook" style="left:auto;right:115px;bottom:60px"><img src="/assets/adventurers-spellbook.svg" alt=""></button>
+<div id="party-icon-dock"><div class="party-icon-slot"><button class="party-icon-button"><canvas class="party-icon-canvas" width="36" height="36"></canvas><span class="party-icon-name">Mortacia</span><span class="party-icon-hp">129/129</span></button><div class="party-dice-wrap"><button class="party-d20">d20</button></div></div><span class="party-roll-history">Attack: d20 18 + 3 = 21</span><div class="party-roll-status">Mortacia: Attack - Dantuea. Roll d20.<br>AC 22. Click Roll.</div></div>
+<script>
+window.addEventListener('DOMContentLoaded', async () => {
+  const checks = {}, errors = [];
+  window.addEventListener('error', e => errors.push(e.message));
+  const family = element => getComputedStyle(element).fontFamily;
+  const fits = element => { const r=element.getBoundingClientRect();return r.left>=0&&r.top>=0&&r.right<=innerWidth+1&&r.bottom<=innerHeight+1; };
+  try {
+    await document.fonts.load('10px "Grave Retro"'); await document.fonts.ready;
+    checks.sharedFontLoaded = document.fonts.check('10px "Grave Retro"');
+    const modern = document.documentElement.dataset.gameGraphics;
+    checks.startsModern = modern==='modern' && family(document.getElementById('phaser-header')).includes('Grave Retro');
+    checks.dynamicPopupUsesPixelFace = family(document.querySelector('.popup-container')).includes('Grave Retro') && family(document.querySelector('.popup-container button')).includes('Grave Retro');
+    for (const mode of ['modern','retro','modern']) {
+      if (document.documentElement.dataset.gameGraphics!==mode) {
+        GameMenuUi.setOpen(true); document.getElementById('retro-graphics-toggle').click();
+      }
+      GameMenuUi.setOpen(true);
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      const expected='Grave Retro',menu=document.getElementById('game-menu');
+      checks[mode+'Face']=[menu,document.getElementById('phaser-header'),document.getElementById('game-log-header'),document.getElementById('phaser-container'),document.querySelector('.popup-container button')].every(e=>family(e).includes(expected));
+      checks[mode+'MenuFits']=fits(menu)&&menu.scrollWidth<=menu.clientWidth+1;
+      checks[mode+'ButtonsWrap']=Array.from(menu.querySelectorAll('button')).every(e=>e.scrollWidth<=e.clientWidth+1);
+      checks[mode+'ConsoleColors']=['phaser-container','game-log-container'].every(id=>{
+        const c=getComputedStyle(document.getElementById(id));return c.color==='rgb(255, 255, 255)'&&c.backgroundColor==='rgb(0, 0, 0)';
+      });
+      checks[mode+'CompactReadableTranscript']=['phaser-container','game-log-container'].every(id=>{
+        const c=getComputedStyle(document.getElementById(id));return c.fontSize==='6px'&&parseFloat(c.lineHeight)>=11&&parseFloat(c.lineHeight)<12;
+      });
+      checks[mode+'CrispPixelBorders']=['phaser-popup','game-log-popup','chatbotcontainer','dungeon-map-shortcut'].every(id=>{
+        const c=getComputedStyle(document.getElementById(id));return c.borderImageSource.includes('ui-pixel-frame.svg')&&c.borderRadius==='0px'&&c.filter==='none';
+      });
+    }
+    const title=getComputedStyle(document.getElementById('chatlog-background-content'));
+    checks.titleSmallerAndSpaced=title.fontSize==='15px'&&parseFloat(title.lineHeight)>=25;
+    checks.commandDraftUnchanged=document.getElementById('chatuserinput').value==='unfinished command'&&getComputedStyle(document.getElementById('chatuserinput')).fontSize==='11px';
+    checks.compassUsesSharedFace=[document.getElementById('dungeon-compass'),...document.querySelectorAll('#dungeon-compass span, #dungeon-compass small, #dungeon-compass select')].every(e=>family(e).includes('Grave Retro'));
+    checks.rollLogsRetainMonospace=Array.from(document.querySelectorAll('.party-roll-history,.party-roll-status')).every(e=>family(e)==='monospace');
+    document.getElementById('console-font-toggle').click();
+    checks.classicFontRestoresTranscriptOnly=['phaser-container','game-log-container'].every(id=>family(document.getElementById(id))==='monospace'&&getComputedStyle(document.getElementById(id)).fontSize==='8px')&&family(document.getElementById('phaser-header')).includes('Grave Retro')&&family(document.getElementById('dungeon-compass')).includes('Grave Retro');
+    checks.classicFontRemembered=localStorage.getItem('holodek.consoleFont')==='classic'&&ConsoleFontUi.restore()==='classic';
+    document.getElementById('console-font-toggle').click();
+    checks.retroFontRestored=family(document.getElementById('phaser-container')).includes('Grave Retro')&&document.documentElement.dataset.consoleFont==='retro';
+    checks.partyLabelsFit=Array.from(document.querySelectorAll('.party-icon-name,.party-icon-hp')).every(e=>{
+      const c=getComputedStyle(e);return c.fontSize==='6px'&&e.scrollWidth<=e.clientWidth&&e.getBoundingClientRect().height<20;
+    });
+    for(let n=0;n<100&&!document.querySelector('.ui-pixel-icon');n++)await new Promise(r=>setTimeout(r,10));
+    const icon=document.querySelector('.ui-pixel-icon');checks.iconActuallyRasterized=!!icon&&icon.width===24&&icon.height===24&&icon.getContext('2d').getImageData(0,0,24,24).data.some(x=>x);
+    checks.pixelIconDoesNotInterceptClicks=!!icon&&getComputedStyle(icon).pointerEvents==='none';
+    checks.noExternalFontRequests = performance.getEntriesByType('resource').filter(r=>/\.(ttf|woff)/.test(r.name)).every(r=>new URL(r.name).origin===location.origin);
+  } catch(error) { errors.push(error.stack); }
+  await fetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
+});
+</script></body></html>`;
+const artDependencies=['renderCharacterProcedural','puzzleModules','shrineIconography','pantheonCharacters','artCharacters','sculptureAnatomy','sculptureForms','frescoDesigns','frescoSerpents','frescoFigures','stoneCarvings','ancientScripts','mosaicDesigns','surfaceArt','roomIllustration','artViewerUi','roomArtUi','retroGraphics','consoleFontUi','renderSceneItems','worldInteractionUi'];
+const artPage=String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style>
+${artDependencies.map(name=>'<script src="/assets/'+name+'.js"></script>').join('')}</head><body>
+<div id="phaser-popup" style="display:block"><div id="phaser-header">Game Console</div><div id="phaser-container"></div></div>
+<div id="game-log-popup" style="display:block"><div id="game-log-header">Game Log</div><div id="game-log-container"></div></div>
+<div id="chatlog" hidden></div><textarea id="draft">unfinished command</textarea>
+<script>
+window.addEventListener('DOMContentLoaded',async()=>{
+  const realFetch=window.fetch.bind(window),checks={},errors=[],calls=[],saved=[],plans=${JSON.stringify([require('./fixtures/room-art.cjs').temple(),require('./fixtures/room-art.cjs').spring(),require('./fixtures/room-art.cjs').alien(),require('./fixtures/room-art.cjs').vista()])};
+  window.addEventListener('error',e=>errors.push(e.message));
+  const rooms=[{coordinates:'X: 0, Y: 0, Z: 0',name:'The Remembered Portico',description:'Fluted pillars frame a dark doorway and brightly painted masonry.'},
+    {coordinates:'1,0,0',name:'The Spring of Unburied Green',description:'A clear spring breaks through grey ashes beneath the yellow sky.'},
+    {coordinates:'2,0,0',name:'The Violet Interval',description:'Cyan crystals gather beside an open purple arch in a blue cavern.'},
+    {coordinates:'3,0,0',name:'The Amber Citadel',description:'A tiered citadel stands among ruined pillars, golden dunes and jagged mountains beneath a vast sun and amber clouds.'}];
+  const wait=async fn=>{for(let i=0;i<200&&!fn();i++)await new Promise(r=>setTimeout(r,10));if(!fn())throw Error('Art UI wait timed out');};
+  window.dungeonRunId='art-probe';
+  window.updateChatLog=html=>{document.getElementById('chatlog').innerHTML+=html;syncGameLogTranscript();};
+  window.syncGameLogTranscript=()=>{document.getElementById('game-log-container').innerHTML=document.getElementById('chatlog').innerHTML;};
+  let delay=false,release;
+  window.fetch=async(url,options)=>{
+    if(url!=='/room-illustration')return realFetch(url,options);
+    const body=JSON.parse(options.body);calls.push(body);const i=Number(body.geoKey.split(',')[0]);
+    if(delay&&i===2)await new Promise(r=>{release=r;});
+    return new Response(JSON.stringify({...body,illustration:{version:1,source:String(i+1).repeat(64),plan:plans[i]}}));
+  };
+  const visit=i=>{const r=rooms[i],box=document.getElementById('phaser-container');box.innerHTML='<div id="room-art-slot">'+RoomArtUi.markup(r)+'</div>';
+    RoomArtUi.visit({...r,onSave:record=>saved.push(record)});};
+  try{
+    await document.fonts.load('10px "Grave Retro"');
+    const box=document.getElementById('phaser-container');
+    box.innerHTML='<div id="room-art-slot">'+RoomArtUi.markup({coordinates:'None',name:'Ruined Temple Entrance',description:'Initial title-screen prose.'})+'</div>';
+    checks.startupNeverShowsLogo=!box.querySelector('img')&&!box.textContent.includes('Children of the Grave');
+    let currentDungeon={geoKey:'0,0,0',_meta:{runId:'art-probe'},sceneSpec:{source:{roomName:rooms[0].name,description:rooms[0].description}}};
+    const roomNameDatabase=new Map([['0,0,0',{name:rooms[0].name}]]);
+    let roomNameDatabasePlainObject,roomNameDatabaseString;
+    const mapToPlainObject=map=>Object.fromEntries(map);
+    ${roomArtPresentation}
+    presentRoomIllustration();presentRoomIllustration();await wait(()=>document.querySelector('#phaser-container .room-art img'));
+    checks.dungeonReadyStartsArtBeforeConsoleUpdate=calls.length===1&&document.querySelector('#phaser-container img').alt===rooms[0].name;
+    checks.startupArtSavedOnLatestRoom=!!JSON.parse(roomNameDatabaseString)['0,0,0'].illustration;
+    saved.push(roomNameDatabase.get('0,0,0').illustration);
+    visit(0);await wait(()=>document.querySelector('#phaser-container .room-art img'));
+    checks.entryIsIllustrated=calls.length===1&&document.querySelectorAll('#chatlog .room-art').length===1&&saved.length>0;
+    const image=document.querySelector('#phaser-container .room-art img');await image.decode();
+    checks.actualPixelImage=image.naturalWidth===320&&image.naturalHeight===200&&getComputedStyle(image).imageRendering==='pixelated';
+    checks.consoleAndLogIdentical=image.src===document.querySelector('#game-log-container .room-art img').src;
+    document.querySelector('#phaser-container .room-art button').focus();document.activeElement.click();
+    let popup=document.getElementById('art-viewer-popup');
+    checks.consoleOpensViewer=popup.open&&popup.matches(':modal')&&popup.querySelector('img').src===image.src;
+    let bounds=popup.getBoundingClientRect();checks.viewerFitsViewport=bounds.left>=0&&bounds.top>=0&&bounds.right<=innerWidth+1&&bounds.bottom<=innerHeight+1;
+    popup.querySelector('button').click();
+    checks.closeRestoresFocus=!document.getElementById('art-viewer-popup')&&document.activeElement.classList.contains('room-art-open');
+    document.querySelector('#game-log-container .room-art button').click();
+    checks.logOpensSameViewer=document.getElementById('art-viewer-popup')?.querySelector('img').src===image.src;ArtViewerUi.close();
+    visit(1);await wait(()=>document.querySelector('#phaser-container img'));visit(0);await wait(()=>document.querySelector('#phaser-container img'));
+    checks.reentryReusesPainting=calls.length===2&&document.querySelectorAll('#chatlog .room-art').length===3&&document.querySelector('#phaser-container img').src===image.src;
+    delay=true;visit(2);await wait(()=>release);visit(1);release();await wait(()=>document.querySelectorAll('#chatlog img').length===5);
+    checks.lateArtDoesNotReplaceCurrent=document.querySelector('#phaser-container img').alt===rooms[1].name;
+    checks.oldEntryStillGetsItsPainting=Array.from(document.querySelectorAll('#chatlog img')).some(img=>img.alt===rooms[2].name);
+    const surface=SurfaceArt.plan({indoor:true,source:{roomName:'Ruined Temple Entrance',description:'An ancient fresco watches over a mosaic pavement.'}});
+    const fresco=surface.find(a=>a.kind==='fresco'),mosaic=surface.find(a=>a.kind==='mosaic'&&a.surface==='floor');
+    for(const art of [fresco,mosaic]){
+      const before=JSON.stringify(art);await WorldInteractionUi.activate({type:'art',enabled:true,art,label:art.label});popup=document.getElementById('art-viewer-popup');
+      const native=SurfaceArt.rasterSize(art),c=document.createElement('canvas');c.width=native.width;c.height=native.height;
+      SurfaceArt.paint(c.getContext('2d'),(w,h)=>{const v=document.createElement('canvas');v.width=w;v.height=h;return v;},art);
+      checks[art.kind+'UsesSameUnlitViewer']=popup.open&&popup.querySelector('img').src===c.toDataURL()&&getComputedStyle(popup.querySelector('img')).filter==='none';
+      checks[art.kind+'Preserved']=JSON.stringify(art)===before;ArtViewerUi.close();
+    }
+    checks.draftUnchanged=document.getElementById('draft').value==='unfinished command';
+    checks.rejectsRemoteAndScriptImages=ArtViewerUi.open({src:'https://example.com/art.png'})===false&&ArtViewerUi.open({src:'javascript:alert(1)'})===false;
+    visit(3);await wait(()=>document.querySelector('#phaser-container img'));const original=document.querySelector('#phaser-container img').src,callCount=calls.length;
+    RetroGraphics.setMode('c64_glazed');const retro=document.querySelector('#phaser-container img').src;
+    checks.retroPaintingIsSeparate=original!==retro&&Array.from(document.querySelectorAll('#game-log-container .room-art img')).at(-1)?.src===retro;
+    const decoded=new Image();decoded.src=retro;await decoded.decode();const quant=document.createElement('canvas');quant.width=320;quant.height=200;quant.getContext('2d').drawImage(decoded,0,0);
+    const rgba=quant.getContext('2d').getImageData(0,0,320,200).data,legal=new Set(RetroGraphics.palette.map(c=>c.join(',')));
+    checks.retroPaintingUsesOnlyC64Colors=true;for(let i=0;i<rgba.length;i+=4)if(!legal.has(Array.from(rgba.slice(i,i+3)).join(',')))checks.retroPaintingUsesOnlyC64Colors=false;
+    RetroGraphics.setMode('modern');checks.modernPaintingRestoredUnchanged=document.querySelector('#phaser-container img').src===original&&calls.length===callCount;
+    document.querySelector('#phaser-container .room-art button').click();
+    popup=document.getElementById('art-viewer-popup');await popup.querySelector('img').decode();
+  }catch(error){errors.push(error.stack);}
+  await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
+});
+</script></body></html>`;
+for (const html of [page,journalPage,tacticalPage,modelPage,fontsPage,artPage])for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) if (script.trim()) new vm.Script(script);
 
 (async () => {
   let receiveReport;
@@ -1227,10 +1448,17 @@ for (const html of [page,journalPage,tacticalPage,modelPage])for (const [, scrip
       });
       return;
     }
-    if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(process.argv.includes('--model-only')?modelPage:process.argv.includes('--tactical-only')?tacticalPage:process.argv.includes('--journal-only')?journalPage:page); return; }
+    if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(process.argv.includes('--art-only')?artPage:process.argv.includes('--fonts-only')?fontsPage:process.argv.includes('--model-only')?modelPage:process.argv.includes('--tactical-only')?tacticalPage:process.argv.includes('--journal-only')?journalPage:page); return; }
+    if (/^\/assets\/fonts\/(PixelifySans|PressStart2P)\.ttf$/.test(request.url)) {
+      response.setHeader('Content-Type','font/ttf'); response.end(fs.readFileSync(path.join(root,request.url.slice(1)))); return;
+    }
+    if (['/assets/ui-pixel-frame.svg','/assets/ui-compass-dial.svg'].includes(request.url)) {
+      response.setHeader('Content-Type','image/svg+xml'); response.end(fs.readFileSync(path.join(root,request.url.slice(1)))); return;
+    }
+    if (request.url==='/assets/children-of-the-grave-logo.png') { response.setHeader('Content-Type','image/png');response.end(fs.readFileSync(path.join(root,request.url.slice(1))));return; }
     if (['/assets/adventurers-map.svg', '/assets/adventurers-pack.svg','/assets/adventurers-journal.svg','/assets/adventurers-spellbook.svg'].includes(request.url)) { response.setHeader('Content-Type', 'image/svg+xml'); response.end(fs.readFileSync(path.join(root, request.url.slice(1)))); return; }
     const name = /^\/assets\/(\w+)\.js$/.exec(request.url)?.[1];
-    if (!scripts.includes(name) && !['partyRecovery','rendererWebGPU','objectDiscovery','adventureJournalUi','combatTacticalUi','partySpellbookUi'].includes(name)) { response.writeHead(404); response.end(); return; }
+    if (!scripts.includes(name) && !artDependencies.includes(name) && !['partyRecovery','rendererWebGPU','objectDiscovery','adventureJournalUi','combatTacticalUi','partySpellbookUi'].includes(name)) { response.writeHead(404); response.end(); return; }
     response.setHeader('Content-Type', 'application/javascript'); response.end(fs.readFileSync(path.join(root, 'assets', name + '.js')));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -1239,6 +1467,7 @@ for (const html of [page,journalPage,tacticalPage,modelPage])for (const [, scrip
   const customSize=process.argv.find(arg=>/^--size=\d+,\d+$/.test(arg))?.slice(7);
   const size = customSize || (process.argv.includes('--narrow') ? '540,900' : '1680,950');
   const child = spawn(browser, ['--headless=new', '--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-first-run', '--window-size=' + size,
+    ...(process.argv.includes('--screenshot')?['--remote-debugging-port=0']:[]),
     '--user-data-dir=' + profile, 'http://127.0.0.1:' + server.address().port], { windowsHide: true });
   let stderr = '', timeout;
   child.stdout.on('data', () => {}); child.stderr.on('data', data => { stderr += data; });
@@ -1249,6 +1478,23 @@ for (const html of [page,journalPage,tacticalPage,modelPage])for (const [, scrip
   const expired = new Promise(resolve => { timeout=setTimeout(()=>resolve({pass:false,error:'Browser probe timed out.',stderr:stderr.slice(-2000)}),30000); });
   // IndexedDB uses real asynchronous I/O; virtual-time dumping can finish before its transactions.
   const report = await Promise.race([reported, stopped, expired]);
+  if(report.pass&&process.argv.includes('--screenshot')){
+    const port=Number(fs.readFileSync(path.join(profile,'DevToolsActivePort'),'utf8').split('\n')[0]);
+    const pages=await fetch('http://127.0.0.1:'+port+'/json').then(r=>r.json());
+    const target=pages.find(p=>p.type==='page'&&p.url.startsWith('http://127.0.0.1:'+server.address().port));
+    if(!target)throw Error('Isolated UI preview page was not found.');
+    const socket=new(require('ws'))(target.webSocketDebuggerUrl);
+    try{
+      await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});
+      const result=await new Promise((resolve,reject)=>{
+        socket.on('message',raw=>{const d=JSON.parse(raw);if(d.id===1)d.error?reject(Error(d.error.message)):resolve(d.result);});
+        socket.send(JSON.stringify({id:1,method:'Page.captureScreenshot',params:{format:'png',captureBeyondViewport:false}}));
+      });
+      const directory=path.join(root,'logs/probes');fs.mkdirSync(directory,{recursive:true});
+      report.preview=path.join(directory,(process.argv.includes('--art-only')?'room-art-':'pixel-ui-')+(process.argv.includes('--narrow')?'narrow':'desktop')+'.png');
+      fs.writeFileSync(report.preview,Buffer.from(result.data,'base64'));
+    }finally{socket.close();}
+  }
   clearTimeout(timeout); child.kill(); server.close();
   console.log(JSON.stringify(report, null, 2)); process.exitCode = report.pass ? 0 : 1;
 })();

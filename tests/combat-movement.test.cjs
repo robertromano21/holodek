@@ -166,8 +166,8 @@ test('dice UI shows attack and damage outcomes alongside avatars and offers the 
   const [pcDie, pcHistory] = slot.children[0].children;
   assert.equal(pcDie.disabled, false);
   assert.match(pcDie.title, /Damage: roll d8/);
-  assert.match(pcHistory.textContent, /Attack: 17/);
-  assert.match(slot.children[1].children[1].textContent, /Attack: 15\nDamage: 6/);
+  assert.equal(pcHistory.textContent, 'Attack: d20 16 + 1 = 17');
+  assert.equal(slot.children[1].children[1].textContent, 'Attack: d20 15 + 0 = 15\nDamage: d6 4 + 2 = 6');
   assert.match(dock.children[0].textContent, /Roll d8 \+ 2/);
 });
 
@@ -191,7 +191,7 @@ test('dice visibly tumble for one second and settle on the server result, not th
   context.window.renderPartyDice(dock, [{ label: 'Ally' }]);
   assert.doesNotMatch(slot.children.at(-1).children[0].className, /rolling/);
   assert.equal(slot.children.at(-1).children[0].textContent, '17');
-  assert.equal(slot.children.at(-1).children[1].textContent, 'Attack: 19');
+  assert.equal(slot.children.at(-1).children[1].textContent, 'Attack: d20 17 + 2 = 19');
 });
 
 test('interactive targeting uses the existing PC/NPC selection request and holding does not randomly attack', async () => {

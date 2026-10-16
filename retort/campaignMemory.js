@@ -144,15 +144,29 @@ function rememberArchivedTransfers(state) {
   }
   slot.transferSource = source;
 }
-async function prepare(state, query, { semantic = require('./memorySemantic'), waitMs = 2000 } = {}) {
+function eligibleRecords(slot, audience, query, turn) {
+  return slot.index.all().filter(row => row.kind !== 'biography' &&
+    !(row.kind === 'player-input' && row.turn === turn && row.text === query) &&
+    (row.witnesses.some(name => audience.witnesses.includes(name)) || audience.witnesses.includes(row.speaker)));
+}
+async function boundedRank(semantic, query, eligible, waitMs) {
+  if (!eligible.length) return new Map();
+  let timer;
+  try {
+    return await Promise.race([Promise.resolve().then(() => semantic.rank(query, eligible)).catch(error => {
+      console.warn('[SemanticRecall]', JSON.stringify({ status: 'error', error: error.message, keywordRecall: 'still-active' }));
+      return new Map();
+    }), new Promise(resolve => { timer = setTimeout(() => resolve(new Map()), waitMs); })]);
+  } finally { clearTimeout(timer); }
+}
+async function prepare(state, query, { semantic = require('./memorySemantic'), waitMs = 2000,
+  consoleText = state.getUpdatedGameConsole?.() } = {}) {
   rememberArchivedTransfers(state);
   const slot = slotFor(state);
   if (!slot || !M.clean(query)) return;
   slot.semanticQuery = query; slot.semantic = new Map();
-  const audience = cast(state), turn = base(state).turn;
-  const eligible = slot.index.all().filter(row => row.kind !== 'biography' &&
-    !(row.kind === 'player-input' && row.turn === turn && row.text === query) &&
-    (row.witnesses.some(name => audience.witnesses.includes(name)) || audience.witnesses.includes(row.speaker)));
+  const audience = cast(state, consoleText), turn = base(state, consoleText).turn;
+  const eligible = eligibleRecords(slot, audience, query, turn);
   const pending = semantic.rank(query, eligible).then(scores => {
     if (slotFor(state) === slot && slot.semanticQuery === query) slot.semantic = scores;
   }).catch(error => {
@@ -161,6 +175,46 @@ async function prepare(state, query, { semantic = require('./memorySemantic'), w
   let timer;
   try { await Promise.race([pending, new Promise(resolve => { timer = setTimeout(resolve, waitMs); })]); }
   finally { clearTimeout(timer); }
+}
+async function planningContext(state, purpose, options = {}) {
+  rememberArchivedTransfers(state);
+  const slot = slotFor(state);
+  if (!slot) return { purpose, evidence: [] };
+  const consoleText = options.consoleText ?? state.getUpdatedGameConsole?.();
+  const audience = cast(state, consoleText), origin = base(state, consoleText);
+  const task = options.task || state.getActiveTask?.();
+  const query = [M.clean(purpose, 200), options.details, field(consoleText, 'Room Name'),
+    state.getCurrentQuest?.(), task?.desc].filter(Boolean).join(' ').slice(0, 1200);
+  // Planning has its own cache: it must not displace the player's response/dialogue query.
+  const signature = JSON.stringify([query, audience.witnesses, origin.roomKey, slot.sequence]);
+  slot.planning ||= new Map();
+  let scores = slot.planning.get(signature);
+  if (!scores) {
+    scores = await boundedRank(options.semantic || require('./memorySemantic'), query,
+      eligibleRecords(slot, audience, query, origin.turn), options.waitMs ?? 1500);
+    if (slotFor(state) !== slot) return { purpose, evidence: [] };
+    slot.planning.set(signature, scores);
+    while (slot.planning.size > 4) slot.planning.delete(slot.planning.keys().next().value);
+  }
+  const settings = { qualified: true, actors: audience.witnesses, roomKey: origin.roomKey, turn: origin.turn,
+    excludeKinds: ['biography', 'player-input'], semantic: scores, maxText: 450, maxChars: 3000, limit: 5 };
+  const evidence = slot.index.search(query, settings);
+  const histories = slot.index.search(options.details || purpose, { ...settings, roomKey: null,
+    excludeKinds: ['biography', 'player-input', 'dialogue'], limit: 2, maxChars: 1400 });
+  for (const row of histories.reverse()) if (!evidence.some(old => old.id === row.id)) evidence.unshift(row);
+  const verified = slot.index.search(query, { ...settings, verifiedOnly: true, maxChars: 900, limit: 1 });
+  for (const row of verified) if (!evidence.some(old => old.id === row.id)) evidence.unshift(row);
+  const result = { purpose: M.clean(purpose, 200), evidence };
+  while (JSON.stringify(result).length > 3600 && evidence.length) evidence.pop();
+  console.info('[CampaignPlanningRecall]', JSON.stringify({ purpose: result.purpose, method: scores.size ? 'hybrid-local' : 'keyword',
+    chars: JSON.stringify(result).length, evidence: evidence.map(row => ({ id: row.id, authority: row.authority })) }));
+  return result;
+}
+async function appendPlanning($, state, purpose, options = {}) {
+  const recalled = await planningContext(state, purpose, options);
+  if (recalled.evidence.length) await $.user(prompt(recalled) +
+    ' Use these episodes to maintain world continuity, remember player choices, avoid repeating resolved troubles and develop plausible future possibilities. They are historical evidence, NOT a script, new state, proof of rumors or permission for NPC omniscience. Plans never complete actions.');
+  return recalled;
 }
 function sharedEncounters(slot, name) {
   if (!slot) return [];
@@ -285,5 +339,5 @@ function dialogueContext(state, characters, query, maxChars = 6000) {
   return rows;
 }
 function exportRecords(state) { return slotFor(state)?.index.all() || []; }
-module.exports = { add, cast, prepare, context, prompt, dialogueContext, dialoguePrompt: DialogueGrounding.prompt,
+module.exports = { add, cast, prepare, context, prompt, planningContext, appendPlanning, dialogueContext, dialoguePrompt: DialogueGrounding.prompt,
   rememberInput, rememberDialogue, rememberCommit, rememberQuest, rememberRoomHistory, rememberProfiles, rememberTransfer, restore, exportRecords };

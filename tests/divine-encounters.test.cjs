@@ -68,6 +68,13 @@ test('canonical visitors have deterministic 300-500 HP, correct allegiance, and 
   assert.equal(P.recruitmentRefusal('give archive concordance to Atinus'), null);
 });
 
+test('Dantuea is recorded as female rather than guessed from her Darkdrake epithet', () => {
+  const f = fixture('Dantuea'), deity = f.db()[f.key].inhabitants.actors.Dantuea;
+  assert.equal(P.canon('Dantuea (Darkdrake)').sex, 'Female');
+  assert.equal(f.db()['0,0,0'].divineCourt.actors.Dantuea.birth.Sex, 'Female');
+  assert.equal(I.parseBlocks(deity.sheet)[0].sex, 'Female');
+});
+
 test('divine seeding is occasional, once per room, non-root, and reuses one individual per name', () => {
   const db = { '0,0,0': room('0,0,0') };
   assert.equal(D.seedRoom(db, '0,0,0', db['0,0,0'].inhabitants, 'visits'), null);

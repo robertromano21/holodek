@@ -19,6 +19,7 @@ const CampaignMemory = require('./retort/campaignMemory');
 const DialogueTurns = require('./retort/dialogueTurns');
 const { createPopulationService } = require('./retort/roomPopulation');
 const { narrateEncounter } = require('./retort/encounterNarration');
+const RandomEncounters = require('./retort/randomEncounters');
 const populationService = createPopulationService(sharedState);
 DialogueTurns.install(sharedState, Inhabitants);
 const fs = require('fs');
@@ -40,6 +41,7 @@ const roomDatabaseReceiver = createRoomDatabaseReceiver();
 // Middleware
 app.use(createGameJsonParser());
 app.use(cors());
+require('./retort/roomIllustration').install(app, sharedState);
 require('./retort/gameModels').install(app);
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
 require('./retort/audioPalette').install(app, sharedState); // same-score SID variants; effects rendered off-thread
@@ -257,7 +259,7 @@ app.post('/submit-target2', (req, res) => {
     if (!turn || turn.turnId !== turnId || turn.combatant !== combatant || !validAction) {
       return res.status(409).json({ error: 'That player turn or target is no longer available.' });
     }
-    if (turn.movement?.busy || turn.tactical && action === 'attack' && !turn.attackTargets.includes(target))
+    if (turn.movement?.busy || turn.tactical && action === 'attack' && !turn.attackTargets.includes(target) && !turn.approachTargets?.some(t => t.name === target))
       return res.status(409).json({ error: 'Movement is resolving or that enemy is out of range or sight.' });
     console.log(`Received target selection: ${combatant} targets ${target}`);
     sharedState.emitter.emit(`target_response_${combatant}`, { target, cancelled: cancelled === true, actionId, turnId, action, itemId, spellId, kind, item });
@@ -491,6 +493,14 @@ app.post('/room-population/visit', async (req, res) => {
   if (inputTaskInFlight || actionDice.active || npcAutonomyTickInFlight) return res.status(409).json({ error: 'The current action is resolving.' });
   let result = populationService.visit({ ...req.body, deferIntroductions: true });
   if (result.error) return res.status(result.status).json({ error: result.error });
+  // The existing visit has already validated the observer, run and room. Additional generation owns the same action lock.
+  inputTaskInFlight = true;
+  try {
+    result = await RandomEncounters.maybeGenerate({ state: sharedState, service: populationService, visit: result, player: req.body.player,
+      isCurrent: () => !actionDice.active && !npcAutonomyTickInFlight });
+  } catch (error) {
+    console.warn('[RandomEncounter]', JSON.stringify({ status: 'not-installed', error: error.message }));
+  } finally { inputTaskInFlight = false; }
   if (result.encounters?.length) {
     inputTaskInFlight = true;
     try { result = await narrateEncounter({ state: sharedState, service: populationService, visit: result,
@@ -1079,7 +1089,9 @@ app.get('/get-room-dungeon', (req, res) => {
   const { coords } = req.query; // ?coords=x,y,z
   if (!coords) return res.status(400).json({ error: 'Missing coords' });
   const [x, y, z] = coords.split(',').map(n => parseInt(n) || 0);
-  const dungeon = sharedState.getRoomDungeon({ x, y, z });
+  const busy = inputTaskInFlight || npcAutonomyTickInFlight || actionDice.active || [...tasks.values()].some(t => t.status === 'processing');
+  const dungeon = busy ? sharedState.getRoomDungeon({ x, y, z }) :
+    require('./retort/porticoUpgrade').prepareRoom(sharedState, `${x},${y},${z}`, { finalize: finalizeRoomDungeon });
   res.json({ dungeon: dungeon || null });
 });
 
@@ -1109,6 +1121,8 @@ app.use(gameJsonErrorHandler);
 require('./saveGames').install(app, { state: sharedState,
   isBusy: () => inputTaskInFlight || npcAutonomyTickInFlight || [...tasks.values()].some(t => t.status === 'processing'),
   onRestored: checkpoint => { roomDatabaseReceiver.reset(); tasks.clear(); MusicSlots.reset(); lastAutonomyAt = 0;
+    require('./retort/porticoUpgrade').prepareRoom(sharedState, checkpoint.roomKey, { finalize: finalizeRoomDungeon,
+      player: checkpoint.browser.position, actors: checkpoint.browser.data.combatCharacters });
     const population = sharedState.getRoomPopulation(checkpoint.roomKey);
     if (population) population.dialogueResumePending = true;
     SidMode.set(checkpoint.settings.sidMode);

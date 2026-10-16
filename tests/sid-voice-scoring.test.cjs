@@ -12,3 +12,13 @@ test('audition references are explicitly labeled, with no hybrid implication',()
   const html=page({text:'Test',characters:[{name:'Test',guide:'lj',profile:{f0:205,fs:1},variants:{reference:{file:'r.wav'},detail:{file:'d.wav'}}}]});
   assert.match(html,/NOT SID, audition only/);assert.match(html,/never mixed/);
 });
+
+test('word edits expose substitutions, insertions and deletions without accepting partial target phrases',()=>{
+  const s=score('The brass key opens the gate.','The key opens a gate now.',['brass key','gate','']);
+  assert.equal(s.edits.length,s.errors);
+  assert.ok(s.edits.some(e=>e.type==='deletion'&&e.expected==='brass'));
+  assert.ok(s.edits.some(e=>e.type==='substitution'&&e.expected==='the'&&e.heard==='a'));
+  assert.ok(s.edits.some(e=>e.type==='insertion'&&e.heard==='now'));
+  assert.deepEqual(s.targetHits,{'brass key':false,gate:true,'':false});
+  assert.equal(score('brass key','brass key',['brass key']).targetHits['brass key'],true);
+});

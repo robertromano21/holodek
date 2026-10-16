@@ -8,7 +8,7 @@ const Details = require('../assets/sceneExteriorDetails');
 
 const EXTERIOR_VERSION = 1;
 const MAX_HEIGHT = 18;
-const MAX_BUILDINGS = 2;
+const MAX_BUILDINGS = 4;
 const MAX_CANDIDATES = 30;
 const RING_WIDTH = 2;
 const COMPASS = { north: [0, -1], northeast: [1, -1], east: [1, 0], southeast: [1, 1],
@@ -94,8 +94,11 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
   const current = db.get(sourceKey) || {};
   const rawExits = exits(spec.exits ?? spec.source?.exits ?? current.exits);
   const storedExits = exits(current.exits);
-  const maxBuildings = Number.isInteger(options.maxBuildings) ? Math.max(0, Math.min(MAX_BUILDINGS, options.maxBuildings)) : MAX_BUILDINGS;
-  const plan = { version: EXTERIOR_VERSION, enabled: options.enabled !== false && spec.indoor === false,
+  const village = current.villagePlan || spec.worldContext?.village;
+  const cavernVillage = village?.container === 'vast-cavern';
+  const cap = village ? 4 : 2;
+  const maxBuildings = Number.isInteger(options.maxBuildings) ? Math.max(0, Math.min(cap, options.maxBuildings)) : cap;
+  const plan = { version: EXTERIOR_VERSION, enabled: options.enabled !== false && (spec.indoor === false || cavernVillage), cavernVillage,
     seed: String(options.seed ?? options.campaignSeed ?? spec.campaignSeed ?? spec.seed ?? '0'),
     sourceKey, maxBuildings, maxHeight: MAX_HEIGHT, maxFootprint: 21, buildings: [], rejected: [], requiredShapes: [] };
   if (!plan.enabled) { plan.reason = options.enabled === false ? 'disabled' : 'not-outdoor'; return (spec.exteriorPlan = plan); }
@@ -109,6 +112,7 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     const room = db.get(targetKey);
     const reject = reason => plan.rejected.push({ direction: name, targetKey, reason });
     if (!room) { reject(target.declared && !target.coords ? 'invalid-target-coordinates' : 'unknown-destination'); continue; }
+    if (cavernVillage && room.villageBuilding?.hubKey !== sourceKey) { reject('cavern-passage-not-building'); continue; }
     const scene = room.sceneSpec || {};
     const roomName = String(room.name || room.roomName || scene.source?.roomName || '');
     const description = String(room.description || scene.source?.description || '');
@@ -118,7 +122,7 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     const selection = rootTemple ? { family: 'temple', evidence: 'known-root-temple-name', ruined: true } :
       chooseArchitecture({ ...scene, indoor: true, source: { roomName, description },
         worldContext: { ...scene.worldContext, fortifiedFloor: room.fortifiedFloor },
-        architecture: scene.architecture || room.architecture || room.classification?.architecture });
+        architecture: scene.architecture || room.architecture || room.classification?.architecture || room.environmentIntent?.architecture });
     if (!selection || !BUILDINGS.has(selection.family)) { reject('no-building-evidence'); continue; }
     const complexIdentity = String(room.complexId || room.siteId || (rootTemple ? 'ruined-temple' : targetKey));
     const random = Voxels.random(`${EXTERIOR_VERSION}:${plan.seed}:${complexIdentity}`);
@@ -126,7 +130,7 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     const roofs = selection.family === 'rotunda' ? ['domed', 'domed', 'flat'] :
       selection.family === 'castle' ? ['pitched', 'flat', 'open'] : ['pitched', 'barrel', 'flat', 'open'];
     const site = room.fortifiedSite;
-    const roofFamily = site ? site.patron ? 'domed' : 'pitched' : roofless ? 'open' : roofs[Math.floor(random() * roofs.length)];
+    const roofFamily = cavernVillage ? 'flat' : site ? site.patron ? 'domed' : 'pitched' : roofless ? 'open' : roofs[Math.floor(random() * roofs.length)];
     const transverse = 13 + 2 * Math.floor(random() * 4), depth = 11 + 2 * Math.floor(random() * 3);
     const forecourtDepth = 2 + Math.floor(random() * 3), wallHeight = 5 + Math.floor(random() * 3);
     const sacred = site?.patron && require('../assets/shrineIconography').pantheon[site.patron];
@@ -135,7 +139,7 @@ function prepareSceneExteriors(spec = {}, roomDatabase = {}, options = {}) {
     if (sacred) Object.assign(palette, { secondary: sacred.color, highlight: sacred.glow || sacred.color });
     plan.buildings.push({ direction: name, targetKey, targetName: roomName, targetIndoor: indoor.value, complexIdentity,
       family: selection.family, ruined: !!selection.ruined, roofFamily, transverse, depth, forecourtDepth,
-      wallHeight, towerHeight: wallHeight + 2 + Math.floor(random() * 3),
+      wallHeight: cavernVillage ? 4 : wallHeight, towerHeight: cavernVillage ? 5 : wallHeight + 2 + Math.floor(random() * 3), cavernVillage,
       entrance: 'closed-gate', palette,
       ...(site ? { fortifiedSite: { id: site.id, template: site.template, levels: site.levels, patron: site.patron },
         monumental: { transverse: site.template === 'wizard_tower' ? 19 : 29, depth: 23,
@@ -288,6 +292,8 @@ function stageSite(dungeon, building, door, marker, nav, before, occupied, optio
     site.push({ ...p, key, u, v, wall, tower, throat, old: c, floor: nav.floors[index] });
   }
   const floors = site.map(p => p.floor), base = Math.max(...floors);
+  if (building.cavernVillage && site.some(p => p.old.ceilHeight < base + building.towerHeight + 4))
+    return { reason: 'insufficient-cavern-headroom' };
   const heightLimit = building.large ? 64 : MAX_HEIGHT;
   if (Math.min(...floors) < -heightLimit || base - Math.min(...floors) > 0.5 ||
     base + Math.max(building.towerHeight + 0.7, building.wallHeight + 2.5) > heightLimit) return { reason: 'uneven-or-height-limited-site' };
@@ -484,7 +490,7 @@ function applySceneExteriors(dungeon, spec = {}, options = {}) {
     maxSite: 25, ringWidth: RING_WIDTH };
   report.groups = report.buildings;
   const finish = reason => { report.reason = reason; if (dungeon) dungeon.sceneExteriors = report; return report; };
-  if (spec.indoor !== false || !plan?.enabled || plan.version !== EXTERIOR_VERSION) return finish('no-outdoor-exterior-plan');
+  if (spec.indoor !== false && !plan?.cavernVillage || !plan?.enabled || plan.version !== EXTERIOR_VERSION) return finish('no-outdoor-exterior-plan');
   const { width, height } = dungeon?.layout || {};
   if (!dungeon?.cells || !Number.isInteger(width) || !Number.isInteger(height) || width < 19 || height < 19 ||
     width > 512 || height > 512 || !validPoint(dungeon.start, width, height)) return finish('invalid-layout-or-start');

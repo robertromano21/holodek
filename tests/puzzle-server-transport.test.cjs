@@ -16,6 +16,7 @@ function fixture({ held = false, actionOnly = false, newlySolved = false } = {})
   const pending = held ? new Promise(done => resolve = () => done(result)) : Promise.resolve(result);
   const context = { sharedState: state, PhysicalPuzzles, tasks, inputTaskInFlight: false, console: quiet,
     Economy: { refresh() {} },
+    GameLogContent: require('../assets/gameLogContent'), SidVoice: { prefetch: rows => rows },
     app: { post: (_path, callback) => handler = callback }, broadcast() {}, actionDice: { end() {} },
     CampaignMemory: { rememberRoomHistory() {} }, characterTraits: { ensureTraitSpecsForConsole() { traits++; } },
     retortWithUserInput: async (_input, _broadcast, _mode, options) => {

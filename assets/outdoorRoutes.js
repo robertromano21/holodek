@@ -9,12 +9,12 @@
   const OFFSETS = {
     north: [0, 1, 0], northeast: [1, 1, 0], east: [1, 0, 0], southeast: [1, -1, 0],
     south: [0, -1, 0], southwest: [-1, -1, 0], west: [-1, 0, 0], northwest: [-1, 1, 0],
-    up: [0, 0, 1], down: [0, 0, -1]
+    up: [0, 0, 1], down: [0, 0, -1], portal: [0, 0, 0]
   };
   const HORIZONTAL = Object.keys(OFFSETS).slice(0, 8);
   const REVERSE = {
     north: 'south', northeast: 'southwest', east: 'west', southeast: 'northwest',
-    south: 'north', southwest: 'northeast', west: 'east', northwest: 'southeast', up: 'down', down: 'up'
+    south: 'north', southwest: 'northeast', west: 'east', northwest: 'southeast', up: 'down', down: 'up', portal: 'portal'
   };
   const ALIASES = { n: 'north', ne: 'northeast', e: 'east', se: 'southeast', s: 'south',
     sw: 'southwest', w: 'west', nw: 'northwest', u: 'up', d: 'down', dn: 'down' };
@@ -85,6 +85,7 @@
   }
 
   function neighbor(coords, dir) {
+    if (dir === 'portal') return null;
     const offset = OFFSETS[dir];
     return coordinates({ x: coords.x + offset[0], y: coords.y + offset[1], z: coords.z + offset[2] });
   }
@@ -221,6 +222,7 @@
     if (!coords) return finish('invalid-coordinates');
     const sourceKey = keyOf(coords), current = get(sourceKey);
     if (current == null) return finish('missing-room');
+    if (current.planarRealm) return finish('separate-plane');
     if (indoor(current) !== false) return finish('not-outdoor');
 
     options = options || {};
@@ -258,6 +260,7 @@
     };
 
     for (const [dir, entries] of groups) {
+      if (dir === 'portal') continue;
       if (!entries.every(entry => open(entry.info))) continue;
       const key = targetKey(entries, coords, dir), target = key && get(key);
       if (key && unvisited(key, target) && indoor(target) === false && deeper(key, target)) {

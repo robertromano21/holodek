@@ -581,11 +581,12 @@ function preserve(oldJSON, incomingJSON, options = {}) {
     .filter(m => m.type === 'raid').map(m => m.sourceRoomKey));
   const fields = ['economy', 'services', 'minorMissions', 'economySeeded', 'groundInventoryVersion', 'campaignSetting', 'campaignAtlas', 'itemTransfers', 'divineCourt', 'divineVisitChecked', 'templeSuppression', 'spellSystem', 'questFailures',
     'factionMemory', 'adventureJournal', 'regionalAdventure', 'regionalAdventureAttempt', 'regionalSite', 'questStories', 'questScenes', 'combatLife',
-    'fortifiedSite', 'fortifiedFloor', 'fortifiedApproaches', 'fortifiedSiteScan'];
+    'fortifiedSite', 'fortifiedFloor', 'fortifiedApproaches', 'fortifiedSiteScan', 'villagePlan', 'villageBuilding', 'villageScan', 'planarRealm', 'portalScan'];
   for (const [key, room] of Object.entries(next)) {
     if (!room || typeof room !== 'object') continue;
     if (!options.trustedNewFields) {
       for (const name of fields) if (old[key]?.[name] === undefined) delete room[name];
+      if (room.exits?.portal && !old[key]?.exits?.portal) delete room.exits.portal;
       for (const actor of Object.values(room.inhabitants?.actors || {})) for (const name of ['wallet', 'inventory', 'receivedItems', 'corpseInventoryDropped', 'possessionsPooled', 'serviceId', 'minorMissionId', 'combatRole', 'combatArchetype', 'spellPreferences', 'regionalStoryId'])
         if (old[key]?.inhabitants?.actors?.[actor.name]?.[name] === undefined) delete actor[name];
       room.objects = (room.objects || []).filter(o => !o.currency_kind && !o.economyItemId && !o.minor_mission_id);
@@ -593,7 +594,7 @@ function preserve(oldJSON, incomingJSON, options = {}) {
   }
   for (const [key, room] of Object.entries(old)) {
     if (!room) continue;
-    if (!next[key] && (key === '0,0,0' || room.fortifiedFloor || room.fortifiedApproaches || room.groundInventoryVersion === 1 || room.services || room.minorMissions || room.templeSuppression || room.regionalSite || room.questStories || raidRooms.has(key) || room.objects?.some(o => o.currency_kind || o.minor_mission_id) ||
+    if (!next[key] && (key === '0,0,0' || room.villagePlan || room.villageBuilding || room.planarRealm || room.exits?.portal || room.fortifiedFloor || room.fortifiedApproaches || room.groundInventoryVersion === 1 || room.services || room.minorMissions || room.templeSuppression || room.regionalSite || room.questStories || raidRooms.has(key) || room.objects?.some(o => o.currency_kind || o.minor_mission_id) ||
         Object.values(room.inhabitants?.actors || {}).some(a => a.deityId))) next[key] = room;
     if (!next[key]) continue;
     for (const field of fields)
@@ -603,6 +604,14 @@ function preserve(oldJSON, incomingJSON, options = {}) {
     }
     if (room.fortifiedFloor && !options.trustedNewFields) {
       for (const field of ['name', 'exits', 'environmentIntent', 'indoor', 'isIndoor', 'isOutdoor', 'classification', 'complexId']) next[key][field] = room[field];
+    }
+    if ((room.villageBuilding || room.planarRealm) && !options.trustedNewFields) {
+      for (const field of ['name', 'environmentIntent', 'indoor', 'isIndoor', 'isOutdoor', 'classification', 'complexId']) next[key][field] = room[field];
+    }
+    if (!options.trustedNewFields && (room.villagePlan || room.exits?.portal)) {
+      next[key].exits ||= {};
+      for (const b of room.villagePlan?.buildings || []) next[key].exits[b.direction] = room.exits[b.direction];
+      if (room.exits?.portal) next[key].exits.portal = room.exits.portal;
     }
     if (room.fortifiedApproaches && !options.trustedNewFields) {
       next[key].exits ||= {};

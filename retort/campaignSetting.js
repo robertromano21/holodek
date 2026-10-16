@@ -6,6 +6,7 @@ const Pantheon = require('../assets/pantheonCharacters');
 const { coordinates, keyOf, indoor } = require('../assets/outdoorRoutes');
 const Underground = require('./undergroundEnvironments');
 const Fortified = require('./fortifiedSites');
+const Lore = require('./underworldLore');
 
 const REGIONS = [
   { id: 'tartarus', name: 'Tartarus Frontier', ecology: 'Ash dunes, basalt uplands and rare spring-fed oases; sheltered gardens depend on maintained cisterns.',
@@ -30,8 +31,8 @@ function hostileTemple(setting, roomName = '') {
   return !!setting?.religion?.patron && Pantheon.canon(setting.religion.patron)?.allegiance === 'Hostile' &&
     (['roman_temple', 'byzantine_basilica', 'deity_temple'].includes(setting.siteKind) || /temple|basilica|sanctuary|shrine|chapel/i.test(roomName));
 }
-const BUILDINGS = new Set(['inn', 'house', 'guildhall', 'roman_temple', 'byzantine_basilica', 'castle', 'gatehouse', 'wizard_citadel', 'villa', ...Fortified.TYPES]);
-const COMMUNITIES = new Set(['oasis', 'hamlet', 'market', ...BUILDINGS]);
+const BUILDINGS = new Set(['inn', 'house', 'guildhall', 'roman_temple', 'byzantine_basilica', 'castle', 'gatehouse', 'wizard_citadel', 'villa', ...Lore.BUILDINGS.map(row => row[0]), ...Fortified.TYPES]);
+const COMMUNITIES = new Set(['oasis', 'hamlet', 'market', 'village', 'cavern_village', ...BUILDINGS]);
 const AUTHORITY = ['elected wellkeepers', 'a council of household elders', 'a guild charter and rotating magistrate', 'a castellans court constrained by an old civic oath'];
 const PREFIXES = ['Amber', 'Reed', 'Flint', 'Laurel', 'Copper', 'Juniper', 'Cinder', 'Willow'];
 const SUFFIXES = ['Well', 'Crossing', 'Rest', 'Reach', 'Ford', 'Hearth', 'Gate', 'Haven'];
@@ -43,6 +44,13 @@ function chapter(completed = 0, total = 21) {
 }
 function plan(input = {}) {
   const c = coordinates(input.targetKey); if (!c) return null;
+  const realm = input.database?.[input.targetKey]?.planarRealm || input.database?.[input.sourceKey]?.planarRealm;
+  if (realm) return { version: 1, regionId: realm.id, region: realm.name, communityId: realm.id, community: realm.name,
+    siteKind: input.template || 'wasteland', building: BUILDINGS.has(input.template), inhabited: COMMUNITIES.has(input.template),
+    subterranean: c.z < 0, ecology: realm.nature, livelihoods: [], pressure: 'Local affairs; knowledge of the Hades conflict depends on the authored faction.',
+    faction: { id: realm.id, name: realm.factions[0]?.name || 'Independent natives', allegiance: 'Neutral' }, neighboringFactions: realm.factions,
+    religion: { patron: null, allegiance: 'Neutral', practice: 'Local cosmology does not spawn deities or replace the canonical pantheon.' },
+    planarRealm: structuredClone(realm), journey: 'Optional plane beyond Tartarus; geographic distance grants no quest progress or access to Hades.' };
   const source = input.database?.[input.sourceKey]?.campaignSetting;
   const zone = `${Math.floor(c.x / 4)},${Math.floor(c.y / 4)},${c.z}`;
   const stage = source?.zone === zone ? source.chapter : Math.min(REGIONS.length - 1,
@@ -92,12 +100,17 @@ function install(database, roomKey, context) {
 }
 function describe(setting) {
   if (!setting) return '';
-  return `[CAMPAIGN-SETTING] Read-only regional facts: ${JSON.stringify(setting)}.
+  if (setting.planarRealm) return require('./planarPortals').describe(setting.planarRealm);
+  return `${Lore.GUIDANCE}\n[CAMPAIGN-SETTING] Read-only regional facts: ${JSON.stringify(setting)}.
 ${setting.subterranean ? 'This site is underground: use the saved underground ecology and existing entrances, with covered passages rather than a surface oasis or sky courtyard. Mines may have workers and crypts may have custodians; caves may instead have unaligned wildlife.' : 'The underground layer describes potential neighboring interiors, not a ceiling over this surface site.'}
 Name actual physical places rather than interchangeable halls of sorrow. For a NEW inhabited site's name, use the saved community name and physical venue as the anchor; add a distinct local qualifier rather than repeating another room's name. Never rename an existing published destination. Describe water, shelter, work and daily community life, with one concrete local tension. A fertile oasis has real water and green vegetation, not dead trees with a poetic name. Graveyards have burial plots and caretaker paths. An inhabited place is not automatically hostile. Interiors use indoor plans; an outdoor approach may only mention entrances backed by real neighboring indoor rooms. Keep the published room name, routes, inhabitants, inventory and quest requirements authoritative. Faction aspirations are not completed events. Never mint silver, invent quests, award rewards, open boss gates or move named targets in prose. [/CAMPAIGN-SETTING]`;
 }
 function seedResidents(population, setting) {
   if (!setting || !population?.actors) return;
+  if (setting.planarRealm) {
+    for (const actor of Object.values(population.actors)) actor.communityId = setting.communityId;
+    return;
+  }
   Object.values(population.actors).forEach((actor, index) => {
     actor.communityId = setting.communityId;
     if (actor.regionalStoryId && FAITH[actor.factionId]) {
@@ -162,6 +175,9 @@ async function prepareAtlas($, state) {
   let atlas = null, failure = 'Campaign planning disabled.';
   if (process.env.CAMPAIGN_SETTING !== 'off') try {
     $.model = 'gpt-4.1-mini'; $.temperature = .9;
+    await $.user`${Lore.GUIDANCE}`;
+    await require('./campaignMemory').appendPlanning($, state, 'campaign geography and faction planning');
+    await $.user`Choose story-appropriate villages as clusters of real walk-in inns, homes, temples, citadels and other institutions, including shade refuges, soul registries, watch houses and cinder forges. Villages can stand within outdoor terrain or inside vast caverns far larger than a building. Choose which institutions and kinds of residents fit each district: concentrations of neutral shades and humanoids alongside stranger souls and optional coercive demon guards, refugees or dissidents. Siege pressure varies with geography and allegiance; do not impose one fixed cast, all-hostile settlements or a timetable of events.`;
     await $.user`Faction roles in array order are fixed: wellkeepers (Dyanetzia, neutral), coercive tollwardens (Arithus or another evil deity, hostile), burial masons (Mordicar, neutral), caravan salvagers (Poena, neutral). Evil temples are defended hostile sanctuaries, not public healing shops. Neutral healing temples are separate. Patronage is metadata; worship never spawns the actual god. Fit the four faction purposes to these roles.`;
     await $.user`${Underground.PLANNING_GUIDANCE} Each region MUST include an underground field (<=500 characters) explaining its geology, subterranean ecology, livelihoods and connections to the surface. This is broad planning, not new exits or quest placement.`;
     await $.user`Also plan intact castles, working fortresses, fantastic citadels, wizard towers and deity-aligned temples as occasional regional institutions. Explain their supply, governance, patronage and relation to nearby communities. They are approached outdoors and have stair-linked storeys with practical service spaces, upper halls and cellars. Some upper halls can later host quest bosses, but do not assign a boss, key or reward. Worship does not spawn a god. Arithus temples are hostile; Arithus himself appears only at the final throne room.`;

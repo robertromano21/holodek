@@ -39,8 +39,33 @@ test('movement spends a shared turn budget, persists real tiles and rejects repl
   assert.equal(f.dice.active.turn.movement.remaining, 4);
   assert.deepEqual(f.space.point(f.pc), { x: 3.5, y: 2.5 });
   assert.equal(f.opportunities.length, 1);
-  await assert.rejects(f.dice.moveCombatant(f.input(14, 11)), /highlighted/);
+  await assert.rejects(f.dice.moveCombatant(f.input(14, 11)), /not available/);
   f.t.close(); assert.equal(f.dice.moveCombatant, undefined);
+});
+
+test('selecting a target approaches only to real weapon range using the same movement budget', async () => {
+  const f = fixture(); f.space.move(f.enemy, { x: 8, y: 4 }); f.t.update();
+  const plan = f.dice.active.turn.approachTargets.find(t => t.name === 'Guard');
+  assert.ok(plan && plan.cost > 0 && plan.cost <= 6);
+  assert.equal(await f.t.approach(f.enemy), true);
+  assert.equal(f.space.canAttack(f.pc, f.enemy), true);
+  assert.equal(f.events.length, plan.cost);
+  assert.equal(f.dice.active.turn.movement.remaining, 6 - plan.cost);
+  assert.notDeepEqual(f.space.point(f.pc), f.space.point(f.enemy), 'Never step onto an occupied target square');
+  const count = f.events.length; assert.equal(await f.t.approach(f.enemy), true);
+  assert.equal(f.events.length, count, 'An already reachable target costs no extra movement');
+});
+
+test('automatic approach cannot teleport through walls, exceed the turn budget or charge a bow target', async () => {
+  const f = fixture(); f.space.move(f.enemy, { x: 14, y: 4 }); f.t.update();
+  assert.equal(await f.t.approach(f.enemy), false); assert.equal(f.events.length, 0);
+  f.space.move(f.enemy, { x: 8, y: 4 });
+  for (let y = 0; y < 12; y++) f.dungeon.cells[`6,${y}`].tile = 'wall';
+  assert.equal(await f.t.approach(f.enemy), false); assert.equal(f.events.length, 0);
+  for (let y = 0; y < 12; y++) f.dungeon.cells[`6,${y}`].tile = 'floor';
+  f.pc.equipped = { Weapon: 'shortbow' }; f.t.update();
+  assert.equal(await f.t.approach(f.enemy), true); assert.equal(f.events.length, 0);
+  f.t.close(); assert.equal(await f.t.approach(f.enemy), false);
 });
 test('stale, malformed, paused, wrong-room and out-of-turn moves cannot spend movement', async () => {
   const f = fixture();
@@ -99,7 +124,7 @@ test('rotated map picking inverts the existing fractional maze projection at eve
   for (const combatAngle of [0, Math.PI / 2, Math.PI, -.8, 2.3]) {
     const d = { combatAngle, cs: 10, centerX: 155, centerY: 155, pos: { x: 41.27, y: 35.62 } };
     for (const tile of [{ x: 42, y: 35 }, { x: 39, y: 39 }]) {
-      const lx = (tile.x + 1 - d.pos.x) * d.cs, ly = (tile.y + 1 - d.pos.y) * d.cs;
+      const lx = (tile.x + .5 - d.pos.x) * d.cs, ly = (tile.y + .5 - d.pos.y) * d.cs;
       const x = d.centerX + lx * Math.cos(combatAngle) - ly * Math.sin(combatAngle), y = d.centerY + lx * Math.sin(combatAngle) + ly * Math.cos(combatAngle);
       assert.deepEqual(Ui.tileAt(d, x * 2.5, y * 2.5, 2.5), tile);
     }
@@ -113,6 +138,8 @@ test('real target route rejects attacks outside reach and choices during movemen
   const post = extra => { let status = 200; handler({ body: { combatant: 'PC', actionId: 'battle', turnId: 'turn', action: 'attack', target: 'Guard', ...extra } },
     { status(v) { status = v; return this; }, json() {} }); return status; };
   assert.equal(post({}), 409); dice.active.turn.attackTargets = ['Guard']; assert.equal(post({}), 200);
+  dice.active.turn.attackTargets = []; dice.active.turn.approachTargets = [{ name: 'Guard', x: 3, y: 4, cost: 2 }];
+  assert.equal(post({}), 200); dice.active.turn.approachTargets = [];
   dice.active.turn.movement.busy = true; assert.equal(post({ action: 'hold', cancelled: true }), 409);
-  dice.active.turn.movement.busy = false; assert.equal(post({ action: 'hold', cancelled: true }), 200); assert.equal(events, 2);
+  dice.active.turn.movement.busy = false; assert.equal(post({ action: 'hold', cancelled: true }), 200); assert.equal(events, 3);
 });

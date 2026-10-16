@@ -6,6 +6,15 @@ self.onmessage=async({data:d})=>{
   try{
     if(d.action==='connect'){audioPort=d.port;audioPort.onmessage=self.onmessage;return;}
     if(d.action==='inspect'){self.postMessage({info:Converter.inspect(d.bytes)});return;}
+    if(d.action==='effect-buffer'){
+      const effect=Converter.createEngine(d.bytes,{sampleRate:d.sampleRate}),info=effect.info;
+      if(info.kind!=='sid-effect'||info.chips>2||info.seconds>8)throw Error('Only short one/two-chip SID effects may be cached.');
+      const count=Math.round(info.seconds*d.sampleRate),samples=new Float32Array(count),fade=d.sampleRate*.005;
+      for(let at=0;at<count;at+=2048){const part=effect.read(Math.min(2048,count-at));
+        for(let i=0;i<part.length;i++)samples[at+i]=Math.max(-.98,Math.min(.98,part[i]))*Math.min(1,(at+i)/fade,(count-1-at-i)/fade);
+      }
+      self.postMessage({effectBuffer:true,id:d.id,samples:samples.buffer,sampleRate:d.sampleRate,seconds:info.seconds},[samples.buffer]);return;
+    }
     if(d.action==='render'){
       const result=Converter.render(d.bytes,{...d,onProgress:progress=>self.postMessage({progress})});
       const wav=Converter.wav(result.samples,result.sampleRate);self.postMessage({wav,report:result.report},[wav]);return;
@@ -43,5 +52,5 @@ self.onmessage=async({data:d})=>{
       }
       (audioPort||self).postMessage({chunk:samples,epoch,end:!options.loop&&position>=total},[samples.buffer]);
     }
-  }catch(error){failedEpoch=d.epoch;(d.action==='pull'&&audioPort?audioPort:self).postMessage({error:error.message,epoch:d.epoch});}
+  }catch(error){if(d.action==='effect-buffer'){self.postMessage({effectBuffer:true,id:d.id,error:error.message});return;}failedEpoch=d.epoch;(d.action==='pull'&&audioPort?audioPort:self).postMessage({error:error.message,epoch:d.epoch});}
 };

@@ -136,6 +136,7 @@
   const TORCH_FLICKER_SPEED = 0.6;
 
   function torchFlicker(seed, timeMs) {
+    if (window.RetroGraphics?.fullbright?.()) return 0.85;
     const t = timeMs * 0.001 * TORCH_FLICKER_SPEED;
     const speedMod = 0.65
       + 0.25 * Math.sin(t * (0.35 + seed * 0.12) + seed * 5.1)
@@ -674,13 +675,16 @@
         palette=window.StoneCarvings.palette((art.surface==='floor'?dungeon?.visualStyle?.floorPalette:null)||dungeon?.visualStyle?.palette,sample);
       }
       const native=window.SurfaceArt.rasterSize(art);
-      const key=[art.tile,art.axis,art.surface,art.sign,art.carvingStyle,art.carvingDepth,art.puzzleClue,art.segmentRole,art.aspectRatio,JSON.stringify(palette)].join('|');
+      const retro=!!window.RetroGraphics?.fullbright?.()&&art.kind==='fresco'&&!art.puzzleClue;
+      const key=[art.tile,art.axis,art.surface,art.sign,art.carvingStyle,art.carvingDepth,art.puzzleClue,art.segmentRole,art.aspectRatio,JSON.stringify(palette),retro].join('|');
       if(this.surfaceArtMeshes.has(key))return this.surfaceArtMeshes.get(key);
       const canvas=document.createElement('canvas');canvas.width=native.width;canvas.height=native.height;
       const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.imageSmoothingEnabled=false;
-      if(palette)window.SurfaceArt.paint(ctx,(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c;},art,palette);
+      if(palette||retro)window.SurfaceArt.paint(ctx,(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c;},art,palette||{},[],{retro});
       else ctx.drawImage(img,0,0,native.width,native.height);
-      const mesh=window.SurfaceArt.mesh(ctx.getImageData(0,0,native.width,native.height),art.axis,art.surface,art.sign,art);
+      const pixels=ctx.getImageData(0,0,native.width,native.height);
+      if(retro)pixels.data.set(window.RetroGraphics.palettePixels(pixels.data,native.width,native.height));
+      const mesh=window.SurfaceArt.mesh(pixels,art.axis,art.surface,art.sign,art);
       const record=this._createCharacterGpuMeshRecord(mesh,[.2,.2,.2],[.8,.8,.8],[1,1,1],{toonSteps:5});
       // Painted pigments need local illumination, not the long-range fill used by large pillars.
       record.torchRadiusScale=art.surface==='object'?6:1.5;record.torchLimit=4;record.shadowStrength=.2;
@@ -1983,6 +1987,8 @@ uniform float u_wallUScale;
 uniform vec2 u_lightDir;
 uniform float u_lightElev;
 uniform float u_lightIntensity;
+uniform float u_fullbright;
+uniform float u_retroWasteland;
 uniform int u_maxSteps;
 uniform int u_atlasCols;
 uniform int u_atlasRows;
@@ -2553,6 +2559,8 @@ float accumulateTorchLit(
   const float TORCH_AMBIENT = 0.5;
   primaryDir2D = vec2(0.0);
   primaryStrengthOut = 0.0;
+  // Retro art carries its own shade bands: no animated lighting or shadow rays.
+  if (u_fullbright > 0.5) return 0.0;
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
@@ -2769,6 +2777,7 @@ void main() {
           keyShadow *= viewShadowFade(nextDist);
           float baseShadowMul = 1.0 - keyShadow;
           vec3 col = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
+          if (u_fullbright > 0.5) col = tex.rgb;
 
           if (nextDist < sideDistClosest) {
             sideDistClosest = nextDist;
@@ -2885,6 +2894,7 @@ void main() {
         keyShadow *= viewShadowFade(perpDist);
         float baseShadowMul = 1.0 - keyShadow;
         vec3 finalCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
+        if (u_fullbright > 0.5) finalCol = tex.rgb;
 
         wallCol = vec4(finalCol, tex.a);
         wallDist = perpDist;
@@ -2994,6 +3004,13 @@ void main() {
     keyShadow *= viewShadowFade(floorDist);
     float baseShadowMul = 1.0 - keyShadow;
     vec3 floorCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
+    if (u_fullbright > 0.5) {
+      floorCol = tex.rgb;
+      float grain = mod(dot(floor(hitPos.xy * 32.0), vec2(13.0, 7.0)), 23.0);
+      if (u_retroWasteland > 0.5 && tex.r * 255.0 >= 30.0 && tex.r * 255.0 < 150.0 && grain < 1.0 &&
+          sin(hitPos.x * 0.42) + sin(hitPos.y * 0.31) + sin((hitPos.x + hitPos.y) * 0.19) > 1.35)
+        floorCol = vec3(150.0, 40.0, 46.0) / 255.0;
+    }
     outColor = vec4(floorCol, 1.0);
     gl_FragDepth = floorDist / u_depthFarDepth;
     return;
@@ -3051,6 +3068,8 @@ void main() {
         lightDir: gl.getUniformLocation(this.program, 'u_lightDir'),
         lightElev: gl.getUniformLocation(this.program, 'u_lightElev'),
         lightIntensity: gl.getUniformLocation(this.program, 'u_lightIntensity'),
+        fullbright: gl.getUniformLocation(this.program, 'u_fullbright'),
+        retroWasteland: gl.getUniformLocation(this.program, 'u_retroWasteland'),
         maxSteps: gl.getUniformLocation(this.program, 'u_maxSteps'),
         atlasCols: gl.getUniformLocation(this.program, 'u_atlasCols'),
         atlasRows: gl.getUniformLocation(this.program, 'u_atlasRows'),
@@ -3125,6 +3144,7 @@ void main() {
         'uniform vec2 u_lightDir;',
         'uniform float u_lightElev;',
         'uniform float u_lightIntensity;',
+        'uniform float u_fullbright;',
         'uniform float u_profile;',
         'uniform float u_depthAmount;',
         'uniform vec3 u_spritePos;',
@@ -3174,6 +3194,7 @@ void main() {
         '    gl_FragDepth = depth;',
         '    return;',
         '  }',
+        '  if (u_fullbright > 0.5) { outColor = tex * u_tint; gl_FragDepth = v_depth; return; }',
         '  vec3 normal = vec3(0.0, 0.0, 1.0);',
         '  if (u_profile > 0.5) {',
         '    float nx = (v_uv.x - 0.5) * 2.0;',
@@ -3238,6 +3259,7 @@ void main() {
         'uniform float u_depthBias;',
         'uniform vec3 u_modelPos;',
         'uniform vec3 u_modelScale;',
+        'uniform float u_retroInk;',
         'out vec3 v_color;',
         'out vec3 v_normal;',
         'out vec3 v_worldPos;',
@@ -3256,6 +3278,10 @@ void main() {
         '  float clipY = (worldPos.z - u_eyeZ) * (2.0 * u_focalLength / u_resolution.y) - 2.0 * u_viewShift * transformY;',
         '  const float nearPlane = 0.02;',
         '  gl_Position = vec4(transformX, clipY, transformY - 2.0 * nearPlane, transformY);',
+        '  if (u_retroInk > 0.5) {',
+        '    vec2 corner = vec2((gl_InstanceID & 1) == 0 ? -1.0 : 1.0, gl_InstanceID < 2 ? -1.0 : 1.0);',
+        '    gl_Position.xy += corner * 1.5 / u_resolution * gl_Position.w;',
+        '  }',
         '  v_depth = clamp(transformY / u_depthFarDepth - u_depthBias, 0.0, 1.0);',
         '}'
       ].join('\n');
@@ -3277,6 +3303,8 @@ uniform vec2 u_plane;
 uniform float u_focalLength;
 uniform float u_eyeZ;
 uniform float u_depthFarDepth;
+uniform float u_retroSurface;
+uniform float u_retroInk;
 
 uniform vec2 u_lightDir;
 uniform float u_lightElev;
@@ -3465,10 +3493,37 @@ void main() {
   float forward = dot(v_worldPos.xy - u_camPos, u_camDir);
   float depth = saturate((forward + u_depthBias) / max(u_depthFarDepth, 1e-3));
   gl_FragDepth = depth;
+  if (u_retroInk > 0.5) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
   // Debug: prove the "slits" are lighting (normal discontinuities) not holes.
   if (u_unlit > 0.5) {
-    outColor = vec4(v_color, 1.0);
+    vec3 paint = v_color;
+    if (u_unlit > 1.5) {
+      vec3 N = normalize(v_normal);
+      float face = clamp(dot(N, normalize(vec3(-0.4, -0.3, 0.8))) * 0.5 + 0.5, 0.0, 1.0);
+      paint *= mix(vec3(0.9, 0.94, 1.0), vec3(1.0, 0.96, 0.9), face);
+      if (u_retroSurface > 0.5) {
+        vec3 brown = vec3(94.0, 53.0, 0.0) / 255.0;
+        vec3 orange = vec3(159.0, 72.0, 21.0) / 255.0;
+        vec3 yellow = vec3(239.0, 243.0, 71.0) / 255.0;
+        float pigment = dot(v_color, vec3(0.3, 0.59, 0.11));
+        if (u_retroSurface < 1.5) {
+          // Recolor the existing carving and face normals, never its geometry.
+          float tone = pigment * 0.58 + face * 0.42;
+          paint = vec3(tone < 0.35 ? 71.0 : tone < 0.52 ? 120.0 : tone < 0.86 ? 174.0 : 255.0) / 255.0;
+          if (pigment < 0.10) paint = vec3(0.0);
+        } else if (u_retroSurface < 2.5 && N.z < 0.5) {
+          // Ceiling panels are yellow; existing beams and anchored seams stay brown/orange.
+          vec2 panel = fract(v_worldPos.xy * 0.5);
+          float seam = min(min(panel.x, 1.0 - panel.x), min(panel.y, 1.0 - panel.y));
+          paint = seam < 0.025 || pigment < 0.1 ? brown : seam < 0.06 || N.z > -0.35 ? orange : yellow;
+        } else if (u_retroSurface > 3.5) {
+          float chroma = max(max(v_color.r, v_color.g), v_color.b) - min(min(v_color.r, v_color.g), v_color.b);
+          if (chroma > 0.10) paint = clamp(vec3(pigment) + (v_color - vec3(pigment)) * 1.8, 0.0, 1.0);
+        }
+      }
+    }
+    outColor = vec4(paint, 1.0);
     return;
   }
 
@@ -3544,6 +3599,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         lightDir: gl.getUniformLocation(this.spriteProgram, 'u_lightDir'),
         lightElev: gl.getUniformLocation(this.spriteProgram, 'u_lightElev'),
         lightIntensity: gl.getUniformLocation(this.spriteProgram, 'u_lightIntensity'),
+        fullbright: gl.getUniformLocation(this.spriteProgram, 'u_fullbright'),
         profile: gl.getUniformLocation(this.spriteProgram, 'u_profile'),
         depthAmount: gl.getUniformLocation(this.spriteProgram, 'u_depthAmount'),
         spritePos: gl.getUniformLocation(this.spriteProgram, 'u_spritePos'),
@@ -3605,6 +3661,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           toneMid: gl.getUniformLocation(this.voxelProgram, 'u_toneMid'),
           toneHighlight: gl.getUniformLocation(this.voxelProgram, 'u_toneHighlight'),
           unlit: gl.getUniformLocation(this.voxelProgram, 'u_unlit'),
+          retroSurface: gl.getUniformLocation(this.voxelProgram, 'u_retroSurface'),
+          retroInk: gl.getUniformLocation(this.voxelProgram, 'u_retroInk'),
           toonSteps: gl.getUniformLocation(this.voxelProgram, 'u_toonSteps'),
         };
       } else {
@@ -3627,6 +3685,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
     rebuildDungeonTextures(dungeon, textures) {
       if (!dungeon || !textures || !this.gl) return;
+      if (window.RetroGraphics?.fullbright?.() && window.RetroGraphics.prepareImage) {
+        const groundKind = window.RetroGraphics.environment(dungeon).wasteland ? 'wasteland' : 'surface';
+        textures = Object.fromEntries(Object.entries(textures).map(([name, image]) => [name,
+          name === 'torch' || name === 'pillar' || name.startsWith('custom_') ? image :
+            window.RetroGraphics.prepareImage(image, name === 'floor' ? groundKind : /ceiling|roof/.test(name) ? 'ceiling' : 'wall')]));
+        for (const name of ['wall', 'floor']) if (!isTextureReady(textures[name]) && window.RetroGraphics.makeSurface) {
+          textures[name] = window.RetroGraphics.makeSurface(name === 'floor' && groundKind === 'wasteland' ? groundKind : name, dungeon.visualStyle?.palette,
+            dungeon.tiles?.[name]?.spriteSpec?.material);
+        }
+      }
       const key = dungeon.geoKey || dungeon._meta?.id || 'default';
       const floorReady = isTextureReady(textures.floor);
       const textureState = Object.keys(textures).filter(name => name === 'floor' ||
@@ -3868,35 +3936,40 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       // The combat-map clock must not animate a stationary 3D billboard.
       const down = window.DungeonInhabitants?.isDown(actor);
       const frame = down ? 0 : pick.frame;
+      const retro = window.RetroGraphics?.fullbright?.();
       const bbRev = Number.isFinite(window.CHARACTER_BILLBOARD_REV) ? window.CHARACTER_BILLBOARD_REV : 0;
       // Cache by facing (drawn art), never by bitmap-mirror — keeps weapon on the same hand
-      const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev, down ? 'down' : 'standing'].join('|');
+      const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev, down ? 'down' : 'standing', retro ? 'retro-world' : 'world'].join('|');
       this._billboardTexCache = this._billboardTexCache || new Map();
       let entry = this._billboardTexCache.get(key);
       if (!entry) {
-        const original = api.renderBillboardPixels(spec, { frame, view, facing });
+        const renderPixels = f => {
+          const original = api.renderBillboardPixels(spec, { frame: f, view, facing });
+          return retro ? window.RetroGraphics?.worldCharacterPixels?.(original, actor, spec) || original : original;
+        };
+        const original = renderPixels(frame);
         const pix = down ? window.CombatLifeUi?.laidDownPixels(original) || original : original;
         if (!pix || !pix.bounds) return null;
         const data = new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength);
         const gl = this.gl;
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, retro ? gl.NEAREST : gl.LINEAR_MIPMAP_NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
-        try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
+        if (!retro) try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
         const ws = Number.isFinite(spec.worldScale) ? Math.max(0.55, Math.min(1.7, spec.worldScale)) : 1;
-        const idle = frame === 0 ? original : api.renderBillboardPixels(spec, { frame: 0, view, facing });
+        const idle = frame === 0 ? original : renderPixels(0);
         const stature = api.humanoidWorldStature?.(spec);
         const bodyFraction = (idle?.bodyHeight || (idle?.bounds?.maxY - idle?.bounds?.minY + 1)) / idle?.h;
         // Measure the body, not transparent headroom, wings or a raised weapon.
         // Use the idle measurement for every frame so walking cannot change size.
         const worldHeight = stature > 0 && bodyFraction > 0 ? stature / bodyFraction : 1.22 * ws;
         // Anchor all walking poses to the same idle soles, not frame-specific padding.
-        const footKey = [spec.key, view, facing, bbRev].join('|');
+        const footKey = [spec.key, view, facing, bbRev, retro ? 'retro-world' : 'world'].join('|');
         this._billboardFootInsets = this._billboardFootInsets || new Map();
         let footInset = this._billboardFootInsets.get(footKey);
         if (!Number.isFinite(footInset)) {
@@ -3936,15 +4009,17 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       return floor + 0.02 + bob - billboard.footInset * billboard.worldHeight;
     },
 
-    // Item billboard texture (Objects in Room), cached per name/type/magic.
+    // Loose loot retains its existing item art and exact silhouette.
     _getItemBillboard(obj) {
       const api = window.SceneItems;
       if (!api || !this.gl) return null;
-      const key = [obj.name, obj.type, obj.magic].join('|').toLowerCase();
+      const retro = !!window.RetroGraphics?.fullbright?.();
+      const key = JSON.stringify([obj.name, obj.type, obj.magic, obj.assembly, retro]);
       this._itemTexCache = this._itemTexCache || new Map();
       let entry = this._itemTexCache.get(key);
       if (entry) return entry;
-      const pix = api.renderItemPixels(obj, { scale: 2, world: true });
+      let pix = api.renderItemPixels(obj, { scale: 2, world: true });
+      if (retro) pix = window.RetroGraphics.treasurePixels(pix);
       const gl = this.gl;
       const tex = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -3990,6 +4065,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.01);
     },
 
+    _retroSurfaceKind(tileName, spec = {}, role = '') {
+      if (spec.voxelShape?.startsWith('puzzle_') || spec.inscription) return 0;
+      const label = role + ' ' + tileName + ' ' + (spec.voxelShape || '');
+      if (/pillar|column|gothic_pier|pediment/i.test(label)) return 1;
+      if (/tree|branch|trunk|stump|oak|pine|willow|cypress/i.test(label)) return 0;
+      return /ceiling|roof|vault|dome|coffer|eave|lintel|drum|rafter|truss/i.test(label) ? 2 : 4;
+    },
+
     getSpriteTexture(img) {
       if (!img || !img.complete || img.naturalWidth === 0) return null;
       const key = img.src || img._webglKey || `${img.naturalWidth}x${img.naturalHeight}`;
@@ -4004,6 +4087,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
       this.spriteTexCache[key] = tex;
+      if (key.startsWith('c64-art-')) {
+        this._retroPropTextureKeys = this._retroPropTextureKeys || [];
+        this._retroPropTextureKeys.push(key);
+        if (this._retroPropTextureKeys.length > 128) {
+          const oldKey = this._retroPropTextureKeys.shift();
+          gl.deleteTexture(this.spriteTexCache[oldKey]); delete this.spriteTexCache[oldKey];
+        }
+      }
       return tex;
     },
 
@@ -4246,7 +4337,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const textures = window.dungeonTextures;
       if (!dungeon || !textures) return;
       const frameStartedAt = performance.now();
-      let voxelDrawCalls = 0, voxelIndices = 0, culledVoxels = 0, torchQueries = 0;
+      let voxelDrawCalls = 0, voxelIndices = 0, culledVoxels = 0, torchQueries = 0, retroOutlineDrawCalls = 0;
       const torchCacheStats = { hits: 0, losTests: 0 };
       const popup = document.getElementById('dungeon-popup');
       const container = document.getElementById('dungeon-container');
@@ -4403,6 +4494,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       }
 
       const lighting = normalizeLight(dungeon.lighting || dungeon.classification?.lighting);
+      const fullbright = !!window.RetroGraphics?.fullbright?.();
+      const retroWasteland = fullbright && !!window.RetroGraphics?.environment?.(dungeon).wasteland;
 
       let skyTop = '#050012';
       let skyBot = '#050012';
@@ -4424,6 +4517,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           b: (v & 255) / 255
         };
       }
+      if (retroWasteland) skyTop = skyBot = '#eff347';
       const skyTopRgb = hexToRgb(skyTop);
       const skyBotRgb = hexToRgb(skyBot);
 
@@ -4717,6 +4811,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform1f(this.uniformLocations.lightElev, lighting.elevation);
       }
       gl.uniform1f(this.uniformLocations.lightIntensity, lighting.intensity);
+      if (this.uniformLocations.fullbright) gl.uniform1f(this.uniformLocations.fullbright, fullbright ? 1 : 0);
       const outdoorDepthFar = 1000000.0;
       const outdoorDepthFarDepth = 300.0;
       const depthFar = isOutdoor ? outdoorDepthFar : 60.0;
@@ -4747,6 +4842,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform1i(this.uniformLocations.atlasCols, this.atlasInfo?.cols || 1);
       gl.uniform1i(this.uniformLocations.atlasRows, this.atlasInfo?.rows || 1);
       gl.uniform3f(this.uniformLocations.skyTop, skyTopRgb.r, skyTopRgb.g, skyTopRgb.b);
+      if (this.uniformLocations.retroWasteland) gl.uniform1f(this.uniformLocations.retroWasteland, retroWasteland ? 1 : 0);
       gl.uniform3f(this.uniformLocations.skyBot, skyBotRgb.r, skyBotRgb.g, skyBotRgb.b);
       gl.uniform1f(this.uniformLocations.depthFar, depthFar);
       gl.uniform1f(this.uniformLocations.depthFarDepth, depthFarDepth);
@@ -4890,12 +4986,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
           const floorH = typeof cell.floorHeight === 'number' ? cell.floorHeight : 0;
           const ceilH = typeof cell.ceilHeight === 'number' ? cell.ceilHeight : floorH + 2;
-          const meta = (window.dungeonTexturesMeta && tileName)
-            ? window.dungeonTexturesMeta[tileName]
-            : null;
+          const meta = window.dungeonTexturesMeta?.[tileName] || dungeon.tiles?.[tileName]?.spriteSpec;
           const heightRatio = typeof meta?.heightRatio === 'number' ? meta.heightRatio : 1.0;
           const baseWidth = typeof meta?.baseWidth === 'number' ? meta.baseWidth : SPRITE_WIDTH_RATIO;
-
+          if (fullbright && isCustom && window.RetroGraphics?.prepareImage) {
+            const propHeight = Number.isFinite(cell.structureHeight) ? cell.structureHeight :
+              ceilH > floorH ? Math.max(.5, (ceilH - floorH) * heightRatio) : SPRITE_WORLD_HEIGHT;
+            if (!this.isVoxelBoxVisible({ x: wx + .5 - baseWidth / 2, y: wy + .5 - baseWidth / 2, z: floorH },
+              { x: baseWidth, y: baseWidth, z: propHeight }, voxelCamera)) { culledVoxels++; continue; }
+          }
           if (!isTorch && !isCustom) continue;
 
           // Base position (wall cell center)
@@ -4964,13 +5063,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             }
           }
 
-          const texImg = window.dungeonTextures && window.dungeonTextures[tileName];
+          const sourceImage = window.dungeonTextures && window.dungeonTextures[tileName];
+          const texImg = fullbright && isCustom ? window.RetroGraphics?.prepareImage(sourceImage, 'prop') : sourceImage;
           if (!isTorch && (!texImg || !texImg.complete)) continue;
 
           const dxp = renderX - camX;
           const dyp = renderY - camY;
           const distSq = dxp * dxp + dyp * dyp;
-          if (!isTorch && distSq > VIS_RADIUS * VIS_RADIUS) continue;
+          const propRadius = VIS_RADIUS;
+          if (!isTorch && distSq > propRadius * propRadius) continue;
           if (!isTorch && distSq < 0.04) continue;
 
           const invDet = 1.0 / (planeX * dirY - dirX * planeY);
@@ -4993,6 +5094,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             spriteWorldHeight = Math.max(0.5, (ceilH - floorH) * heightRatio);
             spriteWidthRatio = spriteBaseWidth;
           }
+          if (fullbright && isCustom && Number.isFinite(cell.structureHeight)) spriteWorldHeight = cell.structureHeight;
 
           const spriteDistance = Math.max(0.1, safeTransformY);
 
@@ -5000,7 +5102,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const mountScreenY = Math.floor(horizon + (eyeZ - spriteBaseZ) * focalLength / spriteDistance);
 
           let spriteScreenHeight = Math.max(2, Math.floor(spriteWorldHeight * focalLength / spriteDistance));
-          const spriteScreenWidth = Math.max(isTorch ? 2 : 1, Math.floor(spriteScreenHeight * spriteWidthRatio));
+          const spriteScreenWidth = Math.max(isTorch ? 2 : 1, Math.floor(fullbright && isCustom ?
+            spriteBaseWidth * focalLength / spriteDistance : spriteScreenHeight * spriteWidthRatio));
 
           // Clamp extreme close-up to prevent overflow
           spriteScreenHeight = Math.min(spriteScreenHeight, height * 1.8);
@@ -5173,12 +5276,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const transformY = invDet * (-planeY * dxp + planeX * dyp);
         if (transformY <= 0.05) continue;
         const screenX = (width / 2) * (1 + transformX / transformY);
-        const nominalHeight = bb.worldHeight * bb.motion.heightScale;
+        const worldH = bb.worldHeight * bb.motion.heightScale;
         // Feet sit ON the walkable floor: clamp footInset so transparent padding cannot sink the figure
         // into the floor plane (that made the tan floor slab bisect winged characters).
         const inset = Math.max(0, Math.min(0.08, Number.isFinite(bb.footInset) ? bb.footInset : 0));
         const feetZ = floorH + 0.02;
-        const worldH = window.ProceduralCharacters?.frameBillboardHeight?.(nominalHeight, eyeZ - feetZ, transformY, voxelCamera.verticalScale, viewShift, inset) ?? nominalHeight;
         const baseZ = feetZ - inset * worldH;
         const screenH = worldH * focalLength / transformY;
         const screenW = screenH;
@@ -5282,7 +5384,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (p.x + s.x < playerX - partRange || p.x > playerX + partRange + 1 ||
             p.y + s.y < playerY - partRange || p.y > playerY + partRange + 1) continue;
         const mesh = this.getVoxelMesh(part.tile, dungeon);
-        if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: p, modelScale: s });
+        if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: p, modelScale: s,
+          retroSurface: this._retroSurfaceKind(part.tile, dungeon.tiles?.[part.tile]?.spriteSpec, part.role || '') });
       }
       for (const part of window.SecretDoorsUi?.parts(dungeon) || []) {
         const mesh = this.getVoxelMesh(part.tile, dungeon);
@@ -5378,6 +5481,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
         const stride = 9 * 4;
         for (const inst of voxelInstances) {
+          if (this.voxelUniforms.retroSurface) gl.uniform1f(this.voxelUniforms.retroSurface, fullbright ?
+            inst.retroSurface ?? this._retroSurfaceKind(inst.tileName, dungeon.tiles?.[inst.tileName]?.spriteSpec) : 0);
           if (this.voxelUniforms.torchCount) {
             const centerX = inst.lightAnchor?.x ?? inst.modelPos.x + inst.modelScale.x * 0.5;
             const centerY = inst.lightAnchor?.y ?? inst.modelPos.y + inst.modelScale.y * 0.5;
@@ -5426,7 +5531,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               gl.uniform3f(this.voxelUniforms.toneHighlight, high[0], high[1], high[2]);
             }
             if (this.voxelUniforms.unlit) {
-              gl.uniform1f(this.voxelUniforms.unlit, pass.unlit ? 1.0 : 0.0);
+              gl.uniform1f(this.voxelUniforms.unlit, fullbright ? 2.0 : pass.unlit ? 1.0 : 0.0);
             }
             if (this.voxelUniforms.toonSteps) {
               gl.uniform1f(this.voxelUniforms.toonSteps, Number.isFinite(pass.toonSteps) ? pass.toonSteps : 3.0);
@@ -5437,6 +5542,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             }
             gl.uniform3f(this.voxelUniforms.modelPos, inst.modelPos.x, inst.modelPos.y, inst.modelPos.z);
             gl.uniform3f(this.voxelUniforms.modelScale, inst.modelScale.x, inst.modelScale.y, inst.modelScale.z);
+            if (fullbright && inst.tileName && inst.mesh.lightingScope !== 'art' && !pass.depthOnly && this.voxelUniforms.retroInk) {
+              // Dilate the real mesh in screen space, with depth testing but no depth
+              // writes. The unchanged fill covers its interior; openings stay open.
+              gl.uniform1f(this.voxelUniforms.retroInk, 1);
+              gl.depthMask(false);
+              gl.drawElementsInstanced(gl.TRIANGLES, pass.count, gl.UNSIGNED_SHORT, 0, 4);
+              gl.depthMask(!pass.depthTestOnly);
+              gl.uniform1f(this.voxelUniforms.retroInk, 0);
+              retroOutlineDrawCalls++;
+            }
             gl.drawElements(gl.TRIANGLES, pass.count, gl.UNSIGNED_SHORT, 0);
             voxelDrawCalls++;
             voxelIndices += pass.count;
@@ -5460,6 +5575,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       gl.useProgram(this.spriteProgram);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuffer);
+      if (this.spriteUniforms.fullbright) gl.uniform1f(this.spriteUniforms.fullbright, fullbright ? 1 : 0);
       gl.enableVertexAttribArray(this.spriteAttribs.pos);
       gl.enableVertexAttribArray(this.spriteAttribs.uv);
       gl.enableVertexAttribArray(this.spriteAttribs.depth);
@@ -5493,6 +5609,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         return t * t * (3 - 2 * t);
       };
       for (const spr of sprites) {
+        if (fullbright && spr.type === 'actorShadow') continue;
         if (this.spriteUniforms.haloMode) {
           gl.uniform1f(this.spriteUniforms.haloMode, 0.0);
         }
@@ -5660,7 +5777,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             );
           }
 
-          if (this.haloTex) {
+          if (this.haloTex && !fullbright) {
             const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
             const haloSize = Math.min(600, glowRadius * 2);
             const haloCenterY = flameCenterY;
@@ -5936,7 +6053,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
 
         // Halo (additive, depth-tested)
-        if (this.haloTex) {
+        if (this.haloTex && !fullbright) {
           const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
           const haloSize = Math.min(600, glowRadius * 2);
           const haloCenterY = flameCenterY;
@@ -6366,7 +6483,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         resourcesMs: Number((resourcesReadyAt - frameStartedAt).toFixed(2)),
         collectionMs: Number((voxelStartedAt - resourcesReadyAt).toFixed(2)),
         voxelSubmitMs: Number((voxelsSubmittedAt - voxelStartedAt).toFixed(2)),
-        voxelInstances: voxelInstances.length, culledVoxels, voxelDrawCalls, voxelTriangles: voxelIndices / 3,
+        voxelInstances: voxelInstances.length, culledVoxels, voxelDrawCalls, voxelTriangles: voxelIndices / 3, retroOutlineDrawCalls,
+        retroBillboards: fullbright ? sprites.filter(sprite => sprite.type === 'custom').length : 0,
         stonework: { enabled: window.ARCHITECTURAL_CARVINGS !== false, percent: (window.STONEWORK_SURFACE_CLOSURE ?? 3) * 100,
           compatibleVisible: voxelInstances.filter(inst=>/\|closure:[\d.]+\|/.test(inst.mesh._debugKey||'')).length,
           raisedVisible: voxelInstances.filter(inst=>/\|closure:[\d.]+\|/.test(inst.mesh._debugKey||'')&&inst.mesh.passes?.length>1).length },

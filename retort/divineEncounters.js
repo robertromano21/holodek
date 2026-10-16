@@ -32,7 +32,7 @@ function sheet(record) {
 }
 function create(name, runId, index, pcName) {
   const c = P.canon(name), hp = name === 'Arithus' ? 500 : 300 + I.hash(runId + ':' + name + ':hp') % 201;
-  const birth = { Name: name, Sex: /Lady|Mother|Mistress|Goddess/.test(c.epithets) ? 'Female' : 'Unknown',
+  const birth = { Name: name, Sex: c.sex || (/Lady|Mother|Mistress|Goddess/.test(c.epithets) ? 'Female' : 'Unknown'),
     Race: c.form === 'human' ? 'Divine Human' : 'Divine Dragon', Class: 'Deity', Level: 50,
     AC: 22, XP: 750000, HP: hp, MaxHP: hp, Equipped: {}, Attack: 10, Damage: 12, Armor: 6, Magic: 15 };
   const descriptor = { name, race: birth.Race, className: 'Deity', allegiance: c.allegiance, routine: 'rest',

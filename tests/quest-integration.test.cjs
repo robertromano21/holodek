@@ -114,7 +114,8 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
     setLastQuestUpdate: value => { state.updates.push(value); }, appendQuestLog: value => { state.logs.push(clone(value)); }
   };
   const sync = name => async (_agent, _coords, _db, text) => { state.synchronizers.push(name); return text; };
-  const dependencies = { console: quiet, sharedState, PuzzleRewards, QuestDeliverySuccessors, Inhabitants, ...progress, ...bossGate, ...actualRoomHelpers,
+  const dependencies = { console: quiet, require: id => require(id.startsWith('./') ? '../retort/' + id.slice(2) : id),
+    CampaignMemory: require('../retort/campaignMemory'), sharedState, PuzzleRewards, QuestDeliverySuccessors, Inhabitants, ...progress, ...bossGate, ...actualRoomHelpers,
     FortifiedSites: require('../retort/fortifiedSites'), snapshotQuestContext: require('../retort/worldContext').snapshotQuestContext,
     Divinity: require('../retort/divineEncounters'), Pantheon: require('../assets/pantheonCharacters'), GeneratedNames: require('../retort/generatedNames'),
     QuestScenes: stories ? require('../retort/questScenes') : undefined,

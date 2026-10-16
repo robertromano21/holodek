@@ -115,12 +115,14 @@ test('combat engages one local hostile group, friendlies help, neutrals and dist
   assert.ok(teams.targets(roster[6]).every(a=>a.name.startsWith('Guard')));
   assert.ok(teams.targets(roster[2]).every(a=>['PC','Companion','Pilgrim'].includes(a.name)));
 });
-test('attacking a neutral provokes only that individual; friendly targeting cannot switch to another foe', () => {
+test('attacking a neutral or friendly resident provokes only that individual, not another encounter', () => {
   const d=dungeon(), p=I.createPopulation(d.geoKey,[descriptor('Mason','Neutral','workers'),descriptor('Mason2','Neutral','workers'),descriptor('Pilgrim','Friendly')]);
   const r=[character('PC','pc',4,4),character('Mason','monster',5,4),character('Mason2','monster',5,5),character('Pilgrim','monster',4,5)];
   assert.deepEqual(I.teams(r,p,createCombatSpace(d,r,d.geoKey),'attack Mason2').hostiles.map(a=>a.name),['Mason2']);
   assert.equal(p.actors.Mason.allegiance,'Neutral');
-  assert.deepEqual(I.teams(r,p,createCombatSpace(d,r,d.geoKey),'attack Pilgrim').hostiles,[]);
+  assert.deepEqual(I.teams(r,p,createCombatSpace(d,r,d.geoKey),'attack Pilgrim').hostiles.map(a=>a.name),['Pilgrim']);
+  assert.equal(p.actors.Pilgrim.allegiance,'Hostile');
+  assert.equal(p.actors.Mason.allegiance,'Neutral');
 });
 test('dead and recruited encounters stay exhausted across JSON persistence and placement', () => {
   const p=I.createPopulation('1,0,0',[descriptor('Guard'),descriptor('Pilgrim','Friendly')]);
@@ -326,7 +328,7 @@ test('pausing target selection stops its deadline and ignores responses until re
 
 const source=fs.readFileSync(require('node:path').join(__dirname,'../retort/retortWithUserInput.js'),'utf8').replace(/\r\n/g,'\n');
 for(const local of [true,false])test(`ordinary monster dialogue uses ${local?'one local':'no distant'} attack-decision request, not a request per room inhabitant`,async()=>{
-  const start=source.indexOf('// Handle Monsters in Room'),end=source.indexOf('let truncatedResponse',start);
+  const start=source.indexOf('// Handle Monsters in Room'),end=source.indexOf('let response = "";',start);
   let block=source.slice(start,end);block=block.slice(0,block.lastIndexOf('\n}'));
   const requests=[],prompts=[],names=Array.from({length:20},(_,i)=>`Guard ${i}`);
   const context={monstersInRoom:'A populated room.',roomName:'Chapel',roomDescription:'A great vaulted nave.',

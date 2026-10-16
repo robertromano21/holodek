@@ -15,8 +15,8 @@
     const out = {};
     for (const [key, url] of Object.entries(root.roomImages || {})) {
       if (!url || url.startsWith('data:image/')) { out[key] = url; continue; }
-      // Illustrations have no procedural recipe. Keep their bytes inside the
-      // checkpoint rather than relying on an expiring image-service URL.
+      // Preserve legacy image-service illustrations too. New Grave Master art
+      // has a portable component recipe in each room's illustration field.
       const response = await root.fetch(url);
       if (!response.ok) throw Error('Cannot preserve room illustration: ' + key);
       const blob = await response.blob();

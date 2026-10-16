@@ -7,7 +7,7 @@ function fixture() {
     postMessage(job) { jobs.push(job); queueMicrotask(() => {
       const result = job.type === 'track' ? { frames: [[150, [], []]], noiseFrames: [{ env: [], rms: 0.1, high: 1 }], phones: [], ms: { analyse: 1 } } :
         job.type === 'render' ? { pcm: new Int16Array([Math.round(job.P.f0), job.noiseFrames ? 200 : 100]), sr: 44100,
-          articulation: { mode: job.noiseFrames ? 'detail' : 'legacy' }, ms: { render: 1 } } : {};
+          articulation: { mode: job.noiseFrames ? 'detail' : 'legacy' }, ms: { render: 1 } } : job.type==='score'?{score:new Uint8Array([1,2,3]),dur:1,ms:{compile:1}}:{};
       this.emit('message', { id: job.id, ok: true, ...result });
     }); }
   }
@@ -33,6 +33,16 @@ test('POST speech binds the submitted identity to the first render and emits a v
   assert.equal(render.P.name, 'Vessa Reedwake'); assert.equal(render.P.f0, 211); assert.equal(render.P.fs, 1.16);
   assert.ok(render.noiseFrames); assert.equal(render.audio, null); assert.equal(render.digi, null);
   assert.equal(f.api.profileOf('  VESSA   REEDWAKE ').fs, 1.16);
+});
+
+test('Dantuea uses the female analysis guide even if a stale browser submits her old low dragon voice', async () => {
+  const f = fixture();
+  const result = await f.call('POST', '/voice/line.sidvoice', { speaker: 'Dantuea (Darkdrake)', text: 'I remember your exile.',
+    chip: '10582', clock: '2x', profile: { f0: 82, fs: .75, kind: 'beast', accent: 'shade' } });
+  assert.equal(result.code, 200);
+  assert.equal(f.jobs.find(j => j.type === 'track').voice, 'lj');
+  const rendered = f.jobs.find(j => j.type === 'score');
+  assert.equal(rendered.P.f0, 195); assert.equal(rendered.P.fs, 1.12); assert.equal(rendered.P.kind, 'regal');
 });
 test('legacy/detail renders reuse one analysis take but never share the rendered cache', async () => {
   const f = fixture(), q = { speaker: 'Test', text: 'Welcome.', chip: '10582', clock: '2x' };
@@ -70,4 +80,46 @@ test('audio-panel articulation preference also controls prefetch and legacy GET 
   const r = await f.call('GET', '/voice/line.wav', { speaker: 'Test', text: 'Welcome.', clock: '2x' });
   assert.equal(r.headers['X-Voice-Articulation'], 'legacy');
   const status = await f.call('GET', '/voice/status', {}); assert.equal(status.data.detail, false);
+});
+
+test('soft defaults, explicit styles and caches are independent of character identity and analysis',async()=>{
+  const f=fixture(),q={speaker:'Vessa Reedwake',text:'Welcome.',clock:'2x',chip:'10582',profile:{f0:211,fs:1.16}};
+  const a=await f.call('POST','/voice/line.wav',q);
+  assert.equal(a.headers['X-Voice-Timbre'],'soft');
+  await f.call('POST','/voice/line.wav',{...q,timbre:'original'});
+  await f.call('POST','/voice/line.wav',{...q,timbre:'continuous'});
+  await f.call('POST','/voice/line.wav',q);
+  const jobs=f.jobs.filter(j=>j.type==='render');
+  assert.equal(jobs.length,3);assert.equal(f.jobs.filter(j=>j.type==='track').length,1);
+  assert.deepEqual(jobs.map(j=>j.timbre),['soft','original','continuous']);
+  for(const j of jobs){assert.equal(j.P.f0,211);assert.equal(j.P.fs,1.16);assert.equal(j.digi,null);}
+});
+
+test('8580 ignores 10582 styles without discarding the saved preference',async()=>{
+  const f=fixture();await f.call('POST','/voice/chip',{chip:'8580',timbre:'soft'});
+  const r=await f.call('POST','/voice/line.wav',{speaker:'Test',text:'Welcome.'});
+  assert.equal(r.headers['X-Voice-Timbre'],'original');
+  const state=await f.call('GET','/voice/chip',{});
+  assert.equal(state.data.timbre,'soft');assert.equal(state.data.effectiveTimbre,'original');
+  await f.call('POST','/voice/chip',{chip:'10582'});
+  const changed=await f.call('POST','/voice/line.wav',{speaker:'Test',text:'Welcome.'});
+  assert.equal(changed.headers['X-Voice-Timbre'],'soft');
+});
+
+test('overlapping requests keep their selected timbre; prefetch uses the selected default',async()=>{
+  const f=fixture(),q={speaker:'Test',text:'Welcome.',chip:'10582'};
+  const results=await Promise.all(['soft','original'].map(timbre=>f.call('POST','/voice/line.wav',{...q,timbre})));
+  assert.deepEqual(results.map(r=>r.headers['X-Voice-Timbre']),['soft','original']);
+  await f.call('POST','/voice/chip',{timbre:'continuous'});
+  f.api.prefetch([{speaker:'Test',line:'Welcome.'}]);await f.api.scoreFor('Test','Welcome.');
+  assert.equal(f.jobs.find(j=>j.type==='score').timbre,'continuous');
+});
+
+test('unsupported voice styles fail visibly without changing settings',async()=>{
+  const f=fixture();
+  const invalid=await f.call('POST','/voice/chip',{chip:'8580',timbre:'something else'});
+  assert.equal(invalid.code,400);
+  const line=await f.call('POST','/voice/line.sidvoice',{speaker:'Test',text:'Hello.',timbre:'unknown'});
+  assert.equal(line.code,400);assert.equal(f.jobs.length,0);
+  const state=await f.call('GET','/voice/chip',{});assert.equal(state.data.chip,'10582');assert.equal(state.data.timbre,'soft');
 });

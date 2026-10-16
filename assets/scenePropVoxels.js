@@ -119,6 +119,7 @@
   architecture.statue = { drawer:'statue',material:'marble',heightRatio:1,baseWidth:.85 };
   for(const shape of sculptures.altarTypes)architecture[shape]={drawer:'altar',material:'stone',heightRatio:shape==='canopied_altar'||shape==='reredos_altar'?1:.6,baseWidth:.95};
   architecture.candelabra={drawer:'candelabra',material:'metal',heightRatio:.65,baseWidth:.65};
+  architecture.portal_arch = { drawer: 'archway', material: 'crystal', heightRatio: 1, baseWidth: 1 };
   for (const shape of ['slider_0','slider_1','slider_2','weight_0','weight_1','weight_2','chime_0','chime_1',
     ...['beacon','iris','statue','fountain','gate','mosaic','altar'].flatMap(s=>[s+'_open',s+'_closed'])])
     architecture['puzzle_'+shape] = { drawer:'altar',material:'stone',heightRatio:.4,baseWidth:.7 };
@@ -430,6 +431,12 @@
         branch(start, end, 0.018);
         if (shape !== 'ash_reeds') branch(end.map((v, k) => (v + start[k]) / 2),
           [Math.max(0.04, end[0] - 0.09), Math.min(0.96, end[1] + 0.1), end[2] + 0.08], 0.012);
+      }
+    } else if (shape === 'portal_arch') {
+      box(.02, .4, 0, .16, .6, .72); box(.84, .4, 0, .98, .6, .72);
+      for (let i = 0; i < 16; i++) {
+        const angle = i * Math.PI / 15, x = .5 + Math.cos(angle) * .41, z = .7 + Math.sin(angle) * .24;
+        box(x - .065, .38, z - .055, x + .065, .62, z + .055);
       }
     } else if (shape === 'exit_marker') {
       box(0.04, 0.04, 0, 0.18, 0.96, 0.6); box(0.82, 0.04, 0, 0.96, 0.96, 0.6);
@@ -1139,6 +1146,7 @@
       hex = palettes[shape][grain ? 1 : 0];
       if (z < 0.12 && h > 0.78) hex = '#7a845c';
     } else if (scrubShapes.includes(shape)) hex = shape === 'ash_reeds' ? '#b9a97c' : h > 0.8 ? '#c7b38f' : shape === 'thorn_bush' ? '#79655b' : '#59654c';
+    else if (shape === 'portal_arch') hex = h > .72 ? '#edb3ff' : h > .25 ? '#a548df' : '#63278b';
     else if (shape === 'exit_marker') hex = '#84d5ad';
     if (treeShapes.includes(shape) || shape === 'stump' || shape === 'roots') {
       const foliage = !['dead_tree', 'bone_tree', 'charred_tree', 'stump', 'roots'].includes(shape) &&

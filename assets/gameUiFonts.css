@@ -1,0 +1,120 @@
+@font-face {
+  font-family: "Grave Retro";
+  src: url("/assets/fonts/PressStart2P.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --game-ui-font: "Grave Retro", monospace;
+  --game-ui-text-size: 6px;
+  --game-ui-heading-size: 10px;
+  --game-ui-menu-size: 9px;
+}
+
+body { font-synthesis: none; }
+
+/* UI only: world canvases, sprite art and their drawing coordinates stay unchanged. */
+body,
+body :is(button, input, select, textarea, dialog, [role="dialog"], [role="dialog"] *,
+  [id$="-popup"], [id$="-popup"] *, [id$="-header"],
+  #game-menu, #game-menu *, #party-icon-dock, #party-icon-dock *,
+  #chatbotcontainer, #chatbotcontainer *, #dungeon-action-notice, #dungeon-action-notice *,
+  .popup-container, .popup-container *, .combat-target-controls, .combat-target-controls *,
+  #holodek-audio-panel, #holodek-audio-panel *,
+  #dungeon-compass, #dungeon-compass *, #chatlog-background-content, #chatlog-background-content *,
+  #combat-map-status, #exploration-map-hover) {
+  font-family: var(--game-ui-font) !important;
+}
+
+#phaser-header, #game-log-header, #combat-header, .inventory-header,
+.exploration-map-header {
+  font-size: var(--game-ui-heading-size) !important;
+  line-height: 1.65;
+  gap: 6px;
+}
+
+/* Keep the console and transcript's existing black/white presentation. */
+#phaser-container, #game-log-container {
+  font-size: var(--game-ui-text-size) !important;
+  font-weight: 400;
+  line-height: 1.85;
+  overflow-wrap: anywhere;
+}
+
+#phaser-container :is(p, span, pre, code), #game-log-container :is(p, span, pre, code) {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+#chatlog-background-content {
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+#chatuserinput {
+  font-size: 11px !important;
+  line-height: 1.7;
+}
+
+#game-menu > button, #game-menu select {
+  font-size: var(--game-ui-menu-size) !important;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+}
+
+#game-menu-toggle {
+  font-size: var(--game-ui-menu-size) !important;
+  line-height: 1.5;
+}
+
+:is([id$="-popup"], dialog, [role="dialog"], .popup-container) {
+  line-height: 1.65 !important;
+  overflow-wrap: anywhere;
+}
+
+:is(#combat-ledger, #journal-content, #party-popup-sheet) {
+  font-size: 11px !important;
+}
+
+#combat-ledger h2 {
+  font-size: 15px !important;
+}
+
+#dungeon-compass { font-size: 7px !important; }
+.compass-rose span { font-size: 8px; }
+.compass-readout, .compass-exit-readout { font-size: 6px; line-height: 1.8; }
+.compass-exit-pin { font-size: 6px !important; }
+.compass-exit-select { font-size: 6px !important; line-height: 1.8; }
+#holodek-audio-panel { font-size: var(--game-ui-menu-size) !important; }
+
+#party-icon-dock :is(.party-icon-name, .party-icon-hp) {
+  font-size: 6px;
+  line-height: 1.7;
+  font-weight: 400;
+  word-break: normal;
+}
+
+#dungeon-action-notice { font-size: 9px !important; line-height: 1.8 !important; z-index: 12030 !important; }
+#dungeon-action-notice strong { font-size: 10px !important; }
+#dungeon-action-notice small { font-size: 7px !important; }
+#dungeon-action-notice .dungeon-message-close { font-size: 10px !important; }
+
+html[data-console-font="classic"] body :is(#phaser-container, #game-log-container),
+html[data-console-font="classic"] body :is(#phaser-container, #game-log-container) * {
+  font-family: monospace !important;
+}
+html[data-console-font="classic"] :is(#phaser-container, #game-log-container) {
+  font-size: 8px !important;
+  line-height: 1.45;
+}
+
+/* Keep the approved, compact dice arithmetic and lower-left combat feed. */
+#party-icon-dock :is(.party-roll-history, .party-roll-status, .party-d20),
+#party-icon-dock :is(.party-roll-history, .party-roll-status) * {
+  font-family: monospace !important;
+}

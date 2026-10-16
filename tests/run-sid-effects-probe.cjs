@@ -8,8 +8,14 @@ const Archive=require('../retort/sidArchive'),Effects=require('../retort/sidEffe
   const reportScript=`const checks={},errors=[];addEventListener('error',e=>errors.push(e.message));addEventListener('unhandledrejection',e=>errors.push(String(e.reason)));const sleep=ms=>new Promise(r=>setTimeout(r,ms)),wait=async fn=>{const end=Date.now()+15000;while(!fn()){if(Date.now()>end)throw Error('Timed out');await sleep(25);}};`;
   const effects=`<script>var currentDungeon={geoKey:'0,0,0'};window.getDungeonLifeContext=()=>({actors:[],dungeon:currentDungeon});localStorage.setItem('holodekAudioSettings',JSON.stringify({v:4,music:0,sfx:.8,amb:.1,voice:.85,compositionChip:'10582',sidMode:'2x'}));</script><script src="/assets/sidPlayer.js"></script><script>const players=[],original=HolodekSidPlayer.open;HolodekSidPlayer.open=async(...args)=>{const p=await original(...args);players.push(p);return p;};</script><script src="/assets/sfx.js"></script><script>(async()=>{${reportScript}
   try{const sound=HolodekSfx;await wait(()=>sound.songKeyNow());
-    await sound.play('door',{rate:1.2,delay:.1});await wait(()=>players.some(p=>p.effectName==='door'&&p.currentTime>.15));checks.liveEffect=true;
-    const shot=players.find(p=>p.effectName==='door');checks.rate=Math.abs(shot.playbackRate.value-1.2)<.001;
+    document.dispatchEvent(new Event('pointerdown'));await wait(()=>sound.state().effectCache?.entries===20);
+    await sound.play('door',{rate:1.2,delay:.1});checks.cachedSidEffect=sound.effectsLog().some(e=>e.name==='door'&&e.transport==='cached-sid-frames');
+    checks.rate=Math.abs(sound.effectsLog().find(e=>e.name==='door').rate-1.2)<.001;
+    const builds=sound.state().effectCache.builds;
+    for(let i=0;i<6;i++){await sound.play(i%2?'step2':'step1');await sleep(180);}
+    const steps=sound.effectsLog().filter(e=>/^step/.test(e.name));checks.footstepsImmediate=steps.length===6&&steps.every(e=>e.transport==='cached-sid-frames'&&e.waitMs<40);
+    checks.noFootstepRebuilds=sound.state().effectCache.builds===builds;
+    checks.boundedEffectCache=sound.state().effectCache.bytes<=12*1024*1024;
     await sound.setAmbience([{tag:'chant',level:.5},{tag:'drips',level:.5},{tag:'howls',level:.4}],'0,0,0');
     await wait(()=>sound.ambLayersInfo().some(l=>l.keyed==='drone'));checks.keyed=sound.ambLayersInfo().filter(l=>l.keyed).length===3;
     await wait(()=>players.some(p=>p.info.kind==='sid-ambience'&&!p.disposed));const drone=players.filter(p=>p.info.kind==='sid-ambience'&&!p.disposed).at(-1);
@@ -18,7 +24,7 @@ const Archive=require('../retort/sidArchive'),Effects=require('../retort/sidEffe
     const now=drone.context.currentTime;drone.playbackRate.cancelScheduledValues(now);drone.playbackRate.setValueAtTime(1,now);drone.playbackRate.linearRampToValueAtTime(1.3,now+.2);await sleep(300);checks.rateAutomation=Math.abs(drone.playbackRate.value-1.3)<.001;
     await drone.seek(drone.duration-.05);await sleep(300);checks.loop=!drone.disposed&&drone.currentTime<1;
     sound.settings.amb=0;sound.applyVolumes();checks.separateVolume=sound.state().ambGain===0&&Math.abs(sound.state().sfxGain-.8)<.00001;
-    checks.noErrors=errors.length===0;await fetch('/report',{method:'POST',body:JSON.stringify({phase:'effects',pass:Object.values(checks).every(Boolean),checks,errors})});
+    checks.noErrors=errors.length===0;await fetch('/report',{method:'POST',body:JSON.stringify({phase:'effects',pass:Object.values(checks).every(Boolean),checks,footstepWaitMs:steps.map(e=>e.waitMs),errors})});
   }catch(error){await fetch('/report',{method:'POST',body:JSON.stringify({phase:'effects',pass:false,checks,errors,error:error.stack})});}})();</script>`;
   const audition=page({text:'Register test.',characters:[{name:'Mortacia',guide:'lj',profile:{f0:205,fs:1},variants:{detail:{file:'comparison.wav',liveFile:'probe.sidvoice'}}}]});
   const auditionTest=`<script>(async()=>{${reportScript}const players=[],open=HolodekSidPlayer.open;HolodekSidPlayer.open=async(...a)=>{const p=await open(...a);players.push(p);return p;};try{

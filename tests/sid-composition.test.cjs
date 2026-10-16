@@ -11,6 +11,19 @@ const Composition = require('../retort/sidComposition');
 const Composer = require('../retort/roomMusicComposer');
 const { waveStats, assemblyStats } = require('../tools/analyze-room-music.cjs');
 const spec = Theory.planPromptSpec();
+test('portal and planar locations retain their own setting and require a multi-movement SID suite', () => {
+  const state = { getRoomNameDatabase: () => JSON.stringify({ '701,800,920': { name: 'The Violet Interval',
+    classification: { indoor: false, biome: 'wasteland' }, planarRealm: { name: 'Auralith', nature: 'A silent crystalline orchard.',
+      population: 'Independent crystal keepers.', factions: [{ name: 'The Facet Assembly', relation: 'unaware' }], gods: [] },
+    exits: { portal: { kind: 'portal', targetCoordinates: '0,0,1' } } } }) };
+  const context = Composer.contextFor(state, '701,800,920', []);
+  assert.equal(context.plane.name, 'Auralith'); assert.equal(context.plane.factions[0].relation, 'unaware');
+  assert.equal(context.portal.kind, 'purple-arch');
+  assert.ok(!Composition.suiteChoices(context).includes('single_theme'));
+  assert.ok(Composition.suiteChoices(context).every(form => spec.suiteForms[form].length > 0));
+  assert.ok(Composition.suiteChoices({ portal: { kind: 'purple-arch' } }).every(form => spec.suiteForms[form].length > 0));
+  assert.ok(Composition.suiteChoices({}).includes('single_theme'));
+});
 const loggedPlan = require('./fixtures/sid-leaving-threshold.json');
 
 function plan(patch = {}) {
@@ -35,6 +48,67 @@ const fakeRetort = replies => {
   return { prompts, requests, system: (...args) => prompts.push(args.join('')), user: (...args) => prompts.push(args.join('')),
     assistant: { generation: async options => { requests.push(options); return { content: replies.shift() }; } } };
 };
+
+test('failed room music is retryable after cooldown without retrying every turn or leaking across runs', () => {
+  let time = 1000;
+  const gate = Composer.createRetryGate({ now: () => time });
+  assert.equal(gate.canAttempt('run-a', '0,0,0'), true);
+  gate.failed('run-a', '0,0,0');
+  assert.equal(gate.canAttempt('run-a', '0,0,0'), false);
+  assert.equal(gate.canAttempt('run-a', '1,0,0'), true);
+  assert.equal(gate.canAttempt('run-b', '0,0,0'), true);
+  time += 29999;
+  assert.equal(gate.canAttempt('run-a', '0,0,0'), false);
+  time++;
+  assert.equal(gate.canAttempt('run-a', '0,0,0'), true);
+  gate.failed('run-a', '0,0,0'); gate.succeeded('run-a', '0,0,0');
+  assert.equal(gate.canAttempt('run-a', '0,0,0'), true);
+});
+
+test('actual room music trigger recovers a missing same-room score and publishes playback, not just ambience', async () => {
+  const source=fs.readFileSync(path.join(__dirname,'../retort/retortWithUserInput.js'),'utf8');
+  const start=source.indexOf('    let musicArrangement = null, musicPlayback = null;');
+  const code=source.slice(start,source.indexOf('    // Parse and initialize roomNameDatabase',start));
+  let time=1000,cached=null,attempts=0;
+  const messages=[],retryGate=Composer.createRetryGate({now:()=>time});
+  const context={isNewRoom:false,coords:{x:0,y:0,z:0},geoKey:'0,0,0',roomDescription:'A quiet portico.',monstersInRoom:[],
+    sharedState:{getRoomMusic:()=>cached,getDungeonRunId:()=>'run-a'},RoomMusicComposer:{retryGate},
+    $:{run:fn=>fn({})},coordsKey:()=> '0,0,0',console:{log(){},error(){}},broadcast:event=>messages.push(event),
+    getOrGenerateRoomMusic:async()=>{
+      attempts++;if(attempts===1)throw Error('Invalid generated rhythm');
+      cached={ambience:[{tag:'wind',level:.1}]};
+      return {musicJson:cached,playback:{sid:'/room.sid',renderer:'sid'}};
+    }};
+  const run=vm.runInNewContext('(async()=>{'+code+'})',context);
+  await run();assert.equal(attempts,1);
+  await run();assert.equal(attempts,1);
+  time+=30000;
+  await run();assert.equal(attempts,2);
+  assert.equal(messages.at(-1).sid,'/room.sid');assert.equal(messages.at(-1).isNew,true);
+  await run();assert.equal(attempts,2,'an existing score must not be composed again');
+});
+
+test('actual startup rhythm failures report every bad cell and valid same-length choices without mutating music', async () => {
+  const bad = plan({ motifRhythm:[8,8,4,8,8,4,4], motifContour:[0,1,2,1,3,2,0],
+    answerRhythm:[4,8,8,4,8,8,4], contrastRhythm:[8,4,8,8,4,8,4] });
+  const before=JSON.stringify(bad);
+  let message='';try{Composition.validate(bad);}catch(error){message=error.message;}
+  assert.equal(JSON.stringify(bad),before);
+  for(const field of ['motifRhythm','answerRhythm','contrastRhythm'])assert.ok(message.includes(field));
+  assert.match(message,/totals 20 units/);
+  assert.ok(message.length<1600);
+  const examples=[...message.matchAll(/Valid 7-event choices: (\[[\d,]+\]) or (\[[\d,]+\])/g)];
+  assert.equal(examples.length,3);
+  for(const match of examples)for(const text of match.slice(1)){
+    const cell=JSON.parse(text);assert.equal(cell.length,7);assert.equal(cell.reduce((n,d)=>n+16/d,0),16);
+    assert.ok(new Set(cell).size>=2);
+  }
+  const $=fakeRetort([JSON.stringify(bad),JSON.stringify(plan())]);
+  const accepted=await Composition.generate($,{roomKey:'0,0,0',runId:'rhythm-recovery'});
+  assert.equal(accepted.composition.attempt,2);
+  assert.ok($.prompts.some(prompt=>prompt.includes('totals 20 units')&&prompt.includes('answerRhythm')&&prompt.includes('contrastRhythm')));
+  assert.deepEqual(accepted.composition.acceptedPlan,plan());
+});
 
 test('development accepts only executable enums and derives answers without interpreting rationale', () => {
   for (const operation of Composition.TRANSFORMS) {
@@ -183,7 +257,7 @@ test('recent room context is bounded, detached, excludes the current room and re
 
 test('legacy arranger output remains byte-identical to the committed reference', () => {
   const original=execFileSync('git',['show','HEAD:retort/sidMusicTheory.js'],{encoding:'utf8',maxBuffer:1024*1024});
-  const sandbox={module:{exports:{}},console}; vm.runInNewContext(original,sandbox);
+  const sandbox={module:{exports:{}},console,require:require('node:module').createRequire(require.resolve('../retort/sidMusicTheory'))}; vm.runInNewContext(original,sandbox);
   for (const text of ['Mortacia in the ruined temple','a merry market','a crystal cavern']) for(let i=0;i<3;i++)
     assert.equal(JSON.stringify(Theory.arrangeSuite({},text,'legacy'+i)),JSON.stringify(sandbox.module.exports.arrangeSuite({},text,'legacy'+i)));
 });

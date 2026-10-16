@@ -42,7 +42,17 @@ function domeSupports(zone) {
     [diagonal, -diagonal], [-diagonal, diagonal], [diagonal, diagonal]] };
 }
 
-function shrineSites(dungeon, nav, connected, count, footprint, occupied, kind = 'shrine') {
+function porticoSupports(zone, start) {
+  if (zone.width < 4 || zone.height < 4) return [];
+  const points = new Map(), add = (x, y) => points.set(`${x},${y}`, { x, y });
+  for (const x of [zone.x, zone.x + zone.width - 1]) for (let i = 0; i < 4; i++)
+    add(x, zone.y + Math.round(i * (zone.height - 1) / 3));
+  const back = start.y >= zone.y + zone.height / 2 ? zone.y : zone.y + zone.height - 1;
+  for (let i = 0; i < 4; i++) add(zone.x + Math.round(i * (zone.width - 1) / 3), back);
+  return [...points.values()];
+}
+
+function shrineSites(dungeon, nav, connected, count, footprint, occupied, kind = 'shrine', classicalPortico = false) {
   const candidates = [];
   if (footprint) {
     for (let y = footprint.y + 3; y <= footprint.y + footprint.height - 7; y++) {
@@ -60,7 +70,7 @@ function shrineSites(dungeon, nav, connected, count, footprint, occupied, kind =
   for (const p of candidates) p.rank = Math.hypot(p.x + 2 - dungeon.start.x, p.y + 2 - dungeon.start.y) + (rnd ? rnd() * 12 : 0);
   candidates.sort((a, b) => a.rank - b.rank);
   const sites = [];
-  const sizes = kind === 'rotunda' ? footprint ? [[7, 7]] : [[9, 9], [7, 7]] : [[4, 5], [4, 4], [3, 4]];
+  const sizes = kind === 'rotunda' ? footprint ? [[7, 7]] : [[9, 9], [7, 7]] : [[5, 7], [4, 7], [4, 5], [4, 4], [3, 4]];
   for (const { x, y } of candidates) for (const [width, height] of sizes) {
     if (x < 1 || y < 1 || x + width >= nav.width || y + height >= nav.height ||
         Math.hypot(x + width / 2 - dungeon.start.x, y + height / 2 - dungeon.start.y) < 6 ||
@@ -86,6 +96,10 @@ function shrineSites(dungeon, nav, connected, count, footprint, occupied, kind =
     }
     if (!valid || Math.max(...floors) - Math.min(...floors) > 0.5) continue;
     const site = { role: kind, x, y, width, height, compact: true };
+    if (kind === 'shrine' && classicalPortico) {
+      const supports = porticoSupports(site, dungeon.start);
+      if (supports.length !== 10 || supports.some(p => dungeon.cells[`${p.x},${p.y}`].navigationReserved)) continue;
+    }
     if (kind === 'rotunda') {
       const { cx, cy, points } = domeSupports(site);
       if (!connected.seen[cy * nav.width + cx] || walkable < width * height * 0.55) continue;
@@ -199,6 +213,7 @@ function applySceneRoofs(dungeon, spec = {}) {
   const temple = (architecture?.family || chooseArchitecture(spec)?.family) === 'temple';
   const nestedShrine = /\bshrine|\bportico|\bpediment/i.test(text);
   const entrance = /\btemple\b.*\bentrance\b/i.test(spec.source?.roomName || '');
+  const classicalPortico = idiom === 'classical' || entrance || /pediment|classical|roman|doric|ionic|corinthian/i.test(text);
   const ruinText = `${text} ${spec.source?.puzzle || ''}`;
   const biome = spec.biome || dungeon.classification?.biome || '';
   const outdoorRuins = outdoor && (/ruin|shrine|temple|altar|tomb|masonry/i.test(ruinText) ||
@@ -215,7 +230,7 @@ function applySceneRoofs(dungeon, spec = {}) {
   else if (requestedRotundas && !existingRotunda) rejected.push({ role: 'rotunda', reason: 'no-safe-connected-site', requested: 1 });
   const shrineCount = outdoor && !temple && !nestedShrine ? requestedShrines - rotundas.length : requestedShrines;
   const remainingShrines = Math.max(0, shrineCount - zones.filter(z => z.role === 'shrine').length);
-  const sites = remainingShrines ? shrineSites(dungeon, navigation, connected, remainingShrines, footprint, zones) : [];
+  const sites = remainingShrines ? shrineSites(dungeon, navigation, connected, remainingShrines, footprint, zones, 'shrine', classicalPortico) : [];
   if (explicitlyRoofless && entrance) for (const site of sites) site.openPortico = true;
   // A roofless middle cluster makes outdoor ruins less like repeated intact temples.
   if (outdoor && sites.length > 1) sites[1].openPortico = true;
@@ -230,7 +245,7 @@ function applySceneRoofs(dungeon, spec = {}) {
     if (zoneIndex === zones.length) {
       if (!porticoRetried && shrineCount && !bays.some(b => b.role === 'shrine')) {
         porticoRetried = true;
-        const retries = shrineSites(dungeon, navigation, connected, 1, footprint, bays);
+        const retries = shrineSites(dungeon, navigation, connected, 1, footprint, bays, 'shrine', classicalPortico);
         if (explicitlyRoofless && entrance) for (const site of retries) site.openPortico = true;
         if (retries.length) { zones.push(...retries); zoneIndex--; continue; }
       }
@@ -288,6 +303,9 @@ function applySceneRoofs(dungeon, spec = {}) {
         const { cx, cy, points } = domeSupports(z);
         for (const [dx, dy] of points) support(cx + dx, cy + dy);
       }
+    } else if (z.role === 'shrine' && bayIdiom === 'classical') {
+      // Four per side plus four across the rear share two corners: ten, with an open front.
+      for (const p of porticoSupports(z, dungeon.start)) support(p.x, p.y);
     } else {
       const xs = z.role === 'shrine' ? [z.x, z.x + z.width - 1] : [z.x - 1, z.x + z.width];
       for (let y = z.y; y < z.y + z.height; y += z.compact ? z.height - 1 : 3) for (const x of xs) support(x, y);
@@ -348,7 +366,7 @@ function applySceneRoofs(dungeon, spec = {}) {
       return x === z.x - 1 && uniqueSupports.includes(`${z.x + z.width},${y}`) ||
         y === z.y - 1 && uniqueSupports.includes(`${x},${z.y + z.height}`);
     });
-    const minimumSupports = opposingWalls ? 2 : 4;
+    const minimumSupports = !dome && z.role === 'shrine' && bayIdiom === 'classical' ? 10 : opposingWalls ? 2 : 4;
     if (uniqueSupports.length < minimumSupports || disconnected) {
       rejected.push({ role: z.role, reason: disconnected ? 'would-block-route' : 'insufficient-supports',
         supports: uniqueSupports, x: z.x, y: z.y });
@@ -525,4 +543,4 @@ function applySceneRoofs(dungeon, spec = {}) {
       openZones: coveragePlan.open, limitReached: coveragePlan.limitReached || false } : null });
 }
 
-module.exports = { roofStyle, applySceneRoofs, roofProfile, architecturalStyle, columnOrder };
+module.exports = { roofStyle, applySceneRoofs, roofProfile, architecturalStyle, columnOrder, porticoSupports };

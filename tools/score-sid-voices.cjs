@@ -8,8 +8,16 @@ function score(reference,hypothesis,targets=[]){
   for(let j=0;j<=b.length;j++)rows[0][j]=j;
   for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)rows[i][j]=Math.min(rows[i-1][j]+1,rows[i][j-1]+1,rows[i-1][j-1]+(a[i-1]===b[j-1]?0:1));
   const errors=rows[a.length][b.length];
-  return{referenceWords:a.length,errors,wer:a.length?errors/a.length:null,
-    targetHits:Object.fromEntries(targets.map(t=>[t,b.includes(words(t)[0])])),
+  const edits=[];let i=a.length,j=b.length;
+  while(i||j){
+    if(i&&j&&a[i-1]===b[j-1]){i--;j--;continue;}
+    if(i&&j&&rows[i][j]===rows[i-1][j-1]+1){edits.push({type:'substitution',expected:a[--i],heard:b[--j],referenceIndex:i,hypothesisIndex:j});}
+    else if(i&&rows[i][j]===rows[i-1][j]+1){edits.push({type:'deletion',expected:a[--i],heard:null,referenceIndex:i,hypothesisIndex:j});}
+    else{edits.push({type:'insertion',expected:null,heard:b[--j],referenceIndex:i,hypothesisIndex:j});}
+  }
+  edits.reverse();
+  return{referenceWords:a.length,errors,wer:a.length?errors/a.length:null,edits,
+    targetHits:Object.fromEntries(targets.map(t=>{const w=words(t);return[t,w.length>0&&b.some((_,i)=>w.every((s,j)=>b[i+j]===s))];})),
     caveat:'Word matching is not naturalness. Proper names require a separate phonetic/listener assessment.'};
 }
 function evaluate(manifest,transcripts){
@@ -24,7 +32,7 @@ function evaluate(manifest,transcripts){
   for(const r of results){if(!pairedFiles.has(r.file))continue;const g=summary[r.variant]||={files:0,errors:0,words:0};g.files++;g.errors+=r.errors;g.words+=r.referenceWords;}
   for(const g of Object.values(summary))g.wer=g.words?g.errors/g.words:null;
   return{summary,pairedOnly:true,results,missing,complete:missing.length===0,
-    comparison:'Compare only matched character/line triplets. Missing transcripts are not scored as failures or successes.'};
+    comparison:'Compare only complete matched character/line sets. Missing transcripts are not scored as failures or successes.'};
 }
 if(require.main===module){
   try{

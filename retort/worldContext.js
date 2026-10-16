@@ -3,7 +3,7 @@ const { ensureContinuation, coordinates, keyOf, exitEntries, resolveExit, coordi
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = value => typeof value === 'string' ? value : '';
 const Campaign = require('./campaignSetting');
-const normalize = raw => [...new Set(exitEntries(raw).map(entry => entry.direction).filter(Boolean))].slice(0, 10);
+const normalize = raw => [...new Set(exitEntries(raw).map(entry => entry.direction).filter(Boolean))].slice(0, 11);
 
 function cloneMetadata(value, budget = { remaining: 16000, nodes: 1024 }, depth = 0, seen = new Set()) {
   if (budget.remaining < 4 || budget.nodes-- <= 0 || depth > 7) return null;
@@ -102,7 +102,8 @@ function buildRoomWorldContext(database, coords, options = {}) {
     const target = rooms.get(resolved.targetKey) || {}, targetInside = indoor(target);
     return { direction, coordinates: resolved.targetKey, name: text(typeof target === 'string' ? target : target.name).slice(0, 100),
       indoor: targetInside, complexId: text(target.complexId) || null,
-      connection: sourceInside === false && targetInside === true ? 'building-entrance' :
+      connection: direction === 'portal' ? 'planar-portal' : room.villagePlan && target.villageBuilding?.hubKey === key ? 'building-entrance' :
+        sourceInside === false && targetInside === true ? 'building-entrance' :
         sourceInside === false && targetInside === false ? 'outdoor-trail' :
           sourceInside === true && targetInside === false ? 'exterior-gateway' :
             sourceInside === true && targetInside === true ? 'interior-passage' : 'unclassified', status: resolved.status };
@@ -114,6 +115,9 @@ function buildRoomWorldContext(database, coords, options = {}) {
     environmentIntent: room.environmentIntent ? cloneMetadata(room.environmentIntent) : null,
     settlement: Campaign.snapshot(room),
     fortifiedFloor: room.fortifiedFloor ? cloneMetadata(room.fortifiedFloor) : null,
+    village: room.villagePlan ? cloneMetadata(room.villagePlan) : null,
+    villageBuilding: room.villageBuilding ? cloneMetadata(room.villageBuilding) : null,
+    planarRealm: room.planarRealm ? cloneMetadata(room.planarRealm) : null,
     nearbySites: (room.fortifiedApproaches || []).slice(0, 2).map(a => ({ ...a, name: rooms.get(a.entryKey)?.name })),
     factionMemory: require('./factionMemory').project(database),
     regionalSite: room.regionalSite ? { flavor: room.regionalSite.flavor, storyId: room.regionalSite.storyId } : null,

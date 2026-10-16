@@ -667,6 +667,8 @@ function createMortaciaReferenceCanvas(frame=0) {
   const canvas=createCanvas(BASE_SIZE*UPSCALE,BASE_SIZE*UPSCALE),ctx=canvas.getContext('2d');
   const unit=3;
   canvas._combatBodyHeight=24*unit;
+  canvas._retroColorRoles={skin:['#cfb395','#aa947e','#d8bda1','#d5b79c'],
+    hair:['#f4cd8b','#efc780'],hairShadow:['#d3ad69'],metal:['#f4ce8e']};
   const phase=Number.isFinite(frame)?Math.abs(Math.floor(frame))%4:0;
   // Frame 1's horizontal alignment keeps the blade visibly two pixels wide on the map.
   const gripX=-1,gripY=[1,2,1,0][phase];
@@ -1676,6 +1678,7 @@ function createCharacterSpriteSheetCanvas(character, spriteSpec = null, frameCou
     const frame=createMortaciaReferenceCanvas(),count=Math.max(1,Math.min(8,Math.floor(frameCount||4)));
     const sheet=createCanvas(frame.width*count,frame.height),ctx=sheet.getContext('2d');
     sheet._combatBodyHeight=frame._combatBodyHeight;
+    sheet._retroColorRoles=frame._retroColorRoles;
     ctx.imageSmoothingEnabled=false;
     for(let i=0;i<count;i++)ctx.drawImage(i?createMortaciaReferenceCanvas(i):frame,i*frame.width,0);
     return sheet;

@@ -7,6 +7,25 @@ function dungeon(width = 40, height = width) {
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) d.cells[`${x},${y}`] = { tile: 'floor', floorHeight: 0 };
   return d;
 }
+
+test('exploration objects use actual discovered items only, disappear on pickup and stay known offscreen', () => {
+  const d = dungeon(), coin = { name: 'Amber coin', type: 'other', x: 22, y: 20 }, secret = { name: 'Unseen key', x: 30, y: 30 };
+  d.sceneObjects = [coin, secret]; d.objectDiscoveries = { version: 1, names: ['amber coin'] };
+  assert.deepEqual(C.knownObjects(d).map(m => m.label), ['Amber coin']);
+  assert.equal(C.knownObjects(d)[0].item, coin);
+  assert.deepEqual(C.knownObjects(d, [secret]), []);
+  const saved = JSON.parse(JSON.stringify(d)); assert.equal(C.knownObjects(saved)[0].x, 22.5);
+});
+
+test('exploration hover names known icons and mapped terrain but never exposes an unexplored cell', () => {
+  const d = dungeon(), state = C.createAtlas().get(d, 'run');
+  C.reveal(state, d, { x: 20.5, y: 20.5 }, 6);
+  assert.equal(C.hoverLabel(d, state, 21.5, 20.5), 'Floor');
+  d.cells['21,20'].tile = 'wall'; assert.equal(C.hoverLabel(d, state, 21.5, 20.5), 'Wall');
+  d.cells['35,35'].feature = 'secret_altar'; assert.equal(C.hoverLabel(d, state, 35.5, 35.5), 'Unexplored');
+  const markers = [{ label: 'Vessa Reedwake', kind: 'encounter', x: 22.5, y: 20.5 }, { label: 'Amber coin', kind: 'object', x: 23.5, y: 20.5 }];
+  assert.match(C.hoverLabel(d, state, 22.5, 20.5, markers, 1.1), /Vessa Reedwake \(last seen\).*Amber coin/);
+});
 test('map reveals only nearby actual tiles without modifying layout, geometry, objects or exits', async () => {
   const d = dungeon(), before = JSON.stringify(d), atlas = C.createAtlas(), state = atlas.get(d, 'game');
   const changed = atlas.reveal(state, d, { x: 20.5, y: 20.5 }, 6);

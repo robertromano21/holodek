@@ -168,6 +168,7 @@ test('chatbotprocessinput preserves its baseline except travel, camera, lock fee
     .replace(/^  if \(!completedStartResult && \/\^\\s\*\(\?:take\|pick[\s\S]*?^  }\r?\n/m, '')
     .replace(/^  if \(!completedStartResult && userInput && await window\.CommerceUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
     .replace(/^  if \(!completedStartResult && userInput && await window\.SpellUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
+    .replace(/^  if \(!completedStartResult && window\.CombatCharacterUi\?\.confirmAttackCommand\(userInput\) === false\) return false;\r?\n/m, '')
     .replace(/^  if \(window\._gameOver\)[^\r\n]*\r?\n/m, '')
     .replace(/^([ \t]*)displayLocalCommandResult\(chatLog, chatHistory, userInput, msg\);/gm, (_, indent) => [
       'updateChatLog(`<br><b>${msg}</b><br>`);',

@@ -133,3 +133,35 @@ test('local vectors are cached on disk and reused across service instances witho
   const reopened = createService({ cacheDir, embed, logger });
   await reopened.rank('the guardian', rows); assert.equal(encoded, 2);
 });
+
+test('planning recall uses qualified semantic episodes without replacing the response query or treating claims as state', async () => {
+  const state = stateFor(); state.getCurrentQuest = () => 'Investigate the missing guardian.';
+  await C.prepare(state, 'Tarn', { semantic: { async rank() { return new Map([['choice', .8]]); } } });
+  let candidates, query;
+  const result = await C.planningContext(state, 'future campaign continuity', { details: 'a guardian who stayed behind',
+    semantic: { async rank(q, rows) { query = q; candidates = rows; return new Map([['choice', .9]]); } } });
+  assert.match(query, /missing guardian/); assert.ok(!candidates.some(row => row.id === 'private'));
+  assert.ok(result.evidence.some(row => row.id === 'choice')); assert.ok(!JSON.stringify(result).includes('sapphire'));
+  assert.ok(JSON.stringify(result).length <= 3600);
+  assert.match(C.prompt(result), /not proof/);
+  let trace;
+  C.context(state, 'Tarn', state.getUpdatedGameConsole(), null, { trace: t => trace = t });
+  assert.equal(trace.method, 'hybrid-local');
+});
+
+test('planning recall times out to keyword results and rejects a late answer from a previous campaign', async () => {
+  const state = stateFor(), result = await C.planningContext(state, 'Tarn temple', { waitMs: 1,
+    semantic: { rank: () => new Promise(() => {}) } });
+  assert.ok(result.evidence.some(row => /Tarn/.test(row.text)));
+  let resolve;
+  const pending = C.planningContext(state, 'old campaign', { waitMs: 100, semantic: { rank: () => new Promise(r => resolve = r) } });
+  await new Promise(r => setImmediate(r)); state.getDungeonRunId = () => 'different-run'; resolve(new Map([['choice', .9]]));
+  assert.deepEqual((await pending).evidence, []);
+});
+
+test('empty planning history does not start or queue a semantic model job', async () => {
+  const state = stateFor(); state.getCampaignMemory = () => ({ runId: state.getDungeonRunId(), records: [] });
+  let calls = 0;
+  const result = await C.planningContext(state, 'new campaign', { semantic: { async rank() { calls++; return new Map(); } } });
+  assert.equal(calls, 0); assert.deepEqual(result.evidence, []);
+});

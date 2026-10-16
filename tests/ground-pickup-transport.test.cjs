@@ -27,7 +27,7 @@ async function fixture(t) {
   const context = { app, sharedState: state, Economy, SpellSystem: require('../retort/spellSystem'), populationService: { save() {} }, inputTaskInFlight: false,
     actionDice: { active: false }, roomDatabaseReceiver: createRoomDatabaseReceiver(), require,
     prepareQuestScene(req) { return req.body.runId === state.getDungeonRunId() && req.body.geoKey === '0,0,0' ? {} : { status: 409, error: 'Stale room.' }; },
-    broadcast: event => events.push(event), console: { info() {}, warn() {}, log() {} }, setImmediate: cb => cb(), prerenderRoomSong() {} };
+    broadcast: event => events.push(event), console: { info() {}, warn() {}, log() {} }, setImmediate: cb => cb(), prepareRoomSong() {} };
   vm.runInNewContext(source.slice(source.indexOf('function economyStateEvent('), source.indexOf("app.post('/spells/view'")), context);
   vm.runInNewContext(source.slice(source.indexOf("app.post('/economy/view'"), source.indexOf("app.post('/room-population/visit'")), context);
   const start = source.indexOf("app.post('/updateState7'");

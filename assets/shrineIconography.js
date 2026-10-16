@@ -11,7 +11,7 @@
     Arithus: { form:'dragon', symbol:'dagger', color:'#a34a3e', domain:'Kinslayer; vengeance, kinstrife; fists gripping a downward dagger' },
     Atricles: { form:'dragon', symbol:'eye', color:'#a4aa9a', domain:'Ringdrake; justice and balance; pale banded-agate dragon, long neck and curled tail, broad membrane wings, two hind legs and golden rings' },
     Chaoticum: { form:'dragon', symbol:'flame', color:'#e59946', domain:'chaos and destruction; fireball through stars' },
-    Dantuea: { form:'dragon', symbol:'serpent', color:'#594d66', domain:'Darkdrake; corruption and undeath; skeletal dragon with a narrow horned skull, exposed ribs and spine, bony wing spars and two hind legs' },
+    Dantuea: { form:'dragon', sex:'Female', voiceProfile:{kind:'regal',f0:195,fs:1.12,accent:'regal',breath:.08,rasp:.04}, symbol:'serpent', color:'#594d66', domain:'Darkdrake; corruption and undeath; skeletal dragon with a narrow horned skull, exposed ribs and spine, bony wing spars and two hind legs' },
     Dyanetzia: { form:'dragon', symbol:'leaf', color:'#b29b52', domain:'Earthdragon, Dyana; topaz/clay dragon curled head to tail; nature and renewal' },
     Eredine: { form:'dragon', symbol:'eye', color:'#b4bfd4', domain:'magic and runes; dragon wings on an opal/crystal eye' },
     Krystalynn: { form:'dragon', symbol:'eye', color:'#a75d65', domain:'nightmares and illusions; dragon head with cracked bloodstone eye' },

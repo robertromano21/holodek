@@ -86,7 +86,7 @@ class Probe extends Phaser.Scene{
         const actor={name:spec.name,type,sprite:{spec,dataUrl:'data:existing-art'}};
         const key=ensureCombatTextureForCharacter(this,actor);originalKey??=key;
         if(originalKey!==key)throw Error('Role-dependent texture for '+actor.name);
-        const tokenSize=combatMapActorSize(actor,25),expected=25*1.35*spec.stature.scale;
+        const tokenSize=combatMapActorSize(actor,25),expected=Math.max(32,25*(/\\b(human|elf|elves|half-elf)\\b/i.test(spec.race||'')?1.4:1.35)*spec.stature.scale);
         const measured=createCharacterSpriteCanvas(actor,spec)._combatBodyHeight;
         const nominal=createTraitSpriteCanvas(spec,0,{measureBody:true})._combatBodyHeight;
         for(const facing of['left','right'])for(let walkFrame=0;walkFrame<4;walkFrame++){

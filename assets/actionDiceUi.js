@@ -8,6 +8,17 @@
   const animations = new Map();
   const seenRolls = new Set();
   const ROLL_ANIMATION_MS = 1000;
+  function rollDetail(r) {
+    const modifier = r.modifier || 0;
+    return `d${r.sides || 20} ${r.natural} ${modifier < 0 ? '-' : '+'} ${Math.abs(modifier)} = ${r.total}`;
+  }
+  function condition(entry) {
+    const actor = entry.source || (window.combatCharacters || []).find(a => String(a.name || a.Name).toLowerCase() === String(entry.label).toLowerCase());
+    const value = actor?.state ?? actor?.State;
+    const down = ['Unconscious', 'Dying', 'Dead'].find(s => s.toLowerCase() === String(value).toLowerCase());
+    const hp = actor?.hp ?? actor?.HP ?? parseFloat(entry.hp);
+    return down || (Number.isFinite(hp) && hp <= 0 ? 'Down' : '');
+  }
 
   function animateRoll(request) {
     const key = request.actor.toLowerCase();
@@ -135,15 +146,25 @@
 
   window.renderPartyDice = function(dock, entries) {
     renderTargetPrompt(dock);
+    window.CombatTurnUi?.renderDockControls?.(dock);
     entries.forEach((entry, index) => {
       const slot = dock.querySelector(`[data-party-slot="${index}"]`);
       if (!slot) return;
       const name = String(entry.label || '').toLowerCase();
+      const down = condition(entry);
       const pending = state.pending && state.pending.actor.toLowerCase() === name ? state.pending : null;
-      slot.classList?.toggle('current-turn', !!pending || targetPrompt?.combatant.toLowerCase() === name);
+      slot.classList?.toggle('current-turn', !down && (!!pending || state.active?.turn?.combatant?.toLowerCase() === name || targetPrompt?.combatant.toLowerCase() === name));
       const result = state.results.filter(r => r.actor.toLowerCase() === name).at(-1);
       const animation = animations.get(name);
       const rolling = animation && Date.now() - animation.startedAt < ROLL_ANIMATION_MS;
+      if (down && !(rolling && result?.id === animation.id && result.label === 'Survival Save')) {
+        const wrap = document.createElement('div'); wrap.className = 'party-dice-wrap';
+        const status = document.createElement('span'); status.className = 'party-roll-history';
+        status.textContent = down + '\nNo initiative or actions'; wrap.appendChild(status);
+        const save = state.results.filter(r => r.actor.toLowerCase() === name && r.label === 'Survival Save').at(-1);
+        if (save) { const history = document.createElement('span'); history.className = 'party-roll-history'; history.textContent = save.label + ': ' + rollDetail(save); wrap.appendChild(history); }
+        slot.appendChild(wrap); return;
+      }
       const die = document.createElement('button');
       die.className = 'party-d20' + (pending ? ' awaiting-roll' : '') + (rolling ? ' rolling' : '');
       die.type = 'button';
@@ -155,7 +176,7 @@
       die.textContent = pending ? (submitting === pending.id ? '...' : `Roll\n${pending.label.toLowerCase()}`) : result ? String(result.natural) : 'd20';
       if (rolling) die.textContent = String(1 + Math.floor(Math.random() * animation.sides));
       die.title = pending ? `${pending.label}: roll d${pending.sides || 20} for ${pending.target || 'your action'}`
-        : result ? `${result.label}: d${result.sides || 20} ${result.natural} + ${result.modifier} = ${result.total}` : 'No roll yet';
+        : result ? `${result.label}: ${rollDetail(result)}` : 'No roll yet';
       die.setAttribute('aria-label', `${entry.label}: ${die.title}`);
       die.addEventListener('click', submitRoll);
       const wrap = document.createElement('div');
@@ -164,17 +185,20 @@
       const history = document.createElement('span');
       history.className = 'party-roll-history';
       history.textContent = state.results.filter(r => r.actor.toLowerCase() === name && (!rolling || r.id !== animation.id)).slice(-2)
-        .map(r => `${r.label}: ${r.total}`).join('\n');
+        .map(r => `${r.label}: ${rollDetail(r)}`).join('\n');
       wrap.appendChild(history);
       slot.appendChild(wrap);
     });
     const status = document.createElement('div');
     status.className = 'party-roll-status';
     status.setAttribute('role', 'status');
-    const p = state.pending;
+    const p = state.pending, turn = state.active?.turn;
+    if (turn && !p && !turn.movement?.busy) status.className += ' awaiting-action';
     status.textContent = error || (p
       ? `${p.actor}: ${p.label}${p.target ? ` - ${p.target}` : ''}. Roll d${p.sides || 20}${p.modifier ? ` + ${p.modifier}` : ''}. ${p.difficulty === null ? '' : `${p.label === 'Attack' ? 'AC' : 'DC'} ${p.difficulty}. `}Click Roll.`
-      : state.active ? 'Resolving actions...' : '');
+      : turn?.movement?.busy ? `${turn.combatant}: moving...` : turn
+        ? `${turn.combatant}: Your turn. Move/click a target, choose a console name or portrait, or use Attack.`
+        : state.active ? 'Resolving actions...' : '');
     // A recoverable prompt even if a party sheet has not arrived yet.
     if (p && !entries.some(e => String(e.label).toLowerCase() === p.actor.toLowerCase())) {
       const button = document.createElement('button');
@@ -188,9 +212,10 @@
     const enemyRolls = state.results.filter(r => !entries.some(e => String(e.label).toLowerCase() === r.actor.toLowerCase())).slice(-4);
     if (enemyRolls.length) {
       const feed = document.createElement('div');
-      feed.className = 'party-roll-status';
+      feed.className = 'party-roll-status party-enemy-rolls';
+      feed.setAttribute('aria-label', 'Recent enemy rolls');
       feed.textContent = enemyRolls.map(r => `${r.actor}: ${r.label} ${animations.get(r.actor.toLowerCase())?.id === r.id && Date.now() - animations.get(r.actor.toLowerCase()).startedAt < ROLL_ANIMATION_MS
-        ? 'rolling...' : `d${r.sides || 20}=${r.natural}${r.modifier ? ` + ${r.modifier}` : ''}`}`).join(' | ');
+        ? 'rolling...' : rollDetail(r)}`).join('\n');
       dock.appendChild(feed);
     }
   };

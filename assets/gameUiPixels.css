@@ -1,0 +1,61 @@
+/* Pixel chrome only. Never rasterize text, form controls, or a whole window. */
+:is(#phaser-popup, #game-log-popup, #combat-popup, #party-popup, #dungeon-popup,
+  #inventory-popup, #journal-popup, #exploration-map-popup, #game-model-popup,
+  #party-spellbook-popup, #combat-turn-popup, #game-menu, #chatbotcontainer,
+  #dungeon-compass, .popup-container, dialog, #dungeon-action-notice,
+  #holodek-audio-panel > div, #dungeon-map-shortcut, #dungeon-inventory-shortcut,
+  #dungeon-journal-shortcut, #dungeon-spellbook-shortcut) {
+  border-radius: 0 !important;
+  border-image: url("/assets/ui-pixel-frame.svg") 6 / 6px / 2px stretch !important;
+  box-shadow: 3px 3px 0 #0009 !important;
+}
+
+:is(#phaser-header, #game-log-header, #combat-header, .inventory-header,
+  .exploration-map-header) {
+  background: linear-gradient(#505050 0 35%, #3c3c3c 35% 65%, #292929 65%) !important;
+  border-radius: 0 !important;
+}
+
+:is(.popup-button, .game-menu-button, #chatbotbutton, #chatuserinput,
+  .compass-exit-pin, .compass-exit-select, .combat-target-controls,
+  #holodek-audio-panel > button) {
+  border-radius: 0 !important;
+  box-shadow: inset 1px 1px 0 #ffffff38, inset -1px -1px 0 #0008;
+}
+
+.compass-dial {
+  border: 1px solid transparent !important;
+  border-radius: 0 !important;
+  background: url("/assets/ui-compass-dial.svg") center / 100% 100% no-repeat;
+  image-rendering: pixelated;
+}
+
+.compass-pointer {
+  width: 12px !important;
+  height: 22px !important;
+  left: calc(50% - 6px) !important;
+  border: 0 !important;
+  background: #dedbd1;
+  clip-path: polygon(5px 0, 7px 0, 7px 4px, 9px 4px, 9px 12px, 11px 12px,
+    11px 22px, 1px 22px, 1px 12px, 3px 12px, 3px 4px, 5px 4px);
+}
+
+:is(#dungeon-map-shortcut, #dungeon-inventory-shortcut, #dungeon-journal-shortcut,
+  #dungeon-spellbook-shortcut) {
+  overflow: visible;
+}
+
+.ui-pixel-icon-ready > img { opacity: 0; }
+.ui-pixel-icon {
+  position: absolute;
+  inset: 2px;
+  width: calc(100% - 4px);
+  height: calc(100% - 4px);
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+:is(#dungeon-map-shortcut, #dungeon-inventory-shortcut, #dungeon-journal-shortcut,
+  #dungeon-spellbook-shortcut):hover img {
+  transform: none !important;
+}

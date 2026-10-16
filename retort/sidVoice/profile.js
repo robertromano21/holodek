@@ -1,4 +1,5 @@
 'use strict';
+const Pantheon = require('../../assets/pantheonCharacters');
 // A stable identity contract, separate from per-line mood and cadence.
 const VERSION = 2;
 const hash32 = s => { let x = 2166136261; for (const c of String(s)) x = Math.imul(x ^ c.charCodeAt(0), 16777619); return x >>> 0; };
@@ -10,6 +11,7 @@ const bound = (value, fallback, min, max) => {
 const OVERRIDES = { mortacia: { f0: 205, fs: 1.04, alpha: 1, breath: 0.06, rasp: 0, range: 3, rate: 4.6, conf: 0.85,
   warm: 0.22, bright: 1.08, vibAmt: 0.2, vibRate: 5.2, pause: 0.95, pull: 0, accent: 1.6, decl: 1.7 } };
 function normalize(P = {}) {
+  P = { ...P, ...Pantheon.canon(P.name)?.voiceProfile };
   const name = String(P.name || '').trim().replace(/\s+/g, ' ').slice(0, 100);
   const base = { v: VERSION, name, kind: ['humanoid', 'regal', 'undead', 'beast'].includes(P.kind) ? P.kind : 'humanoid',
     f0: bound(P.f0, 130, 60, 320), fs: bound(P.fs, 1, 0.7, 1.35),

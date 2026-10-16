@@ -86,6 +86,59 @@ the score's sample rate. There is no change to installed VICE or the game server
 Audio quality and intelligibility still require listening tests; browser/native
 synthesis is not guaranteed bit-identical. See [speech documentation](../../docs/SID-VOICE-10582.md).
 
+## Potential Fabrication
+
+If it were fabricated, the 10582 is an 8580-compatible SID with a second register page and four additive blocks that only affect the speech path. Music written to the classic 32 registers plays unchanged.
+Base
+
+Three voices, same as the 8580: 24-bit phase accumulator, pulse/saw/triangle/noise, ADSR, hard-restart gate, global filter, 4-bit master volume.
+Register file is 64 bytes instead of 32. Addresses $00–$1F are the classic SID. $20–$3F are the extensions. A model bit selects the 6-bit address mask; on an 8580 the upper page is ignored.
+Clock is the standard ~1 MHz (or 2×/4× for the higher-rate modes already used in the player). Output is the chip’s own sample stream, not a resampled WAV.
+
+Extended registers (per chip)
+
+Range, Block and What it does
+
+$19–$1B	Level	
+Per-voice 8-bit amplitude (LVL).    
+Scales the voice after the waveform, before the mixer.
+
+$1C	Mute	    
+Per-voice hard mute.               
+ Zeros that voice’s contribution without touching the envelope.
+
+$1D–$1E	        
+Fast envelope	                    
+Attack/decay times for a burst envelope that can replace the ADSR on a voice (FENV). Used for stop releases.
+
+$1F	            
+Formant enable / source	
+Enables a 2-pole resonator, picks its excitation (voice-1 wrap as a glottal pulse, and/or noise), and sets a divider.
+
+$20–$23	        
+Formant	Center frequency (16-bit Hz), bandwidth, level. 
+The resonator sits on the noise or the pulse and tracks the short-window spectral peak.
+
+$24–$29	
+Output notch	
+A peaking biquad on the chip’s final sum. Center, width, and depth. Wet/dry ramps in ~1 ms. This is the antiformant path; it never touches the dry music signal.
+
+RangeBlockWhat it does$19–$1BLevelPer-voice 8-bit amplitude (LVL). Scales the voice after the waveform, before the mixer.$1CMutePer-voice hard mute. Zeros that voice’s contribution without touching the envelope.$1D–$1EFast envelopeAttack/decay times for a burst envelope that can replace the ADSR on a voice (FENV). Used for stop releases.$1FFormant enable / sourceEnables a 2-pole resonator, picks its excitation (voice-1 wrap as a glottal pulse, and/or noise), and sets a divider.$20–$23FormantCenter frequency (16-bit Hz), bandwidth, level. The resonator sits on the noise or the pulse and tracks the short-window spectral peak.$24–$29Output notchA peaking biquad on the chip’s final sum. Center, width, and depth. Wet/dry ramps in ~1 ms. This is the antiformant path; it never touches the dry music signal.
+Architecture constraints that matter for silicon
+
+The notch is after the mixer, not inside a voice. It carves the summed spectrum regardless of phase, which is why it was preferred over an inverted resonator.
+The formant voice is additive. It does not replace the classic oscillator; it adds a shaped component. Music that never writes $1F–$23 is bit-identical to an 8580.
+Noise and tone still cannot be mixed on one classic voice. The formant block is the workaround: a separate resonator excited by noise or by the pulse edge.
+A speech line uses a bank of these chips (64 in the current emulator), each handling a slice of the spectrum or a phone. A single 10582 is not a full vocoder; it is one voice-group with the extra blocks. A fabricated part would either be one chip plus an external bank controller, or a multi-core die with N copies of the voice group sharing the notch.
+
+What was deliberately left out
+
+No PCM/digi path. The chip does not play samples.
+No change to the classic waveform set or the filter topology. The extensions are additive registers, not a new oscillator core.
+The multi-resolution analysis (8 ms vs 32 ms) is a driver feature, not a chip feature. The chip only sees the register writes the driver produces.
+
+That is the fabrication target: an 8580 with a 32-byte extension page containing per-voice level and mute, a fast burst envelope, one tracking formant resonator, and one output-path notch, all of which stay silent unless written.
+
 ## License
 
 VICE and the accompanying native model/patch are GPL-2.0-or-later. The baseline

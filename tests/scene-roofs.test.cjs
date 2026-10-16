@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
 const { applySceneArchitecture, makeNavigation, reachable } = require('../retort/sceneArchitecture');
-const { applySceneRoofs, roofProfile, columnOrder, architecturalStyle } = require('../retort/sceneRoofs');
+const { applySceneRoofs, roofProfile, columnOrder, architecturalStyle, porticoSupports } = require('../retort/sceneRoofs');
 const { buildSceneSpec } = require('../retort/sceneSpec');
 const { placeSceneLandmarks } = require('../retort/sceneRoomBuilder');
 const V = require('../assets/scenePropVoxels');
@@ -19,6 +19,66 @@ function room(name, description) {
   assert.equal(applySceneArchitecture(dungeon, spec).status, 'built');
   return { dungeon, spec };
 }
+
+test('pediment porticos have ten pillars with four per side, four across the back and an open front', () => {
+  const zone = { role: 'shrine', x: 4, y: 4, width: 5, height: 7 };
+  for (const start of [{ x: 6, y: 16 }, { x: 6, y: 1 }]) {
+    const points = porticoSupports(zone, start), back = start.y > 7 ? 4 : 10, front = back === 4 ? 10 : 4;
+    assert.equal(points.length, 10, 'Rear corner columns are shared, not duplicated');
+    assert.equal(new Set(points.map(p => `${p.x},${p.y}`)).size, 10);
+    assert.equal(points.filter(p => p.x === 4).length, 4); assert.equal(points.filter(p => p.x === 8).length, 4);
+    assert.equal(points.filter(p => p.y === back).length, 4);
+    assert.equal(points.filter(p => p.y === front).length, 2, 'No extra column blocks the front aisle');
+  }
+  const { dungeon: d, spec } = room('Roman Temple', 'A pedimented Corinthian portico beside an open courtyard.');
+  for (const [key, cell] of Object.entries(d.cells)) {
+    const [x, y] = key.split(',').map(Number);
+    d.cells[key] = { tile: x && y && x < 31 && y < 31 ? 'floor' : 'wall', floorHeight: 0, ceilHeight: 3 };
+  }
+  d.sceneArchitecture.zones = [{ ...zone }]; d.start = { x: 6, y: 16 };
+  const before = reachable(makeNavigation(d), d.start);
+  const roof = applySceneRoofs(d, spec), bay = roof.bays.find(b => b.role === 'shrine' && b.x === zone.x && b.y === zone.y);
+  assert.ok(bay, JSON.stringify(roof.rejected));
+  assert.equal(bay.supports.length, 10);
+  for (const p of porticoSupports(zone, d.start)) {
+    assert.ok(bay.supports.includes(`${p.x},${p.y}`));
+    assert.equal(d.tiles[d.cells[`${p.x},${p.y}`].tile].spriteSpec.voxelShape, 'corinthian_column');
+  }
+  const after = reachable(makeNavigation(d), d.start);
+  for (const [key, cell] of Object.entries(d.cells)) {
+    const [x, y] = key.split(',').map(Number), i = y * 32 + x;
+    if (before.seen[i] && cell.tile === 'floor') assert.ok(after.seen[i], key);
+  }
+});
+
+test('ten-pillar plans fit compact porticos without overlapping columns or filling the front aisle', () => {
+  for (const [width, height] of [[4, 4], [4, 5], [4, 7], [5, 7], [9, 13]]) {
+    const zone = { x: 4, y: 4, width, height };
+    for (const start of [{ x: 6, y: 1 }, { x: 6, y: 24 }]) {
+      const points = porticoSupports(zone, start);
+      assert.equal(new Set(points.map(p => `${p.x},${p.y}`)).size, 10);
+      assert.ok(points.every(p => p.x >= 4 && p.x < 4 + width && p.y >= 4 && p.y < 4 + height));
+      const front = start.y < 4 ? 4 : 4 + height - 1;
+      assert.equal(points.filter(p => p.y === front).length, 2);
+    }
+  }
+  assert.deepEqual(porticoSupports({ x: 4, y: 4, width: 3, height: 4 }, { x: 6, y: 16 }), []);
+});
+
+test('a protected pillar location rejects the whole ten-column portico instead of leaving a partial colonnade', () => {
+  const { d, spec } = outdoorRoom('A classical pedimented portico stands beside the dunes.');
+  const zone = { role: 'shrine', x: 4, y: 4, width: 5, height: 7, compact: true, roofStyle: 'pitched' };
+  d.sceneArchitecture = { status: 'built', zones: [zone] };
+  for (const c of Object.values(d.cells)) c.navigationReserved = true;
+  const points = porticoSupports(zone, d.start);
+  for (const p of points.slice(1)) d.cells[`${p.x},${p.y}`].navigationReserved = false;
+  const before = structuredClone(d.cells);
+  const roof = applySceneRoofs(d, spec);
+  assert.equal(roof.shrines.placed, 0);
+  assert.ok(roof.rejected.some(r => r.role === 'shrine' && r.x === 4 && r.y === 4 && r.reason === 'insufficient-supports'));
+  assert.deepEqual(d.cells, before);
+  assert.equal(d.sceneStructures.length, 0);
+});
 
 for (const [name, description, idiom, style] of [
   ['Roman Temple', 'Inside a Roman temple, Corinthian columns support a coffered ceiling and a pedimented shrine beside an open courtyard.', 'classical', 'coffered'],
@@ -172,6 +232,7 @@ test('outdoor ruins use shared cells, preserve terrain and protected features, a
   assert.equal(roof.shrines.placed, 2, JSON.stringify(roof));
   assert.equal(roof.rotundas.placed, 1);
   assert.equal(roof.bays.length, 3);
+  for (const b of roof.bays.filter(b => b.role === 'shrine')) assert.equal(b.supports.length, 10);
   assert.equal(roof.parts, 17);
   assert.ok(d.sceneStructures.some(p => p.role === 'rotunda-portico'));
   assert.ok(d.sceneStructures.some(p => p.role === 'rotunda-pediment'));
@@ -260,7 +321,7 @@ test('legacy GPU upload retains collision orientation and consumes roofs as ordi
   assert.ok(!uploads.some(a => a[2] === 'RGBA32F'));
   assert.equal(r.hasStructures, true);
   assert.ok(!source.includes('const roofFsSource'));
-  assert.match(source, /voxelInstances\.push\(\{ tileName: part\.tile, mesh, modelPos: p, modelScale: s \}\)/);
+  assert.match(source, /voxelInstances\.push\(\{ tileName: part\.tile, mesh, modelPos: p, modelScale: s,\s*retroSurface:/);
   gl.getParameter = gl.getUniform = gl.readPixels = () => { throw Error('Automatic diagnostics must not query the GPU'); };
   const report = r.getRenderingDiagnostics(d, { gpuReadback: false });
   assert.equal(report.cpuToPackedMismatches, 0);
@@ -290,7 +351,7 @@ test('overhead architecture matches column range, including diagonal and extende
     const instances = [], fetched = [];
     const context = { window:{},dungeon: { sceneStructures: parts }, voxelInstances: instances, playerX, playerY,
       VIS_RADIUS: 10, VOXEL_VIS_RADIUS: 64,
-      renderer: { getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
+      renderer: { _retroSurfaceKind: () => 0, getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
     vm.runInNewContext(`(function() { ${source.slice(start, end)} }).call(renderer)`, context);
     assert.deepEqual(fetched, expected);
     assert.deepEqual(instances.map(i => i.tileName), fetched);
@@ -320,8 +381,8 @@ test('all ground voxel shapes use the original column range, not the short billb
     VOXEL_VIS_RADIUS: 64, TORCH_VIS_RADIUS: 64, VIS_RADIUS: 10,
     playerX: 0, playerY: 0, camX: 0, camY: 0, width: 320, height: 180, horizon: 90, eyeZ: 0.65,
     dirX: 1, dirY: 0, planeX: 0, planeY: 0.66, focalLength: 160,
-    SPRITE_WORLD_HEIGHT: 1, SPRITE_WIDTH_RATIO: 0.6, collectVoxelTorchRectsForWebGPU: false,
-    renderer: { voxelProgram: {}, voxelMeshes: {}, getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
+    SPRITE_WORLD_HEIGHT: 1, SPRITE_WIDTH_RATIO: 0.6, collectVoxelTorchRectsForWebGPU: false, fullbright: false,
+    renderer: { voxelProgram: {}, voxelMeshes: {}, _retroSurfaceKind: () => 0, getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
   vm.runInNewContext(`(function() { ${source.slice(start, end)} }).call(renderer)`, context);
   assert.deepEqual(fetched.sort(), ['custom_altar', 'custom_obelisk', 'custom_tree', 'pillar']);
   assert.equal(instances.length, 4);
@@ -348,10 +409,21 @@ test('legacy shaders retain lighting and clipping apart from explicit height tra
           'if (!inBounds(fMapX, fMapY) || fetchCell(fMapX, fMapY).a >= 0.5) break;')
         .replace('uniform float u_viewShift;\n', '')
         .replace('float horizon = u_resolution.y * (0.5 + u_viewShift);', 'float horizon = u_resolution.y * 0.5;');
+      // Remove only explicitly opt-in Retro branches; keep the Modern shader byte-pinned.
+      program = program.replace(/^uniform float u_(?:fullbright|retroWasteland);\n/gm, '')
+        .replace('  // Retro art carries its own shade bands: no animated lighting or shadow rays.\n  if (u_fullbright > 0.5) return 0.0;\n', '')
+        .replace(/^[ \t]*if \(u_fullbright > 0.5\) (?:col|finalCol) = tex.rgb;\n/gm, '')
+        .replace(/^    if \(u_fullbright > 0.5\) \{[\s\S]*?^    }\n/m, '');
     } else if (name === 'voxelVs') {
       assert.match(program, /- 2.0 \* u_viewShift \* transformY/);
       program = program.replace("        'uniform float u_viewShift;',\n", '')
-        .replace('(2.0 * u_focalLength / u_resolution.y) - 2.0 * u_viewShift * transformY;', '(2.0 * u_focalLength / u_resolution.y);');
+        .replace('(2.0 * u_focalLength / u_resolution.y) - 2.0 * u_viewShift * transformY;', '(2.0 * u_focalLength / u_resolution.y);')
+        .replace("        'uniform float u_retroInk;',\n", '')
+        .replace(/^        '  if \(u_retroInk > 0.5\) \{',[\s\S]*?^        '  }',\n/m, '');
+    } else {
+      program = program.replace(/^uniform float u_retro(?:Surface|Ink);\n/gm, '')
+        .replace('  if (u_retroInk > 0.5) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }\n', '')
+        .replace(/^    vec3 paint = v_color;[\s\S]*?^    outColor = vec4\(paint, 1.0\);/m, '    outColor = vec4(v_color, 1.0);');
     }
     assert.equal(crypto.createHash('sha256').update(program).digest('hex'), expected, name);
   }

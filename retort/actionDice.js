@@ -19,7 +19,9 @@ class ActionDice {
     return {
       type: 'dice_state', epoch: this.epoch, revision: this.revision, paused: this.paused,
       active: this.active && { id: this.active.id, kind: this.active.kind, geoKey: this.active.geoKey,
-        ...(this.active.round ? { round: this.active.round } : {}), ...(this.active.turn ? { turn: this.active.turn } : {}) },
+        ...(this.active.round ? { round: this.active.round } : {}), ...(this.active.turn ? { turn: this.active.turn } : {}),
+        ...(this.active.ledger ? { ledger: { ...this.active.ledger, initiative: this.active.ledger.initiative.map(a => ({ ...a })),
+          entries: this.active.ledger.entries.map(a => ({ ...a })) } } : {}) },
       pending: this.pending?.request || null,
       results: [...this.results.values()]
     };
@@ -28,6 +30,25 @@ class ActionDice {
   publish() {
     this.revision++;
     this.active?.broadcast(this.snapshot());
+  }
+
+  recordCombat(entry) {
+    if (this.active?.kind !== 'combat' || !entry || !this.active.ledger) return false;
+    const ledger = this.active.ledger;
+    const name = value => typeof value === 'string' && value.length > 0 && value.length <= 120;
+    if (entry.kind === 'initiative') {
+      if (!Array.isArray(entry.order) || !entry.order.every(a => a && name(a.name) && Number.isFinite(a.roll))) return false;
+      ledger.round = this.active.round || 1;
+      ledger.initiative = entry.order.map(a => ({ name: a.name, roll: a.roll })).sort((a, b) => b.roll - a.roll);
+    } else {
+      if (entry.kind === 'hit' && (!name(entry.actor) || !name(entry.target) || !Number.isFinite(entry.damage) || entry.damage < 0 || !Number.isFinite(entry.hp))) return false;
+      if (entry.kind === 'miss' && (!name(entry.actor) || !name(entry.target))) return false;
+      if (entry.kind === 'notice' && (typeof entry.text !== 'string' || !entry.text.trim() || entry.text.length > 1200)) return false;
+      if (!['hit', 'miss', 'notice'].includes(entry.kind)) return false;
+      ledger.entries.push({ ...entry, id: `${this.active.id}:${++ledger.sequence}`, round: this.active.round || 1 });
+      if (ledger.entries.length > 60) ledger.entries.shift();
+    }
+    this.publish(); return true;
   }
 
   setPaused(value) {
@@ -56,6 +77,7 @@ class ActionDice {
     if (this.active) throw new Error('Another action is still resolving.');
     this.results.clear();
     this.active = { id: randomUUID(), kind, geoKey, broadcast };
+    if (kind === 'combat') this.active.ledger = { version: 1, round: 0, initiative: [], entries: [], sequence: 0 };
     this.publish();
   }
 

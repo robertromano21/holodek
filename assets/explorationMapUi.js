@@ -5,22 +5,41 @@
   let open = false, range = 96, lastPaint = 0, timer = null;
   let viewCenter = null, drag = null;
   let encounterSelect, encounterSignature = '', selectedEncounter = '';
-  let mapProjection = null;
-  const portraits = new Map();
+  let mapProjection = null, hover;
+  const portraits = new Map(), itemIcons = new Map();
   function encounterMarkers(dungeon) {
     return [...root.DungeonCartography.landmarks(dungeon, current?.state),
+      ...root.DungeonCartography.knownObjects(dungeon, root.getVisibleSceneObjects?.() || dungeon.sceneObjects || []),
       ...root.DungeonCartography.knownEncounters(dungeon, current?.state, root.DungeonLife?.population(), root.getDungeonLifeContext?.()?.actors || [])];
   }
   function encounterPortrait(marker) {
     const actor = root.getDungeonLifeContext?.()?.actors?.find(a => a.name === marker.name);
     const src = actor?.sprite?.dataUrl || root.resolveKnownCharacterSprite?.(marker.name)?.dataUrl;
-    if (!src) return null;
+    if (!src) {
+      if (!actor || !root.createCharacterSpriteCanvas) return null;
+      const key = `procedural:${actor.name}:${actor.sprite?.key || actor.sprite?.spec?.key || actor.race || ''}`;
+      if (portraits.get(marker.name)?.key === key) return portraits.get(marker.name).image;
+      try {
+        const image = root.createCharacterSpriteCanvas(actor, actor.sprite?.spec);
+        if (image) portraits.set(marker.name, { key, image });
+        return image;
+      } catch { return null; }
+    }
     const previous = portraits.get(marker.name);
     if (previous?.src === src) return previous.image.complete && previous.image.naturalWidth ? previous.image : null;
     const image = new Image(); portraits.set(marker.name, { src, image });
     if (portraits.size > 32) portraits.delete(portraits.keys().next().value);
     image.onload = () => paint(true); image.src = src;
     return null;
+  }
+  function itemIcon(marker) {
+    if (!root.SceneItems?.createItemCanvas) return null;
+    const key = JSON.stringify([marker.name, marker.item?.type, marker.item?.magic, marker.item?.assembly]);
+    if (itemIcons.has(key)) return itemIcons.get(key);
+    const icon = root.SceneItems.createItemCanvas(marker.item, { scale: 1 });
+    if (icon) itemIcons.set(key, icon);
+    while (itemIcons.size > 64) itemIcons.delete(itemIcons.keys().next().value);
+    return icon;
   }
   function updateEncounterChoices(markers, key) {
     if (!encounterSelect) return;
@@ -29,7 +48,7 @@
     encounterSignature = signature;
     encounterSelect.replaceChildren();
     const overview = document.createElement('option'); overview.value = '';
-    overview.textContent = `${markers.some(m => m.kind === 'encounter') ? 'Landmarks & Encounters' : 'Landmarks'} (${markers.length})`;
+    overview.textContent = `Known places, people & items (${markers.length})`;
     encounterSelect.appendChild(overview);
     for (const marker of markers) {
       const option = document.createElement('option'); option.value = marker.id;
@@ -131,7 +150,9 @@
     const center = viewCenter || player;
     const left = Math.max(0, Math.min(state.width - extent, center.x - extent / 2));
     const top = Math.max(0, Math.min(state.height - extent, center.y - extent / 2));
-    mapProjection = { left, top, scale, markers: encounters };
+    mapProjection = { left, top, scale, markers: [...encounters, ...(d.roomExits?.markers || []).map(m => ({
+      x: m.x + .5, y: m.y + .5, label: `${m.direction === 'portal' ? 'Portal' : m.direction + ' exit'}`, kind: 'exit'
+    }))] };
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(bitmap, -left * scale, -top * scale, state.width * scale, state.height * scale);
     for (const marker of encounters) {
@@ -143,6 +164,13 @@
         const image = encounterPortrait(marker);
         if (image) ctx.drawImage(image, x - 9, y - 9, 18, 18);
         else { ctx.fillStyle = '#16120d'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center'; ctx.fillText(marker.glyph, x, y + 4); }
+        continue;
+      }
+      if (marker.kind === 'object') {
+        ctx.fillRect(x - 8, y - 8, 16, 16); ctx.strokeRect(x - 8, y - 8, 16, 16);
+        const icon = itemIcon(marker);
+        if (icon) ctx.drawImage(icon, x - 8, y - 8, 16, 16);
+        else { ctx.fillStyle = '#16120d'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center'; ctx.fillText('*', x, y + 4); }
         continue;
       }
       ctx.beginPath(); ctx.moveTo(x, y - 8); ctx.lineTo(x + 8, y); ctx.lineTo(x, y + 8); ctx.lineTo(x - 8, y); ctx.closePath();
@@ -164,7 +192,7 @@
     const target = encounters.find(m => m.id === selectedEncounter);
     const bearing = target ? ['E', 'SE', 'S', 'SW', 'W', 'NW', 'N', 'NE'][(Math.round(Math.atan2(target.y - player.y, target.x - player.x) / (Math.PI / 4)) + 8) % 8] : '';
     const targetText = target ? ` | ${target.label}: ${Math.round(Math.hypot(target.x - player.x, target.y - player.y))} tiles ${bearing}${target.kind === 'encounter' ? ' (last seen)' : ''}` :
-      ` | ${encounters.filter(m => m.kind !== 'encounter').length} known landmarks, ${encounters.filter(m => m.kind === 'encounter').length} encounters`;
+      ` | ${encounters.filter(m => m.kind !== 'encounter' && m.kind !== 'object').length} landmarks, ${encounters.filter(m => m.kind === 'object').length} items, ${encounters.filter(m => m.kind === 'encounter').length} encounters`;
     caption.textContent = `${d.sceneSpec?.source?.roomName || d.geoKey} | N is up | ${Math.round(state.count / (state.width * state.height) * 100)}% mapped${targetText}`;
   }
   function fit() {
@@ -195,8 +223,12 @@
     canvas = document.getElementById('exploration-map-canvas');
     caption = document.getElementById('exploration-map-caption');
     if (!panel || !canvas || !caption) return;
+    hover = document.createElement('div'); hover.id = 'exploration-map-hover'; hover.hidden = true; hover.setAttribute('role', 'status');
+    Object.assign(hover.style, { position: 'fixed', zIndex: '20010', pointerEvents: 'none', background: '#17130f', color: '#f3dfb3',
+      border: '1px solid #b59a62', padding: '4px 7px', maxWidth: '260px', fontSize: '13px', fontFamily: 'Georgia, serif' });
+    document.body.appendChild(hover);
     encounterSelect = document.createElement('select'); encounterSelect.id = 'exploration-map-landmarks';
-    encounterSelect.setAttribute('aria-label', 'Find a known landmark or encounter');
+    encounterSelect.setAttribute('aria-label', 'Find a known place, character or item');
     panel.querySelector('.exploration-map-tools').appendChild(encounterSelect);
     encounterSelect.addEventListener('change', () => {
       selectedEncounter = encounterSelect.value;
@@ -210,17 +242,22 @@
     document.getElementById('exploration-map-follow').addEventListener('click', () => { range = current?.dungeon.classification?.indoor === false ? 96 : 64; viewCenter = null; selectedEncounter = ''; if (encounterSelect) encounterSelect.value = ''; paint(true); });
     canvas.addEventListener('pointerdown', event => {
       if (!current || event.button !== 0) return;
+      hover.hidden = true;
       drag = { x: event.clientX, y: event.clientY, center: { ...(viewCenter || current.player) } };
       canvas.setPointerCapture(event.pointerId);
     });
     canvas.addEventListener('pointermove', event => {
       if (!drag || !current) {
-        if (mapProjection) {
+        if (current && mapProjection) {
           const bounds = canvas.getBoundingClientRect(), x = (event.clientX - bounds.left) * canvas.width / bounds.width,
             y = (event.clientY - bounds.top) * canvas.height / bounds.height;
-          const marker = mapProjection.markers.find(m => Math.hypot((m.x - mapProjection.left) * mapProjection.scale - x,
-            (m.y - mapProjection.top) * mapProjection.scale - y) <= 12);
-          if (marker) root.DungeonAreaTitles?.preview(marker);
+          const text = root.DungeonCartography.hoverLabel(current.dungeon, current.state,
+            mapProjection.left + x / mapProjection.scale, mapProjection.top + y / mapProjection.scale,
+            mapProjection.markers, 10 / mapProjection.scale);
+          hover.textContent = text; hover.hidden = !text;
+          const zoom = document.body.getBoundingClientRect().width / (document.body.offsetWidth || root.innerWidth) || 1;
+          hover.style.left = Math.max(0, Math.min((root.innerWidth - 270) / zoom, (event.clientX + 12) / zoom)) + 'px';
+          hover.style.top = Math.max(0, Math.min((root.innerHeight - 60) / zoom, (event.clientY + 14) / zoom)) + 'px';
         }
         return;
       }
@@ -231,6 +268,7 @@
     });
     canvas.addEventListener('pointerup', () => { drag = null; });
     canvas.addEventListener('pointercancel', () => { drag = null; });
+    canvas.addEventListener('pointerleave', () => { hover.hidden = true; });
     root.addEventListener('resize', fit);
     root.addEventListener('pagehide', () => atlas.flushAll());
     document.addEventListener('visibilitychange', () => { if (document.hidden) atlas.flushAll(); });
@@ -240,6 +278,7 @@
     if (!panel) return;
     open = typeof value === 'boolean' ? value : !open;
     panel.style.display = open ? 'block' : 'none';
+    if (!open && hover) hover.hidden = true;
     document.getElementById('open-exploration-map-button')?.setAttribute('aria-expanded', String(open));
     const shortcut = document.getElementById('dungeon-map-shortcut');
     shortcut?.setAttribute('aria-expanded', String(open));
@@ -250,7 +289,7 @@
   function update(dungeon, player, angle, runId) {
     const state = atlas.get(dungeon, runId);
     if (!state) {
-      if (current) { current = null; bitmapRoom = null; bitmapRevision = -1; paint(true); }
+      if (current) { current = null; mapProjection = null; if (hover) hover.hidden = true; bitmapRoom = null; bitmapRevision = -1; paint(true); }
       return;
     }
     if (current?.state !== state) {
@@ -275,7 +314,7 @@
   function reset({ discard = false } = {}) {
     if (timer) { root.clearTimeout(timer); timer = null; }
     if (!discard) atlas.flushAll(); current = null; atlas.clear(); bitmap = null; bitmapRoom = null; bitmapRevision = -1;
-    portraits.clear();
+    mapProjection = null; drag = null; portraits.clear(); itemIcons.clear(); if (hover) hover.hidden = true;
     discardOldRuns(root.dungeonRunId).catch(() => {});
     paint(true);
   }

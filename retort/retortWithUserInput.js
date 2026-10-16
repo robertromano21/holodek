@@ -10,8 +10,6 @@ const StoryPrompts = require('./graveMasterStoryPrompts');
 const RoomDescription = require('./roomDescription');
 const GeneratedNames = require('./generatedNames');
 
-const axios = require('axios');
-
 const { OpenAI } = require('openai');
 
 const fs = require('fs');
@@ -91,12 +89,15 @@ const QuestDirectionFacts = require('./questDirectionFacts');
 const HostilePursuit = require('./hostilePursuit');
 const CombatTurnFlow = require('./combatTurnFlow');
 const CombatTactics = require('./combatTactics');
+const CombatProvocation = require('./combatProvocation');
 const EquipmentRules = require('../assets/equipmentRules');
 const ItemTransfer = require('./itemTransfer');
 const QuestDeliverySuccessors = require('./questDeliverySuccessors');
 const CampaignMemory = require('./campaignMemory');
 const CampaignSetting = require('./campaignSetting');
 const FortifiedSites = require('./fortifiedSites');
+const Villages = require('./villages');
+const PlanarPortals = require('./planarPortals');
 const Economy = require('./economy');
 const SpellSystem = require('./spellSystem');
 const CombatLife = require('./combatLife');
@@ -403,32 +404,6 @@ const characterClasses = [
 function prepareLiveRoomMusic(musicJson, coordsKeyStr) {
   return require('./liveRoomMusic').prepare(musicJson,{coords:coordsKeyStr,runId:sharedState.getDungeonRunId()});
 }
-
-async function generateImage(prompt) {
-    const apiKey = process.env.OPENAI_API_KEY; // Ensure your API key is stored in the environment
-    const url = "https://api.openai.com/v1/images/generations";
-
-    try {
-        const response = await axios.post(url, {
-            prompt: prompt,
-            n: 1,
-            size: "1024x1024",
-            model: "dall-e-3" // Specify DALL-E 3 model explicitly, if required
-        }, {
-            headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json"
-            }
-        });
-
-        const imageUrl = response.data.data[0].url;
-        return imageUrl;
-    } catch (error) {
-        console.error("Error generating image:", error.response ? error.response.data : error.message);
-        throw new Error("Failed to generate image");
-    }
-}
-
 
 let adjustedCharacters = [];
 let adjustedNpcs = [];
@@ -2318,26 +2293,7 @@ console.log("personalNarrative:", personalNarrative);
 
 }
 
-let truncatedResponse = "";
-let sanitizedResponse = "";
 let response = "";
-
-async function sanitizeImage($) {
-    console.log(`Sanitizing the image prompt...`);
-    
-    // Send the prompt to GPT-4 to sanitize it
-    await $.user`Please rewrite the following prompt and remove only those parts that violate OpenAI's content policies for DALL-E 3, and otherwise reprint the rest of the prompt verbatim:\n\n${truncatedResponse}`;
-    
-    // Get the sanitized response
-    const sanitizedResult = await $.assistant.generation({ maxTokens: 2000 });
-    
-    // Ensure the sanitized response is assigned to the sanitizedResponse variable
-    sanitizedResponse = sanitizedResult.content.trim();
-    
-    console.log(`Sanitized response received: ${sanitizedResponse}`);
-    
-    return sanitizedResponse;
-}
 
 // Helper function to calculate cumulative XP
 function calculateCumulativeXp(xpThreshold, level) {
@@ -3955,6 +3911,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
 
   function buildIndoorFromPlan(plan) {
     IndoorBlueprint.build(dungeon, plan, { floor: baseFloor, ceil: baseCeil, architecture: sceneSpec?.architecture,
+      cavernVillage: sceneSpec?.worldContext?.village?.container === 'vast-cavern',
       coveredStorey: sceneSpec?.worldContext?.fortifiedFloor?.stairs?.includes('up') });
     console.info('[IndoorLayout]', JSON.stringify({ geoKey: dungeon.geoKey || null, ...dungeon.indoorLayout }));
   }
@@ -4169,6 +4126,10 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
 
   if (indoor) {
     buildIndoorFromPlan(blueprint?.indoorPlan || { rooms: blueprint?.rooms, corridors: blueprint?.paths });
+    if (sceneSpec?.worldContext?.village?.container === 'vast-cavern') {
+      applySafeSpawnZone();
+      buildSceneExteriorSites(dungeon, sceneSpec);
+    }
     applyBlueprintFeatures();
     applySafeSpawnZone();
     return;
@@ -5605,6 +5566,10 @@ async function generateMissingRoomDetails($, object) {
     if (!room) return;
 
     room.classification = isPlainObject(room.classification) ? room.classification : {};
+    if (room.planarRealm?.palette) {
+      Object.assign(room.classification, room.planarRealm.palette);
+      return;
+    }
 
     // IMPORTANT: colors-only based strictly on DESCRIPTION (not name)
     try {
@@ -5674,7 +5639,7 @@ async function generateMissingRoomDetails($, object) {
     : [];
   // "None" is a placeholder, not a populated neighbor that can satisfy an exit.
   const existingAdjacentRooms = adjacentRooms.split(',')
-    .map(adj => adj.trim().match(/^(north|south|east|west|northeast|southeast|northwest|southwest|up|down):\s*(.+)$/i))
+    .map(adj => adj.trim().match(/^(north|south|east|west|northeast|southeast|northwest|southwest|up|down|portal):\s*(.+)$/i))
     .filter(match => match && !/^(none|null|undefined|empty)$/i.test(match[2].trim()))
     .map(match => match[1].toLowerCase());
 
@@ -5927,6 +5892,31 @@ async function generateMissingRoomDetails($, object) {
       persistRoomDb(roomNameDatabasePlain);
     }
     if (shouldPopulateRoom) {
+        const villageRecall = await CampaignMemory.appendPlanning($, sharedState,
+          'new location: settlement needs, siege pressures, unresolved choices and local relationships',
+          { consoleText: updatedGameConsole, details: currentRoomData.name });
+        const villageReport = await $.run(agent => Villages.prepare(agent, roomNameDatabasePlain, coordKey, {
+          ...snapshotQuestContext(sharedState, updatedGameConsole), seed: sharedState.getDungeonRunId?.() || '', recalled: villageRecall,
+          reservedDirections: roomExitsArray
+        }));
+        if (villageReport.status === 'installed') {
+          roomExitsArray.splice(0, roomExitsArray.length, ...new Set([...roomExitsArray, ...Object.keys(currentRoomData.exits)]));
+          for (const b of currentRoomData.villagePlan.buildings) existingAdjacentRooms.push(b.direction);
+          updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${roomExitsArray.join(', ')}`);
+          persistRoomDb(roomNameDatabasePlain);
+        }
+        const portalReport = await $.run(agent => PlanarPortals.prepare(agent, roomNameDatabasePlain, coordKey, {
+          ...snapshotQuestContext(sharedState, updatedGameConsole), seed: sharedState.getDungeonRunId?.() || '', recalled: villageRecall
+        }));
+        if (currentRoomData.exits?.portal) {
+          if (!roomExitsArray.includes('portal')) roomExitsArray.push('portal');
+          if (!existingAdjacentRooms.includes('portal')) existingAdjacentRooms.push('portal');
+          updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${roomExitsArray.join(', ')}`);
+        }
+        if (villageReport.status === 'installed' || portalReport.status === 'installed') {
+          persistRoomDb(roomNameDatabasePlain);
+          await CampaignPlanningLog.capture(sharedState, 'village and planar portal planning');
+        }
         console.log("Generating new room details due to missing description or incomplete exits.");
             $.model = "gpt-4.1-mini";
             $.temperature = 1.2;
@@ -5944,6 +5934,10 @@ async function generateMissingRoomDetails($, object) {
     // Generate room description (only when missing)
     const floorGuidance = FortifiedSites.describe(currentRoomData);
     if (floorGuidance) await $.assistant`${floorGuidance}`;
+    const villageGuidance = Villages.describe(currentRoomData);
+    if (villageGuidance) await $.assistant`${villageGuidance}`;
+    const planarGuidance = PlanarPortals.describe(currentRoomData.planarRealm);
+    if (planarGuidance) await $.assistant`${planarGuidance}`;
     const existingIntent = describeEnvironmentIntent(currentRoomData.environmentIntent);
     if (existingIntent) await $.assistant`${existingIntent}`;
     const worldContext = buildRoomWorldContext(roomNameDatabasePlain, currentCoordinates,
@@ -6159,7 +6153,8 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
         roomShape = { indoor: true, size: 32, biome: 'temple', features: [] };
       }
       const intendedEnvironment = frontierIntent.intents[dir];
-      if (intendedEnvironment) roomShape = { ...roomShape, indoor: intendedEnvironment.indoor, biome: intendedEnvironment.biome };
+      if (intendedEnvironment) roomShape = { ...roomShape, indoor: intendedEnvironment.indoor, biome: intendedEnvironment.biome,
+        ...(intendedEnvironment.template === 'cavern_village' ? { size: 192 } : {}) };
 
       roomNameDatabasePlain[newKey] = {
         name: newRoomName,
@@ -6191,6 +6186,10 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     for (const [direction, intent] of Object.entries(frontierIntent.intents)) {
       if (newAdjacentRooms[direction] && roomNameDatabasePlain[intent.targetKey] && !roomNameDatabasePlain[intent.targetKey].environmentIntent) {
         roomNameDatabasePlain[intent.targetKey].environmentIntent = intent;
+        if (currentRoomData.planarRealm) {
+          roomNameDatabasePlain[intent.targetKey].planarRealm = structuredClone(currentRoomData.planarRealm);
+          Object.assign(roomNameDatabasePlain[intent.targetKey].classification, currentRoomData.planarRealm.palette);
+        }
         if (typeof CampaignSetting !== 'undefined') CampaignSetting.install(roomNameDatabasePlain, intent.targetKey, intent.campaignSetting);
       }
     }
@@ -7573,6 +7572,9 @@ async function generateQuest($) {
         const roll = Math.random();
         if (roll < 1.00) {
             console.log("Next artifact missing, generating new details.");
+            await $.user`${require('./underworldLore').GUIDANCE}`;
+            await CampaignMemory.appendPlanning($, sharedState, 'campaign quest planning: prior choices, unresolved threads, relationships and completed troubles',
+              { consoleText: updatedGameConsole });
             $.model = "gpt-4.1-mini";
             $.temperature = 1.2;
             $.user`Instructions for the Grave Master:
@@ -8030,18 +8032,19 @@ async function tryDungeonDoorAction(userInput) {
 let combatSpace = null;
 let combatPopulation = null;
 let combatTurnFlow = null;
+let commandedCombatTarget = null;
 async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
   return new Promise(resolve => {
     let remaining = 180000, previous = Date.now();
-    let prompt, tactics;
-    const finish = target => { clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond);
+    let prompt, tactics, choosing = false, finished = false;
+    const finish = target => { if (finished) return; finished = true; clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond);
       tactics?.close();
       if (typeof combatTurnFlow !== 'undefined') combatTurnFlow?.clearPrompt(prompt?.turnId); resolve(target); };
     const respond = message => {
-      if (message.actionId !== actionDice.active?.id || actionDice.paused) return;
+      if (finished || choosing || message.actionId !== actionDice.active?.id || actionDice.paused) return;
       if (prompt?.turnId && message.turnId !== prompt.turnId) return;
       if (tactics?.busy()) return;
-      if (message.action === 'hold') return finish({ hold: true });
+      if (message.action === 'hold') { actionDice.recordCombat?.({ kind: 'notice', text: `${combatant.name} holds position.` }); return finish({ hold: true }); }
       if (allowRetreat && message.action === 'retreat') return finish({ retreat: true });
       if (message.action === 'cast') {
         const choice = prompt?.spells?.find(s => s.itemId === message.itemId && s.spellId === message.spellId && s.target === message.target);
@@ -8057,6 +8060,14 @@ async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
       if (message.cancelled) return finish(null);
       const target = targets.find(t => t.name.toLowerCase() === String(message.target).toLowerCase() && t.hp > 0);
       if (target && (!prompt.tactical || prompt.attackTargets.includes(target.name))) finish(target);
+      else if (target && tactics && prompt.approachTargets?.some(t => t.name === target.name)) {
+        choosing = true;
+        tactics.approach(target).then(ready => {
+          if (finished) return;
+          if (ready) finish(target);
+          else { choosing = false; tactics.update(); broadcast({ ...prompt, notice: 'That target cannot be reached with the remaining movement.' }); }
+        }).catch(error => { if (!finished) { choosing = false; tactics.update(); console.warn('[CombatApproach]', error.message); broadcast(prompt); } });
+      }
     };
     const timer = setInterval(() => {
       const now = Date.now();
@@ -8083,8 +8094,8 @@ async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
             modifier: enemy.attack - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, enemy) : 0), difficulty: combatant.ac });
           if (roll?.success) {
             const damage = await rollCombatDamage(enemy, combatant, combatant, logs);
-            if (damage !== null) { await applyCombatDamage(combatant, damage, logs); combatSpace.setHealth([combatant]); logs.push(`${combatant.name} takes ${damage} damage; HP ${combatant.hp}.`); }
-          } else logs.push(`${enemy.name} misses.`);
+            if (damage !== null) { await applyCombatDamage(combatant, damage, logs, enemy); combatSpace.setHealth([combatant]); logs.push(`${combatant.name} takes ${damage} damage; HP ${combatant.hp}.`); }
+          } else { logs.push(`${enemy.name} misses.`); if (roll) actionDice.recordCombat?.({ kind: 'miss', actor: enemy.name, target: combatant.name }); }
           const all = [...combatTurnFlow.teams.friends, ...combatTurnFlow.teams.hostiles, ...combatTurnFlow.teams.spectators];
           commitCombatHealth(all.find(a => a.type === 'pc'), all.filter(a => a.type === 'npc'), all.filter(a => a.type === 'monster'));
           if (Inhabitants.state(combatant) === 'Dead') ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(combatant, enemy));
@@ -8099,6 +8110,12 @@ async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
         } });
     }
     broadcast(prompt);
+    if (combatant.type === 'pc' && commandedCombatTarget && tactics) {
+      const name = commandedCombatTarget.toLowerCase(); commandedCombatTarget = null;
+      const exact = targets.filter(t => t.name.toLowerCase() === name), candidates = exact.length ? exact : targets.filter(t => t.name.toLowerCase().startsWith(name));
+      if (candidates.length === 1 && prompt.approachTargets?.some(t => t.name === candidates[0].name))
+        respond({ actionId: prompt.actionId, turnId: prompt.turnId, action: 'attack', target: candidates[0].name });
+    }
   });
 }
 function selectCombatTeams(pc, npcs, monsters, userInput, fallback, combatLog) {
@@ -8137,6 +8154,9 @@ function gameConsoleForPerception(consoleText = updatedGameConsole) {
   return require('../assets/gameLogContent').withoutLootLists(perceived, { inventory: false });
 }
 async function handleCombatRound($, userInput, combatMode) {
+    commandedCombatTarget = /^\s*attack\s+(.+?)\s*$/i.exec(String(userInput))?.[1] || null;
+    const provocation = typeof CombatProvocation !== 'undefined' ? CombatProvocation.prepare(sharedState, populationService, userInput) : null;
+    if (provocation) { updatedGameConsole = sharedState.getUpdatedGameConsole(); broadcast(provocation); }
     const coords = sharedState.getLastCoords();
     const geoKey = `${coords.x},${coords.y},${coords.z}`;
     const dungeon = sharedState.getRoomDungeon(coords);
@@ -8147,7 +8167,7 @@ async function handleCombatRound($, userInput, combatMode) {
     combatTurnFlow = typeof CombatTurnFlow !== 'undefined' ? CombatTurnFlow.create(actionDice, sharedState) : null;
     try {
         if (!combatTurnFlow) return await resolveCombatRound($, userInput, combatMode);
-        const logs = []; let result;
+        const logs = provocation ? [provocation.content] : []; let result;
         do {
             await actionDice.waitUntilResumed();
             combatTurnFlow.startRound();
@@ -8203,12 +8223,14 @@ async function handleCombatRound($, userInput, combatMode) {
             combatPopulation = null;
             combatSpace = null;
             combatTurnFlow = null;
+            commandedCombatTarget = null;
             actionDice.end();
         }
     }
 }
 
 async function rollCombatInitiative(combatant, pc) {
+    if (!Inhabitants.canAct(combatant)) return null;
     return combatTurnFlow ? combatTurnFlow.initiative(combatant, pc) : roll1d20();
 }
 async function choosePlayerCombatAction(combatant, targets) {
@@ -8239,10 +8261,11 @@ async function retreatCombatParty(pc, npcs, monsters, combatLog) {
         // Do not call rollCombatAttack: it includes pursuit movement, forbidden for an opportunity attack.
         const hit = await actionDice.roll({ actor: enemy.name, label: 'Retreat Attack', target: target.name,
             modifier: enemy.attack - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, enemy) : 0), difficulty: target.ac });
-        if (!hit || hit.total < target.ac) { combatLog.push(`${enemy.name} misses ${target.name}.`); continue; }
+        if (!hit || hit.total < target.ac) { combatLog.push(`${enemy.name} misses ${target.name}.`);
+          if (hit) actionDice.recordCombat?.({ kind: 'miss', actor: enemy.name, target: target.name }); continue; }
         const damage = await rollCombatDamage(enemy, target, pc, combatLog);
         if (damage === null) continue;
-        await applyCombatDamage(target, damage, combatLog); combatSpace?.setHealth([target]);
+        await applyCombatDamage(target, damage, combatLog, enemy); combatSpace?.setHealth([target]);
         combatLog.push(`${target.name} takes ${damage} damage and has ${target.hp} HP left.`);
         commitCombatHealth(pc, npcs, monsters);
         if (Inhabitants.state(target) === 'Dead') ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(target, enemy));
@@ -8265,6 +8288,7 @@ async function retreatCombatParty(pc, npcs, monsters, combatLog) {
     }
     combatTurnFlow.retreated = true;
     combatLog.push('The living party retreats together. Hostiles may still pursue.');
+    actionDice.recordCombat?.({ kind: 'notice', text: 'The party retreats together.' });
     return true;
 }
 
@@ -8310,6 +8334,7 @@ async function rollCombatAttack(combatant, target, pc, combatLog) {
     });
     if (!result) combatLog.push(`${combatant.name} did not roll in time and holds the attack.`);
     else combatLog.push(`${combatant.name}: d20 ${result.natural} + ${result.modifier} = ${result.total}.`);
+    if (result && result.total < target.ac) actionDice.recordCombat?.({ kind: 'miss', actor: combatant.name, target: target.name });
     return result;
 }
 
@@ -8330,8 +8355,9 @@ async function rollCombatDamage(combatant, target, pc, combatLog) {
     combatLog.push(`${combatant.name}: ${count}d${sides} + ${combatant.damage} = ${total} damage.`);
     return typeof SpellSystem !== 'undefined' ? SpellSystem.absorb(sharedState, target, total) : total;
 }
-async function applyCombatDamage(target, damage, combatLog) {
-    if (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase) { target.hp -= damage; return; }
+async function applyCombatDamage(target, damage, combatLog, attacker = null) {
+    const record = () => { if (attacker) actionDice.recordCombat?.({ kind: 'hit', actor: attacker.name, target: target.name, damage, hp: target.hp, state: target.state }); };
+    if (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase) { target.hp -= damage; record(); return; }
     let natural = null;
     if (target.hp > 0 && target.hp - damage <= 0) {
       const roll = await actionDice.roll(CombatLife.survivalPlan(target));
@@ -8346,6 +8372,7 @@ async function applyCombatDamage(target, damage, combatLog) {
     Object.assign(target, { hp: current.hp, state: current.state, dyingRounds: current.remaining });
     if (current.hp > 0 && injury.save) combatLog.push(life.message);
     if (Inhabitants.isDown(target)) combatLog.push(`${target.name} falls ${injury.state.toLowerCase()} at 0 HP${injury.remaining ? `; ${injury.remaining} rounds to receive aid` : '; stable'}.`);
+    record();
 }
 function playerControls(combatant, pc, npcs) {
     return combatant.name === (pc?.hp > 0 ? pc.name : npcs.find(a => a.hp > 0)?.name);
@@ -8367,7 +8394,7 @@ function resolveCombatCare(choice, pc, npcs, monsters, combatLog) {
     for (const actor of [pc, ...npcs, ...monsters].filter(Boolean)) {
       const sheet = sheets.get(actor.name); if (sheet) { actor.hp = sheet.hp; actor.state = sheet.state; }
     }
-    combatLog.push(result.content); commitCombatHealth(pc, npcs, monsters); return true;
+    combatLog.push(result.content); actionDice.recordCombat?.({ kind: 'notice', text: result.content }); commitCombatHealth(pc, npcs, monsters); return true;
 }
 
 function automaticCombatSpell(combatant, targets) {
@@ -8412,6 +8439,7 @@ async function resolveCombatSpell(choice, combatant, pc, npcs, monsters, already
       }
     }
     combatLog.push(result.content);
+    actionDice.recordCombat?.({ kind: 'notice', text: result.content });
     broadcast({ type: 'spell_cast', actionId: actionDice.active.id, runId: sharedState.getDungeonRunId(), geoKey: actionDice.active.geoKey, ...result });
     commitCombatHealth(pc, npcs, monsters); return true;
 }
@@ -8514,17 +8542,19 @@ async function resolveCombatRound($, userInput, combatMode) {
 
     for (const combatant of allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a))) {
         const initiativeRoll = await rollCombatInitiative(combatant, pc);
+        if (initiativeRoll === null) continue;
         // Initiative orders the live combatants; copying them forks HP during successive hits.
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
     }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
+    actionDice.recordCombat?.({ kind: 'initiative', order: initiativeOrder.map(a => ({ name: a.name, roll: a.initiative })) });
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
     for (const combatant of initiativeOrder) {
         if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
-        if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) continue;
+        if (!Inhabitants.canAct(combatant) || alreadyKilled.has(combatant.name)) continue;
         if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
@@ -8573,7 +8603,7 @@ async function resolveCombatRound($, userInput, combatMode) {
             const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
             if (damageRoll === null) continue;
 
-            await applyCombatDamage(target, damageRoll, combatLog);
+            await applyCombatDamage(target, damageRoll, combatLog, combatant);
             combatSpace?.setHealth([target]);
             combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
 
@@ -8784,12 +8814,14 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     for (const combatant of allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a))) {
         const initiativeRoll = await rollCombatInitiative(combatant, pc);
+        if (initiativeRoll === null) continue;
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
         // combatLog.push(`${combatant.name} starts at position (${combatant.x}, ${combatant.y}) with initiative ${initiativeRoll}.`);
     }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
+    actionDice.recordCombat?.({ kind: 'initiative', order: initiativeOrder.map(a => ({ name: a.name, roll: a.initiative })) });
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
     const currentOccupiedPositions = new Set();
@@ -8858,7 +8890,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
 
     for (const combatant of initiativeOrder) {
         if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
-        if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) {
+        if (!Inhabitants.canAct(combatant) || alreadyKilled.has(combatant.name)) {
             combatLog.push(`${combatant.name} skipped due to HP (${combatant.hp}) or already killed.`);
             continue;
         }
@@ -8978,7 +9010,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             if (attackSuccess) {
                 const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
                 if (damageRoll === null) continue;
-                await applyCombatDamage(target, damageRoll, combatLog);
+                await applyCombatDamage(target, damageRoll, combatLog, combatant);
                 combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
                 commitCombatHealth(pc, npcs, aliveMonsters);
@@ -9093,6 +9125,7 @@ function commitCombatHealth(pc, npcs, monsters) {
   updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monsters);
   sharedState.setUpdatedGameConsole(updatedGameConsole);
   if (combatPopulation) populationService.save(combatPopulation);
+  combatTurnFlow?.refreshInitiative?.();
   broadcastCombatHealth();
 }
 
@@ -9293,11 +9326,13 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     // Roll initiative
     for (const combatant of allCombatants.filter(a => combatTeams.hostiles.length && combatTeams.combatants.includes(a))) {
         const initiativeRoll = await rollCombatInitiative(combatant, pc);
+        if (initiativeRoll === null) continue;
         combatant.initiative = initiativeRoll;
         initiativeOrder.push(combatant);
     }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
+    actionDice.recordCombat?.({ kind: 'initiative', order: initiativeOrder.map(a => ({ name: a.name, roll: a.initiative })) });
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
     let currentOccupiedPositions = new Set(initiativeOrder.filter(c => c.hp > 0).map(c => `${c.x},${c.y}`));
@@ -9376,7 +9411,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
 
     for (const combatant of initiativeOrder) {
         if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
-        if (combatant.hp <= 0 || alreadyKilled.has(combatant.name)) {
+        if (!Inhabitants.canAct(combatant) || alreadyKilled.has(combatant.name)) {
             combatLog.push(`${combatant.name} is skipped due to HP (${combatant.hp}) or already killed.`);
             continue;
         }
@@ -9468,7 +9503,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             if (attackSuccess) {
                 const damageRoll = await rollCombatDamage(combatant, target, pc, combatLog);
                 if (damageRoll === null) continue;
-                await applyCombatDamage(target, damageRoll, combatLog);
+                await applyCombatDamage(target, damageRoll, combatLog, combatant);
                 combatSpace?.setHealth([target]);
                 combatLog.push(`${combatant.name} hits ${target.name} for ${damageRoll} damage. ${target.name} has ${target.hp} HP left.`);
                 commitCombatHealth(pc, npcs, aliveMonsters);
@@ -11603,24 +11638,28 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     
     let musicArrangement = null, musicPlayback = null;
 
-    if (isNewRoom) {
+    const cachedMusic = sharedState.getRoomMusic(coords);
+    const musicRunId = sharedState.getDungeonRunId();
+    if ((isNewRoom || !cachedMusic) && (cachedMusic || RoomMusicComposer.retryGate.canAttempt(musicRunId, geoKey))) {
       try {
         const { musicJson, playback, isNew, key, coords: c } =
           await $.run($ => getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom));
         
         musicArrangement = musicJson; musicPlayback = playback;
+        RoomMusicComposer.retryGate.succeeded(musicRunId, geoKey);
         console.log(`Music updated for room at ${coordsKey(coords)} (${playback.sid})`);
       } catch (musicErr) {
+        RoomMusicComposer.retryGate.failed(musicRunId, geoKey);
         console.error('Music generation failed:', musicErr);
         musicArrangement = null;
       }
     } else {
-      console.log('Same room, using cached music');
-      musicArrangement = sharedState.getRoomMusic(coords);
+      console.log(cachedMusic ? 'Same room, using cached music' : 'Room music retry cooling down');
+      musicArrangement = cachedMusic;
     }
     
     // Broadcast to clients to reload audio (SSE)
-    broadcast({ ...musicPlayback, type: 'roomMusicUpdated', coords: coordsKey(coords), isNew: isNewRoom, ambience: (musicArrangement && Array.isArray(musicArrangement.ambience)) ? musicArrangement.ambience : null });
+    broadcast({ ...musicPlayback, type: 'roomMusicUpdated', coords: coordsKey(coords), isNew: !!musicPlayback, ambience: (musicArrangement && Array.isArray(musicArrangement.ambience)) ? musicArrangement.ambience : null });
     
     // Parse and initialize roomNameDatabase
     // Parse and initialize roomNameDatabase
@@ -11903,7 +11942,7 @@ If there are monsters in the room, they may not know who Suzerain is or understa
 let charactersAttackResult = '';
 let charactersAttack = '';
 
-if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRoom.toLowerCase() !== 'none') {
+if (userInput.toLowerCase().includes("attack") && (monstersInRoom && monstersInRoom.toLowerCase() !== 'none' || CombatProvocation.companionTarget(updatedGameConsole, userInput))) {
     const combatResult = await handleCombatRound($, userInput, combatMode);
     combatLog = combatResult.combatLog || ''; // Extract the combat log from the result
     console.log("combatLog (programmatic only): ", combatLog);
@@ -11913,7 +11952,7 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
     console.log('[Combat] Programmatic sim (conclude with log only, no LLM even on defeat).');
     return {
       content: combatLog,
-      updatedGameConsole,
+      updatedGameConsole: sharedState.getUpdatedGameConsole(),
       combatCharactersString: sharedState.getCombatCharactersString(),
       roomNameDatabaseString: sharedState.getRoomNameDatabase() || roomNameDatabaseString || '',
       combatRoundOnly: true,
@@ -12099,6 +12138,8 @@ await $.user`Individual character allegiances override the room's summary state:
 if (typeof CampaignMemory !== 'undefined') {
   const recall = CampaignMemory.context(sharedState, userInput, updatedGameConsole, activeTask);
   if (recall.evidence.length || recall.profiles?.length) await $.user(CampaignMemory.prompt(recall));
+  await CampaignMemory.appendPlanning($, sharedState, 'response continuity: relevant decisions, promises, consequences and unresolved concerns',
+    { consoleText: updatedGameConsole, details: userInput, task: activeTask });
 }
 let spoken = {dialogue:[],replies:[]};
 response = '';
@@ -12653,23 +12694,9 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
     return acc;
   }, '').trim();
   let compiledResponse = formattedDescription + "\n\n" + monstersAttack + "\n\n" + combatLog + "\n\n" + response;
-  truncatedResponse = compiledResponse.length > 3900 ? compiledResponse.substring(0, 3900) : compiledResponse;
-  if (!isAutoSimAdvance) {
-    await $.run($ => sanitizeImage($));
-  }
-  let imageUrl = '';
-  /* if (sanitizedResponse) {
-    try {
-      imageUrl = await generateImage(`Generate an 8-bit style graphic with no text or labels, reminiscent of 1980s computer games. The image should only contain visual elements without any text, words, letters, or symbols: ${sanitizedResponse}`);
-      console.log("Generated image URL:", imageUrl);
-    } catch (error) {
-      console.error("Failed to generate image:", error.message);
-    }
-  } */
   returnObj.content = compiledResponse;
   returnObj.combatCharactersString = sharedState.getCombatCharactersString();
   returnObj.roomNameDatabaseString = roomNameDatabaseString;
-  returnObj.imageUrl = imageUrl;
 } else if (attackDecision === "Attack" && !roomDescriptionGenerated) {
   returnObj.content = monstersAttack + "\n\n" + combatLog + "\n\n" + response;
   returnObj.combatCharactersString = sharedState.getCombatCharactersString();
@@ -12684,22 +12711,8 @@ if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRo
     return acc;
   }, '').trim();
   let compiledResponse = formattedDescription + "\n\n" + response;
-  truncatedResponse = compiledResponse.length > 3800 ? compiledResponse.substring(0, 3800) : compiledResponse;
-  if (!isAutoSimAdvance) {
-    await $.run($ => sanitizeImage($));
-  }
-  let imageUrl = '';
-  /* if (sanitizedResponse) {
-    try {
-      imageUrl = await generateImage(`Generate an 8-bit style graphic with no text or labels, reminiscent of 1980s computer games. The image should only contain visual elements without any text, words, letters, or symbols: ${sanitizedResponse}`);
-      console.log("Generated image URL:", imageUrl);
-    } catch (error) {
-      console.error("Failed to generate image:", error.message);
-    }
-  } */
   returnObj.content = compiledResponse;
   returnObj.roomNameDatabaseString = roomNameDatabaseString;
-  returnObj.imageUrl = imageUrl;
 } else {
   returnObj.content = (physicalPuzzleResult?.narrative || narrative) + "\n\n" + response;
   returnObj.roomNameDatabaseString = roomNameDatabaseString;

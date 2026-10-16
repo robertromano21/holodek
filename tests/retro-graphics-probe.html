@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>C64 Graphics Presentation Probe</title>
+<style>
+  body { margin: 0; background: #161511; color: #eadac0; font: 14px Georgia, serif; }
+  #dungeon-container { position: relative; width: 640px; height: 480px; }
+  #dungeon-container canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+  #dungeon-container #retro-graphics-canvas[hidden] { display: none; }
+  #game-menu { position: fixed; top: 35px; left: 4px; z-index: 10; background: #222; padding: 8px; }
+  #game-menu[hidden] { display: none; }
+  #game-menu-toggle { position: fixed; top: 4px; left: 4px; z-index: 10; }
+</style>
+<button id="game-menu-toggle" aria-controls="game-menu">Menu</button>
+<div id="game-menu" hidden><button id="retro-graphics-toggle" aria-pressed="false">Retro Mode: OFF</button><span id="retro-graphics-status" hidden></span></div>
+<div id="dungeon-popup" style="display:block"><div id="dungeon-container"></div></div><pre id="results">Running...</pre>
+<script src="/assets/gameMenuUi.js"></script>
+<script src="/assets/retroGraphics.js"></script>
+<script src="/assets/masonryPatterns.js"></script>
+<script src="/assets/voxelMaterials.js"></script>
+<script src="/assets/scenePropVoxels.js"></script>
+<script src="/assets/renderCharacterProcedural.js"></script>
+<script src="/assets/renderCharacterSprite.js"></script>
+<script src="/assets/characterMotion3d.js"></script>
+<script src="/assets/rendererWebGL.js"></script>
+<script src="/node_modules/phaser/dist/phaser.min.js"></script>
+<script>
+window.addEventListener('DOMContentLoaded', async () => {
+  const report = { pass: false, checks: {}, timings: {}, webgpu: null, images: [], errors: [] };
+  window.addEventListener('error', event => report.errors.push(event.message));
+  window.addEventListener('unhandledrejection', event => report.errors.push(String(event.reason)));
+  const check = (name, condition) => { report.checks[name] = !!condition; if (!condition) throw new Error(name); };
+  const api = window.RetroGraphics, host = document.getElementById('dungeon-container');
+  const toggle = document.getElementById('retro-graphics-toggle');
+  const output = () => document.getElementById('retro-graphics-canvas');
+  const pixel = (x, y) => [...output().getContext('2d').getImageData(x, y, 1, 1).data];
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const hash = () => {
+    const data = output().getContext('2d').getImageData(0, 0, output().width, output().height).data;
+    let h = 2166136261; for (let i = 0; i < data.length; i++) h = Math.imul(h ^ data[i], 16777619);
+    return h >>> 0;
+  };
+  function colorLimits() {
+    const c = output(), rgba = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    const palette = new Set(api.palette.map(p => p.join(',')));
+    for (let i = 0; i < rgba.length; i += 4) {
+      if (!palette.has([rgba[i], rgba[i + 1], rgba[i + 2]].join(',')) || rgba[i + 3] !== 255) return false;
+    }
+    return true;
+  }
+  try {
+    const scene = document.createElement('canvas'); scene.width = 640; scene.height = 480; host.appendChild(scene);
+    const ctx = scene.getContext('2d');
+    function paint(offset = 0) {
+      const gradient = ctx.createLinearGradient(0, 0, 640, 480);
+      gradient.addColorStop(0, '#d6a84c'); gradient.addColorStop(.45, '#485b76'); gradient.addColorStop(1, '#241c16');
+      ctx.fillStyle = gradient; ctx.fillRect(0, 0, 640, 480);
+      for (let x = 20; x < 640; x += 55) { ctx.fillStyle = '#b4a38a'; ctx.fillRect(x, 100, 22, 310); ctx.fillStyle = '#675347'; ctx.fillRect(x + 16, 100, 6, 310); }
+      ctx.fillStyle = '#eff347'; ctx.fillRect(offset % 600, 210, 32, 60);
+    }
+    paint();
+    check('modernHasNoOverlay', api.status().mode === 'modern' && !api.present(scene, host) && !output());
+    document.getElementById('game-menu-toggle').click();
+    check('hamburgerOpens', !document.getElementById('game-menu').hidden);
+    check('retroStartsOff', toggle.getAttribute('aria-pressed') === 'false');
+    toggle.click();
+    check('menuChangesMode', api.status().mode === 'c64_glazed' && toggle.getAttribute('aria-pressed') === 'true');
+    document.getElementById('game-menu-toggle').click();
+    check('canvasCopies', api.present(scene, host));
+    check('glazedBitmap', output().width === 160 && output().height === 200 && colorLimits());
+    check('inputPassthrough', document.elementFromPoint(320, 240) === scene && getComputedStyle(output()).pointerEvents === 'none');
+    let clicks = 0; scene.addEventListener('click', () => clicks++);
+    document.elementFromPoint(320, 240).click(); check('clickTargetUnchanged', clicks === 1);
+    const sourceBounds = scene.getBoundingClientRect(), overlayBounds = output().getBoundingClientRect();
+    check('viewAndPickingBoundsUnchanged', ['x', 'y', 'width', 'height'].every(k => sourceBounds[k] === overlayBounds[k]) && scene.width === 640 && scene.height === 480);
+    const previous = hash(); api.present(scene, host); check('stationaryDither', hash() === previous);
+    const hashes = new Set(), frameStart = api.status().frames, times = [];
+    for (let i = 0; i < 24; i++) {
+      await new Promise(resolve => requestAnimationFrame(resolve)); paint(i * 8); api.present(scene, host);
+      hashes.add(hash()); times.push(api.status().lastFrameMs);
+    }
+    report.timings.animationMeanMs = times.reduce((a, b) => a + b, 0) / times.length;
+    check('everyAnimationFramePresented', api.status().frames === frameStart + 24 && hashes.size === 24);
+    api.setMode('c64_glazed'); check('glazeCopies', api.present(scene, host));
+    check('glazeKeepsPixelGeometry', output().width === 160 && output().height === 200 && api.status().fullbright);
+    const glazeStart = performance.now(); for (let i = 0; i < 20; i++) api.present(scene, host);
+    report.timings.glazeMeanMs = (performance.now() - glazeStart) / 20;
+    check('boundedConversionCost', report.timings.animationMeanMs < 25 && report.timings.glazeMeanMs < 25);
+    host.style.width = '360px'; host.style.height = '640px'; api.present(scene, host);
+    check('mobileBounds', output().getBoundingClientRect().width === 360 && output().getBoundingClientRect().height === 640);
+    host.style.width = ''; host.style.height = '';
+    host.replaceChildren(scene); api.present(scene, host);
+    check('reattachesAfterRoomOrBackendReplacement', host.querySelectorAll('#retro-graphics-canvas').length === 1);
+    toggle.click(); check('modernRestored', api.status().mode === 'modern' && getComputedStyle(output()).display === 'none' && document.elementFromPoint(320, 240) === scene);
+
+    const gpuScene = document.createElement('canvas'); gpuScene.width = 160; gpuScene.height = 120;
+    const gl = gpuScene.getContext('webgl2', { alpha: false }); check('webglAvailable', !!gl);
+    host.replaceChildren(gpuScene); api.setMode('c64_glazed');
+    function drawGL() {
+      gl.disable(gl.SCISSOR_TEST); gl.clearColor(150 / 255, 40 / 255, 46 / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.enable(gl.SCISSOR_TEST); gl.scissor(0, 0, 160, 60); gl.clearColor(91 / 255, 214 / 255, 206 / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.disable(gl.SCISSOR_TEST);
+    }
+    drawGL(); check('webglSameFrameCopy', api.presentRenderer({ canvas: gpuScene }, host));
+    check('webglOrientation', same(pixel(1, 1), [150, 40, 46, 255]) && same(pixel(1, 198), [91, 214, 206, 255]));
+    await new Promise(resolve => requestAnimationFrame(resolve)); drawGL(); api.presentRenderer({ canvas: gpuScene }, host);
+    check('webglSurvivesDrawingBufferDiscard', same(pixel(1, 1), [150, 40, 46, 255]));
+    check('noGlError', gl.getError() === gl.NO_ERROR);
+
+    if (navigator.gpu) {
+      const adapter = await navigator.gpu.requestAdapter();
+      if (adapter) {
+        const device = await adapter.requestDevice(), gpu = document.createElement('canvas'); gpu.width = 160; gpu.height = 120;
+        const context = gpu.getContext('webgpu'), format = navigator.gpu.getPreferredCanvasFormat();
+        context.configure({ device, format, alphaMode: 'opaque' }); host.replaceChildren(gpu);
+        const encoder = device.createCommandEncoder(), pass = encoder.beginRenderPass({ colorAttachments: [{
+          view: context.getCurrentTexture().createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 91 / 255, g: 214 / 255, b: 206 / 255, a: 1 }
+        }] }); pass.end(); device.queue.submit([encoder.finish()]);
+        check('webgpuSameFrameCopy', api.presentRenderer({ mode: 'webgpu', _presentedAtLeastOnce: true, canvas: gpu, legacyRenderer: { canvas: gpuScene } }, host));
+        check('webgpuUsesCompletedPresentation', same(pixel(1, 1), [91, 214, 206, 255]));
+        report.webgpu = { tested: true, adapter: adapter.info?.device || '' }; context.unconfigure(); device.destroy();
+      } else report.webgpu = { tested: false, reason: 'No adapter available' };
+    } else report.webgpu = { tested: false, reason: 'WebGPU unavailable' };
+
+    const fixture = await fetch('/room-image');
+    if (fixture.ok) {
+      const image = new Image(); image.src = URL.createObjectURL(await fixture.blob()); await image.decode();
+      ctx.clearRect(0, 0, 640, 480); ctx.drawImage(image, 0, 0, 640, 480); URL.revokeObjectURL(image.src);
+    } else paint();
+    host.replaceChildren(scene);
+    const comparison = document.createElement('canvas'); comparison.width = 640; comparison.height = 278;
+    const g = comparison.getContext('2d'); g.fillStyle = '#161511'; g.fillRect(0, 0, 1280, 278); g.font = '16px Georgia'; g.imageSmoothingEnabled = false;
+    for (const [i, mode] of ['modern', 'c64_glazed'].entries()) {
+      api.setMode(mode); api.present(scene, host); g.drawImage(mode === 'modern' ? scene : output(), i * 320, 32, 320, 240);
+      g.fillStyle = '#eadac0'; g.fillText(api.modes[mode].label, i * 320 + 10, 22);
+    }
+    report.images.push({ name: 'retro-graphics-comparison.png', png: comparison.toDataURL() });
+
+    api.setMode('modern');
+    const mapHost = document.createElement('div'); document.body.appendChild(mapHost);
+    const mapGame = await new Promise(resolve => {
+      new Phaser.Game({ type: Phaser.CANVAS, width: 775, height: 775, parent: mapHost, pixelArt: true,
+        banner: false, audio: { noAudio: true }, scene: { key: 'CombatScene', create() {
+          this.redrawCombatRT = () => {
+            const retro = api.fullbright(), key = retro ? 'map-mortacia-retro' : 'map-mortacia';
+            if (!this.textures.exists(key)) {
+              const sheet = api.characterSheet(this.originalSheet, { name: 'Mortacia' });
+              this.textures.addSpriteSheet(key, sheet, { frameWidth: sheet.width / 4, frameHeight: sheet.height });
+            }
+            this.actor.setTexture(key, 0);
+            this.tiles.forEach(({ object, wall }) => object.setFillStyle(retro ? wall ? 0x96282e : 0x474747 : wall ? 0x884455 : 0x33443c));
+            this.grid.clear().lineStyle(1, retro ? 0xaeaeae : 0x888888, retro ? 1 : .35);
+            for (let i = 0; i <= 775; i += 25) this.grid.moveTo(i, 0).lineTo(i, 775).moveTo(0, i).lineTo(775, i);
+            this.grid.strokePath();
+          };
+          api.bindCombat(this.game);
+          this.tiles = [];
+          for (let y = 0; y < 31; y++) for (let x = 0; x < 31; x++) this.tiles.push({ wall: y % 7 === 0,
+            object: this.add.rectangle(x * 25, y * 25, 25, 25, y % 7 === 0 ? 0x884455 : 0x33443c).setOrigin(0) });
+          this.grid = this.add.graphics();
+          const spec = ProceduralCharacters.getPresetProceduralSpec('Mortacia');
+          const sheet = createCharacterSpriteSheetCanvas({ name: 'Mortacia' }, spec, 4);
+          this.originalSheet = sheet;
+          this.textures.addSpriteSheet('map-mortacia', sheet, { frameWidth: sheet.width / 4, frameHeight: sheet.height });
+          this.actor = this.add.sprite(385, 385, 'map-mortacia', 0).setDisplaySize(48, 48);
+          this.redrawCombatRT();
+          this.game.events.once('postrender', () => { this.game.loop.sleep(); resolve(this.game); });
+        } } });
+    });
+    const mapContext = mapGame.renderer.gameContext;
+    const originalMap = mapContext.getImageData(0, 0, 775, 775).data;
+    const nextMapFrame = () => new Promise(resolve => mapGame.events.once('postrender', resolve));
+    const actorSize = mapGame.scene.getScene('CombatScene').actor.displayHeight;
+    let mapFrame = nextMapFrame(); api.setMode('c64_glazed'); await mapFrame;
+    const mapPixels = mapContext.getImageData(0, 0, 775, 775).data, mapPalette = new Set(api.palette.map(p => p.join(',')));
+    let mapValid = true;
+    for (let i = 0; i < mapPixels.length; i += 4) if (!mapPalette.has([...mapPixels.slice(i, i + 3)].join(','))) { mapValid = false; break; }
+    check('phaserCombatPalette', mapValid && api.status().combatFrames > 0);
+    const mapSeen = new Set(); for (let i = 0; i < mapPixels.length; i += 4) mapSeen.add([...mapPixels.slice(i, i + 3)].join(','));
+    check('phaserCombatVisibleGridAndRedWalls', [2, 11, 15].every(index => mapSeen.has(api.palette[index].join(','))));
+    check('phaserMortaciaSkinAndHair', [7, 10].every(index => mapSeen.has(api.palette[index].join(','))));
+    check('phaserCombatSizeUnchanged', mapGame.canvas.width === 775 && mapGame.scene.getScene('CombatScene').actor.displayHeight === actorSize);
+    report.timings.combatPaletteMs = api.status().combatFrameMs;
+    report.images.push({ name: 'retro-graphics-combat.png', png: mapGame.canvas.toDataURL() });
+    mapFrame = nextMapFrame(); api.setMode('modern'); await mapFrame;
+    check('phaserCombatModernRestored', mapContext.getImageData(0, 0, 775, 775).data.every((v, i) => v === originalMap[i]));
+    mapGame.destroy(true); mapHost.remove();
+
+    const renderer = window.webglDungeonRenderer;
+    await fetch('/progress?production-init');
+    api.setMode('modern'); renderer.canvas = null;
+    check('productionShadersCompile', renderer.init(host));
+    const info = renderer.gl.getExtension('WEBGL_debug_renderer_info');
+    report.renderer = info ? renderer.gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : renderer.gl.getParameter(renderer.gl.RENDERER);
+    if (/SwiftShader/i.test(report.renderer)) {
+      // The real shaders compile above. Retro returns zero light in this function;
+      // specialize that same result for SwiftShader to avoid its shadow-loop JIT.
+      const gl = renderer.gl, original = gl.shaderSource.bind(gl);
+      gl.shaderSource = (shader, source) => {
+        const start = source.indexOf('float accumulateTorchLit(');
+        if (start >= 0 && source.includes('float floorHeightFromCell')) {
+          const opening = source.indexOf('{', start); let depth = 1, end = opening + 1;
+          while (depth && end < source.length) { if (source[end] === '{') depth++; if (source[end] === '}') depth--; end++; }
+          source = source.slice(0, opening + 1) + '\nshadowBlend=0.0;primaryDir2D=vec2(0.0);primaryStrengthOut=0.0;return 0.0;\n}' + source.slice(end);
+        }
+        original(shader, source);
+      };
+      try { check('softwareFixtureInit', renderer.init(host)); } finally { gl.shaderSource = original; }
+      report.specialization = 'World light accumulator only: zero-light result matching retro policy; unmodified shaders compiled first. Modern light appearance is not assessed by this fixture.';
+    }
+    const room = { geoKey: '0,0,0', _geometryStamp: 'retro-room-fixture', layout: { width: 9, height: 9 },
+      classification: { indoor: true }, skyTop: '#27334f', skyBot: '#496784', lighting: { dir: 'NW', intensity: .6 },
+      cells: {}, tiles: { pillar: { spriteSpec: { voxelShape: 'doric_column', material: 'stone', baseWidth: .75, heightRatio: 1 } },
+        custom_missing_column: { spriteSpec: { voxelShape: 'ionic_column', material: 'marble', baseWidth: .75, heightRatio: 1 } },
+        custom_archway: { spriteSpec: { voxelShape: 'archway', material: 'stone', baseWidth: .8, heightRatio: .7 } },
+        retro_ceiling: { spriteSpec: { voxelShape: 'coffered_slab', material: 'stone' } } },
+      sceneStructures: [{ tile: 'retro_ceiling', role: 'roof-skin', position: { x: 2, y: 2, z: 2.5 }, size: { x: 5, y: 5, z: .25 } }] };
+    for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) room.cells[x + ',' + y] = {
+      tile: x === 0 || x === 8 || y === 0 || y === 8 ? 'wall' : x === 5 && y === 3 ? 'pillar' : x === 5 && y === 5 ? 'custom_missing_column' : 'floor', floorHeight: 0, ceilHeight: 2.5
+    };
+    room.cells['8,4'] = { tile: 'torch', floorHeight: 0, ceilHeight: 2.5, torchFacing: 'west' };
+    room.cells['5,2'] = { tile: 'custom_archway', floorHeight: 0, ceilHeight: 2.5 };
+    function texture(color) {
+      const c = document.createElement('canvas'); c.width = c.height = 8;
+      const g = c.getContext('2d'); g.fillStyle = color; g.fillRect(0, 0, 8, 8);
+      c.complete = true; c.naturalWidth = c.naturalHeight = 8; return c;
+    }
+    const spec = ProceduralCharacters.getPresetProceduralSpec('Mortacia');
+    const actor = { name: spec.name, type: 'monster', hp: 12, state: 'Friendly', mazeX: 4, mazeY: 4, sprite: { spec } };
+    const textures = { floor: api.makeSurface('floor'), wall: texture('#b4a38a') };
+    for (const [name, url] of [['wall', '/wall-image'], ['pillar', '/prop-image']]) {
+      const response = await fetch(url);
+      if (response.ok) { const image = new Image(); image.src = URL.createObjectURL(await response.blob()); await image.decode(); textures[name] = image; }
+    }
+    Object.assign(window, { currentDungeon: room, dungeonTextures: textures,
+      playerDungeonX: 1, playerDungeonY: 4, playerPosX: 1.5, playerPosY: 4.5, playerAngle: 0, playerZ: .65,
+      combatCharacters: [actor], gamePaused: true, WEBGPU_VOXEL_PREWARM: false });
+    const roomBefore = JSON.stringify(room), actorBefore = JSON.stringify(actor);
+    window.renderDungeonView = () => { renderer.renderScene(); api.presentRenderer(renderer, host); };
+    await fetch('/progress?production-render');
+    api.setMode('c64_glazed');
+    check('productionBrightWorld', renderer.gl.getUniform(renderer.program, renderer.uniformLocations.fullbright) === 1);
+    check('productionBrightSprites', renderer.gl.getUniform(renderer.spriteProgram, renderer.spriteUniforms.fullbright) === 1);
+    check('productionPaintedPillars', renderer.lastFrameStats.retroBillboards === 0 && renderer.lastFrameStats.voxelInstances >= 3);
+    check('productionUsesDetailedWorldCharacter', [...renderer._billboardTexCache.keys()].some(key => key.endsWith('|retro-world')));
+    const pillarMesh = renderer.voxelMeshes.pillar;
+    check('productionPillarNotFlattened', !!pillarMesh && renderer._getRetroPropImage === undefined);
+    check('productionMeshOutlines', renderer.lastFrameStats.retroOutlineDrawCalls >= 3);
+    check('productionNonColumnPropsNotFlattened', !!renderer.voxelMeshes.custom_archway && renderer.lastFrameStats.retroBillboards === 0);
+    const painted = hash(); await new Promise(resolve => setTimeout(resolve, 130)); window.renderDungeonView();
+    check('productionNoLightFlicker', hash() === painted);
+    report.images.push({ name: 'retro-graphics-room.png', png: output().toDataURL() });
+    await fetch('/progress?production-modern');
+    api.setMode('modern');
+    check('productionPillarMeshUnchanged', renderer.voxelMeshes.pillar === pillarMesh);
+    check('productionLightingRestored', renderer.gl.getUniform(renderer.program, renderer.uniformLocations.fullbright) === 0 &&
+      renderer.gl.getUniform(renderer.spriteProgram, renderer.spriteUniforms.fullbright) === 0);
+    check('productionSceneDataUnchanged', JSON.stringify(room) === roomBefore && JSON.stringify(actor) === actorBefore);
+    check('productionNoGlErrors', renderer.gl.getError() === renderer.gl.NO_ERROR);
+    const wasteland = { geoKey: 'retro-outdoors', _geometryStamp: 'outdoor-fixture', layout: { width: 20, height: 20 },
+      classification: { indoor: false, biome: 'wasteland' }, skyTop: '#446688', skyBot: '#997766', cells: {}, tiles: {} };
+    for (let y = 0; y < 20; y++) for (let x = 0; x < 20; x++) wasteland.cells[x + ',' + y] = { tile: 'floor', floorHeight: 0, ceilHeight: 0 };
+    const outdoorBefore = JSON.stringify(wasteland);
+    const groundTexture = texture('#a49c88'), groundContext = groundTexture.getContext('2d');
+    groundContext.fillStyle = '#777777';
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if ((x * 3 + y * 5) % 4 === 0) groundContext.fillRect(x, y, 1, 1);
+    Object.assign(window, { currentDungeon: wasteland, combatCharacters: [], playerDungeonX: 2, playerDungeonY: 5,
+      playerPosX: 2.5, playerPosY: 5.5, playerAngle: 0, dungeonTextures: { floor: groundTexture, wall: texture('#998866') } });
+    api.setMode('c64_glazed');
+    const seen = new Set(), rgba = output().getContext('2d').getImageData(0, 0, 160, 200).data;
+    for (let i = 0; i < rgba.length; i += 4) seen.add([...rgba.slice(i, i + 3)].join(','));
+    check('wastelandSolidYellowSky', same(pixel(80, 2), [...api.palette[7], 255]) && same(pixel(80, 60), [...api.palette[7], 255]));
+    check('wastelandRedAndGrayGround', seen.has(api.palette[2].join(',')) && [11, 12, 15].some(index => seen.has(api.palette[index].join(','))));
+    let redPixels = 0, groundPixels = 0;
+    for (let i = 100 * 160 * 4; i < rgba.length; i += 4) {
+      groundPixels++;
+      if (same([...rgba.slice(i, i + 3)], api.palette[2])) redPixels++;
+    }
+    report.ground = { redPixels, groundPixels };
+    check('wastelandRedIsSparseFlecks', redPixels > 0 && redPixels / groundPixels < .05);
+    report.images.push({ name: 'retro-graphics-wasteland.png', png: output().toDataURL() });
+    api.setMode('modern');
+    check('wastelandPolicyRestores', renderer.gl.getUniform(renderer.program, renderer.uniformLocations.retroWasteland) === 0 && JSON.stringify(wasteland) === outdoorBefore);
+    report.status = api.status(); check('noBrowserErrors', report.errors.length === 0);
+    report.pass = Object.values(report.checks).every(Boolean);
+  } catch (error) { report.error = error.stack; }
+  document.getElementById('results').textContent = JSON.stringify({ ...report, images: undefined });
+  await fetch('/report', { method: 'POST', body: JSON.stringify(report) });
+});
+</script>
+</html>

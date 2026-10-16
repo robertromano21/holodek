@@ -38,6 +38,30 @@
         color: { Friendly: '#8ecba6', Neutral: '#91bcdd', Hostile: '#de8174' }[row.allegiance] || '#dbb879' }];
     });
   }
+  function knownObjects(dungeon, objects = dungeon?.sceneObjects || []) {
+    const names = new Set((dungeon?.objectDiscoveries?.names || []).map(name => String(name).toLowerCase().trim()));
+    const used = new Set();
+    return (Array.isArray(objects) ? objects : []).slice(0, 128).flatMap(item => {
+      const name = String(item?.name || '').trim(), id = name.toLowerCase();
+      if (!id || !names.has(id) || used.has(id) || !validPoint(item) || !dungeon.cells?.[`${Math.floor(item.x)},${Math.floor(item.y)}`]) return [];
+      used.add(id);
+      return [{ id: `object:${id}`, name, label: name, x: item.x + .5, y: item.y + .5,
+        kind: 'object', glyph: '*', color: '#e3c26f', item }];
+    });
+  }
+  function hoverLabel(dungeon, state, x, y, markers = [], radius = 1) {
+    if (!validPoint({ x, y }) || !dungeon?.layout || !state) return '';
+    const close = markers.map(marker => ({ marker, distance: Math.hypot(marker.x - x, marker.y - y) }))
+      .filter(row => row.distance <= radius).sort((a, b) => a.distance - b.distance).slice(0, 4);
+    if (close.length) return close.map(({ marker }) => marker.kind === 'encounter' ? `${marker.label} (last seen)` : marker.label).join('; ');
+    const tx = Math.floor(x), ty = Math.floor(y);
+    if (tx < 0 || ty < 0 || tx >= state.width || ty >= state.height) return '';
+    if (!seen(state, ty * state.width + tx)) return 'Unexplored';
+    const cell = dungeon.cells?.[`${tx},${ty}`];
+    if (!cell) return '';
+    const tile = dungeon.tiles?.[cell.tile], name = tile?.landmark?.label || tile?.landmark?.type || cell.feature || cell.tile || 'floor';
+    return String(name).replace(/^custom_/, '').replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+  }
   const seen = (state, index) => !!(state.bits[index >> 3] & (1 << (index & 7)));
   function mark(state, index) {
     if (seen(state, index)) return false;
@@ -176,7 +200,7 @@
     return { get, reveal, seen, flush, async flushAll() { for (const state of rooms.values()) await flush(state); },
       clear() { rooms.clear(); }, get size() { return rooms.size; } };
   }
-  const api = { bearings, encounters, landmarks, observeResident, knownEncounters, createAtlas, reveal, seen, visible };
+  const api = { bearings, encounters, landmarks, observeResident, knownEncounters, knownObjects, hoverLabel, createAtlas, reveal, seen, visible };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DungeonCartography = api;
 })(typeof window === 'undefined' ? globalThis : window);

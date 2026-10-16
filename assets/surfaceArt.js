@@ -139,11 +139,14 @@
         clueStyle:p.clueStyle,pairs:['sequence','harmonics'].includes(p.kind)?[]:p.controls.map(c=>({mark:c.mark,option:c.options[c.goal]}))});
     return art.slice(0,13);
   }
-  function paint(ctx,createCanvas,art,palette={},glyphs=[]){
+  function paint(ctx,createCanvas,art,palette={},glyphs=[],options={}){
     const native=rasterSize(art),cv=createCanvas(native.width,native.height),c=cv.getContext('2d'),canvasWidth=native.width/(native.height/64);
     c.scale(native.height/64,native.height/64);
     // Pigment belongs to the painting, not the beige stone behind it; room lighting still applies in 3D.
     if(art.kind==='fresco'||art.kind==='mosaic'&&art.style)palette=frescoPalette(art);
+    const retro=options.retro===true&&art.kind==='fresco'&&!art.puzzleClue;
+    if(retro)palette={primary:art.pigments==='vermilion'?'#96282e':'#2724c4',secondary:'#41b936',highlight:'#eff347',shadow:'#000000'};
+    const figurePalette=i=>retro?{...palette,primary:['#96282e','#41b936','#2724c4'][i%3]}:palette;
     const primary=palette.primary||'#67564a',trim=palette.secondary||'#c99d65',light=palette.highlight||'#efe0ae',dark=palette.shadow||'#28272a';
     c.fillStyle=primary;c.fillRect(0,0,canvasWidth,64);c.strokeStyle=trim;c.lineWidth=3;
     const shapedMosaic=art.kind==='mosaic'&&!art.puzzleClue&&Mosaics.shape(art)!=='rectangle';
@@ -206,9 +209,9 @@
       c.restore();
       if(art.style||art.figures?.length){
         const rows=Designs.layout(art,Designs.figures(art),canvasWidth);
-        for(const row of rows){
+        for(const [i,row] of rows.entries()){
           if(art.style==='byzantine'){c.strokeStyle=light;c.lineWidth=1;c.beginPath();c.arc(row.box.x+row.box.width/2,row.box.y+5,5,0,Math.PI*2);c.stroke();}
-          Figures.paint(c,row,palette,row.box,art.style||'renaissance',createCanvas);
+          Figures.paint(c,row,figurePalette(i),row.box,art.style||'renaissance',createCanvas);
         }
       }else{
       const figures=art.motifs.filter(m=>Iconography.name(m)||Sculptures.forms.includes(m.toLowerCase()));
@@ -218,7 +221,7 @@
         const box=central?{x:27,y:composition==='apotheosis'?3:8,width:43,height:46}:
           {x:subjects.length===2?5+i*46:4+i*29,y:composition==='lamentation'?24:15,width:subjects.length===3?29:39,height:composition==='lamentation'?29:39};
         box.x=(box.x+box.width/2)*spread-box.width/2;
-        Sculptures.paintFigure(c,{label:art.label+' '+m,form,deity},{...palette,primary,secondary:trim,highlight:light,shadow:dark},
+        Sculptures.paintFigure(c,{label:art.label+' '+m,form,deity},{...figurePalette(i),secondary:trim,highlight:light,shadow:dark},
           {...box,pigment:true});});
       const deity=Iconography.name(subjects[0]);ink(deity||art.motifs[0],canvasWidth/2-5,7,9,light);
       }

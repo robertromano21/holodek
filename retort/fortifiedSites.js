@@ -145,7 +145,7 @@ Each floor is its own room at the supplied XYZ coordinate; stairs connect adjace
 }
 async function extend($, database, sourceKey, input = {}) {
   const source = database[sourceKey], c = Routes.coordinates(sourceKey);
-  if (!source || Routes.indoor(source) !== false || !c || c.z < 0 || source.fortifiedSiteScan === 1) return [];
+  if (!source || source.villagePlan || source.villageBuilding || Routes.indoor(source) !== false || !c || c.z < 0 || source.fortifiedSiteScan === 1) return [];
   const results = [];
   for (const [direction, exit] of Object.entries(source.exits || {})) {
     const target = Routes.resolveExit(c, direction, source.exits).targetKey, room = database[target];
@@ -182,4 +182,4 @@ function bossCandidates(database, input = {}) {
     !Object.keys(r.inhabitants?.actors || {}).length)
     .slice(0, 12).map(([coordinates, r]) => ({ coordinates, name: r.name, siteId: r.complexId, purpose: r.fortifiedFloor.purpose }));
 }
-module.exports = { TYPES, TEMPLATES, FUNCTIONS, isType, isFloor, route, validate, compile, seed, extend, describe, bossCandidates };
+module.exports = { TYPES, TEMPLATES, FUNCTIONS, isType, isFloor, protectedKeys, route, validate, compile, seed, extend, describe, bossCandidates };

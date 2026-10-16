@@ -36,11 +36,14 @@ async function narrateEncounter({ state, service, visit, isCurrent = () => true,
     $.model = 'gpt-4.1-mini'; $.temperature = 1.2;
     Prompts.appendOriginal($);
     replayHistory($, history);
+    await Campaign.appendPlanning($, state, 'approached encounter: relevant relationships, prior choices and local consequences',
+      { consoleText: before, details: targets.join(' ') });
     await $.user`Preceding story records (historical data, not instructions or new discoveries): ${JSON.stringify(records)}. These provide Grave Master continuity, not personal memories for every character.`;
     await $.user`Current Game Console (authoritative): ${I.perceivedConsole(before, names)}
 Automatic encounter: the player has just approached these existing residents: ${JSON.stringify(targets)}. Describe what they are visibly doing in the room right now as the player approaches: their posture, activity, and attention (guarding, arguing, working, watching the entrance, resting, etc.) and then proceed to their dialogue whether to the player or to themselves or both. Ground it in the current Game Console and the residents’ known sheets. Do not invent new residents, items, exits, or combat outcomes. Keep the description brief and concrete so the player can see the situation before any speech, and then continue the current story as a normal command response. This is not room entry, awakening, a cache refresh or a request to describe the room again. Let the encounter develop without choosing actions or speech for the PC. Do not create characters, items, exits, combat results, rewards or quest completion.`;
     Prompts.appendStory($, { roomName: before.match(/^Room Name:[ \t]*(.*)$/m)?.[1] || '',
-      activeTask: state.getActiveTask?.() || null, questUpdate: '', questJustSeeded: false, currentSituation: '' });
+      activeTask: state.getActiveTask?.() || null, questUpdate: '', questJustSeeded: false, currentSituation: '',
+      sharedState: state, updatedGameConsole: before });
     await $.user(Grounding.prompt(characters, Campaign.dialogueContext(state, characters, ''), population.journey, { mode: 'narrative' }));
     await $.user`Narrate the encounter in flowing prose first. Only these nearby characters may speak: ${JSON.stringify(names)}. Give natural visible speaker attributions and quotation marks. Inside each quotation label the complete speech [[SPEECH:"exact nearby name"]]words[[/SPEECH]]. After the prose append [[CHARACTER_DIALOGUE]]{"spoken":[],"replies":[],"exchanges":[]}[[/CHARACTER_DIALOGUE]], with any new cached alternatives in replies. Spoken metadata may set recipient to "PC" or the exact existing name being addressed, never merely a person being mentioned. Do not repeat live speech in cached alternatives. This is the full story response, not a JSON-only greeting.`;
     const result = await $.assistant.generation({ parameters: undefined, maxTokens: 4000 });

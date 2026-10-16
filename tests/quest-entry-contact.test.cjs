@@ -47,7 +47,7 @@ test('a first-time contact cannot be discovered through a pillar, but a previous
   assert.equal(f.contact().speaker, 'Guide');
 });
 
-for (const proposed of ['Friendly', 'Hostile']) test(`quest-contact generation accepts ${proposed === 'Friendly' ? 'a friendly ally' : 'only nonhostile allegiance'} without changing other cast slots`, async () => {
+for (const proposed of ['Friendly', 'Hostile']) test(`quest-contact generation protects ${proposed === 'Friendly' ? 'a friendly ally' : 'a nonhostile contact'} while other residents retain model-chosen allegiance`, async () => {
   let requests = 0;
   const agent = { user() {}, assistant: { generation: async () => { requests++; return { content: JSON.stringify({ inhabitants: inhabitantReply(8, [
     { slot: 0, name: 'Guide', allegiance: proposed, dialogue: ['The keeper is missing. Can you investigate?'] },
@@ -56,7 +56,7 @@ for (const proposed of ['Friendly', 'Hostile']) test(`quest-contact generation a
   const result = await generateInhabitants(agent, { roomName: 'Cloister', roomDescription: 'A ruined cloister.', geoKey: '1,0,0', indoor: true, quest, questSeed: true },
     { level: () => 1, random: () => 5, sex: () => 'Female', xp: () => 0, equipment: async () => null });
   assert.equal(requests, 1); assert.equal(result.population.actors.Guide.allegiance, proposed === 'Friendly' ? 'Friendly' : 'Neutral');
-  assert.equal(result.population.actors.Guard.allegiance, 'Hostile');
+  assert.equal(result.population.actors.Guard.allegiance, 'Friendly');
   assert.equal(result.population.questIntroduction.hook, 'The keeper is missing. Can you investigate?');
   const d = fixture().dungeon; I.place(result.population, d);
   const guide = result.population.actors.Guide;

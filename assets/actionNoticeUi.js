@@ -5,10 +5,11 @@
 })(typeof window === 'undefined' ? globalThis : window, function(root) {
   'use strict';
   const queue = [], seen = new Set();
-  let panel, portrait, title, status, message, active = null, room = '', itemSnapshot = null, serial = 0;
+  let panel, content, portrait, title, status, message, active = null, room = '', itemSnapshot = null, serial = 0;
   const context = () => root.getDungeonLifeContext?.();
   const clock = () => root.DungeonLife?.time?.() ?? Date.now();
   const clean = value => typeof value === 'string' ? value.trim() : '';
+  const requiresDismissal = event => event.result === 'observed' || ['document-read', 'writing-discovered', 'art-examined'].includes(event.kind);
   const fallbackIcon = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 64"><path fill="#d8bc7a" d="M16 4h16v8h6v16h-6v8h8v8h4v16H4V44h4v-8h8v-8h-6V12h6z"/><path fill="#30251c" d="M18 16h12v8H18zM20 38h8v22h-8z"/></svg>');
   function sameRoom(event) { return event.runId === root.dungeonRunId && event.geoKey === context()?.dungeon?.geoKey; }
   function receive(event) {
@@ -16,13 +17,14 @@
     seen.add(event.id); if (seen.size > 128) seen.delete(seen.values().next().value);
     const row = { ...event, title: event.title.slice(0, 100), message: event.message.slice(0, 700) };
     if (event.kind === 'puzzle-complete') {
-      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].kind === 'puzzle-control') queue.splice(i, 1);
-      if (active?.kind === 'puzzle-control') active = null;
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].kind === 'puzzle-control' && !requiresDismissal(queue[i])) queue.splice(i, 1);
+      if (active?.kind === 'puzzle-control' && !requiresDismissal(active)) active = null;
       queue.unshift(row);
     } else queue.push(row);
     if (queue.length > 20) {
-      const optional = queue.findIndex(row => !['puzzle-complete', 'defeat'].includes(row.kind));
-      queue.splice(optional < 0 ? 0 : optional, 1);
+      const optional = queue.findIndex(row => !requiresDismissal(row) && !['puzzle-complete', 'defeat'].includes(row.kind));
+      // The transient-toast budget must not discard unread pages or important outcomes.
+      if (optional >= 0) queue.splice(optional, 1);
     }
     tick();
     return true;
@@ -43,7 +45,10 @@
       (bounds ? bounds.left + bounds.width / 2 : root.innerWidth / 2) / zoom - width / 2)) + 'px';
     const dialogue = document.getElementById('dungeon-dialogue');
     const top = dialogue && !dialogue.hidden ? Math.min(bounds?.top ?? root.innerHeight, dialogue.getBoundingClientRect().top) : bounds?.top;
-    panel.style.bottom = Math.max(12, (root.innerHeight - (top ?? root.innerHeight)) / zoom + 12) + 'px';
+    const bottom = Math.max(12, (root.innerHeight - (top ?? root.innerHeight)) / zoom + 12);
+    const height = Math.max(1, root.innerHeight / zoom - bottom - 12);
+    panel.style.bottom = bottom + 'px'; panel.style.maxHeight = height + 'px';
+    content.style.maxHeight = Math.max(1, height - 22) + 'px';
   }
   function tick() {
     const ctx = context(), key = `${root.dungeonRunId}:${ctx?.dungeon?.geoKey || ''}`;
@@ -53,11 +58,12 @@
       if (panel) panel.hidden = true;
     }
     if (!panel || root.gamePaused) return;
-    if (active && clock() >= active.until) { active = null; panel.hidden = true; }
+    if (active && active.until !== null && clock() >= active.until) { active = null; panel.hidden = true; }
     if (!active && queue.length) {
       const row = queue.shift();
       if (!sameRoom(row)) return;
-      active = { ...row, until: clock() + (row.kind === 'puzzle-complete' ? 7500 : Math.min(9000, Math.max(3500, row.message.length * 22))) };
+      const manual = requiresDismissal(row);
+      active = { ...row, until: manual ? null : clock() + (row.kind === 'puzzle-complete' ? 7500 : Math.min(9000, Math.max(3500, row.message.length * 22))) };
       title.textContent = row.title;
       const labels = { success: 'Success', partial: 'Partial Progress', failure: 'Failed', blocked: 'Cannot Do That',
         observed: 'Examined', defeated: 'Defeated', resolved: 'Action Resolved' };
@@ -66,7 +72,8 @@
         row.kind === 'pursuit' ? 'Pursuit' :
         [clean(row.activity).replace(/([a-z])([A-Z])/g, '$1 $2'), labels[row.result], Number.isFinite(row.roll) ? `d20 ${row.roll}` : ''].filter(Boolean).join(' / ');
       message.textContent = row.message;
-      portrait.src = iconFor(row); panel.dataset.kind = row.kind; panel.hidden = false;
+      if (manual) status.textContent += (status.textContent ? ' / ' : '') + 'Close with X';
+      portrait.src = iconFor(row); panel.dataset.kind = row.kind; panel.dataset.dismissal = manual ? 'manual' : 'timed'; panel.hidden = false;
       console.info('[ActionNoticeDisplayed]', { id: row.id, geoKey: row.geoKey, kind: row.kind, title: row.title, message: row.message });
     }
     if (active) fit();
@@ -105,10 +112,13 @@
     const dismissStyle = document.createElement('style');
     dismissStyle.textContent = '#dungeon-action-notice{padding-right:44px}#dungeon-action-notice .dungeon-message-close{position:absolute;top:4px;right:4px;width:32px;height:32px;padding:0;margin:0;border:0;border-radius:4px;background:transparent;color:#ead29d;font:16px Georgia,serif;cursor:pointer;pointer-events:auto}#dungeon-action-notice .dungeon-message-close:hover{background:#ffffff1c}#dungeon-action-notice .dungeon-message-close:focus-visible{outline:1px solid #ead29d;outline-offset:1px}';
     document.head.appendChild(dismissStyle);
+    const readingStyle = document.createElement('style');
+    readingStyle.textContent = '#dungeon-action-notice[data-dismissal=manual]{pointer-events:auto}#dungeon-action-notice .dungeon-action-content{min-width:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;white-space:pre-wrap;overflow-wrap:anywhere}';
+    document.head.appendChild(readingStyle);
     panel = document.createElement('div'); panel.id = 'dungeon-action-notice'; panel.hidden = true;
     panel.setAttribute('role', 'status'); panel.setAttribute('aria-live', 'polite');
     portrait = document.createElement('img'); portrait.alt = '';
-    const body = document.createElement('div'); title = document.createElement('strong');
+    const body = content = document.createElement('div'); body.className = 'dungeon-action-content'; title = document.createElement('strong');
     status = document.createElement('small'); message = document.createElement('div');
     body.append(title, status, message); panel.append(portrait, body); document.body.appendChild(panel);
     const close = document.createElement('button'); close.id = 'dungeon-action-notice-close'; close.type = 'button';

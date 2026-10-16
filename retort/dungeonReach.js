@@ -1,5 +1,6 @@
 const Inhabitants = require('../assets/dungeonInhabitants');
 const Gear = require('../assets/equipmentRules');
+const Footprint = require('../assets/combatFootprint');
 function roomKey(value) {
   const numbers = String(value || '').match(/-?\d+/g);
   return numbers?.length === 3 ? numbers.map(Number).join(',') : null;
@@ -51,28 +52,42 @@ function lineClear(dungeon, a, b) {
 
 function createCombatSpace(dungeon, roster, geoKey) {
   const actors = new Map(roster.map(c => [String(c.name || c.Name).toLowerCase(), c]));
-  const entry = actor => actors.get(String(actor.name || actor.Name).toLowerCase());
+  const entry = actor => actor && actors.get(String(actor.name || actor.Name).toLowerCase());
   const point = actor => position(entry(actor), geoKey);
+  const bodyPoints = (actor, at = point(actor)) => !at ? [] : Footprint.cells(entry(actor) || actor, at)
+    .map(c => ({ x: at.x + c.x - Math.floor(at.x), y: at.y + c.y - Math.floor(at.y) }));
+  const pairs = (a, p, b, q) => bodyPoints(a, p).flatMap(from => bodyPoints(b, q).map(to => ({ from, to, distance: Math.hypot(from.x - to.x, from.y - to.y) })))
+    .sort((a, b) => a.distance - b.distance);
   function distance(a, b) {
     const p = point(a), q = point(b);
-    return p && q ? Math.hypot(p.x - q.x, p.y - q.y) : Infinity;
+    return p && q ? pairs(a, p, b, q)[0]?.distance ?? Infinity : Infinity;
   }
   function reachOf(a) {
     return Gear.reach(a);
   }
   function canAttackFrom(a, p, b) {
     const q = point(b);
-    return p && q && Math.hypot(p.x - q.x, p.y - q.y) <= reachOf(a) && lineClear(dungeon, p, q);
+    return p && q && pairs(a, p, b, q).some(pair => pair.distance <= reachOf(a) && lineClear(dungeon, pair.from, pair.to));
   }
   const canAttack = (a, b) => !!canAttackFrom(a, point(a), b);
-  const canStrikeFrom = (a, p, q) => !!(p && q && !Gear.ranged(a) && Math.hypot(p.x - q.x, p.y - q.y) <= reachOf(a) && lineClear(dungeon, p, q));
-  const canStrike = (a, b) => canStrikeFrom(a, point(a), point(b));
+  const canStrikeFrom = (a, p, q, target) => !!(p && q && !Gear.ranged(a) &&
+    pairs(a, p, target, q).some(pair => pair.distance <= reachOf(a) && lineClear(dungeon, pair.from, pair.to)));
+  const canStrike = (a, b) => canStrikeFrom(a, point(a), point(b), b);
+  function canMoveTo(a, from, to) {
+    const moving = entry(a) || a;
+    const blocked = new Set([...actors.values()].filter(c => c !== moving && (c.hp ?? 1) > 0 && position(c, geoKey))
+      .flatMap(c => Footprint.cells(c).map(p => `${p.x},${p.y}`)));
+    const dx = to.x - from.x, dy = to.y - from.y;
+    return Footprint.cells(moving, to).every(p => !blocked.has(`${p.x},${p.y}`) &&
+      Inhabitants.canTraverse(dungeon, { x: p.x - dx, y: p.y - dy,
+        ...(Number.isFinite(from.pointX) ? { pointX: from.pointX + p.x - to.x, pointY: from.pointY + p.y - to.y } : {}) }, p));
+  }
   function rangedPenalty(a) {
     if (!Gear.ranged(a)) return 0;
     const friendly = a.type === 'pc' || a.type === 'npc' || Inhabitants.allegiance(a) === 'Friendly';
     return [...actors.values()].some(b => (b.hp ?? 1) > 0 && b.name !== a.name &&
       (friendly ? Inhabitants.allegiance(b) === 'Hostile' : b.type === 'pc' || b.type === 'npc' || Inhabitants.allegiance(b) === 'Friendly') &&
-      distance(a, b) <= 1.5 && lineClear(dungeon, point(a), point(b))) ? 4 : 0;
+      pairs(a, point(a), b, point(b)).some(pair => pair.distance <= 1.5 && lineClear(dungeon, pair.from, pair.to))) ? 4 : 0;
   }
   function setHealth(combatants) {
     combatants.forEach(actor => { const c = entry(actor); if (c) c.hp = actor.hp; });
@@ -90,8 +105,6 @@ function createCombatSpace(dungeon, roster, geoKey) {
   function pursuitPath(a, b, maxSteps = Infinity) {
     const p = point(a), q = point(b);
     if (!p || !q || canAttack(a, b)) return [];
-    const blocked = new Set([...actors.values()].filter(c => c !== entry(a) && (c.hp ?? 1) > 0 && position(c, geoKey))
-      .map(c => `${c.mazeX},${c.mazeY}`));
     const start = { x: Math.floor(p.x), y: Math.floor(p.y), pointX:p.x,pointY:p.y,parent: null };
     const queue = [start], seen = new Set([`${start.x},${start.y}`]);
     for (let i = 0; i < queue.length && i < 4096; i++) {
@@ -103,7 +116,7 @@ function createCombatSpace(dungeon, roster, geoKey) {
       }
       for (const [dx, dy] of [[0, -1], [1, 0], [0, 1], [-1, 0]]) {
         const x = current.x + dx, y = current.y + dy, key = `${x},${y}`;
-        if (seen.has(key) || blocked.has(key)) continue;
+        if (seen.has(key) || !canMoveTo(a, current, { x, y })) continue;
         const from = dungeon.cells[`${current.x},${current.y}`], to = dungeon.cells[key];
         if (!Inhabitants.canTraverse(dungeon, current, { x, y }) ||
             Inhabitants.ceilingHeight(dungeon, to) - (to.floorHeight || 0) <= 0.65) continue;
@@ -120,7 +133,7 @@ function createCombatSpace(dungeon, roster, geoKey) {
     if(c.type==='pc')c.mazePoint={x:step.x+0.5,y:step.y+0.5};
     return true;
   }
-  return { dungeon, roster, distance, canAttack, canStrike, canStrikeFrom, rangedPenalty, point, pursuitPath, move, syncRoster, setHealth };
+  return { dungeon, roster, distance, canAttack, canAttackFrom, canStrike, canStrikeFrom, canMoveTo, rangedPenalty, point, pursuitPath, move, syncRoster, setHealth };
 }
 
 module.exports = { roomKey, position, solid, lineClear, createCombatSpace };

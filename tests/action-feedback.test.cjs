@@ -46,8 +46,9 @@ test('adjudication notices show only committed XP trap damage item and exit rece
 function browserFixture() {
   let now = 1000, paused = false;
   const elements = new Map(), listeners = {};
-  const element = tag => ({ tagName: tag, hidden: false, style: {}, dataset: {}, children: [], textContent: '',
-    addEventListener() {}, blur() {},
+  const element = tag => ({ tagName: tag, hidden: false, style: {}, dataset: {}, children: [], textContent: '', listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; }, blur() {},
+    click() { this.listeners.click?.({ preventDefault() {}, stopPropagation() {} }); },
     setAttribute() {}, append(...children) { this.children.push(...children); },
     appendChild(child) { this.children.push(child); if (child.id) elements.set(child.id, child); },
     getBoundingClientRect: () => ({ top: 650, left: 250, width: 500, height: 80 }) });
@@ -108,6 +109,48 @@ test('action notice dismissal remains available while paused without clearing th
   api.receive(event); api.receive({ ...event, id: 'second' }); f.pause(true);
   api.dismiss(); api.tick(); assert.equal(f.elements.get('dungeon-action-notice').hidden, true);
   f.pause(false); api.tick(); assert.equal(f.elements.get('dungeon-action-notice').hidden, false);
+});
+
+test('readings and examinations wait for X, never auto-advance or enter the speech queue', () => {
+  for (const details of [{ kind: 'document-read', result: 'observed' }, { kind: 'writing-discovered' },
+    { kind: 'art-examined' }, { kind: 'puzzle-control', result: 'observed' }]) {
+    const f = browserFixture(), api = f.root.DungeonActionNotices; let spoken = 0;
+    f.root.DungeonLife.receiveDialogue = () => spoken++;
+    const event = { runId: 'run', geoKey: '0,0,0', id: 'read-1', title: 'An Unfinished Covenant', message: 'Retrieve the plate, then speak with Nera.', ...details };
+    api.receive(event); api.receive({ ...event, id: 'read-2', message: 'The next page.' });
+    const panel = f.elements.get('dungeon-action-notice'); f.advance(3600000);
+    assert.equal(panel.hidden, false); assert.equal(panel.dataset.dismissal, 'manual');
+    assert.equal(panel.children[1].children[2].textContent, event.message);
+    assert.match(panel.children[1].children[1].textContent, /Close with X/);
+    assert.equal(spoken, 0);
+    f.elements.get('dungeon-action-notice-close').click(); assert.equal(panel.hidden, true);
+    api.tick(); assert.equal(panel.children[1].children[2].textContent, 'The next page.');
+  }
+});
+
+test('important readings cannot be evicted by puzzle completion or a backlog of notices', () => {
+  const f = browserFixture(), api = f.root.DungeonActionNotices;
+  const event = { runId: 'run', geoKey: '0,0,0', kind: 'puzzle-control', result: 'observed', title: 'Clue', message: 'Do not lose these instructions.' };
+  for (let i = 0; i < 25; i++) api.receive({ ...event, id: 'clue-' + i, title: 'Clue ' + i });
+  api.receive({ ...event, id: 'solved', kind: 'puzzle-complete', result: 'success', title: 'Solved' });
+  const panel = f.elements.get('dungeon-action-notice'); f.advance(90001);
+  assert.equal(panel.children[1].children[0].textContent, 'Clue 0');
+  api.dismiss(); api.tick(); assert.equal(panel.children[1].children[0].textContent, 'Solved');
+  for (let i = 1; i < 25; i++) {
+    api.dismiss(); api.tick(); assert.equal(panel.children[1].children[0].textContent, 'Clue ' + i);
+  }
+});
+
+test('manual readings remain dismissible while paused and clear on a room change or game reset', () => {
+  const f = browserFixture(), api = f.root.DungeonActionNotices;
+  const event = { id: 'read', runId: 'run', geoKey: '0,0,0', kind: 'document-read', title: 'Tablet', message: 'Instructions.' };
+  api.receive(event); f.pause(true); f.advance(90000);
+  const panel = f.elements.get('dungeon-action-notice'); assert.equal(panel.hidden, false);
+  f.elements.get('dungeon-action-notice-close').click(); assert.equal(panel.hidden, true);
+  f.pause(false); api.receive({ ...event, id: 'next' });
+  f.ctx.dungeon.geoKey = '1,0,0'; api.tick(); assert.equal(panel.hidden, true);
+  api.receive({ ...event, id: 'new-room', geoKey: '1,0,0' }); assert.equal(panel.hidden, false);
+  api.reset(); assert.equal(panel.hidden, true);
 });
 
 test('confirmed pickups require room removal plus an inventory increase, not despawns equips or room transitions', () => {

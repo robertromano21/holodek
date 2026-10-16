@@ -12,6 +12,7 @@
     if (typeof document === 'undefined' || !document.body) return;
     const loading = busy();
     document.body.classList.toggle('game-command-loading', loading);
+    document.body.classList.toggle('game-combat-targeting', root.actionDiceState?.active?.kind === 'combat');
     for (const button of document.querySelectorAll('#chatbotcontainer button')) {
       if (button.hasAttribute?.('data-read-only-reference')) continue;
       if (loading) {
@@ -52,12 +53,15 @@
     // Guard the public command entry, leaving its delicate parser and state pipeline untouched.
     if (typeof root.chatbotprocessinput === 'function') root.chatbotprocessinput = wrap(root.chatbotprocessinput);
     document.addEventListener('click', event => {
+      if (root.CombatCharacterUi?.openConsoleTarget?.(event.target)) {
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
       if (event.target.closest?.('[data-read-only-reference]')) return;
       if (!busy() || !event.target.closest?.('#phaser-container a, #phaser-container [class*="clickable-"], #chatbotcontainer button')) return;
       event.preventDefault(); event.stopImmediatePropagation();
     }, true);
     const style = document.createElement('style');
-    style.textContent = '.game-command-loading #chatbotcontainer button:not([data-read-only-reference]){opacity:.5;cursor:wait}.game-command-loading #phaser-container [class*="clickable-"]{cursor:wait;text-decoration:none;opacity:.65}';
+    style.textContent = '.game-command-loading #chatbotcontainer button:not([data-read-only-reference]){opacity:.5;cursor:wait}.game-command-loading #phaser-container [class*="clickable-"]{cursor:wait;text-decoration:none;opacity:.65}.game-combat-targeting #phaser-container :is(.clickable-pc,.clickable-npc,.clickable-monster){cursor:pointer;text-decoration:underline;opacity:1}';
     document.head.appendChild(style);
     if (root.jQuery) root.jQuery(document)
       .on('ajaxSend.commandGate', (_event, _xhr, settings) => transportStarted(settings.url))

@@ -12,25 +12,26 @@ test('generated size metadata is bounded, stable, persistent and independent of 
     assert.deepEqual(C.withVariant(spec,4).stature,spec.stature);
   }
 });
-test('actual combat-map sprite bodies use the same humanoid proportions as 3D, without role-dependent resizing',()=>{
-  const game=fs.readFileSync('assets/game.js','utf8'),ctx={window:{ProceduralCharacters:C},document:{createElement:()=>require('canvas').createCanvas(1,1)},COMBAT_ACTOR_TOKEN_SCALE:1.35,COMBAT_MORTACIA_TOKEN_SCALE:1.75};
+test('combat-map readable body targets are independent of role and preserve world stature',()=>{
+  const game=fs.readFileSync('assets/game.js','utf8'),ctx={window:{ProceduralCharacters:C},document:{createElement:()=>require('canvas').createCanvas(1,1)},COMBAT_ACTOR_TOKEN_SCALE:1.35,COMBAT_MORTACIA_TOKEN_SCALE:1.75,COMBAT_HUMANOID_TOKEN_SCALE:1.4,COMBAT_MIN_BODY_TOKEN_SCALE:1.28};
   vm.runInNewContext(game.slice(game.indexOf('function fitCombatNpcSpriteSheet('),game.indexOf('function setCombatPlayerTokenOwner(')),ctx);
-  for(const [race,scale]of[['Human',1],['Elf',1],['Dwarf',.8],['Gnome',.8],['Halfling',.8],['Mortacia',1.2]]){
+  for(const [race,expected]of[['Human',35],['Elf',35],['Dwarf',32],['Gnome',32],['Halfling',32],['Mortacia',40.5]]){
     const spec=race==='Mortacia'?C.getPresetProceduralSpec(race):C.buildProceduralSpriteSpec({name:'Map '+race,race,class:'Fighter'});
+    const before=JSON.stringify(spec),worldHeight=C.humanoidWorldStature(spec);
     let bodySize;
     for(const type of['pc','npc','monster']){
       const actor={name:spec.name,type,sprite:{spec}},sheet=Sprite.createCharacterSpriteSheetCanvas(actor,spec);
       ctx.fitCombatNpcSpriteSheet(sheet,actor);
       const size=ctx.combatMapActorSize(actor,25)*actor._combatBodyFraction;
-      close(size,25*1.35*scale);bodySize??=size;close(size,bodySize);
+      close(size,expected);bodySize??=size;close(size,bodySize);
     }
+    assert.equal(JSON.stringify(spec),before);assert.equal(C.humanoidWorldStature(spec),worldHeight);
   }
 });
-test('close-up framing keeps the top visible and size-based roaming distances do not change combat reach',()=>{
+test('camera distance never reduces world stature and existing size-based movement distances do not change combat reach',()=>{
   for(const height of[1.65,1.98,2.475,3.3])for(const depth of[.3,1,2,5]){
     const framed=C.frameBillboardHeight(height,.65,depth,Math.sqrt(3),0,.04);
-    const top=.5+(.65-(1-.04)*framed)*Math.sqrt(3)/2/depth;
-    assert.ok(top>=.05-1e-8);assert.ok(framed<=height);
+    assert.equal(framed,height);
   }
   const giant=C.buildProceduralSpriteSpec({name:'Enormous Golem',race:'Giant',isMonster:true});
   assert.ok(C.characterViewingDistance(giant)>3);
@@ -47,7 +48,7 @@ function pixelHeight(canvas){
 }
 function combatContext(){
   const game=fs.readFileSync('assets/game.js','utf8'),ctx={window:{ProceduralCharacters:C,createCharacterSpriteSheetCanvas:Sprite.createCharacterSpriteSheetCanvas,createCombatSpriteSheetCanvas:Sprite.createCombatSpriteSheetCanvas},
-    document:{createElement:()=>require('canvas').createCanvas(1,1)},COMBAT_ACTOR_TOKEN_SCALE:1.35,COMBAT_MORTACIA_TOKEN_SCALE:1.75,
+    document:{createElement:()=>require('canvas').createCanvas(1,1)},COMBAT_ACTOR_TOKEN_SCALE:1.35,COMBAT_MORTACIA_TOKEN_SCALE:1.75,COMBAT_HUMANOID_TOKEN_SCALE:1.4,COMBAT_MIN_BODY_TOKEN_SCALE:1.28,
     Phaser:{Textures:{FilterMode:{NEAREST:'nearest'}}},applyProceduralSpriteToEntry:()=>false,console};
   vm.runInNewContext(game.slice(game.indexOf('function fitCombatNpcSpriteSheet('),game.indexOf('function getCombatFacingFlip(')),ctx);
   vm.runInNewContext(game.slice(game.indexOf('function getCombatTextureKey('),game.indexOf('// Re-create a combat-map visual when')),ctx);
@@ -69,10 +70,21 @@ test('a tiny-layout elf with headgear is not visually magnified over a medium-la
     const idle=Sprite.createTraitSpriteCanvas(spec),sheet=Sprite.createCharacterSpriteSheetCanvas(actor,spec);
     assert.equal(sheet._combatBodyHeight,pixelHeight(idle),'Use the drawn headgear and outline, not nominal limb heights');
     const fitted=ctx.fitCombatNpcSpriteSheet(sheet,actor),visible=pixelHeight(fitted)*ctx.combatMapActorSize(actor,25)/fitted.height;
-    assert.ok(Math.abs(visible-33.75)<.8,`${layout}/${type}: actual visible body ${visible}`);sizes.push(visible);
+    assert.ok(Math.abs(visible-35)<.8,`${layout}/${type}: actual visible body ${visible}`);sizes.push(visible);
     assert.equal(JSON.stringify(spec),before);
   }
   assert.ok(Math.max(...sizes)-Math.min(...sizes)<.8,'Layout size cannot introduce a PC-only or tiny-layout enlargement');
+});
+
+test('other small creatures also receive the 32-pixel map body floor without enlarging large monsters',()=>{
+  const ctx=combatContext();
+  for(const scale of[.8,.87,.88,.94,1.02,1.5,2])for(const type of['pc','npc','monster']){
+    const spec=largeSpec('beast',scale),actor={name:spec.name,type,sprite:{spec}},before=JSON.stringify(spec);
+    const sheet=Sprite.createCombatSpriteSheetCanvas(actor,spec);ctx.fitCombatNpcSpriteSheet(sheet,actor);
+    close(ctx.combatMapActorSize(actor,25)*actor._combatBodyFraction,Math.max(32,33.75*scale));
+    assert.equal(JSON.stringify(spec),before);
+  }
+  close(ctx.combatMapActorSize({name:'Legacy compact',race:'Dwarf',type:'npc'},25),32);
 });
 
 test('weapon, wing, halo and magical extensions cannot change body calibration or alter the original avatar pixels',()=>{

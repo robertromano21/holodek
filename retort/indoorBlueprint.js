@@ -13,6 +13,11 @@ const inside = (r, p) => p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.
 function build(dungeon, plan = {}, base = {}) {
   if (!plan || typeof plan !== 'object') plan = {};
   const { width, height } = dungeon.layout;
+  if (base.cavernVillage) {
+    // The settlement lives beneath one continuous cave roof, not in a house-sized room maze.
+    plan = { rooms: [{ x: .03, y: .03, w: .94, h: .94, shape: 'irregular', role: 'entrance', clearance: 14 }], corridors: [] };
+    base = { ...base, ceil: 14 };
+  }
   const rng = random(`${dungeon.generation?.seed || dungeon.blueprint?.seed || 'indoor'}:blueprint`);
   const floor = finite(base.floor, 0), clearance = clamp(finite(base.ceil, 2.5), 2, 14);
   const cells = dungeon.cells;

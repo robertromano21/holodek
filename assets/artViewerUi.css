@@ -1,0 +1,24 @@
+.room-art { display: block; white-space: normal; margin: 8px 0 14px; max-width: 100%; }
+.room-art figcaption { color: #e7c478; margin: 0 0 6px; line-height: 1.8; }
+.room-art-open { display: block; padding: 0; margin: 0; border: 1px solid #958260; background: #111; color: #ddd; width: 100%; max-width: 640px; cursor: zoom-in; }
+.room-art-open > span { display: block; padding: 14px; font-size: 8px; line-height: 1.8; }
+#phaser-container .room-art img, #game-log-container .room-art img, .room-art img {
+  display: block; width: 100%; height: auto; max-width: 100%; margin: 0; image-rendering: pixelated;
+}
+#art-viewer-popup {
+  position: fixed; inset: 0; margin: auto; transform: none; box-sizing: border-box;
+  width: min(900px, 92vw); height: fit-content; max-height: 92vh; overflow: auto;
+  padding: 12px; background: #080808; color: #eee; z-index: 20000;
+  border: 6px solid #aaa; border-image: url('/assets/ui-pixel-frame.svg') 6 / 6px / 0 stretch;
+  border-radius: 0; font: 10px/1.85 var(--game-ui-font, monospace); white-space: normal;
+}
+#art-viewer-popup::backdrop { background: #000c; }
+#art-viewer-popup header { display: flex; gap: 16px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+#art-viewer-popup header strong { font-size: 12px; color: #e7c478; }
+#art-viewer-popup header button { flex: none; padding: 5px 9px; cursor: pointer; }
+#art-viewer-popup > img { display: block; max-width: 100%; width: 100%; height: auto; max-height: 65vh; object-fit: contain; image-rendering: pixelated; filter: none; }
+#art-viewer-popup p { margin: 12px 0 0; font-size: 9px; line-height: 1.9; }
+@media (max-width: 600px) {
+  #art-viewer-popup { width: 94vw; padding: 8px; }
+  #art-viewer-popup header strong { font-size: 9px; }
+}

@@ -2,7 +2,7 @@
   'use strict';
   const COMPASS = { north: [0, -1], northeast: [1, -1], east: [1, 0], southeast: [1, 1],
     south: [0, 1], southwest: [-1, 1], west: [-1, 0], northwest: [-1, -1] };
-  const LABELS = { north: 'N', northeast: 'NE', east: 'E', southeast: 'SE', south: 'S', southwest: 'SW', west: 'W', northwest: 'NW', up: 'UP', down: 'DN' };
+  const LABELS = { north: 'N', northeast: 'NE', east: 'E', southeast: 'SE', south: 'S', southwest: 'SW', west: 'W', northwest: 'NW', up: 'UP', down: 'DN', portal: 'PORTAL' };
   const cache = new WeakMap();
   const STEPS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
   function normalize(raw) {
@@ -66,9 +66,17 @@
     dungeon.tiles ||= {};
     dungeon.tiles.journey_exit_marker = { spriteSpec: { voxelShape: 'exit_marker', material: 'wood', collisionBlocking: false },
       landmark: { type: 'exit_marker', label: 'Journey threshold' } };
-    dungeon.sceneStructures = (dungeon.sceneStructures || []).filter(p => p.role !== 'journey-exit-marker');
+    dungeon.sceneStructures = (dungeon.sceneStructures || []).filter(p => p.role !== 'journey-exit-marker' && p.role !== 'planar-portal-arch');
     for (const marker of markers) dungeon.sceneStructures.push({ role: 'journey-exit-marker', shape: 'exit_marker', tile: 'journey_exit_marker',
       direction: marker.direction, position: { x: marker.x + 0.05, y: marker.y + 0.05, z: marker.floor + 0.05 }, size: { x: 0.9, y: 0.9, z: 0.4 } });
+    for (const marker of markers.filter(m => m.direction === 'portal')) {
+      const c = dungeon.cells[marker.key], available = dungeon.classification?.indoor === false ? 3 : Math.max(1.5, (c.ceilHeight || marker.floor + 3) - marker.floor - .1);
+      dungeon.tiles.planar_portal_arch = { spriteSpec: { voxelShape: 'portal_arch', material: 'crystal', collisionBlocking: false,
+        palette: { primary: '#9537c9', secondary: '#63278b', highlight: '#edb3ff', shadow: '#351444' } }, landmark: { type: 'portal', label: 'Planar portal' } };
+      dungeon.sceneStructures.push({ role: 'planar-portal-arch', shape: 'portal_arch', tile: 'planar_portal_arch', direction: 'portal',
+        position: { x: marker.x + .02, y: marker.y + .02, z: marker.floor }, size: { x: .96, y: .96, z: Math.min(3, available) } });
+      marker.kind = 'planar-portal';
+    }
     dungeon.roomExits = { version: 1, signature, status: missing.length ? 'partial' : 'built', markers, missing, reachable: count };
     cache.set(dungeon, { signature, stamp });
     return dungeon.roomExits;

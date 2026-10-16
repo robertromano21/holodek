@@ -36,7 +36,7 @@ function route(database, origin, bossKey) {
   return null;
 }
 function prompt(context) {
-  return `Author the FIRST connected regional adventure in Children of the Grave, supplementing the existing main quest.
+  return `${require('./underworldLore').GUIDANCE}\nAuthor the FIRST connected regional adventure in Children of the Grave, supplementing the existing main quest.
 Use the system prompt's underworld lore and these real bindings: ${JSON.stringify(context)}.
 The engine owns mechanics: accept the hook; read burial records; defeat two road extortionists; defeat two hostile temple jailers;
 recruit a neutral prisoner and escort them alive to the oasis, OR read the prison testimony when escort is impossible;
@@ -45,7 +45,7 @@ Make a lived-in adventure with personal stakes, a misleading rumor that the buri
 and two defensible faction choices. Write short dramatic dialogue, not an omniscient lore lecture.
 The four sites, in order, are a fertile oasis/community, an outdoor graveyard, a dangerous outdoor road, and an INDOOR hostile temple of Arithus or Dantuea.
 Use the existing firstSiteName when supplied; its open trail can contain a watered settlement. The existing contact alone speaks the hook; do not replace their identity. The engine binds all exact room names and directions after validation.
-Name six mortal inhabitants: oasis representative, rescued prisoner, two road guards, two temple guards; no gods, bosses or party names.
+Name six non-divine inhabitants (souls, shades, native beings or humanoids as you choose): oasis representative, rescued prisoner, two road guards, two temple guards; no gods, bosses or party names. These are underworld people, not necessarily living mortals.
 Return only JSON with title (<=70 chars), premise (<=220), hook (<=400), rumor (<=220), investigation (<=400), rescue (<=400), conclusion (<=400),
 sites:[{name (<=80), flavor (<=240)}] (four entries),
 actors:[{name (<=60), history (<=220), personality (<=160)}] (six entries in the order above),
@@ -173,6 +173,7 @@ async function trySeed($, state, database, origin, gate, text) {
   };
   if (!route(database, origin, gate.targetKey)||!contact) return fallback(!contact ? 'No living neutral opening contact.' : 'No safe connected regional route; existing quest generator retained.');
   try {
+    await require('./campaignMemory').appendPlanning($, state, 'regional adventure: past choices, unresolved trouble, factions and relationships', { consoleText: text });
     await $.assistant`${prompt({ origin, room: database[origin]?.name, mainQuest: state.getCurrentQuest(), bossRoom: database[gate.targetKey]?.name,
       contact:{name:contact.name,history:database[origin].inhabitants.actors[contact.name].history},
       party: I.parseSheets(text, 'PC').concat(I.parseSheets(text, 'NPCs in Party')).map(a => a.name),

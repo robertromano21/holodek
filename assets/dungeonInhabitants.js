@@ -193,6 +193,7 @@
         spellPreferences: [...new Set(Array.isArray(row.spellPreferences) ? row.spellPreferences : [])]
           .filter(id => typeof id === 'string' && SpellRules?.catalog(className).includes(id)).slice(0, 7),
         allegiance: state, state, encounterId: text(row.encounterId || row.encounter, 40) || `group-${Math.floor(index / 3)}`,
+        homeSite: text(row.homeSite, 20) || 'commons',
         job: text(row.job, 70) || (state === 'Hostile' ? 'sentinel' : 'pilgrim'),
         activity: text(row.activity, 140) || (state === 'Hostile' ? 'watching the approach' : 'studying the ruins'),
         personality: text(row.personality, 220), voice: text(row.voice, 140), motivation: text(row.motivation, 180),
@@ -208,7 +209,7 @@
     const limit = starting ? 4 : indoor ? 10 : 20;
     for (const row of normalizeDescriptors(rows, { limit, starting })) {
       // Limit each encounter to four and keep allegiances coherent within a group.
-      const base = `${row.encounterId}-${row.allegiance.toLowerCase()}`;
+      const base = `${row.encounterId}-${row.allegiance.toLowerCase()}${row.homeSite === 'commons' ? '' : '-' + row.homeSite}`;
       let group = groupById.get(base);
       if (!group || group.members.length >= 4) {
         group = { id: `${base}-${groups.length}`, members: [], status: 'unseen', introPlayed: false, site: null };
@@ -424,7 +425,7 @@
     const available = new Map(tiles.map(t => [`${t.x},${t.y}`, t]));
     const occupied = new Set(Object.values(population.actors).filter(a => a.position).map(a => `${a.position.x},${a.position.y}`));
     const extent = Math.max(dungeon.layout?.width || 0, dungeon.layout?.height || 0);
-    const gap = population.starting ? 0 : population.indoor ? 12 : Math.max(20, Math.min(60, extent / 9));
+    const gap = population.starting ? 0 : population.settlement?.hub ? 6 : population.indoor ? 12 : Math.max(20, Math.min(60, extent / 9));
     const safeDistance = population.starting ? 2 : population.indoor ? 9 : 16;
     const smallGroups = population.groups.filter(g => !g.site && g.status !== 'exhausted' && g.members.length <= 3);
     const questGroup = !population.starting && population.questIntroduction?.status === 'pending' ?
@@ -439,6 +440,9 @@
     for (const group of groups) {
       if (group.site || group.status === 'exhausted') continue;
       let site = null, best = -Infinity;
+      const homeSite = population.settlement?.hub && population.actors[group.members[0]]?.homeSite;
+      const venue = homeSite && dungeon.sceneExteriors?.buildings?.find(b => b.direction === homeSite)?.doorway?.approach;
+      const center = population.settlement?.hub ? venue || dungeon.start : null;
       // Sample a bounded number of sites, but across the entire reachable level.
       const pool = group === entryGroup ? candidates.filter(t => Math.hypot(t.x - dungeon.start.x, t.y - dungeon.start.y,
         (dungeon.cells[`${t.x},${t.y}`].floorHeight || 0) - (dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].floorHeight || 0)) <= MONSTER_DIALOGUE_RANGE &&
@@ -455,7 +459,7 @@
         const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx,dy]) => available.has(`${t.x+dx},${t.y+dy}`) &&
           Math.abs((dungeon.cells[`${t.x+dx},${t.y+dy}`].floorHeight || 0) - floor) <= 1.5).length;
         if (neighbors < 2) continue;
-        const preferred = population.starting || group===entryGroup ? -t.distance : -Math.abs(t.distance - safeDistance -
+        const preferred = center && group !== entryGroup ? -Math.hypot(t.x - center.x, t.y - center.y) * 3 : population.starting || group===entryGroup ? -t.distance : -Math.abs(t.distance - safeDistance -
           (group.members.length + sites.length + 1) * Math.max(12, extent / (population.groups.length + 2)));
         const score = preferred + Math.min(spacing, extent) * 0.25 + hash(`${salt}:${t.x},${t.y}`) / 4294967296 * 8;
         if (score > best) { best = score; site = t; }
@@ -533,15 +537,17 @@
     const matches = exact.length ? exact : explicit ? living.filter(a => a.type === 'monster' && keyOf(a.name).startsWith(keyOf(explicit))) : [];
     const provoking = matches.length===1 && (!population || !space || pc &&
       (space.canAttack(pc,matches[0]) || space.distance(matches[0],pc)<=(population.indoor ? 8 : 12)) && lineClear(space.dungeon,space.point(matches[0]),space.point(pc)));
-    if (provoking && allegiance(matches[0]) === 'Neutral') {
+    if (provoking && allegiance(matches[0]) !== 'Hostile') {
       matches[0].allegiance = 'Hostile';
       matches[0].state = 'Hostile';
+      matches[0].storedState = 'Hostile';
       const record = population?.actors?.[matches[0].name];
       if (record) record.allegiance = record.state = 'Hostile';
+      if (population) population.revision++;
     }
     let hostiles = living.filter(a => allegiance(a, fallback) === 'Hostile');
     if(population && !pc)hostiles=[];
-    if (explicit && (matches.length !== 1 || allegiance(matches[0]) === 'Friendly')) hostiles = [];
+    if (explicit && matches.length !== 1) hostiles = [];
     if (population && space && pc) {
       const range = population.indoor ? 8 : 12;
       const target = matches[0];

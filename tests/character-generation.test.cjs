@@ -53,8 +53,8 @@ for (const count of [1, 4]) test(`Ruined Temple's ${count} friendly residents re
   const rows = inhabitants(count), a = agent({ inhabitants: rows });
   const result = await generateInhabitants(a, { ...context, quest: 'Existing quest', questSeed: true }, { ...rules,
     random: (min, max) => max === 5 ? count : min });
-  assert.equal(a.requests.length, 1); assert.equal(a.requests[0].parameters, undefined);
-  assert.ok(Object.hasOwn(a.requests[0], 'parameters'), 'Explicitly clear any previous modifier schema.');
+  assert.equal(a.requests.length, 1); assert.ok(a.requests[0].parameters.inhabitants);
+  assert.equal(a.requests[0].strictParameters, true, 'Validate authored identities through the strict contract.');
   assert.equal(result.population.starting, true); assert.equal(result.population.questIntroduction, undefined);
   assert.equal(Object.keys(result.population.actors).length, count);
   const saved = JSON.parse(JSON.stringify(result.population)), roster = I.parseBlocks(result.sheets).map(a => ({ ...a, type: 'monster' }));
@@ -135,12 +135,15 @@ test('4.1 Mini and Luna send identical character-writing prompts and inputs for 
   for (const geoKey of ['0,0,0', '1,0,0']) {
     const captures = [];
     for (const id of ['gpt-4.1-mini', 'gpt-6-luna']) {
-      const requests = [], content = JSON.stringify({ inhabitants: inhabitants(geoKey === '0,0,0' ? 1 : 8) });
+      const requests = [], content = JSON.stringify({ inhabitants: inhabitants(geoKey === '0,0,0' ? 1 : 8).map(row => ({
+        ...row, allegiance: geoKey === '0,0,0' ? 'Friendly' : row.slot < 3 ? 'Neutral' : 'Hostile',
+        encounterId: 'local-' + Math.floor(row.slot / 3), homeSite: 'commons'
+      })) });
       const client = { chat: { completions: { create: async body => {
         requests.push(body);
         return (async function* () {
-          yield { choices: [{ index: 0, delta: { content }, finish_reason: null }] };
-          yield { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+          yield { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'authored_cast', type: 'function', function: { name: 'answer', arguments: content } }] }, finish_reason: null }] };
+          yield { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] };
         })();
       } } } };
       const models = createModelService({ initial: id, clientFor: () => client });
@@ -154,7 +157,7 @@ test('4.1 Mini and Luna send identical character-writing prompts and inputs for 
         return Authorship.runWithLore($, child => generateInhabitants(child, { ...context, geoKey }, rules));
       }), null, { shouldSaveToLog: false });
       assert.equal(requests.length, 1); assert.equal(requests[0].model, id);
-      assert.equal(requests[0].tools, undefined); assert.equal(requests[0].temperature, .85);
+      assert.equal(requests[0].tools[0].function.strict, true); assert.equal(requests[0].temperature, .85);
       captures.push(requests[0].messages.filter(m => m.content === original || m.role === 'user').map(m => m.content));
     }
     assert.deepEqual(captures[0], captures[1], 'Only the model-specific backend role adapter may differ, never character instructions or world data.');

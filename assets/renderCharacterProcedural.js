@@ -3553,10 +3553,9 @@
     const stature = characterStature(spec);
     return stature ? 1.65 * stature.scale : null;
   }
-  function frameBillboardHeight(height, eyeAboveFeet, depth, verticalScale, shift = 0, inset = 0) {
-    // Keep the top of close-up artwork within a five-percent camera margin.
-    const fit = (eyeAboveFeet + (.9 + 2 * shift) * depth / verticalScale) / (1 - inset);
-    return fit > 0 ? Math.min(height, fit) : height;
+  function frameBillboardHeight(height) {
+    // Compatibility for older callers: camera distance must never change world stature.
+    return height;
   }
   function characterViewingDistance(spec) {
     const target = humanoidWorldStature(spec);

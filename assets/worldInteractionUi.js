@@ -255,6 +255,7 @@
       await requestRead(target.label);return;
     }
     if(target.type==='art'){
+      if (root.ArtViewerUi?.surface(target.art)) { clear(); return; }
       root.DungeonActionNotices?.receive?.({id:'art:'+Date.now(),runId:root.dungeonRunId,geoKey:frame.dungeon.geoKey,
         kind:'art-examined',result:'observed',title:target.label,message:target.art.description+(target.art.text?' '+target.art.text:'')});
       return;

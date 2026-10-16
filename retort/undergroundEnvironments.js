@@ -11,7 +11,7 @@ const TEMPLATES = [
   ['ice_cave', true, 'cave', 'ice_cave', 'Inside an ice cave, a frozen rock ceiling covers frost-rimmed chambers, ice formations and connected firm walking ledges.', 'Name an ice cave or frozen grotto, not an open glacier.'],
   ['crypt', true, 'crypt', 'crypt', 'Inside an enclosed crypt, stone vaults cover sarcophagi, burial niches and connected caretaker passages.', 'Name a crypt, tomb or ossuary, distinct from an outdoor graveyard.']
 ];
-const ids = new Set([...TEMPLATES.map(row => row[0]), 'catacomb']);
+const ids = new Set([...TEMPLATES.map(row => row[0]), 'catacomb', 'cavern_village']);
 const REGIONAL_LAYERS = [
   'Basalt lava tubes and mineral caverns underlie the ash wastes; braced mines supply stone and ore, while spring caves and burial crypts draw caretakers and scavenging packs.',
   'Worked mines and limestone caverns run beneath caravan passes; miners trade at surface wells, and fungal grottos and crypt galleries branch away from the haulage routes.',
