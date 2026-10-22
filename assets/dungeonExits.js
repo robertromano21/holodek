@@ -17,7 +17,8 @@
     const directions = normalize(raw), signature = directions.slice().sort().join(','), stamp = dungeon._geometryStamp;
     const previous = cache.get(dungeon);
     if (previous?.signature === signature && previous.stamp === stamp) return dungeon.roomExits;
-    const { width: w, height: h } = dungeon.layout, { x: sx, y: sy } = dungeon.start;
+    // world1 ARRIVAL_EDGES moves the party's start to the arrival gate; exits stay laid out from the room's own origin.
+    const { width: w, height: h } = dungeon.layout, { x: sx, y: sy } = dungeon._world1Start || dungeon.start;
     if (!(Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 && w <= 512 && h <= 512)) return { status: 'skipped', markers: [] };
     const seen = new Uint8Array(w * h), parents = new Int32Array(w * h).fill(-1), q = new Int32Array(w * h);
     const first = sx + sy * w;
@@ -42,7 +43,9 @@
         const planned = c.complexExit === direction || c.exit === direction || c.exit?.direction === direction;
         const dot = v ? (dx * v[0] + dy * v[1]) / Math.hypot(...v) : 0;
         if (!planned && (d > 80 || v && dot < d * 0.75)) continue;
-        const s = planned ? 10000 - d : v ? dot - Math.abs(dx * v[1] - dy * v[0]) * 1.5 : -Math.abs(d - 15);
+        // world1 EXIT_FRAMES: favour the far edge in the exit's direction so moving through reads as moving forward.
+        const edge = (dungeon.exitFrames ?? root.HolodekFlags?.EXIT_FRAMES) && v ? dot * 2 : 0;
+        const s = planned ? 10000 - d : v ? dot + edge - Math.abs(dx * v[1] - dy * v[0]) * 1.5 : -Math.abs(d - 15);
         if (s > score) { score = s; best = { direction, label: LABELS[direction], key: `${x},${y}`, x, y,
           floor: c.floorHeight || 0, kind: planned ? 'architectural-exit' : v ? 'directional-route' : 'portal-landing', i }; }
       }
@@ -66,9 +69,24 @@
     dungeon.tiles ||= {};
     dungeon.tiles.journey_exit_marker = { spriteSpec: { voxelShape: 'exit_marker', material: 'wood', collisionBlocking: false },
       landmark: { type: 'exit_marker', label: 'Journey threshold' } };
-    dungeon.sceneStructures = (dungeon.sceneStructures || []).filter(p => p.role !== 'journey-exit-marker' && p.role !== 'planar-portal-arch');
+    dungeon.sceneStructures = (dungeon.sceneStructures || []).filter(p => p.role !== 'journey-exit-marker' && p.role !== 'journey-exit-frame' && p.role !== 'planar-portal-arch');
     for (const marker of markers) dungeon.sceneStructures.push({ role: 'journey-exit-marker', shape: 'exit_marker', tile: 'journey_exit_marker',
       direction: marker.direction, position: { x: marker.x + 0.05, y: marker.y + 0.05, z: marker.floor + 0.05 }, size: { x: 0.9, y: 0.9, z: 0.4 } });
+    // world1 EXIT_FRAMES: frame each compass exit in biome-fitting architecture, facing its direction.
+    // Data-only flag: dungeon.exitFrames is set server-side when HOLODEK_EXIT_FRAMES is on.
+    if (dungeon.exitFrames ?? root.HolodekFlags?.EXIT_FRAMES) for (const marker of markers.filter(m => COMPASS[m.direction] || m.direction === 'up' || m.direction === 'down')) {
+      const kind = frameKind(dungeon, marker.direction), side = ['east', 'west'].includes(marker.direction) ? '_side' : '';
+      const shape = `exit_${kind}${side}`, tile = `journey_exit_${kind}${side}`, c = dungeon.cells[marker.key];
+      const available = dungeon.classification?.indoor === false ? 2.6 : Math.max(1.5, (c?.ceilHeight || marker.floor + 3) - marker.floor - .1);
+      // world1 MOLDINGS: stone arch frames get a carved gate surround from the room's theme (wood/metal frames stay plain).
+      const C = root.DesignCatalog, surround = kind === 'arch' && C && (dungeon.moldings ?? root.HolodekFlags?.MOLDINGS) ?
+        { version: 1, region: 'panel', pattern: C.VOXEL_PATTERNS[C.hash(`${dungeon.sceneSpec?.roomName || ''}:${marker.direction}`) % C.VOXEL_PATTERNS.length] } : null;
+      dungeon.tiles[tile] = { spriteSpec: { voxelShape: shape, material: kind === 'gate' ? 'wood' : kind === 'grate' ? 'metal' : 'stone', collisionBlocking: false, ...(surround ? { stoneCarving: surround } : {}) },
+        landmark: { type: 'exit_frame', label: `${LABELS[marker.direction]} ${kind}` } };
+      dungeon.sceneStructures.push({ role: 'journey-exit-frame', shape, tile, direction: marker.direction,
+        position: { x: marker.x - .05, y: marker.y - .05, z: marker.floor }, size: { x: 1.1, y: 1.1, z: Math.min(2.6, available) } });
+      marker.frame = kind;
+    }
     for (const marker of markers.filter(m => m.direction === 'portal')) {
       const c = dungeon.cells[marker.key], available = dungeon.classification?.indoor === false ? 3 : Math.max(1.5, (c.ceilHeight || marker.floor + 3) - marker.floor - .1);
       dungeon.tiles.planar_portal_arch = { spriteSpec: { voxelShape: 'portal_arch', material: 'crystal', collisionBlocking: false,
@@ -80,6 +98,13 @@
     dungeon.roomExits = { version: 1, signature, status: missing.length ? 'partial' : 'built', markers, missing, reachable: count };
     cache.set(dungeon, { signature, stamp });
     return dungeon.roomExits;
+  }
+  function frameKind(dungeon, direction) {
+    const biome = dungeon.classification?.biome || '', text = `${dungeon.sceneSpec?.roomName || ''} ${dungeon.classification?.architecture || ''}`.toLowerCase();
+    if (direction === 'down' || biome === 'crypt' || /crypt|catacomb|tomb|dungeon|sewer|cistern/.test(text)) return 'grate';
+    if (biome === 'fortress' || /castle|fort|gatehouse|citadel|keep/.test(text)) return 'portcullis';
+    if (dungeon.classification?.indoor === false || /wasteland|grove|village|hamlet|oasis|market/.test(text)) return 'gate';
+    return 'arch';
   }
   function nearby(dungeon, player, radius = 1) {
     if (!player || !Number.isFinite(player.x) || !Number.isFinite(player.y)) return null;

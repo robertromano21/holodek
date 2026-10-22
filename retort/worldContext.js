@@ -68,14 +68,16 @@ function consoleLine(consoleText, label) {
   return matches.length === 1 ? matches[0][1].trim() : '';
 }
 
-function propagateComplexIdentity(database, coords) {
+function propagateComplexIdentity(database, coords, { readOnly = new Set() } = {}) {
   coords = coordinates(coords);
   if (!coords) return;
   const { rooms } = indexDatabase(database), key = keyOf(coords), room = rooms.get(key);
   if (indoor(room) !== true) return;
   room.complexId ||= key === '0,0,0' ? 'ruined-temple' : `site:${key}`;
   for (const direction of normalize(room.exits)) {
-    const target = rooms.get(resolveExit(coords, direction, room.exits).targetKey);
+    const targetKey = resolveExit(coords, direction, room.exits).targetKey;
+    if (readOnly.has(targetKey)) continue;
+    const target = rooms.get(targetKey);
     if (indoor(target) === true && !target.complexId) target.complexId = room.complexId;
   }
 }
@@ -187,6 +189,9 @@ function attachSceneWorldContext(spec, database, state, consoleText) {
   spec.source.environmentIntent = cloneMetadata(spec.worldContext.environmentIntent);
   spec.source.questContext = { currentQuest: quest.currentQuest, taskIndex: quest.taskIndex, constructionTasks,
     completionOwner: 'existing quest adjudication; construction cannot complete tasks' };
+  // world1 CITY_SITES: 'city' room kind for planned city streets/buildings (biome keyword scoring is unchanged).
+  try { const db = typeof database === 'string' ? JSON.parse(database || '{}') : database; const city = require('./citySites').sceneKind(db?.[key],db);
+    if (city && require('./worldFlags').on('CITY_SITES')) { spec.city = city; spec.roomKind = city.roomKind; } } catch {}
   return spec;
 }
 

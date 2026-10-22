@@ -16,9 +16,11 @@
     const geoKey = key(coordinates);
     if (!geoKey || !runId || !name || !description) return '';
     const id = idOf({ geoKey, name, description, runId });
-    return `<figure class="room-art" data-room-art="${esc(id)}"><button type="button" class="room-art-open" aria-label="View ${esc(name)} artwork"><span>Grave Master is painting ${esc(name)}...</span></button></figure>`;
+    return `<figure class="room-art" data-room-art="${esc(id)}"><button type="button" class="room-art-open" aria-label="View ${esc(name)} artwork"><span>${esc(root.HolodekFlags?.GM_NAME || 'Grave Master')} is painting ${esc(name)}...</span></button></figure>`;
   }
   function raster(record) {
+    const saved = record.rasters, png = value => typeof value === 'string' && value.length < 1024 * 1024 && /^data:image\/png;base64,iVBORw0KGgo[A-Za-z0-9+/]*={0,2}$/.test(value);
+    if (saved?.version === 1 && saved.source === record.source && png(saved.modern) && png(saved.retro)) return { src: saved.modern, retroSrc: saved.retro };
     const c = document.createElement('canvas'); c.width = root.RoomIllustration.width; c.height = root.RoomIllustration.height;
     root.RoomIllustration.paint(c.getContext('2d'), record.plan, record.source);
     return { src: root.ArtViewerUi.source(c, false), retroSrc: root.ArtViewerUi.source(c, true) };
@@ -77,7 +79,7 @@
     if (slot && slot.querySelector('[data-room-art]')?.dataset.roomArt !== id) slot.innerHTML = markup(room);
     if (entry) {
       serial++;
-      root.updateChatLog?.(`<br><figure class="room-art" data-room-art="${esc(id)}" data-room-entry="${serial}"><figcaption>${esc(room.name)}</figcaption><button type="button" class="room-art-open" aria-label="View ${esc(room.name)} artwork"><span>Grave Master is painting this room...</span></button></figure><br>`);
+      root.updateChatLog?.(`<br><figure class="room-art" data-room-art="${esc(id)}" data-room-entry="${serial}"><figcaption>${esc(room.name)}</figcaption><button type="button" class="room-art-open" aria-label="View ${esc(room.name)} artwork"><span>${esc(root.HolodekFlags?.GM_NAME || 'Grave Master')} is painting this room...</span></button></figure><br>`);
     }
     if (!cache.has(id) && room.illustration) {
       try { cache.set(id, { ...raster(room.illustration), name: room.name, description: room.description }); } catch { /* Invalid old art is repaired by the server. */ }

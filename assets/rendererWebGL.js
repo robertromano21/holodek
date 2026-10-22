@@ -9,6 +9,9 @@
 
   function createShader(gl, type, source, progress) {
     const shader = gl.createShader(type);
+    if (type === gl.FRAGMENT_SHADER && (source.includes('retroPaint(') || source.includes('retroTrace('))) {
+      source = window.RetroDetails?.shader(source) || source.replace('void main() {', 'vec3 retroPalette(int i) { return vec3(1.0,0.7,0.2); }\nvec3 retroTrace(vec3 c, vec3 p, vec3 n) { return c; }\nvec2 retroLighting(vec3 p, vec3 n) { return vec2(1.0); }\nvec3 retroPaint(vec3 base, vec3 p, vec3 n) { return base; }\nvoid main() {');
+    }
     gl.shaderSource(shader, source);
     const kind = type === gl.VERTEX_SHADER ? 'vertex' : 'fragment';
     progress?.(`${kind}-compile-start`);
@@ -135,6 +138,14 @@
 
   const TORCH_FLICKER_SPEED = 0.6;
 
+  // Keep area illumination steady; animate only the shader's local ridge highlights.
+  const retroPhaseLocations = new WeakMap();
+  function setRetroPhase(gl, program, timeMs) {
+    if (!window.RetroGraphics?.fullbright?.() || !program || typeof program !== 'object') return;
+    if (!retroPhaseLocations.has(program)) retroPhaseLocations.set(program, gl.getUniformLocation(program, 'u_retroPhase'));
+    const location = retroPhaseLocations.get(program);
+    if (location != null) gl.uniform1f(location, Math.floor(timeMs / 240));
+  }
   function torchFlicker(seed, timeMs) {
     if (window.RetroGraphics?.fullbright?.()) return 0.85;
     const t = timeMs * 0.001 * TORCH_FLICKER_SPEED;
@@ -664,7 +675,7 @@
       if(!window.SurfaceArt||!isTextureReady(img))return null;
       this.surfaceArtMeshes ||= new Map();
       let palette=null;
-      if(art.carvingStyle&&!art.puzzleClue&&window.StoneCarvings){
+      if((art.carvingStyle||art.moldingStyle)&&!art.puzzleClue&&window.StoneCarvings){
         const backing=textures[art.surface==='floor'?'floor':'wall'];
         this.stoneworkSamples ||= new WeakMap();let sample=backing&&this.stoneworkSamples.get(backing);
         if(backing&&isTextureReady(backing)&&!sample){
@@ -676,14 +687,14 @@
       }
       const native=window.SurfaceArt.rasterSize(art);
       const retro=!!window.RetroGraphics?.fullbright?.()&&art.kind==='fresco'&&!art.puzzleClue;
-      const key=[art.tile,art.axis,art.surface,art.sign,art.carvingStyle,art.carvingDepth,art.puzzleClue,art.segmentRole,art.aspectRatio,JSON.stringify(palette),retro].join('|');
+      const key=[art.tile,art.axis,art.surface,art.sign,art.carvingStyle||art.moldingStyle,art.carvingDepth,art.puzzleClue,art.segmentRole,art.aspectRatio,JSON.stringify(palette),retro].join('|');
       if(this.surfaceArtMeshes.has(key))return this.surfaceArtMeshes.get(key);
       const canvas=document.createElement('canvas');canvas.width=native.width;canvas.height=native.height;
       const ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.imageSmoothingEnabled=false;
       if(palette||retro)window.SurfaceArt.paint(ctx,(w,h)=>{const c=document.createElement('canvas');c.width=w;c.height=h;return c;},art,palette||{},[],{retro});
       else ctx.drawImage(img,0,0,native.width,native.height);
       const pixels=ctx.getImageData(0,0,native.width,native.height);
-      if(retro)pixels.data.set(window.RetroGraphics.palettePixels(pixels.data,native.width,native.height));
+      // Preserve source artwork pigments; the final Retro display applies its selected palette.
       const mesh=window.SurfaceArt.mesh(pixels,art.axis,art.surface,art.sign,art);
       const record=this._createCharacterGpuMeshRecord(mesh,[.2,.2,.2],[.8,.8,.8],[1,1,1],{toonSteps:5});
       // Painted pigments need local illumination, not the long-range fill used by large pillars.
@@ -818,6 +829,46 @@
       this._voxelPrewarmToken++;
     },
 
+    _adjacentSignature(dungeon) {
+      return JSON.stringify([dungeon._geometryStamp||dungeon._meta?.geometryStamp,dungeon.visualStyle?.palette,
+        window.ARCHITECTURAL_CARVINGS,window.STONEWORK_SURFACE_CLOSURE,window.VOXEL_MESH_REV,
+        window.VOXEL_MATERIAL_TEXTURES,!!window.RetroGraphics?.fullbright?.()]);
+    },
+    releaseAdjacentRoom(id) {
+      const record=this._adjacentRooms?.get(id);if(!record)return;
+      for(const mesh of Object.values(record.meshes))for(const pass of mesh.passes||[mesh]){this.gl?.deleteBuffer(pass.vbo);this.gl?.deleteBuffer(pass.ibo);}
+      this._adjacentRooms.delete(id);
+    },
+    async prewarmAdjacentRoom(dungeon,id,valid=()=>true) {
+      if(!this.gl||!dungeon?.cells)return;
+      this._adjacentRooms ||= new Map();const signature=this._adjacentSignature(dungeon);
+      if(this._adjacentRooms.get(id)?.signature===signature)return;
+      this.releaseAdjacentRoom(id);
+      while(this._adjacentRooms.size>=2)this.releaseAdjacentRoom(this._adjacentRooms.keys().next().value);
+      const record={signature,geoKey:dungeon.geoKey,stamp:dungeon._geometryStamp||dungeon._meta?.geometryStamp,meshes:{}};
+      this._adjacentRooms.set(id,record);
+      const names=[...new Set(Object.values(dungeon.cells).map(c=>c.tile).concat((dungeon.sceneStructures||[]).map(p=>p.tile)))]
+        .filter(name=>name&&(name==='pillar'||name.startsWith('custom_')||dungeon.tiles?.[name]?.spriteSpec)).slice(0,6);
+      const started=performance.now();
+      for(const name of names){
+        await new Promise(resolve=>{if(window.requestIdleCallback)window.requestIdleCallback(resolve,{timeout:500});else setTimeout(resolve,16);});
+        if(!valid()||this._adjacentRooms.get(id)!==record||performance.now()-started>8000)break;
+        const active=this.voxelMeshes;
+        try{this.voxelMeshes=record.meshes;this.getVoxelMesh(name,dungeon,{allowCpuFallback:false});}
+        finally{this.voxelMeshes=active;}
+      }
+      if(!valid()){this.releaseAdjacentRoom(id);return;}
+      for(const item of (dungeon.sceneObjects||[]).slice(0,16))this._getItemBillboard(item);
+    },
+    _adoptAdjacentRoom(dungeon) {
+      const signature=this._adjacentSignature(dungeon);
+      for(const[id,record]of this._adjacentRooms||[]){
+        if(record.geoKey===dungeon.geoKey&&record.stamp===(dungeon._geometryStamp||dungeon._meta?.geometryStamp)&&record.signature===signature){
+          this.voxelMeshes=record.meshes;this._adjacentRooms.delete(id);return Object.keys(record.meshes).length;
+        }
+      }
+      return 0;
+    },
     _scheduleVoxelPrewarm(dungeon, cacheKey) {
       if (!isVoxelPrewarmEnabled() || !dungeon || !dungeon.cells) return;
       const names = new Set();
@@ -1551,7 +1602,7 @@
         if (debugSolid) return [1.0, 0.0, 1.0];
         if (spec.voxelShape && window.ScenePropVoxels?.color) {
           const color=window.ScenePropVoxels.color(spec.voxelShape, x / voxelResolution, y / voxelResolution, z / voxelResolution, normal, primary, material,
-            { textures: voxelTextures, palette: shapePalette, puzzleFace: spec.puzzleFace,sculpture:spec.sculpture,shrine:spec.shrine,inscription:spec.inscription });
+            { textures: voxelTextures, palette: shapePalette, puzzleFace: spec.puzzleFace,sculpture:spec.sculpture,shrine:spec.shrine,inscription:spec.inscription,cityKit:spec.cityKit });
           if(!carvedStatue)return color;
           // Local cavity shading reveals eye sockets, fingers and robe folds without painting fake features.
           const p=[x,y,z].map((v,i)=>Math.floor(v-normal[i]*.5)),axis=normal.findIndex(v=>v!==0),u=(axis+1)%3,v=(axis+2)%3;
@@ -2559,8 +2610,7 @@ float accumulateTorchLit(
   const float TORCH_AMBIENT = 0.5;
   primaryDir2D = vec2(0.0);
   primaryStrengthOut = 0.0;
-  // Retro art carries its own shade bands: no animated lighting or shadow rays.
-  if (u_fullbright > 0.5) return 0.0;
+  // Retro traces the same shadow-tested room illumination as Modern.
   for (int i = 0; i < MAX_TORCH; i++) {
     if (i >= u_torchCount) break;
     vec3 toL = u_torchPos[i] - worldPos;
@@ -2777,7 +2827,7 @@ void main() {
           keyShadow *= viewShadowFade(nextDist);
           float baseShadowMul = 1.0 - keyShadow;
           vec3 col = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
-          if (u_fullbright > 0.5) col = tex.rgb;
+          if (u_fullbright > 0.5) col = retroTrace(col, vec3(u_camPos + rayDir * nextDist, worldZ), normal);
 
           if (nextDist < sideDistClosest) {
             sideDistClosest = nextDist;
@@ -2894,7 +2944,7 @@ void main() {
         keyShadow *= viewShadowFade(perpDist);
         float baseShadowMul = 1.0 - keyShadow;
         vec3 finalCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
-        if (u_fullbright > 0.5) finalCol = tex.rgb;
+        if (u_fullbright > 0.5) finalCol = retroTrace(finalCol, exactWorldPos, wallNormalTorch);
 
         wallCol = vec4(finalCol, tex.a);
         wallDist = perpDist;
@@ -3004,13 +3054,7 @@ void main() {
     keyShadow *= viewShadowFade(floorDist);
     float baseShadowMul = 1.0 - keyShadow;
     vec3 floorCol = tex.rgb * base * baseShadowMul + tex.rgb * torchLight + torchAdd;
-    if (u_fullbright > 0.5) {
-      floorCol = tex.rgb;
-      float grain = mod(dot(floor(hitPos.xy * 32.0), vec2(13.0, 7.0)), 23.0);
-      if (u_retroWasteland > 0.5 && tex.r * 255.0 >= 30.0 && tex.r * 255.0 < 150.0 && grain < 1.0 &&
-          sin(hitPos.x * 0.42) + sin(hitPos.y * 0.31) + sin((hitPos.x + hitPos.y) * 0.19) > 1.35)
-        floorCol = vec3(150.0, 40.0, 46.0) / 255.0;
-    }
+    if (u_fullbright > 0.5) floorCol = retroTrace(floorCol, hitPos, normal);
     outColor = vec4(floorCol, 1.0);
     gl_FragDepth = floorDist / u_depthFarDepth;
     return;
@@ -3190,11 +3234,13 @@ void main() {
         '    if (sphereZRaw < capMin) discard;',
         '    float sphereZ = (sphereZRaw - capMin) / max(1e-4, 1.0 - capMin);',
         '    float depth = clamp(v_depth - u_haloDepthSpan * sphereZ, 0.0, 1.0);',
+        '    if (u_fullbright > 0.5) { vec2 cell=floor(v_uv*32.0); float ring=floor(length(cell/16.0-1.0)*6.0); if(ring>2.0&&mod(cell.x+cell.y,2.0)>0.5)discard; tex=vec4(retroPalette(ring<1.0?7:ring<2.0?8:9),1.0); }',
         '    outColor = vec4(tex.rgb, tex.a) * u_tint;',
         '    gl_FragDepth = depth;',
         '    return;',
         '  }',
-        '  if (u_fullbright > 0.5) { outColor = tex * u_tint; gl_FragDepth = v_depth; return; }',
+        '  if (u_fullbright > 1.5) { outColor = vec4(tex.rgb,tex.a) * u_tint; gl_FragDepth = v_depth; return; }',
+        '  if (u_fullbright > 0.5) { vec3 p = vec3(u_spritePos.xy, u_spritePos.z + (1.0-v_uv.y)*u_spriteHeight); outColor = vec4(retroPaint(tex.rgb, p + vec3(v_uv.x*0.8,0.0,0.0), vec3(0.0,0.0,1.0)),tex.a) * u_tint; gl_FragDepth = v_depth; return; }',
         '  vec3 normal = vec3(0.0, 0.0, 1.0);',
         '  if (u_profile > 0.5) {',
         '    float nx = (v_uv.x - 0.5) * 2.0;',
@@ -3495,34 +3541,10 @@ void main() {
   gl_FragDepth = depth;
   if (u_retroInk > 0.5) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
-  // Debug: prove the "slits" are lighting (normal discontinuities) not holes.
-  if (u_unlit > 0.5) {
+  // Ordinary unlit artwork retains its original behavior. Retro voxels continue
+  // through the same light accumulation, occlusion and material ramp as Modern.
+  if (u_unlit > 0.5 && u_unlit < 1.5) {
     vec3 paint = v_color;
-    if (u_unlit > 1.5) {
-      vec3 N = normalize(v_normal);
-      float face = clamp(dot(N, normalize(vec3(-0.4, -0.3, 0.8))) * 0.5 + 0.5, 0.0, 1.0);
-      paint *= mix(vec3(0.9, 0.94, 1.0), vec3(1.0, 0.96, 0.9), face);
-      if (u_retroSurface > 0.5) {
-        vec3 brown = vec3(94.0, 53.0, 0.0) / 255.0;
-        vec3 orange = vec3(159.0, 72.0, 21.0) / 255.0;
-        vec3 yellow = vec3(239.0, 243.0, 71.0) / 255.0;
-        float pigment = dot(v_color, vec3(0.3, 0.59, 0.11));
-        if (u_retroSurface < 1.5) {
-          // Recolor the existing carving and face normals, never its geometry.
-          float tone = pigment * 0.58 + face * 0.42;
-          paint = vec3(tone < 0.35 ? 71.0 : tone < 0.52 ? 120.0 : tone < 0.86 ? 174.0 : 255.0) / 255.0;
-          if (pigment < 0.10) paint = vec3(0.0);
-        } else if (u_retroSurface < 2.5 && N.z < 0.5) {
-          // Ceiling panels are yellow; existing beams and anchored seams stay brown/orange.
-          vec2 panel = fract(v_worldPos.xy * 0.5);
-          float seam = min(min(panel.x, 1.0 - panel.x), min(panel.y, 1.0 - panel.y));
-          paint = seam < 0.025 || pigment < 0.1 ? brown : seam < 0.06 || N.z > -0.35 ? orange : yellow;
-        } else if (u_retroSurface > 3.5) {
-          float chroma = max(max(v_color.r, v_color.g), v_color.b) - min(min(v_color.r, v_color.g), v_color.b);
-          if (chroma > 0.10) paint = clamp(vec3(pigment) + (v_color - vec3(pigment)) * 1.8, 0.0, 1.0);
-        }
-      }
-    }
     outColor = vec4(paint, 1.0);
     return;
   }
@@ -3581,6 +3603,9 @@ void main() {
   col += TORCH_COLOR * torchLight * 0.12;
   col = clamp(col, 0.0, 1.0);
 
+  // Trace the finished Modern lighting; never illuminate a shadow independently.
+  if (u_unlit > 2.5) col = clamp(v_color * clamp(dot(ramp, vec3(0.299, 0.587, 0.114)) + torchLight * 0.12, 0.65, 1.05), 0.0, 1.0);
+  if (u_unlit > 1.5 && u_unlit < 2.5) col = retroTrace(col, v_worldPos, N);
   outColor = vec4(col, 1.0);
 }`;
 
@@ -3689,7 +3714,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const groundKind = window.RetroGraphics.environment(dungeon).wasteland ? 'wasteland' : 'surface';
         textures = Object.fromEntries(Object.entries(textures).map(([name, image]) => [name,
           name === 'torch' || name === 'pillar' || name.startsWith('custom_') ? image :
-            window.RetroGraphics.prepareImage(image, name === 'floor' ? groundKind : /ceiling|roof/.test(name) ? 'ceiling' : 'wall')]));
+            window.RetroGraphics.prepareImage(image, name === 'floor' ? groundKind : /ceiling|roof/.test(name) ? 'ceiling' : 'wall', dungeon.tiles?.[name]?.spriteSpec?.material || 'stone')]));
         for (const name of ['wall', 'floor']) if (!isTextureReady(textures[name]) && window.RetroGraphics.makeSurface) {
           textures[name] = window.RetroGraphics.makeSurface(name === 'floor' && groundKind === 'wasteland' ? groundKind : name, dungeon.visualStyle?.palette,
             dungeon.tiles?.[name]?.spriteSpec?.material);
@@ -3728,6 +3753,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           this.surfaceArtMeshes=new Map();
         }
         this.voxelMeshes = {};
+        this._adoptAdjacentRoom(dungeon);
         this.voxelPaletteKey = paletteKey;
         this._cancelVoxelPrewarmJob();
         const webgpuRenderer = window.webgpuDungeonRenderer;
@@ -4061,7 +4087,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       if (this.spriteUniforms.depthShadeScale) gl.uniform1f(this.spriteUniforms.depthShadeScale, depthShadeScale);
       if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.5);
       gl.uniform4f(this.spriteUniforms.tint, 1.0, 1.0, 1.0, 1.0);
+      const vividRetro=!!window.RetroGraphics?.fullbright?.();
+      if(vividRetro&&this.spriteUniforms.fullbright)gl.uniform1f(this.spriteUniforms.fullbright,2);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if(vividRetro&&this.spriteUniforms.fullbright)gl.uniform1f(this.spriteUniforms.fullbright,1);
       if (this.spriteUniforms.alphaCut) gl.uniform1f(this.spriteUniforms.alphaCut, 0.01);
     },
 
@@ -4359,6 +4388,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           return;
         }
       }
+      window.GraphicsSettings?.applyToRenderer?.(this);
       const width = this.canvas ? this.canvas.width : Math.max(1, Math.floor(displayW / pixelScale));
       const height = this.canvas ? this.canvas.height : Math.max(1, Math.floor(displayH / pixelScale));
 
@@ -4411,7 +4441,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const minFloor = Number.isFinite(this.minFloor) ? this.minFloor : 0;
 
       const FOV = Math.PI / 3;
-      const planeScale = Math.tan(FOV / 2);
+      const retroAspect=window.RetroGraphics?.fullbright?.()&&container.clientWidth>0&&container.clientHeight>0?container.clientWidth/container.clientHeight:1;
+      const planeScale = Math.tan(FOV / 2) * retroAspect;
       const planeX = -dirY * planeScale;
       const planeY = dirX * planeScale;
       const focalLength = height / (2 * Math.tan(FOV / 2));
@@ -4616,8 +4647,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const cy = wy + 0.5;
         return {
           facing,
-          lightX: cx + n.x * TORCH_LIGHT_OFFSET,
-          lightY: cy + n.y * TORCH_LIGHT_OFFSET,
+          lightX: cx + n.x * TORCH_LIGHT_OFFSET - n.y * (fullbright ? window.RetroDetails?.torchOffset?.(wx*31+wy*17,now) || 0 : 0),
+          lightY: cy + n.y * TORCH_LIGHT_OFFSET + n.x * (fullbright ? window.RetroDetails?.torchOffset?.(wx*31+wy*17,now) || 0 : 0),
           renderX: cx + n.x * TORCH_SPRITE_OFFSET,
           renderY: cy + n.y * TORCH_SPRITE_OFFSET
         };
@@ -4742,6 +4773,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           });
         }
       }
+      // world1 GENRE_LIGHTS: extra light types join the same torch list (same falloff, shadows, occlusion, cache).
+      if (window.HolodekFlags?.GENRE_LIGHTS && window.GenreLights) {
+        const GL = window.GenreLights, near = l => Math.abs(l.x - playerX) <= TORCH_VIS_RADIUS && Math.abs(l.y - playerY) <= TORCH_VIS_RADIUS;
+        for (const l of dungeon.genreLights || []) { if (!near(l)) continue; const c = dungeon.cells?.[`${Math.floor(l.x)},${Math.floor(l.y)}`], z = (c?.floorHeight || 0) + (l.z ?? 1.4);
+          const r = GL.light(l.type, l.x, l.y, z, ((l.x * 31 + l.y * 17) % 100) / 100, now, TORCH_LIGHT_RADIUS_FLOOR, torchFlicker); r.dist2 = (r.x - camX) ** 2 + (r.y - camY) ** 2; torchLights.push(r); }
+      }
       torchLights.sort((a, b) => a.dist2 - b.dist2);
       const torchById = new Map();
       torchLights.forEach((light, order) => { light.order = order; torchById.set(`${light.x},${light.y},${light.radius}`, light); });
@@ -4782,6 +4819,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.useProgram(this.program);
+      setRetroPhase(gl, this.program, now);
 
       const posLoc = gl.getAttribLocation(this.program, 'a_pos');
       gl.bindBuffer(gl.ARRAY_BUFFER, this.posBuffer);
@@ -5064,7 +5102,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           }
 
           const sourceImage = window.dungeonTextures && window.dungeonTextures[tileName];
-          const texImg = fullbright && isCustom ? window.RetroGraphics?.prepareImage(sourceImage, 'prop') : sourceImage;
+          const texImg = fullbright && isCustom ? window.RetroGraphics?.prepareImage(sourceImage, 'prop', meta?.material || 'stone') : sourceImage;
           if (!isTorch && (!texImg || !texImg.complete)) continue;
 
           const dxp = renderX - camX;
@@ -5380,7 +5418,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const p = part.position, s = part.size;
         if (!p || !s || ![p.x, p.y, p.z, s.x, s.y, s.z].every(Number.isFinite) ||
             s.x <= 0 || s.y <= 0 || s.z <= 0) continue;
-        const partRange = part.skyline === true ? 192 : VOXEL_VIS_RADIUS;
+        // world1 CITY_PROPS: small street detail sets cullDistance (LOD) so dense districts stay cheap.
+        const partRange = part.skyline === true ? 192 : Number.isFinite(part.cullDistance) ? Math.min(VOXEL_VIS_RADIUS, part.cullDistance) : VOXEL_VIS_RADIUS;
         if (p.x + s.x < playerX - partRange || p.x > playerX + partRange + 1 ||
             p.y + s.y < playerY - partRange || p.y > playerY + partRange + 1) continue;
         const mesh = this.getVoxelMesh(part.tile, dungeon);
@@ -5391,7 +5430,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const mesh = this.getVoxelMesh(part.tile, dungeon);
         if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: part.position, modelScale: part.size });
       }
-      for(const art of dungeon.surfaceArt || []){
+      for(const art of [...(dungeon.surfaceArt || []),...(dungeon.moldingArt || [])]){
         if(window.AncientScripts?.replacesClueOverlay(dungeon,art))continue;
         const p=art.position,s=art.size,x=Math.max(p.x,Math.min(p.x+s.x,playerX)),y=Math.max(p.y,Math.min(p.y+s.y,playerY));
         if(Math.hypot(x-playerX,y-playerY)>VOXEL_VIS_RADIUS)continue;
@@ -5425,6 +5464,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const voxelStartedAt = performance.now();
       if (this.voxelProgram && voxelInstances.length > 0) {
         gl.useProgram(this.voxelProgram);
+      setRetroPhase(gl, this.voxelProgram, now);
         gl.disable(gl.BLEND);
 
         const wasCull = gl.isEnabled(gl.CULL_FACE);
@@ -5531,7 +5571,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               gl.uniform3f(this.voxelUniforms.toneHighlight, high[0], high[1], high[2]);
             }
             if (this.voxelUniforms.unlit) {
-              gl.uniform1f(this.voxelUniforms.unlit, fullbright ? 2.0 : pass.unlit ? 1.0 : 0.0);
+              gl.uniform1f(this.voxelUniforms.unlit, fullbright ? (inst.mesh.lightingScope==='art' ? (pass.unlit ? 1.0 : 3.0) : 2.0) : pass.unlit ? 1.0 : 0.0);
             }
             if (this.voxelUniforms.toonSteps) {
               gl.uniform1f(this.voxelUniforms.toonSteps, Number.isFinite(pass.toonSteps) ? pass.toonSteps : 3.0);
@@ -5574,6 +5614,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       this.buildFlameTexture();
 
       gl.useProgram(this.spriteProgram);
+      setRetroPhase(gl, this.spriteProgram, now);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuffer);
       if (this.spriteUniforms.fullbright) gl.uniform1f(this.spriteUniforms.fullbright, fullbright ? 1 : 0);
       gl.enableVertexAttribArray(this.spriteAttribs.pos);
@@ -5777,7 +5818,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             );
           }
 
-          if (this.haloTex && !fullbright) {
+          if (this.haloTex) {
             const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
             const haloSize = Math.min(600, glowRadius * 2);
             const haloCenterY = flameCenterY;
@@ -6053,7 +6094,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
 
         // Halo (additive, depth-tested)
-        if (this.haloTex && !fullbright) {
+        if (this.haloTex) {
           const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
           const haloSize = Math.min(600, glowRadius * 2);
           const haloCenterY = flameCenterY;

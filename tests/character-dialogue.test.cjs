@@ -248,7 +248,7 @@ for (const enteringRoom of [true, false]) test(`${enteringRoom ? 'entry' : 'ordi
 });
 
 test('the actual five-minute cache pipeline retrieves specific witnessed exchanges without another model call', async () => {
-  const f = personalFixture(), a = agent(), captured = [];
+  const f = personalFixture(), a = agent({ ...reply, spoken: [] }), captured = [];
   const memory = { ...CampaignMemory, dialogueContext: (...args) => { const rows = CampaignMemory.dialogueContext(...args); captured.push(rows); return rows; } };
   const context = { Inhabitants: I, DialogueMemory: Memory, CampaignMemory: memory, describeCharacters, generateCharacterDialogue, sharedState: f.state,
     populationService: { get: () => f.p, save() {} }, sanitizeLiveWorldStateForPrompt: v => v,
@@ -261,7 +261,7 @@ test('the actual five-minute cache pipeline retrieves specific witnessed exchang
   assert.deepEqual(captured[0].find(row => row.name === 'Distant Guard').memories, []);
 });
 test('five-minute refresh batches all living characters once, speaks nothing immediately and respects its cooldown',async()=>{
-  const f=fixture(),a=agent(),before=f.state.getUpdatedGameConsole();let saves=0;
+  const f=fixture(),a=agent({ ...reply, spoken: [] }),before=f.state.getUpdatedGameConsole();let saves=0;
   const context={Inhabitants:I,DialogueMemory:Memory,describeCharacters,generateCharacterDialogue,sharedState:f.state,
     populationService:{get:()=>f.p,save:()=>saves++},sanitizeLiveWorldStateForPrompt:v=>v,
     run:async work=>work(a),retort:work=>work,console:{warn(){},info(){}}};
@@ -273,7 +273,7 @@ test('five-minute refresh batches all living characters once, speaks nothing imm
   const second=await context.runNpcAutonomyTick();assert.ok(second.cached);assert.equal(a.requests.length,1);
 });
 for(const change of ['run','room','pause','command','newer-cache'])test(`a pending cache refresh is discarded after a ${change} change`,async()=>{
-  const f=fixture(),a=agent();let saves=0;
+  const f=fixture(),a=agent({ ...reply, spoken: [] });let saves=0;
   const context={Inhabitants:I,DialogueMemory:Memory,describeCharacters,generateCharacterDialogue,sharedState:f.state,
     populationService:{get:()=>f.p,save:()=>saves++},sanitizeLiveWorldStateForPrompt:v=>v,
     run:async work=>{

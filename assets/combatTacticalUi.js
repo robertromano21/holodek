@@ -102,6 +102,7 @@
     if (state) ledgerState = state;
     const box = document.getElementById('combat-popup'); if (!box) return;
     let panel = document.getElementById('combat-ledger');
+    const created = !panel;
     if (!panel) {
       panel = document.createElement('aside'); panel.id = 'combat-ledger'; panel.setAttribute('aria-label', 'Combat ledger');
       const heading = document.createElement('h2'); heading.textContent = 'Combat Ledger'; panel.appendChild(heading);
@@ -111,13 +112,14 @@
       box.appendChild(panel);
     }
     const turnPanel = document.getElementById('combat-turn-popup'); if (turnPanel) panel.appendChild(turnPanel);
+    const follow = created || panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
     const content = ledgerContent(ledgerState), entries = document.getElementById('combat-ledger-entries');
-    const follow = entries && entries.scrollTop + entries.clientHeight >= entries.scrollHeight - 24;
     const text = content.entries.join('\n\n');
-    if (entries && entries.textContent !== text) { entries.textContent = text; if (follow) entries.scrollTop = entries.scrollHeight; }
+    if (entries && entries.textContent !== text) entries.textContent = text;
     const initiative = document.getElementById('combat-ledger-initiative'), pending = document.getElementById('combat-ledger-pending');
     if (initiative) initiative.textContent = content.initiative;
     if (pending) pending.textContent = content.pending;
+    if (follow) panel.scrollTop = panel.scrollHeight;
   }
   function layout(animate = false) {
     const box = document.getElementById('combat-popup'); if (!box || !active) return;
@@ -221,7 +223,11 @@
   }
   function occupants(draw, actors = root.combatCharacters || []) {
     if (!draw?.dungeon) return [];
-    return actors.filter(a => a && a.discoveryState !== 'pending' && (a.hp ?? 1) > 0 &&
+    // Downed allies cannot act, but their occupied tiles still select them for aid.
+    const alive = a => root.DungeonInhabitants?.isAlive ? root.DungeonInhabitants.isAlive(a) :
+      !/^dead$/i.test(a.state || a.State || a.status || '') &&
+      ((a.hp ?? a.HP ?? 1) > 0 || /^(Dying|Unconscious)$/i.test(a.state || a.State || ''));
+    return actors.filter(a => a && a.discoveryState !== 'pending' && alive(a) &&
       (!root.isDungeonActorPresent || root.isDungeonActorPresent(a)) &&
       (!a.mazeRoomKey || a.mazeRoomKey.replace(/\s/g, '') === draw.dungeon.geoKey?.replace(/\s/g, '')))
       .map(a => {

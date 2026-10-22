@@ -70,7 +70,11 @@ function createRuntime({ models = Models, client, log = logMessage, timeoutMs, p
               .map(message => ({ role: message.role, content: message.content })));
             messages = await prepareMessages(messages, { inheritedMessages, settings });
           }
-          yield* Transport.stream(settings, messages, { models, client, timeoutMs });
+          let local = false; try { local = !!models.profile(settings.model).local; } catch {}
+          if (!local) { yield* Transport.stream(settings, messages, { models, client, timeoutMs }); return; }
+          // Mark the PC's Ollama busy for this foreground call so background prefetch yields to it.
+          let release; require('./adjacentRooms').foreground(() => new Promise(resolve => { release = resolve; }));
+          try { yield* Transport.stream(settings, messages, { models, client, timeoutMs }); } finally { release(); }
         }
         const message = new GameMessage(role, !!settings.parameters, source(), log);
         if (push) conversation.messages.push(message);

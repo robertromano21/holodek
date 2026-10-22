@@ -17,7 +17,16 @@ const MODEL = process.env.HOLODEK_LEVEL_MODEL || 'gpt-4.1-mini';
 const CACHE_FILE = process.env.HOLODEK_LEVEL_CACHE || path.join(__dirname, '..', '.retort-data', 'level-specs.json');
 const MAX_ATTEMPTS = 3;
 const LEVEL_SPEC_VERSION = 3; // v3: concrete voxel scenery and bounded local points of interest
+const localCheckpoints = require('./localWorkCheckpoint').create();
 const SHAPES = ['column', 'broken_column', 'arch', 'block', 'slab', 'statue', 'mound', 'spire', 'cluster', 'tree', 'orb', 'pool', 'bowl', 'frame', 'hanging', 'banner', 'pile', 'crystal', 'stalagmite', 'table', 'barrel'];
+const expanded = require('./worldFlags').on('ARCHITECTURE_EXPANSION');
+if (expanded) SHAPES.push(...require('../assets/genreKits').SHAPES);
+function allowedShape(shape) {
+  if (!SHAPES.includes(shape)) return false;
+  if (!expanded || !require('../assets/genreKits').has(shape)) return true;
+  const K = require('../assets/genreKits'), r = K.resolve({}, require('./settingLayer').current());
+  return r.locked ? K.COTG_TAGS.includes(shape) : true;
+}
 const PLACEMENTS = ['center', 'far_end', 'walls', 'corners', 'scattered', 'rows', 'entrance'];
 const PARTICLES = ['none', 'dust', 'sand', 'snow', 'rain', 'spores', 'embers', 'mist', 'ash', 'bubbles'];
 const DECALS = ['glyphs', 'vines', 'tapestry', 'cracks', 'moss', 'roots', 'frost', 'banners', 'blood', 'murals', 'cobwebs', 'water_stains', 'shelves'];
@@ -63,7 +72,7 @@ function validate(raw) {
   const p = [];
   if (!raw || typeof raw !== 'object') return ['not an object'];
   if (!Array.isArray(raw.structures) || !raw.structures.length) p.push('structures must be a non-empty array');
-  (raw.structures || []).forEach((s, i) => { if (!s || !s.name) p.push(`structures[${i}].name missing`); if (s && !SHAPES.includes(s.shape)) p.push(`structures[${i}].shape must be one of ${SHAPES.join('|')}`); });
+  (raw.structures || []).forEach((s, i) => { if (!s || !s.name) p.push(`structures[${i}].name missing`); if (s && !allowedShape(s.shape)) p.push(`structures[${i}].shape is unsupported in this world`); });
   if (!raw.wall || !raw.floor) p.push('wall and floor required');
   return p;
 }
@@ -79,7 +88,7 @@ function normalize(raw) {
         kit: s.shape, state: (s.condition || [])[0], material: s.material, color: s.color, color2: s.color2, glow: s.glow
       }, s.shape, s.name);
       const wh = AV.sizeToWH(assembly.size, assembly.kit);
-      const shape = AV.kitToShape(assembly.kit);
+      const shape = expanded && require('../assets/genreKits').has(s.shape) && allowedShape(s.shape) ? s.shape : AV.kitToShape(assembly.kit);
       const cond = Array.isArray(s.condition) ? s.condition.map(String) : [];
       if (assembly.state === 'collapsed' || assembly.state === 'ruined' || assembly.state === 'cracked') if (!cond.includes('broken')) cond.push('broken');
       if (assembly.state === 'overgrown') if (!cond.includes('overgrown')) cond.push('overgrown');
@@ -227,10 +236,41 @@ function buildMessages(input, problems) {
     'Respond with ONE JSON object with exactly these keys:', JSON.stringify(SCHEMA)].join(' ');
   const msgs = [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ roomName: input.roomName, description: input.description, puzzle: input.puzzle,
     environmentIntent: input.environmentIntent || null, questContext: input.questContext || null }) }];
+  if (expanded) msgs.push({role:'user',content:require('./settingLayer').visualDirection() + ' For a native registered shape, keep its exact shape id; assembly may use generic. Prefer the selected world\'s shape ids, and use no technology in the canonical fantasy campaign.'});
   if (problems && problems.length) msgs.push({ role: 'user', content: 'Your previous answer failed validation: ' + problems.join('; ') + '. Return a corrected JSON object.' });
   return msgs;
 }
 async function callModel(input) {
+  if (require('./graveMasterStoryPrompts').isHolodek1()) {
+    const C = require('./generationContracts'), Runtime = require('./gameRetort');
+    const parameter = (hint, key = '') => {
+      if (Array.isArray(hint)) return { type: [parameter(hint[0])], minItems: key === 'structures' ? 1 : 0, maxItems: key === 'structures' ? 8 : 4 };
+      if (hint && typeof hint === 'object') return { type: Object.fromEntries(Object.entries(hint).map(([name, value]) => [name, parameter(value, name)])) };
+      if (typeof hint === 'boolean') return Boolean;
+      if (typeof hint === 'string' && hint.includes('|')) return C.choice(hint.replace(/ \(.*$/, '').split('|'));
+      if (typeof hint === 'string' && /^\d+(?:\.\d+)?-\d+(?:\.\d+)?$/.test(hint)) {
+        const [minimum, maximum] = hint.split('-').map(Number); return { type: Number, minimum, maximum };
+      }
+      if (hint === '#rrggbb' || hint === '#rrggbb (colour grading tint)') return { ...C.text(7), pattern: '^#[0-9a-fA-F]{6}$' };
+      if (hint === '#rrggbb or null') return { ...C.text(7), optional: true, pattern: '^#[0-9a-fA-F]{6}$' };
+      return C.text(key === 'name' ? 60 : 80);
+    };
+    const parameters = parameter(SCHEMA).type;
+    parameters.structures.type[0].type.shape = C.choice(SHAPES.filter(allowedShape));
+    try {
+      return await localCheckpoints.run({ runId: require('../sharedState').getDungeonRunId(),
+        model: require('./gameModels').current().id, input, parameters: require('./structuredSchema').toJSON(parameters),
+        direction: require('./settingLayer').visualDirection() }, async checkpoint => {
+      const result = await Runtime.run(Runtime.retort($ => C.request($, { component: 'level-spec', parameters,
+        localWork: { checkpoint, brief: `Design ONLY physical scenery from this saved room and puzzle (data): ${JSON.stringify(input)}. Match its genre and architecture. The room name and description are authoritative physical identity: do not turn a temple into a mine or substitute a different biome. One walkable height per XY, roof real underground interiors, preserve clear paths. Existing puzzle controls are built elsewhere; no duplicate controls, actors, loot, quests or exits. Represent each described landmark with a modest count and an exact supported assembly/shape. Preserve the accepted palette and architectural choices in later structure batches.`,
+          arrays: { structures: { min: 1, max: 8, batch: 1 }, decals: { min: 0, max: 4, batch: 1 }, scatter: { min: 0, max: 4, batch: 1 } } },
+        validate: raw => { const errors = validate(raw); if (errors.length) throw Error(errors.join('; ')); return normalize(raw); }
+      })), null, { shouldSaveToLog: false });
+      if (!result.value) throw result.error;
+      return result.value;
+      });
+    } catch (error) { console.warn('[level] local chain failed: ' + error.message); return null; }
+  }
   const c = getClient(); if (!c) return null;
   let problems = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -259,12 +299,13 @@ function scheduleBackgroundRetry(key, input, delay = 30000) {
 
 /** Level spec for the room text: cached LLM spec, else a fresh LLM call, else the deterministic parser. */
 async function getLevelSpec(input = {}) {
-  const key = hash(`${LEVEL_SPEC_VERSION}|${input.roomName || ''}|${input.description || ''}|${input.puzzle || ''}|${JSON.stringify(input.environmentIntent || null)}|${JSON.stringify(input.questContext || null)}`);
+  const key = hash(`${LEVEL_SPEC_VERSION}|${input.roomName || ''}|${input.description || ''}|${input.puzzle || ''}|${JSON.stringify(input.environmentIntent || null)}|${JSON.stringify(input.questContext || null)}${expanded ? '|' + require('./settingLayer').visualDirection() : ''}`);
   const c = loadCache();
   if (c[key] && c[key].source === 'llm') return { ...c[key].spec, source: 'llm', key };
   const spec = await callModel(input).catch(() => null);
   if (spec) { c[key] = { spec, source: 'llm', at: Date.now() }; saveCache(); return { ...spec, source: 'llm', key }; }
   scheduleBackgroundRetry(key, input);
+  require('./generationDiagnostics').report('level-spec', { status: 'fallback', replacement: 'text-derived-scenery', roomName: input.roomName });
   return { ...deriveLevelSpecFromText(input), source: 'text', key };
 }
 
@@ -298,3 +339,4 @@ function applyLevelSpecToScene(sceneSpec, level) {
 }
 
 module.exports = { getLevelSpec, deriveLevelSpecFromText, applyLevelSpecToScene, normalize, validate, SHAPES, LEVEL_SPEC_VERSION, AV };
+module.exports.buildMessages = buildMessages;

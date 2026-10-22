@@ -1,6 +1,6 @@
 (function(root) {
   'use strict';
-  let panel = null, serial = 0, refreshTimer = null, selected = null, preparing = false, message = '';
+  let panel = null, serial = 0, refreshTimer = null, selected = null, quick = false, preparing = false, message = '';
   const preparationBlocked = () => preparing || root.gamePaused || root.actionDiceState?.active || root.GameCommandGate?.busy() || root._combatCommandPending || root._characterStartupPending;
   function close() { serial++; panel?.remove(); panel = null; document.getElementById('dungeon-spellbook-shortcut')?.setAttribute('aria-expanded', 'false'); }
   function position() {
@@ -11,6 +11,18 @@
   }
   function render(data, content) {
     content.replaceChildren();
+    if (quick) {
+      const guide = document.createElement('p'); guide.textContent = 'Prepared spells and equipped item spells with Magic available now. Choose a spell, then its target. Casting still requires your turn and a valid target in clear sight.'; content.appendChild(guide);
+      let count = 0;
+      for (const caster of data.casters) for (const group of caster.groups) for (const spell of group.spells) if (caster.hp > 0 && spell.casts > 0) {
+        const cast = document.createElement('button'); cast.type = 'button'; cast.className = 'popup-button';
+        cast.textContent = caster.name + ': ' + spell.name + ' (' + spell.casts + '; ' + spell.cost + ' Magic)';
+        cast.addEventListener('click', () => { close(); root.SpellUi?.openSpell(caster.name, spell.id); }); content.appendChild(cast); count++;
+      }
+      if (!count) { const empty = document.createElement('p'); empty.textContent = 'No prepared spells or equipped item spells have enough Magic right now.'; content.appendChild(empty); }
+      const full = document.createElement('button'); full.type = 'button'; full.className = 'popup-button'; full.textContent = 'Full Party Spellbook'; full.addEventListener('click', () => open()); content.appendChild(full);
+      return;
+    }
     const guide = document.createElement('p'); guide.textContent = 'Numbers show casts affordable now from prepared class spells or equipped items. Spells share their source\'s Magic: casting one reduces the others\' counts. (0) means unavailable. Level headings use this game\'s spell unlock levels, not full tabletop spell slots.';
     content.appendChild(guide);
     if (message) { const status = document.createElement('p'); status.setAttribute('role', 'status'); status.textContent = message; content.appendChild(status); }
@@ -82,11 +94,17 @@
               spell.status !== 'Prepared' && caster.prepared.length >= caster.slots;
             name.title = spell.status === 'Prepared' ? 'Forget this prepared spell (one turn)' : caster.prepared.length >= caster.slots ? 'All slots are filled; forget a spell first' : 'Prepare this spell in an empty slot (one turn)';
             name.addEventListener('click', () => configure(caster.name, spell.id, spell.status === 'Prepared', data, content)); }
-          detail.textContent = `${spell.status}. ${spell.source}; cost ${spell.cost} Magic; range ${spell.range} tiles.\n${spell.description}` +
+          detail.textContent = `${spell.status}. ${spell.source}; cost ${spell.cost} Magic; clear line of sight; no distance limit.\n${spell.description}` +
             (spell.preview ? '\nPreview at the required casting level.' : '') +
             (spell.status === 'Equipped' || spell.status === 'Insufficient Magic' ? `\nItem Magic: ${spell.magic}. ` +
               (spell.artifact ? `Artifact recharges in ${spell.rechargeIn} turns when depleted.` : 'Exhausting this item turns it to ash.') : '');
           detail.style.whiteSpace = 'pre-wrap'; card.append(name, memorize, cost, detail); section.appendChild(card);
+          if (spell.casts > 0) {
+            const cast = document.createElement('button'); cast.type = 'button'; cast.className = 'popup-button';
+            cast.textContent = 'Cast ' + spell.name;
+            cast.addEventListener('click', () => { close(); root.SpellUi?.openSpell(caster.name, spell.id); });
+            card.appendChild(cast);
+          }
         }
       }
       content.appendChild(section);
@@ -120,11 +138,11 @@
     finally { preparing = false; if (panel && serial === token && runId === root.dungeonRunId) render(data, content);
       else if (panel) root.PartySpellbookUi.refresh(); }
   }
-  async function open() {
-    close(); const token = ++serial, runId = root.dungeonRunId;
-    panel = document.createElement('section'); panel.id = 'party-spellbook-popup'; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', 'Party Spellbook');
+  async function open(options = {}) {
+    quick = options.quick === true; close(); const token = ++serial, runId = root.dungeonRunId;
+    panel = document.createElement('section'); panel.id = 'party-spellbook-popup'; panel.setAttribute('role', 'dialog'); panel.setAttribute('aria-label', quick ? 'Cast a Spell' : 'Party Spellbook');
     const header = document.createElement('div'), title = document.createElement('span'), exit = document.createElement('button'), content = document.createElement('div');
-    header.className = 'inventory-header'; title.textContent = 'Party Spellbook'; exit.textContent = 'X'; exit.setAttribute('aria-label', 'Close spellbook'); exit.addEventListener('click', close);
+    header.className = 'inventory-header'; title.textContent = quick ? 'Cast a Spell' : 'Party Spellbook'; exit.textContent = 'X'; exit.setAttribute('aria-label', 'Close spellbook'); exit.addEventListener('click', close);
     header.append(title, exit); content.className = 'party-spellbook-content'; content.textContent = 'Reading party spell records...'; panel.append(header, content);
     document.body.appendChild(panel); position();
     document.getElementById('dungeon-spellbook-shortcut')?.setAttribute('aria-expanded', 'true');
@@ -135,7 +153,7 @@
       render(data, content);
     } catch (error) { if (serial === token) content.textContent = error.message; }
   }
-  root.PartySpellbookUi = { open, close, refresh() {
+  root.PartySpellbookUi = { open, close, openQuick: () => open({ quick: true }), refresh() {
     if (!panel || refreshTimer || preparing) return;
     refreshTimer = setTimeout(async () => {
       refreshTimer = null; if (!panel) return;

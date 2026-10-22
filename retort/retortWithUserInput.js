@@ -57,6 +57,7 @@ const { evaluateTaskRequirements, mergeTaskProgress, taskBinding, verifiedTaskCo
   normalizeDeliveryTask, compileGeneratedTask, generatedTaskTypes, selectGeneratedElements, writeQuestRequirements, refreshCombatQuestProgress } = require('./questProgress.js');
 const { ensureBossGate, seedBossKey, makeBossKeyTask, isReservedBossKeyName } = require('./bossGate.js');
 const DungeonExits = require('../assets/dungeonExits');
+const RoomEntry = require('./roomEntry');
 const { getLevelSpec, applyLevelSpecToScene } = require('./levelSpec.js');
 const { logDungeonConstruction, saveDungeonDiagnostic } = require('../dungeonDiagnostics');
 const { actionDice } = require('./actionDice');
@@ -69,6 +70,16 @@ const { doorIntent, prepareDoorAction, applyDoorAction } = require('./dungeonAct
 const { buildEnvironment } = require('../assets/dungeonEnvironment');
 const LivingEnvironments = require('../assets/livingEnvironments');
 const { generateDesign: generatePhysicalPuzzleDesign } = require('./physicalPuzzleDesign');
+// world1 expansion modules (each feature is behind its own flag in ./worldFlags).
+const Surprise = require('./surprise');
+const RoomCast = require('./roomCast');
+const CrossGameMemory = require('./crossGameMemory');
+const CityScenery = require('./cityScenery');
+const CitySites = require('./citySites'); // world1 CITY_SITES: full city plan (streets/buildings) installed from a placed city room
+const WorldSetting = require('./settingLayer');
+const WastelandPyramids = require('./wastelandPyramids');
+const BookLore = require('./bookLore');
+const TempleComplex = require('./templeComplex');
 const { prepare: preparePhysicalPuzzleAction, bindTask: bindPhysicalPuzzleTask } = require('./physicalPuzzleActions');
 const ReadableItems = require('../assets/readableItems');
 const {prepare:prepareReadableAction} = require('./readableActions');
@@ -99,6 +110,7 @@ const FortifiedSites = require('./fortifiedSites');
 const Villages = require('./villages');
 const PlanarPortals = require('./planarPortals');
 const Economy = require('./economy');
+const AdjacentRooms = require('./adjacentRooms');
 const SpellSystem = require('./spellSystem');
 const CombatLife = require('./combatLife');
 const QuestFailure = require('./questFailure');
@@ -235,6 +247,7 @@ const client = new OpenAI({
 
 // retortWithUserInput.js
 const sharedState = require('../sharedState');
+CrossGameMemory.attach(sharedState); // world1: no-repeat history is read from and written to the save
 const populationService = createPopulationService(sharedState);
 
 let assistant; // Global variable to store the assistant
@@ -946,6 +959,7 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   let roomNameDatabaseString = await getDelayedRoomNameDatabase();
   const liveWorldState = sanitizeLiveWorldStateForPrompt(sharedState.getLiveWorldState());
 
+
   if (dungeonTestingMode) {
     console.log('Dungeon testing mode enabled; running dungeon-only pipeline.');
     return run(retort(async ($) => runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseString, broadcast)));
@@ -992,6 +1006,9 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   if (physicalPuzzleResult && !physicalPuzzleResult.completed) return physicalPuzzleResponse(physicalPuzzleResult);
   if (physicalPuzzleResult) roomNameDatabaseString = sharedState.getRoomNameDatabase();
 
+  // holodek-1 only: last 3 exchanges verbatim + MiniLM-ranked older exchanges (bounded); other models unchanged.
+  if (StoryPrompts.isHolodek1() && personalNarrative) personalNarrative = await require('./holodekHistoryRecall').select(personalNarrative,
+    { userInput, consoleText: updatedGameConsole, task: sharedState.getActiveTask?.() || null });
   let dialogueParts = personalNarrative.split('\n');
   let narrative = ``;
   
@@ -1090,6 +1107,14 @@ async function generateDefaultClassification($, currentRoom = null, isSideChambe
   };
 
   if (!isSideChamber) {
+    if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) {
+      const C = require('./generationContracts');
+      return require('./holodekRoomWork').request($, 'room-classification', {
+        indoor: Boolean, size: { type: Number, enum: [16, 32, 48, 64] }, biome: C.text(40),
+        features: { type: [C.text(40)], minItems: 1, maxItems: 3 },
+        ...Object.fromEntries(['skyTop', 'skyBot', 'floorColor', 'wallColor'].map(key => [key, { ...C.text(7), pattern: '^#[0-9a-fA-F]{6}$' }]))
+      }, 'Classify one new underworld location, physical attributes only, no narrative or events. Existing physical hints (data): ' + JSON.stringify(currentRoom?.classification || base));
+    }
     // LLM-generate for outdoor/exploration
     $.model = "gpt-4o-mini";
     $.temperature = 0.7;
@@ -1158,7 +1183,10 @@ async function generateKey($, coordinates, direction) {
   $.model = "gpt-4.1-mini";
   $.temperature = 1.0;
   await $.user`Provide the name and modifiers for a key for a locked door at coordinates ${coordinatesToString(coordinates)} in the direction "${direction}". Respond with ONLY the JSON object in the format: {"name": "Key Name", "type": "key", "attack_modifier": W, "damage_modifier": X, "ac": Y, "magic": Z} where "Key Name" is a simple, unique name (e.g., "Skeleton Key", "Iron Key") and W, X, Y, Z are numbers 0, 1, 2, or 3. Do not include any other text, explanations, or comments before or after the JSON.`;
-  const keyResult = await $.assistant.generation({ maxTokens: 80,
+  const keyResult = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? await require('./holodekAdjudication').json($,
+    'ordinary-key', { name: { type: String, maxLength: 40 }, type: { type: String, enum: ['key'] },
+      ...Object.fromEntries(['attack_modifier', 'damage_modifier', 'ac', 'magic'].map(key => [key, { type: Number, enum: [0, 1, 2, 3] }])) },
+    { coordinates, direction }, 'Name one ordinary key for this engine-locked door, not a reserved quest seal; 1-4 lower-case words.') : await $.assistant.generation({ maxTokens: 80,
     parameters: {
       name: {type: String},
       type: {type: String, enum: ["key"]},
@@ -1330,7 +1358,9 @@ async function selectExitStatus($) {
   $.model = "gpt-4.1-mini";
   $.temperature = 1.0;
   await $.user`Choose one of the following exit statuses: locked, blocked, barricaded, sealed. Respond with ONLY the JSON object in the format: {"status": "chosen_status"} where "chosen_status" is one of the options. Do not include any other text, explanations, or comments before or after the JSON.`;
-  const statusResult = await $.assistant.generation({ maxTokens: 50,
+  const statusResult = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? await require('./holodekAdjudication').json($,
+    'exit-status', { status: { type: String, enum: ['locked', 'blocked', 'barricaded', 'sealed'] } }, {},
+    'Choose only one initial exit status from the enum. Do not change any existing bound exit.') : await $.assistant.generation({ maxTokens: 50,
     parameters: {
       status: {type: String, enum: ["locked", "blocked", "barricaded", "sealed"]}
     }
@@ -1546,6 +1576,7 @@ function parseCoordinates(coordString) {
 async function getOrGenerateRoomMusic($, coords, roomDescription, monstersInRoom) {
   const c   = normalizeCoords(coords);
   const key = coordsKey(c);
+  if (typeof process !== 'undefined' && process.env.HOLODEK_REMOTE_ENGINE !== '1') await require('./websiteRoomPipeline')?.wait?.(sharedState, key, 'music');
 
   try {
     // Cache first
@@ -2248,7 +2279,10 @@ console.log("personalNarrative:", personalNarrative);
             // Ask GPT if the monsters attack
             await $.user`The nearby hostile encounter ${JSON.stringify([...nearbyHostiles])} can perceive the player. Given the player's command, does this local encounter attack? Decide once for this encounter, not for the entire level. Respond ONLY with JSON {"attack_decision":"Attack"} or {"attack_decision":"Doesn't Attack Yet"}.`;
 
-            const attackDecisionResult = await $.assistant.generation({ maxTokens: 40,
+            const attackDecisionResult = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? await require('./holodekAdjudication').json($,
+              'encounter-attack-intent', { attack_decision: { type: String, enum: ['Attack', "Doesn't Attack Yet"] } },
+              { userInput, roomName, roomDescription, localHostiles: [...nearbyHostiles] },
+              'Decide only whether this already-perceived nearby hostile encounter attacks now. Threats and warnings need not be attacks; do not awaken distant groups.') : await $.assistant.generation({ maxTokens: 40,
                 parameters: {
                     attack_decision: {type: String, enum: ["Attack", "Doesn't Attack Yet"]}
                 }
@@ -2338,6 +2372,10 @@ async function generateMonstersBlockIsolated($, roomName, roomDescription, roomC
 }
 
 async function generateMonsterEquipmentName($, objectType, ownerName) {
+    if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())
+        return require('./holodekRoomWork').request($, 'monster-equipment-name', { name: { type: String, minLength: 1, maxLength: 40 } },
+          `Name ONE ordinary portable ${objectType} for ${JSON.stringify(ownerName)}. Return only a short lowercase noun phrase, 1-4 words, no punctuation, statistics or reserved quest item.`,
+          require('./holodekObjectName').validate);
     $.model = 'gpt-4.1-mini';
     $.temperature = 1.0;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -2351,7 +2389,7 @@ async function generateMonsterEquipmentName($, objectType, ownerName) {
     return null;
 }
 
-async function generateMonstersForRoomUsingGPT($, roomName, roomDescription, roomCoordinates) {
+async function generateMonstersForRoomUsingGPT($, roomName, roomDescription, roomCoordinates, construction = null) {
     
 // Extract Boss Room Coordinates if they exist
 const bossRoomCoordinatesMatch = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
@@ -2412,7 +2450,8 @@ if (currentCoordinatesMatch) {
 
     if (currentCoordinatesMatch &&
         (!bossRoomCoordinates || currentCoordinatesMatch.slice(1).some((value, index) => Number(value) !== [bossRoomCoordinates.x, bossRoomCoordinates.y, bossRoomCoordinates.z][index]))) {
-      return generateRoomInhabitantPopulation($, roomName, roomDescription, currentCoordinatesMatch.slice(1).map(Number).join(','));
+      if (StoryPrompts.isHolodek1()) return $.run(agent => generateRoomInhabitantPopulation(agent, roomName, roomDescription, currentCoordinatesMatch.slice(1).map(Number).join(','), construction)); // holodek-1 only: isolated sub-request
+      return generateRoomInhabitantPopulation($, roomName, roomDescription, currentCoordinatesMatch.slice(1).map(Number).join(','), construction);
     }
     const numMonsters = getRandomInt(1, 4); // Random number of monsters
     const monsters = [];
@@ -2731,7 +2770,7 @@ if (currentCoordinatesMatch) {
 
 }
 
-async function generateRoomInhabitantPopulation($, roomName, roomDescription, geoKey) {
+async function generateRoomInhabitantPopulation($, roomName, roomDescription, geoKey, construction = null) {
   const { characters, npcs } = extractCharactersAndNpcs(updatedGameConsole);
   const pc = characters[0];
   if (!pc) return;
@@ -2763,7 +2802,7 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   const min = pc.Name === 'Mortacia' || pc.Name === 'Suzerain' && pc.Level >= 15 ? 1 : Math.max(1, average);
   const max = Math.min(20, pc.Name === 'Mortacia' ? 15 : pc.Name === 'Suzerain' && pc.Level >= 15 ? 13 : average + 2);
   const result = await generateInhabitants($, { roomName, roomDescription, geoKey, indoor,
-    campaignSetting: room.campaignSetting,
+    campaignSetting: room.campaignSetting, rooms: records,
     partyNames: party.map(a => a.Name), usedNames, quest: sharedState.getCurrentQuest(),
     questSeed: needsQuestIntroduction(sharedState.getCurrentQuest(), records, geoKey, sharedState.getCurrentTaskIndex() || 0) }, {
     random: getRandomInt, sex: getRandomSex, level: () => getRandomInt(min, max),
@@ -2779,6 +2818,7 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
     }
   });
   RegionalAdventure.bindPopulation(room, result);
+  if (typeof RoomCast !== 'undefined' && RoomCast.enabled()) try { await RoomCast.generateIsolated(sharedState, { runId: sharedState.getDungeonRunId(), geoKey, roomName, population: result.population, nearbyRooms: RoomCast.nearbyRooms(records, geoKey) }); } catch (error) { console.warn('[RoomCast]', error.message); }
   updatedGameConsole = updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,
     `Monsters in Room: \n${result.sheets || 'None'}\n`);
   const properties = result.equipment.map(e => `{name: "${e.name}", type: "${e.type}", attack_modifier: ${e.attack_modifier || 0}, damage_modifier: ${e.damage_modifier || 0}, ac: ${e.ac || 0}, magic: ${e.magic || 0}}`).join(', ');
@@ -2796,13 +2836,14 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   economyDb[geoKey].objects ||= [];
   for (const item of generatedObjects) if (objectNames.has(item.name.toLowerCase()) && !economyDb[geoKey].objects.some(o => o.name === item.name)) economyDb[geoKey].objects.push({
     ...item, ...(item.consumable_kind ? { quantity: generatedNames.filter(n => n === item.name.toLowerCase()).length } : {}) });
-  Economy.seedRoom(economyDb, geoKey, result.population, sharedState.getDungeonRunId(), updatedGameConsole);
+  Economy.seedRoom(economyDb, geoKey, result.population, sharedState.getDungeonRunId(), updatedGameConsole, { deferCommunity: !!construction });
+  if (!construction) (typeof RoomCast !== 'undefined' ? RoomCast : null)?.install(economyDb, geoKey, result.population, sharedState.getDungeonRunId());
   sharedState.setRoomNameDatabase(JSON.stringify(economyDb));
   updatedGameConsole = Inhabitants.withStates(Economy.syncGround(updatedGameConsole, economyDb[geoKey]), result.population);
   sharedState.setUpdatedGameConsole(updatedGameConsole);
   populationService.save(result.population);
-  await Divinity.developBiographies($, sharedState, geoKey);
-  await SpellSystem.developRecipes($, sharedState);
+  if (!construction) await Divinity.developBiographies($, sharedState, geoKey);
+  await SpellSystem.developRecipes($, sharedState, { constructionKey: construction?.key });
   updatedGameConsole = sharedState.getUpdatedGameConsole();
   console.info('[RoomPopulation]', JSON.stringify({ geoKey, indoor, actors: Object.keys(result.population.actors).length,
     groups: result.population.groups.map(g => ({ id: g.id, members: g.members.length })) }));
@@ -2838,9 +2879,14 @@ async function generateRoomObjects($, roomName, roomDescription) {
         const objectType = itemTypes[Math.floor(Math.random() * itemTypes.length)];
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
+        let objectName;
+        if ((typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) {
+            objectName = await require('./holodekObjectName').generate($, { objectType, roomName, roomDescription });
+        } else {
         await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure for the ${roomName}, with the object all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType} Room Description: ${roomDescription} If the object type is other, it might be a type of treasure that is wearable, a jewel, an orb, a relic or something readable like a scroll or tome. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
         const objectResult = await $.assistant.generation({ maxTokens: 30 });
-        const objectName = GeneratedNames.clean(objectResult.content).toLowerCase();
+        objectName = GeneratedNames.clean(objectResult.content).toLowerCase();
+        }
         if (isReservedBossKeyName(itemDatabase, objectName)) {
             console.warn('[BossKeyReserved] Ordinary object generation cannot seed the quest seal.');
             continue;
@@ -2852,6 +2898,13 @@ async function generateRoomObjects($, roomName, roomDescription) {
 }
 
 async function generateObjectModifiers($, object) {
+    if ((typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) { // holodek-1: a bad structured answer must never abort the caller (e.g. startGameWithCharacter)
+        for (let attempt = 1; attempt <= 2; attempt++) try { return await generateObjectModifiersInner($, object); }
+        catch (error) { if (attempt < 2) { console.warn(`[holodek-1 modifiers] attempt 1 failed (${error.message}); retrying once`); continue; } console.warn(`[holodek-1 modifiers] ${object?.name}: ${error.message}; using 0/0/0/0`); return { attack_modifier: 0, damage_modifier: 0, ac: 0, magic: 0 }; }
+    }
+    return generateObjectModifiersInner($, object);
+}
+async function generateObjectModifiersInner($, object) {
     if (!object || !object.name || !object.type) {
         console.error("Invalid object provided to generateObjectModifiers", object);
         return {
@@ -2863,6 +2916,10 @@ async function generateObjectModifiers($, object) {
     }
 
     const { name: objectName, type: objectType } = object;
+    if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) return require('./holodekRoomWork').request($, 'object-modifiers', {
+      attack_modifier: { type: Number, enum: [0, 3, 4, 5] }, damage_modifier: { type: Number, enum: [0, 4, 5, 6] },
+      ac: { type: Number, enum: [0, 1, 2] }, magic: { type: Number, enum: [0, 1, 2, 3] }
+    }, `Choose only the existing modifier fields for this item (data): ${JSON.stringify({ name: objectName, type: objectType })}. No prose, new item or invented mechanic. Choose exact schema values.`);
     console.log(`Generating modifiers for the object: ${objectName}, which is a ${objectType}...`);
 
     $.model = "gpt-4.1-mini";
@@ -2921,7 +2978,11 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredT
   $.model = "gpt-4.1-mini";
   $.temperature = 0.8;
 
-  await $.user`
+  // holodek-1 only: compact tile brief; same tool parameters and parser below.
+  if ((typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) await $.user`Design 2-4 obstacle feature tiles that fit this ${isOutdoor ? 'wasteland' : 'indoor'} room: "${roomDesc}". Puzzle: "${puzzleDesc || 'none'}". Must include these types: ${requiredTypes.length ? requiredTypes.join(', ') : 'none'}.
+Return ONLY JSON: {"tiles":{"tile1":{"type":"snake_case_label","spriteSpec":{"profile":"flat|cylinder|slab|arch|block","depth":0.7,"heightRatio":0.9,"baseWidth":0.4,"gridWidth":0.4,"detail":{"bandCount":3,"grooveCount":6,"wear":0.3,"cracks":0.2,"skin":"none|mosaic|zigzag|circuit|marble|plaid|grid|banded|tiles","carving":"none|chevrons|spiral|runes|glyphs|vines","accentColor":"#RRGGBB","accentStrength":0.35}},"procedure":{"material":"stone|obsidian|ash|bone|rust|crystal|marble|metal|wood","program":[{"op":"background","style":"dark_radial"},{"op":"column","width":0.35,"height":0.9,"solidBase":true},{"op":"cracks","density":0.3},{"op":"vignette","strength":0.6}]}}}}
+Ops: background(style flat|dark_radial|horizon_glow), tile_grid, column, block, archway, spire, ruin_wall, rubble(count), stairs(steps), crystal_cluster, ribcage, totem, branches, mound, slabs, cracks(density), rim_light(side), vignette(strength); sizes are 0..1 fractions. Invent types a player would expect to see here.`;
+  else await $.user`
       For this Tartarus ${isOutdoor ? 'wasteland' : 'indoor'} room: "${roomDesc}".
       Puzzle context (if any): "${puzzleDesc || 'none'}".
     
@@ -3060,7 +3121,8 @@ async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredT
     Keep JSON valid. No comments, no markdown, no extra text.
   `;
 
-  const tilesResult = await $.assistant.generation({ maxTokens: 400, 
+  const tilesResult = StoryPrompts.isHolodek1() ? await require('./holodekTiles').generate($,
+    { roomDesc, puzzleDesc, isOutdoor, requiredTypes }) : await $.assistant.generation({ maxTokens: 400,
     parameters: {
       tiles: {
         type: Object,
@@ -3408,6 +3470,8 @@ function getFallback(forColorsOnly) {
 }
 
 async function generateRoomVisualStyle($, roomDescription, geoKey, classification) {
+    if (StoryPrompts.isHolodek1() && roomDescription)
+        return require('./holodekRoomWork').visualStyle($, roomDescription, geoKey, classification);
     if (!roomDescription) {
         console.error("generateRoomVisualStyle called with empty description");
         return null;
@@ -3560,6 +3624,10 @@ ${roomDescription}
 }
 
 async function generateDungeonBlueprint($, roomDescription, puzzleDesc, classification, size, customTiles, generation = null, sceneSpec = null) {
+  if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) {
+    const parsed = await require('./holodekBlueprint').generate($, { roomDescription, puzzleDesc, classification, size, customTiles, generation, sceneSpec });
+    return BlueprintDesign.enrich(DungeonGeneration.seedBlueprint(parsed, generation), { classification, size, generation, sceneSpec, description: roomDescription });
+  }
   const customList = Array.isArray(customTiles)
     ? customTiles.map(t => t && (t.name || t.type)).filter(Boolean)
     : [];
@@ -3599,7 +3667,10 @@ Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
     props: [{ type: 'available custom tile id', x: '0..1', y: '0..1', scale: '0.5..1.4' }],
     volumes: [{ x: '0..1', y: '0..1', w: '0..1', h: '0..1', tile: 'wall|pillar|floor', ceil: 'world units' }]
   }, null, 2)}
-Rules:
+${(typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) ? `Rules (compact): Apply only the rules for this room's Indoor value. Spawn is at (0.5, 0.75): put a point of interest 12-24 tiles away and 3-5 scenery clusters along paths and exit approaches; do not put everything north of spawn. Invent fresh coordinates from the seed and description; schema values are field descriptions, not placements.
+Indoor: include indoorPlan with 6-12 connected rooms of varied size (one entrance), corridors by zero-based room index (width 2-4 tiles, style L/H/V), 2-4 heightLevels with ramp:true where heights differ, one walkable floor per XY cell. Grand halls get 5-9 clearance, side chambers 3-5; shrine needs 5x6 tiles, rotunda 9x9, full building module 21x25. Module x/y are 0..1 inside the room, width/height are grid tiles. Natural caves, mines and lava tubes use irregular chambers and skip classical modules.
+Outdoor: no indoorPlan; 2-6 landforms with different scales (rise in world units, canyon/basin rise is depth), buildings on bounded foundations linked to paths (widthTiles, ramp:true, no flatten), props from the available custom tile ids grouped by biome. Columns are small spaced colonnades, never a solid block. Keep values within 0..1 and the start area clear. Express any puzzle or listed features through volumes/props.
+JSON only.` : `Rules:
   - Apply only the rules for this room's Indoor value. OUTDOORS: do NOT return indoorPlan, a maze of rooms, or room-count quotas.
   - The spawn is at normalized (0.5, 0.75). Put a recognizable point of interest within 12-24 tiles of spawn and 3-5
     distinct scenery clusters along paths and exit approaches, about 25-45 tiles apart. Do not put all content north of spawn.
@@ -3710,7 +3781,7 @@ Rules:
     Prefer pillar_cluster prefabs for small groups. A pillar volume denotes a bounded colonnade, not thousands of columns.
   - Keep values within 0..1. Avoid overlaps near the start (center-bottom).
   - If a puzzle is present, express it as volumes/prefabs/props.
-JSON only.`;
+JSON only.`}`;
 
   const result = await $.assistant.generation({ maxTokens: classification?.indoor === true ? 6144 : 4096 });
   const raw = result.content || String(result.result || '');
@@ -3910,6 +3981,7 @@ function buildDungeonFromBlueprint(dungeon, classification, blueprint, customTil
   }
 
   function buildIndoorFromPlan(plan) {
+    plan = (typeof TempleComplex !== 'undefined' ? TempleComplex : null)?.augment(plan, dungeon.generation || sceneSpec?.generation) || plan;
     IndoorBlueprint.build(dungeon, plan, { floor: baseFloor, ceil: baseCeil, architecture: sceneSpec?.architecture,
       cavernVillage: sceneSpec?.worldContext?.village?.container === 'vast-cavern',
       coveredStorey: sceneSpec?.worldContext?.fortifiedFloor?.stairs?.includes('up') });
@@ -4222,14 +4294,14 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     const startKey = "0,0,0";
     const startRoom = roomNameDatabasePlain[startKey];
     let outsideKey = null;
-    if (startRoom) {
+    if (startRoom && !WorldSetting.current()) {
       startRoom.indoor = startRoom.isIndoor = true;
       startRoom.isOutdoor = false;
       startRoom.classification = { ...startRoom.classification, indoor: true, biome: 'temple' };
       roomNameDbString = JSON.stringify(roomNameDatabasePlain);
     }
 
-    if (startRoom && startRoom.exits && typeof startRoom.exits === "object") {
+    if (startRoom && !WorldSetting.current() && startRoom.exits && typeof startRoom.exits === "object") {
       const exitDirs = Object.keys(startRoom.exits);
       if (exitDirs.length > 0) {
         const firstDir = exitDirs[0];
@@ -4240,7 +4312,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       }
     }
 
-    if (!outsideKey) {
+    if (!outsideKey && !WorldSetting.current()) {
       const exitsLine = updatedGameConsole.match(/Exits:\s*([^\n]+)/)?.[1] || "";
       const roomExitsArray = exitsLine.split(",").map(s => s.trim()).filter(Boolean);
       if (roomExitsArray.length > 0 && currentX === 0 && currentY === 0 && currentZ === 0) {
@@ -4290,7 +4362,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
 
     const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
-    let forcedIndoor = geoKeyString === '0,0,0' ? true : null;
+    let forcedIndoor = geoKeyString === '0,0,0' ? (WorldSetting.startRoomProfile()?.indoor ?? true) : null;
     try {
       const db = JSON.parse(roomNameDbString || "{}");
       const entry = db[geoKeyString];
@@ -4328,7 +4400,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       }
 
       db[geoKeyString] = db[geoKeyString] || {};
-      if (geoKeyString === '0,0,0') classification.biome = 'temple';
+      if (geoKeyString === '0,0,0') Object.assign(classification,WorldSetting.startRoomProfile()?.classification || {biome:'temple'});
       db[geoKeyString].classification = {
         ...(db[geoKeyString].classification || {}),
         ...classification
@@ -4350,7 +4422,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     coords: geoCoords,
     indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
   }));
-  if (geoKey === '0,0,0') { sceneSpec.indoor = true; sceneSpec.biome = 'temple'; }
+  if (geoKey === '0,0,0') { const start=WorldSetting.startRoomProfile(); sceneSpec.indoor=start?.indoor ?? true;sceneSpec.biome=start?.classification.biome || 'temple'; }
   classification = applySceneSpecToClassification(sceneSpec, classification);
   if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
   DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
@@ -4640,7 +4712,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
       DungeonExits.install(dungeon, sceneSpec.exits);
       console.info('[SceneExteriors]', geoKey, JSON.stringify(applySceneExteriors(dungeon, sceneSpec)));
       console.info('[SceneVegetation]', geoKey, JSON.stringify(applySceneVegetation(dungeon, sceneSpec)));
-      console.info('[SceneBiomeProps]', geoKey, JSON.stringify(applySceneBiomeProps(dungeon, sceneSpec)));
+      console.info('[SceneBiomeProps]', geoKey, JSON.stringify(applySceneBiomeProps(dungeon, sceneSpec))); if (typeof CityScenery !== 'undefined') console.info('[CityScenery]', geoKey, JSON.stringify(CityScenery.apply(dungeon, sceneSpec, CityScenery.citySiteFor(sharedState, geoKey)))); if (typeof WastelandPyramids !== 'undefined') console.info('[WastelandPyramids]', geoKey, JSON.stringify(WastelandPyramids.apply(dungeon, sceneSpec, geoKey)));
     } catch (e) {
       console.error('[SceneGfx] landmark placement failed:', e);
     }
@@ -5217,7 +5289,9 @@ async function determineArtifactType($, nextArtifact) {
     $.temperature = 1.0;
     await $.user`Determine the type of the artifact named "${nextArtifact}". The possible types are: weapon, armor, shield, or other. Respond with only the type.`;
 
-    const typeResult = await $.assistant.generation({ maxTokens: 40,
+    const typeResult = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? await require('./holodekAdjudication').json($,
+        'artifact-type', { type: { type: String, enum: ['weapon', 'armor', 'shield', 'other'] } }, { name: nextArtifact },
+        'Classify only this existing artifact into its equipment type.') : await $.assistant.generation({ maxTokens: 40,
         parameters: {
             type: { type: String, enum: ["weapon", "armor", "shield", "other"] }
         }
@@ -5304,7 +5378,12 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.0;
     await $.assistant`Generate a fantasy race and class for a powerful boss character named ${bossName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise), high magical beings, and other entities of pure energy and form, angels, powerful demons. Format exactly as 'Race: [race], Class: [class]' and nothing else with no line breaks.`;
-    const raceClassResult = await $.assistant.generation({ maxTokens: 30 });
+    const raceClassResult = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? await (async () => {
+      const value = await require('./holodekRoomWork').request($, 'boss-identity', {
+        race: { type: String, minLength: 1, maxLength: 70 }, className: { type: String, minLength: 1, maxLength: 70 }
+      }, `Choose only the race and occupation/class for the existing boss ${JSON.stringify(bossName)} at level ${bossLevel}. Not a god, goddess, party member or a new boss identity. No stats, lore paragraph or events. ${StoryPrompts.settingOnce({})}`);
+      return { content: `Race: ${value.race}, Class: ${value.className}` };
+    })() : await $.assistant.generation({ maxTokens: 30 });
     console.log("Race and Class Result:", raceClassResult);
 
     if (!raceClassResult || !raceClassResult.content) {
@@ -5434,7 +5513,458 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
     return updatedGameConsole;
 }
 
-async function generateMissingRoomDetails($, object) {
+// One geometry pass for entry and isolated background construction.
+async function buildGeneratedRoom($, roomDescription, puzzleInRoom, isAutoSimAdvance, returnObj, { enteringRoom = false, entryPrevious = sharedState.getLastCoords() } = {}) {
+// Parse coordinates
+let currentX = 0, currentY = 0, currentZ = 0;
+const coordMatch = updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
+if (coordMatch) {
+  currentX = parseInt(coordMatch[1]);
+  currentY = parseInt(coordMatch[2]);
+  currentZ = parseInt(coordMatch[3]);
+}
+
+const geoCoords = { x: currentX, y: currentY, z: currentZ };
+const geoKey = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
+
+// Parse turn count (authoritative for first-room boot)
+const turnsMatch = updatedGameConsole.match(/Turns:\s*(\d+)/);
+const turns = turnsMatch ? parseInt(turnsMatch[1], 10) : null;
+
+// Detect first turn explicitly
+const isFirstTurn = turns === 0;
+
+// Fall back to lastCoords comparison for normal movement
+const lastCoords = sharedState.getLastCoords();
+const lastGeoKey =
+  lastCoords &&
+  typeof lastCoords.x === "number" &&
+  typeof lastCoords.y === "number" &&
+  typeof lastCoords.z === "number"
+    ? `${lastCoords.x},${lastCoords.y},${lastCoords.z}`
+    : null;
+
+// Final room-entry decision
+// lastCoords is already updated earlier this turn (music + coords bookkeeping), so a plain
+// coordinate comparison misses real moves. Also treat "no dungeon built for this room yet" as new.
+let hasRoomDungeon = false;
+let cachedRoomDungeon = null;
+let staleRoomDungeon = false;
+try {
+  cachedRoomDungeon = sharedState.getRoomDungeon && sharedState.getRoomDungeon(geoCoords);
+  const input = sceneInputFromConsole(updatedGameConsole, { coords: geoCoords });
+  const source = cachedRoomDungeon?.sceneSpec?.source;
+  const normalize = text => String(text || '').trim().replace(/\s+/g, ' ');
+  staleRoomDungeon = !!cachedRoomDungeon && (!source || normalize(source.roomName) !== normalize(input.roomName) ||
+    normalize(source.description) !== normalize(input.description));
+  if (geoKey === '0,0,0' && !WorldSetting.current() && cachedRoomDungeon &&
+      (cachedRoomDungeon.classification?.indoor === false || cachedRoomDungeon.sceneSpec?.indoor === false)) staleRoomDungeon = true;
+  if (cachedRoomDungeon?.builder?.mode === 'hand') staleRoomDungeon = false; // Campaign Builder: hand-built rooms are authoritative
+  hasRoomDungeon = !!cachedRoomDungeon?.layout && !!cachedRoomDungeon?.cells && !staleRoomDungeon;
+} catch (error) { console.warn('[DungeonEntry] Cached room validation failed:', error.message); }
+const isNewGeoRoom =
+  isFirstTurn ||
+  !lastGeoKey ||
+  geoKey !== lastGeoKey ||
+  !hasRoomDungeon;
+
+console.info('[DungeonEntry]', JSON.stringify({ geoKey, lastGeoKey, isFirstTurn,
+  hasRoomDungeon, staleRoomDungeon, isAutoSimAdvance, build: !!(isNewGeoRoom && !hasRoomDungeon && roomDescription && !isAutoSimAdvance),
+  reason: isAutoSimAdvance ? 'automatic-turn' : staleRoomDungeon ? 'description-changed' : !hasRoomDungeon ? 'missing-dungeon' : 'cached-room' }));
+
+if (isNewGeoRoom && !hasRoomDungeon && roomDescription && !isAutoSimAdvance) {
+  const remotePipeline = require('./websiteRoomPipeline');
+  const remote = remotePipeline?.begin?.(sharedState, updatedGameConsole);
+  if (remote) {
+    await remotePipeline.wait(sharedState, geoKey, 'geometry');
+    roomNameDatabaseString = sharedState.getRoomNameDatabase();
+    const dungeon = sharedState.getRoomDungeonForSimulation(geoCoords);
+    if (!dungeon?.cells || !dungeon.layout) throw Error('Remote geometry did not arrive.');
+    if (enteringRoom) RoomEntry.prepare(dungeon, { geoKey,
+      fromKey: `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`, input: userInput });
+    sharedState.setRoomDungeon(geoCoords, dungeon, dungeon.customTiles || []);
+    sharedState.setLastCoords(geoCoords); returnObj.dungeon = dungeon;
+    broadcast({ type: 'dungeonLoaded', geoKey, dungeon });
+  } else {
+  console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
+  const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
+  // 🧭 STEP 0 — classify biome & size
+  
+  const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
+  let forcedIndoor = geoKeyString === '0,0,0' ? (WorldSetting.startRoomProfile()?.indoor ?? true) : null;
+  try {
+    const db = JSON.parse(roomNameDatabaseString || "{}");
+    const entry = db[geoKeyString];
+    if (forcedIndoor === null && entry && typeof entry.indoor === 'boolean') {
+      forcedIndoor = entry.indoor;
+    }
+  } catch (e) {
+    console.error('Failed to read indoor flag from roomNameDatabase:', e);
+  }
+  
+let classification = await classifyDungeon(roomDescription);
+console.log('Dungeon classification (raw):', classification);
+
+// Override indoor/outdoor with our authoritative flag
+if (forcedIndoor !== null) {
+  classification = classification || {};
+  classification.indoor = forcedIndoor;
+  console.log('Dungeon classification (after indoor override):', classification.indoor);
+}
+
+// === INSERT: NEW PERSISTENCE LOGIC (REPLACE the line below if it exists, or add after the override) ===
+// (If you have an existing `classification = ...` line here, replace it with the full block below)
+try {
+  // Safeguard: Use cached if complete, else re-classify
+  let db = JSON.parse(roomNameDatabaseString || "{}");
+  const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
+  let cachedClassification = db[geoKeyString]?.classification;
+  if (!cachedClassification || cachedClassification.indoor === null || cachedClassification.biome === null) {
+    // Re-classify only if incomplete
+    classification = await classifyDungeon(roomDescription);
+    console.log('Re-classified incomplete room:', geoKeyString);
+  } else {
+    classification = cachedClassification;
+    console.log('Using cached classification for re-visited room:', geoKeyString);
+  }
+
+  // Override with authoritative flag (if available)
+  if (forcedIndoor !== null) {
+    classification = classification || {};
+    classification.indoor = forcedIndoor;
+    console.log('Classification after indoor override:', classification.indoor);
+  }
+
+  // Persist: Merge into DB entry (preserve exits/objects/etc.)
+  if (geoKeyString === '0,0,0') Object.assign(classification,WorldSetting.startRoomProfile()?.classification || {biome:'temple'});
+  db[geoKeyString] = db[geoKeyString] || {};
+  db[geoKeyString].classification = {
+    ... (db[geoKeyString].classification || {}),  // Preserve any non-null existing details
+    ... classification  // Override with fresh/cached computation
+  };
+  db[geoKeyString].indoor = classification.indoor;  // Sync top-level flag
+
+  // Save updated DB
+  roomNameDatabaseString = JSON.stringify(db, null, 2);  // Update local string (pretty-print for logs)
+  if (sharedState.setRoomNameDatabase) {
+    sharedState.setRoomNameDatabase(roomNameDatabaseString);
+  }
+  console.log('Persisted classification for', geoKeyString, ':', JSON.stringify(db[geoKeyString].classification, null, 2));
+} catch (persistErr) {
+  console.error('Failed to persist classification for', geoKeyString, ':', persistErr);
+  // Fallback: Use local classification for this turn's rendering
+}
+
+// === AFTER (existing code continues) ===
+  // Room text is the source of truth: parse name/description/exits/objects into a scene spec
+  // that overrides the classifier wherever the text is explicit.
+  const sceneSpec = buildSceneSpec(sceneInputFromConsole(updatedGameConsole, {
+    coords: geoCoords,
+    indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
+  }));
+  if (geoKey === '0,0,0') { const start=WorldSetting.startRoomProfile();sceneSpec.indoor=start?.indoor ?? true;sceneSpec.biome=start?.classification.biome || 'temple'; }
+  classification = applySceneSpecToClassification(sceneSpec, classification);
+  if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
+  DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
+  console.log('[SceneSpec]', geoKey, describeSceneSpec(sceneSpec));
+  attachSceneWorldContext(sceneSpec, roomNameDatabaseString, sharedState, updatedGameConsole);
+  try {
+    const levelSpec = await getLevelSpec(sceneSpec.source || {});
+    applyLevelSpecToScene(sceneSpec, levelSpec);
+    console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
+  } catch (e) { console.warn('[LevelSpec] failed', e.message); }
+
+  DungeonGeneration.varyPalette(sceneSpec);
+  sceneSpec.outdoorTerrain = OutdoorTerrain.plan(sceneSpec, sceneSpec.generation.gridSize);
+  prepareSceneGeography(sceneSpec, roomNameDatabaseString);
+  prepareSceneExteriors(sceneSpec, roomNameDatabaseString, { seed: sharedState.getDungeonRunId(), enabled: process.env.HOLODEK_SCENE_EXTERIORS !== '0' });
+  sceneSpec.puzzleMechanism = JSON.parse(roomNameDatabaseString || '{}')[geoKey]?.puzzleMechanism || null;
+  LivingEnvironments.enrichSceneSpec(sceneSpec);
+  prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
+  prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
+
+  require('./fortifiedDecor').prepare(sceneSpec);
+  const isOutdoor = classification && classification.indoor === false;
+  const size = sceneSpec.generation.gridSize;
+
+  const startX = Math.floor(size / 2);
+  const startY = size - Math.floor(size / 4);
+  
+  // 🔴 STEP 1 — Ask the LLM to describe how this room should LOOK, with biome hints
+    const visualStyle = applySceneSpecToVisualStyle(sceneSpec, await generateRoomVisualStyle($, roomDescription, geoKey, classification));
+    if (!visualStyle) {
+      console.error("⚠️ Could not generate style JSON. Using fallback.");
+    }
+      const puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: ([^\n]+)/)?.[1]?.trim() || '';
+      const requiredCustomTypes = Array.isArray(classification?.features)
+        ? classification.features
+            .map(f => String(f).toLowerCase())
+            .map(f => (f === 'altars' ? 'altar' : f === 'statues' ? 'statue' : f === 'arches' ? 'arch' : f))
+            .filter(f => !['pillars', 'mountains'].includes(f))
+        : [];
+      let customTiles = [];
+      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, Array.from(new Set([...requiredCustomTypes, ...sceneRequiredCustomTypes(sceneSpec)])));
+      customTiles = customTiles.filter(tile => !LivingEnvironments.isReservedScenery(sceneSpec.puzzleMechanism, tile));
+      console.log('[Custom Tiles] Generated:', customTiles);
+      const blueprint = await generateDungeonBlueprint(
+        $,
+        roomDescription,
+        puzzleInRoom,
+        classification,
+        size,
+        customTiles,
+        sceneSpec.generation,
+        sceneSpec
+      );
+    let lighting = (visualStyle && visualStyle.lighting) ? visualStyle.lighting : {
+      dir: "NW",
+      elevation: 0.6,
+      intensity: 0.6,
+      color: "#FFFFFF"
+    };
+    try {
+      const db = JSON.parse(roomNameDatabaseString || "{}");
+      const entry = db[geoKeyString] || {};
+      if (entry.lighting) {
+        lighting = entry.lighting;
+      } else {
+        entry.lighting = lighting;
+      }
+      if (blueprint) {
+        entry.blueprint = blueprint;
+      }
+      db[geoKeyString] = entry;
+      roomNameDatabaseString = JSON.stringify(db, null, 2);
+      if (sharedState.setRoomNameDatabase) {
+        sharedState.setRoomNameDatabase(roomNameDatabaseString);
+      }
+    } catch (e) {
+      console.error('Failed to persist lighting for', geoKeyString, e);
+    }
+    const dungeon = {
+      layout: { width: size, height: size },
+      generation: sceneSpec.generation,
+      outdoorTerrain: sceneSpec.outdoorTerrain,
+      start: { x: startX, y: startY },
+      tiles: {},
+      cells: {},
+      customTiles,
+      classification,
+      visualStyle,
+      blueprint,
+      lighting,
+      // sky colors only for outdoors; indoors falls back to dark
+      skyTop: classification && classification.indoor === false && classification.skyTop
+                ? classification.skyTop
+                : undefined,
+    skyBot: classification && classification.indoor === false && classification.skyBot
+              ? classification.skyBot
+              : undefined
+  };
+    // 🔴 STEP 2 — Generate textures ONCE per room
+    dungeon.tiles.floor = {
+      url: generateSpriteFromStyle(visualStyle && visualStyle.floorPalette ? { ...visualStyle, palette: visualStyle.floorPalette } : visualStyle, "floor", `${geoKey}_floor`)
+    };
+  dungeon.tiles.wall = {
+    url: generateSpriteFromStyle(visualStyle, "wall", `${geoKey}_wall`)
+  };
+  dungeon.tiles.torch = {
+    url: generateSpriteFromStyle(visualStyle, "torch", `${geoKey}_torch`)
+  };
+  dungeon.tiles.door = {
+    url: generateSpriteFromStyle(visualStyle, "door", `${geoKey}_door`)
+  };
+  dungeon.tiles.pillar = {
+    url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`),
+    spriteSpec: {
+      profile: 'cylinder',
+      depth: 0.8,
+      heightRatio: 1.0,
+      baseWidth: 0.5,
+      gridWidth: 0.5,
+      collisionRadius: 0.09,
+      detail: {
+        bandCount: 3,
+        grooveCount: 6,
+        grooveDepth: 0.25,
+        taper: 0.06,
+        baseHeight: 0.18,
+        capHeight: 0.12,
+        baseFlare: 0.12,
+        capFlare: 0.1,
+        wear: 0.25,
+        chips: 0.2,
+        cracks: 0.2,
+        noise: 0.3,
+        skin: 'mosaic',
+        skinStrength: 0.35,
+        carving: 'runes',
+        accentColor: null,
+        accentStrength: 0
+      }
+    }
+  };
+    // 🔴 STEP 3 — Generate sprites for customs (if any)
+    customTiles.forEach((tile, i) => {
+      if (!tile || !tile.type) return;
+      const tileName = `custom_${tile.type}_${i}`;
+      tile.name = tileName;
+      const style = {
+        palette: visualStyle && visualStyle.palette ? visualStyle.palette : undefined,
+        procedure: tile.procedure || {},
+        spriteSpec: tile.spriteSpec || null
+      };
+  dungeon.tiles[tileName] = {
+    url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`),
+    spriteSpec: tile.spriteSpec || {
+      profile: 'flat',
+      depth: 0.5,
+      heightRatio: 0.9,
+      baseWidth: 0.6,
+      gridWidth: 0.6,
+      detail: {
+        bandCount: 0,
+        grooveCount: 0,
+        grooveDepth: 0.1,
+        taper: 0,
+        baseHeight: 0.1,
+        capHeight: 0.08,
+        baseFlare: 0.05,
+        capFlare: 0.05,
+        wear: 0.2,
+        chips: 0.15,
+        cracks: 0.15,
+        noise: 0.25,
+        skin: '',
+        skinStrength: 0,
+        carving: '',
+        accentColor: null,
+        accentStrength: 0
+      }
+    }
+  };
+    });
+    // 🔴 STEP 3b — scene-spec graphics: material textures + pixel-art landmark sprites
+    dungeon.geoKey = geoKey;
+    try {
+      const sceneGfx = applySceneGraphics(dungeon, sceneSpec, { geoKey, customTiles });
+      customTiles = dungeon.customTiles;
+      console.log('[SceneGfx]', geoKey, JSON.stringify(sceneGfx));
+    } catch (e) {
+      console.error('[SceneGfx] graphics failed, keeping LLM sprites:', e);
+    }
+
+    logDungeonConstruction('scene-graphics', dungeon);
+    // 🔴 STEP 4 — Build layout using blueprint (fallback to legacy if missing)
+    if (blueprint) {
+      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles, sceneSpec);
+    } else if (classification && classification.indoor === false) {
+      buildOutdoorLayout(dungeon, classification, customTiles, sceneSpec);
+    } else {
+      buildIndoorLayout(dungeon, classification);
+    }
+  logDungeonConstruction('layout', dungeon);
+  applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
+  require('./fortifiedStairs').install(dungeon, sceneSpec);
+  applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
+  logDungeonConstruction('geography', dungeon);
+  console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
+  logDungeonConstruction('architecture', dungeon);
+  // 🔴 STEP 4 — insert doors between floors
+  for (let y = 1; y < dungeon.layout.height - 1; y++) {
+    for (let x = 1; x < dungeon.layout.width - 1; x++) {
+      const key = `${x},${y}`;
+      const cell = dungeon.cells[key];
+      if (!cell || cell.tile !== "wall" || cell.architectureRole || cell.exteriorRole) continue;
+      const N = dungeon.cells[`${x},${y-1}`];
+      const S = dungeon.cells[`${x},${y+1}`];
+      const E = dungeon.cells[`${x+1},${y}`];
+      const W = dungeon.cells[`${x-1},${y}`];
+      // vertical gap
+      if (N?.tile === "floor" && S?.tile === "floor" && Math.random() < 0.07) {
+        cell.tile = "door";
+        cell.door = { isDoor: true, isOpen: false };
+      }
+      // horizontal gap
+      if (E?.tile === "floor" && W?.tile === "floor" && Math.random() < 0.07) {
+        cell.tile = "door";
+        cell.door = { isDoor: true, isOpen: false };
+      }
+    }
+  }
+ 
+  logDungeonConstruction('doors', dungeon);
+  // 🔴 STEP 5 — upgrade some walls to torch-walls
+  for (let y = 1; y < dungeon.layout.height - 1; y++) {
+    for (let x = 1; x < dungeon.layout.width - 1; x++) {
+      const key = `${x},${y}`;
+      const cell = dungeon.cells[key];
+      if (!cell || cell.tile !== "wall" || cell.exteriorRole) continue;
+      const N = dungeon.cells[`${x},${y-1}`];
+      const S = dungeon.cells[`${x},${y+1}`];
+      const E = dungeon.cells[`${x+1},${y}`];
+      const W = dungeon.cells[`${x-1},${y}`];
+      const floorNeighbors = [N, S, E, W].filter(n => n && n.tile === "floor").length;
+      if (floorNeighbors === 0) continue;
+      if (Math.random() < 0.10) {
+        cell.tile = "torch";
+        cell.feature = "torch";
+      }
+    }
+  }
+  logDungeonConstruction('torch-walls', dungeon);
+    // spawn safe square
+    dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
+  // 🔴 STEP 6 — put the landmarks the text names into the room
+  try {
+    applySceneRoofs(dungeon, sceneSpec);
+    require('./fortifiedDecor').cover(dungeon, sceneSpec);
+    logDungeonConstruction('roof-structure', dungeon);
+    const placement = placeSceneLandmarks(dungeon, sceneSpec);
+    console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
+    console.log('[SceneGfx] objects placed', geoKey, JSON.stringify(placeSceneObjects(dungeon, sceneSpec)));
+    DungeonExits.install(dungeon, sceneSpec.exits);
+    console.info('[SceneExteriors]', geoKey, JSON.stringify(applySceneExteriors(dungeon, sceneSpec)));
+    console.info('[SceneVegetation]', geoKey, JSON.stringify(applySceneVegetation(dungeon, sceneSpec)));
+    console.info('[SceneBiomeProps]', geoKey, JSON.stringify(applySceneBiomeProps(dungeon, sceneSpec))); if (typeof CityScenery !== 'undefined') console.info('[CityScenery]', geoKey, JSON.stringify(CityScenery.apply(dungeon, sceneSpec, CityScenery.citySiteFor(sharedState, geoKey)))); if (typeof WastelandPyramids !== 'undefined') console.info('[WastelandPyramids]', geoKey, JSON.stringify(WastelandPyramids.apply(dungeon, sceneSpec, geoKey)));
+  } catch (e) {
+    console.error('[SceneGfx] landmark placement failed:', e);
+  }
+  dungeon.puzzleBuildReport = LivingEnvironments.install(dungeon, sceneSpec);
+  dungeon.surfaceArtReport = applySurfaceArt(dungeon,sceneSpec);
+  console.info('[PuzzleConstruction]', geoKey, JSON.stringify(dungeon.puzzleBuildReport));
+  logDungeonConstruction('landmarks-and-objects', dungeon);
+  // UPDATED: Pass customTiles to sharedState
+  dungeon.sceneSpec = sceneSpec;
+  dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
+  console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
+  roomNameDatabaseString = storeSceneSpecInRoomDb(roomNameDatabaseString, geoKey, sceneSpec);
+  if (enteringRoom) RoomEntry.prepare(dungeon, { geoKey,
+    fromKey: `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`, input: userInput });
+  const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
+  sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
+  sharedState.setLastCoords(geoCoords);
+  broadcast({ type: 'dungeonLoaded', geoKey, dungeon: finalDungeon });
+  returnObj.dungeon = finalDungeon;
+  console.log('Dungeon built with VISUAL STYLE → SPRITE → RAYCASTER');
+}
+
+  }
+if (enteringRoom && hasRoomDungeon) {
+  const cached = sharedState.getRoomDungeonForSimulation(geoCoords);
+  if (cached) {
+    RoomEntry.prepare(cached, { geoKey, fromKey: `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`, input: userInput });
+    sharedState.setRoomDungeon(geoCoords, cached, cached.customTiles || []);
+    returnObj.dungeon = cached;
+    broadcast({ type: 'dungeonLoaded', geoKey, dungeon: cached });
+  }
+}
+return { geoCoords, geoKey };
+}
+
+async function generateMissingRoomDetails($, object, construction = null) {
+  const constructionReadOnly = key => construction && key !== construction.key && (key === '0,0,0' ||
+    construction.assignment?.readOnly?.includes(key) || construction.assignment?.assignments?.some(other => other.destination === key && other.owner !== construction.id));
   const diversitySeed = ['vitality_contrast', 'auditory_twist', 'conversational_detail'][Math.floor(Math.random() * 3)];
   let roomDescriptionGenerated = false;
   let environmentDescription = '';
@@ -5547,6 +6077,7 @@ async function generateMissingRoomDetails($, object) {
 
   async function ensureRoomHasNonEmptyClassification(db, key, inheritFromRoom = null) {
     const normKey = normalizeCoordKeyLocal(key);
+    if (constructionReadOnly(normKey)) return;
     const room = db[normKey];
     if (!room) return;
 
@@ -5562,6 +6093,7 @@ async function generateMissingRoomDetails($, object) {
   async function applyPaletteFromDescriptionToRoom(db, key, description) {
     if (!description || !String(description).trim()) return;
     const normKey = normalizeCoordKeyLocal(key);
+    if (constructionReadOnly(normKey)) return;
     const room = db[normKey];
     if (!room) return;
 
@@ -5668,7 +6200,7 @@ async function generateMissingRoomDetails($, object) {
   // ----------------------------
   let startRoom = getRoomSafeLocal(roomNameDatabasePlain, startKey);
   if (!startRoom) {
-    const startClassification = await generateDefaultClassification($, null, true);
+    const startClassification = ((typeof TempleComplex !== 'undefined' ? TempleComplex : null)?.mark || (c => c))(await generateDefaultClassification($, null, true));
     startRoom = {
       name: "Ruined Temple Entrance",
       exhaustionLimit: 4,
@@ -5683,14 +6215,17 @@ async function generateMissingRoomDetails($, object) {
       monsters: { inRoom: "None", equippedProperties: "None", state: "None" }
     };
     setRoomSafeLocal(roomNameDatabasePlain, startKey, startRoom);
-  } else {
+  } else if (!constructionReadOnly(startKey)) {
     ensureRoomFlagsConsistent(startRoom);
     setRoomSafeLocal(roomNameDatabasePlain, startKey, startRoom);
   }
   // The starting temple is a fixed interior, even when currency/atlas metadata created its skeleton first.
-  startRoom.indoor = true;
-  startRoom.classification = { size: 16, features: ['pillars'], ...startRoom.classification, indoor: true, biome: 'temple' };
+  if (!constructionReadOnly(startKey)) {
+  if (typeof WorldSetting !== 'undefined' && WorldSetting.current()) WorldSetting.applyStartRoom(startRoom);
+  else { startRoom.indoor = true;
+    startRoom.classification = { size: 16, features: ['pillars'], ...startRoom.classification, indoor: true, biome: 'temple' }; }
   ensureRoomFlagsConsistent(startRoom);
+  }
 
   // ----------------------------
   // Ensure current room exists (but DO NOT decide palette unless description exists)
@@ -5719,6 +6254,15 @@ async function generateMissingRoomDetails($, object) {
     ensureRoomFlagsConsistent(currentRoomData);
     setRoomSafeLocal(roomNameDatabasePlain, coordKey, currentRoomData);
   }
+  if (!construction && currentRoomData.pendingCommunityActivation) {
+    const activation = require('./preparedRoomEntry').activate(sharedState, coordKey, updatedGameConsole);
+    updatedGameConsole = activation.text;
+    if (activation.changed) {
+      await Divinity.developBiographies($, sharedState, coordKey);
+      roomNameDatabasePlain = JSON.parse(sharedState.getRoomNameDatabase());
+      currentRoomData = roomNameDatabasePlain[coordKey]; startRoom = roomNameDatabasePlain[startKey];
+    }
+  }
   if (FortifiedSites.isFloor(currentRoomData)) {
     updatedGameConsole = updatedGameConsole.replace(/^Room Name:.*$/m, `Room Name: ${currentRoomData.name}`);
     const fixed = Object.keys(currentRoomData.exits);
@@ -5731,6 +6275,7 @@ async function generateMissingRoomDetails($, object) {
 
   // Repair empty/missing classification everywhere (including boss room cases that had `{}`) :contentReference[oaicite:2]{index=2}
   for (const [k, r] of Object.entries(roomNameDatabasePlain)) {
+    if (construction && k !== construction.key) continue;
     if (!r) continue;
     if (classificationIsMissingOrEmpty(r)) {
       // inherit from current room if we have it, else start
@@ -5850,18 +6395,24 @@ async function generateMissingRoomDetails($, object) {
         let neighbor = getRoomSafeLocal(roomNameDatabasePlain, targetKey);
         let name = neighbor?.name;
         if (!name || /^(none|null|undefined|empty)$/i.test(String(name).trim())) {
+          if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) {
+            name = await require('./holodekRoomWork').roomName($, { database: roomNameDatabasePlain,
+              sourceKey: coordKey, sourceName: roomName, direction,
+              forceOutdoor: !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0] });
+          } else {
           $.model = 'gpt-4.1-mini';
           $.temperature = 1.0;
           await $.assistant`Generate only a room name for the existing ${direction} exit from ${roomName}. Do not redescribe or repopulate the current room. Current room description: ${roomDescription}`;
           const response = await $.assistant.generation({ maxTokens: 40 });
           name = response.content?.trim();
           if (!name || /^(none|null|undefined|empty)$/i.test(name)) continue;
+          }
         }
         if (!neighbor) {
           let shape;
           try { shape = await classifyDungeon(name, false); }
           catch { shape = { indoor: true, size: 32, biome: 'temple', features: [] }; }
-          const outdoorEntrance = coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0];
+          const outdoorEntrance = !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0];
           const indoor = outdoorEntrance ? false : shape.indoor;
           neighbor = { name, exhaustionLimit: null, attemptedSearches: 0, trapTriggered: false,
             exits: {}, objects: [], monsters: { inRoom: 'None', equippedProperties: 'None', state: 'None' },
@@ -5891,6 +6442,13 @@ async function generateMissingRoomDetails($, object) {
       }
       persistRoomDb(roomNameDatabasePlain);
     }
+    // world1 CITY_SITES: entering a placed city room installs the full city plan (named skeleton rooms; prose comes later from the model).
+    try { const cityReport = CitySites.install(roomNameDatabasePlain, coordKey, { seed: sharedState.getDungeonRunId?.() || '' });
+      if (cityReport.status === 'installed') { const d = cityReport.direction; if (!roomExitsArray.includes(d)) roomExitsArray.push(d); if (!existingAdjacentRooms.includes(d)) existingAdjacentRooms.push(d);
+        updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${roomExitsArray.join(', ')}`); persistRoomDb(roomNameDatabasePlain); }
+      if (cityReport.status !== 'skipped') console.info('[CitySites]', coordKey, JSON.stringify(cityReport)); } catch (cityErr) { console.error('[CitySites] install failed', coordKey, cityErr?.message); }
+    if (require('./worldFlags').on('CITY_COMPLETE') && currentRoomData.citySites) persistRoomDb(roomNameDatabasePlain);
+    if (require('./worldFlags').on('CITY_COMPLETE') && currentRoomData.cityRoom) persistRoomDb(roomNameDatabasePlain);
     if (shouldPopulateRoom) {
         const villageRecall = await CampaignMemory.appendPlanning($, sharedState,
           'new location: settlement needs, siege pressures, unresolved choices and local relationships',
@@ -5922,6 +6480,7 @@ async function generateMissingRoomDetails($, object) {
             $.temperature = 1.2;
             $.user`FYI: Variability seed for this turn—infuse subtle contrast: ${diversitySeed}. Await next.`;
             StoryPrompts.appendOriginal($);
+            if (StoryPrompts.isHolodek1()) await StoryPrompts.injectRecall($, { userInput: 'describe this newly entered room: look, light, sounds, smells, objects, exits', consoleText: updatedGameConsole, focus: roomName });
         
     //    await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the current room taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore. The underworld plane, Tartarus, which includes the Ruined Temple's many rooms, and outside of which is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
   //      const generationResultName = await $.assistant.generation({ maxTokens: 40 });
@@ -5936,6 +6495,8 @@ async function generateMissingRoomDetails($, object) {
     if (floorGuidance) await $.assistant`${floorGuidance}`;
     const villageGuidance = Villages.describe(currentRoomData);
     if (villageGuidance) await $.assistant`${villageGuidance}`;
+    const cityGuidance = CitySites.describe(currentRoomData);
+    if (cityGuidance) await $.assistant`${cityGuidance}`;
     const planarGuidance = PlanarPortals.describe(currentRoomData.planarRealm);
     if (planarGuidance) await $.assistant`${planarGuidance}`;
     const existingIntent = describeEnvironmentIntent(currentRoomData.environmentIntent);
@@ -5946,10 +6507,15 @@ async function generateMissingRoomDetails($, object) {
     await $.assistant`Conditional world context for this newly described room: ${JSON.stringify(worldContext)}
 Use only known facts here, not an invented list of exits. If outdoors, describe real terrain, walkable approaches and suitable dead vegetation, not only abstract metaphors. If a known route leads to an indoor building, describe that destination's exterior, forecourt and physical entrance; its other walls enclose the building, while the surrounding perimeter can be explored. If a route leads outdoors, it is a continuation through the region rather than an arbitrary indoor hall. If indoors and linked to the same complex, distinguish deeper interior passages from gateways to exterior courts or wasteland. The Ruined Temple is a large complex, not a single shed, and can have multiple entrance rooms connected by its interior. Keep each known complex's architectural identity coherent. The journey ultimately heads toward Hades and Arithus, but do not rush, teleport, complete quests, invent visible exits, or change encounter mechanics. Plan a few plausible developments ahead using existing neighbor names and quest context, leaving branches, surprises, settlements, ruins and environmental challenges imaginative and responsive to player choices. Choose what lies along the road; this is not a fixed sequence of scenes. Hints of Hades can motivate the journey without prematurely revealing the finale. These distinctions supplement the existing system prompt and never replace startup, monster, item, puzzle or quest generation.`;
     await $.assistant`Physical architecture guidance for newly described locations: describe concrete, navigable buildings, not only metaphors. Match the existing room name and biome; never replace an already described room. Use one dominant plan, with a few coherent nested structures: Roman temples, basilicas, forums, amphitheaters, theaters, chariot circuses, bathhouses, granaries/horrea, atrium houses/domus, villas, insula courtyards, aqueduct arcades or monumental arches; or motte-and-bailey, shell-keep, stone-keep or concentric castles. Indoor halls and corridors are normally roofed, with explicitly located open courtyards or ruined sections. Mention an appropriate roof where relevant: barrel/groin/ribbed/fan vault, timber or hammerbeam roof, boarded or gold-coffered ceiling, pendentive or squinch dome. Pillars support grouped buildings, not random farms. A pedimented portico may lead into a rotunda inside a larger complex. These are visual construction cues, not new inventory items, exits, characters or rules. Do not list every style; choose what serves this location's lore and physical use.`;
+    if (!(typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) // holodek-1 only: the compact room work order below carries this instruction
     await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits; skip for auditory. - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
     if (coordKey === startKey) await $.assistant`[START-ROOM] Ruined Temple Entrance at 0,0,0 is an INDOOR temple chamber with a roof, walls and interior floor. Describe the party inside it. Tartarus's dunes and yellow sky are beyond the outdoor exit, not the ground or open sky of this chamber. This fixed physical rule overrides environmental poetry and variability hints. [/START-ROOM]`;
-    roomDescription = await RoomDescription.generate($, { name: roomName, coordinates: coordKey,
-      classification: currentRoomData.classification, room: currentRoomData });
+    // A matching background description is consumed once; mechanics and population still run here.
+    const pregeneratedDescription = AdjacentRooms.take(coordKey, roomName, sharedState.getDungeonRunId?.() || '', currentRoomData);
+    if (pregeneratedDescription) roomDescription = pregeneratedDescription;
+    else roomDescription = await RoomDescription.generate($, { name: roomName, coordinates: coordKey,
+      classification: currentRoomData.classification, room: currentRoomData, worldContext,
+      physicalGuidance: [floorGuidance, villageGuidance, cityGuidance, planarGuidance].filter(Boolean) });
     updatedGameConsole = updatedGameConsole.replace(/Room Description: .*/, `Room Description: ${roomDescription}`);
     roomDescriptionGenerated = true;
 
@@ -6042,13 +6608,19 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       completedQuests: Number(updatedGameConsole.match(/^Quests Achieved:\s*(\d+)/m)?.[1]) || 0 });
     console.info('[EnvironmentIntent]', coordKey, JSON.stringify(frontierIntent));
     let newAdjacentRooms = {};
-    if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length > 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
+    const localNaming = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
+    if (localNaming) {
+      newAdjacentRooms = await require('./holodekRoomWork').adjacentNames($, { database: roomNameDatabasePlain,
+        sourceKey: coordKey, sourceName: roomName, directions: roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction)),
+        intents: frontierIntent.intents, outdoorDirection: !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 ? roomExitsArray[0] : null });
+    } else if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length > 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
       console.log("Generating a room name for the first exit leading to the Wastelands of Tartarus.");
       const guidance = describeEnvironmentIntent(frontierIntent.intents[roomExitsArray[0]]);
       if (guidance) await $.assistant`${guidance}`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
-      await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} leading to the wastelands of Tartarus. This room is an outdoor area away from the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
+      if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]}, an outdoor area of the wastelands outside the temple. Reply with the name only: 1-5 words, no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
+      else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} leading to the wastelands of Tartarus. This room is an outdoor area away from the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
       const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
     } else if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length === 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
@@ -6056,17 +6628,19 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       if (guidance) await $.assistant`${guidance}`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
-      await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
+      if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]}. Reply with the name only: 1-5 words, no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
+      else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
       const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
     }
     for (const exit of roomExitsArray.slice(1)) {
-      if (!existingAdjacentRooms.includes(exit)) {
+      if (!localNaming && !existingAdjacentRooms.includes(exit)) {
         const guidance = describeEnvironmentIntent(frontierIntent.intents[exit]);
         if (guidance) await $.assistant`${guidance}`;
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
-        await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the ${roomName} to the ${exit} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
+        if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the ${roomName} to the ${exit}. Reply with the name only: 1-5 words, no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
+        else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the ${roomName} to the ${exit} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
         const generationResultName = await $.assistant.generation({ maxTokens: 40 });
         newAdjacentRooms[exit] = generationResultName.content.trim();
       }
@@ -6279,7 +6853,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     }
 
     // Final scrub + repair + persist after all mutations
-    propagateComplexIdentity(roomNameDatabasePlain, currentCoordinates);
+    propagateComplexIdentity(roomNameDatabasePlain, currentCoordinates, { readOnly: new Set(construction ? Object.keys(roomNameDatabasePlain).filter(constructionReadOnly) : []) });
     const bossGateReport = ensureBossGate(roomNameDatabasePlain, updatedGameConsole);
     if (bossGateReport.changed) console.info('[BossGate]', JSON.stringify(bossGateReport));
     const outdoorRoute = supplementOutdoorRoutes(roomNameDatabasePlain, currentCoordinates, roomExitsArray, updatedGameConsole,
@@ -6289,6 +6863,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     if (outdoorRoute.report.added) console.info('[OutdoorContinuation]', coordKey, JSON.stringify(outdoorRoute.report));
     scrubMalformedKeysInDb(roomNameDatabasePlain);
     for (const [k, r] of Object.entries(roomNameDatabasePlain)) {
+      if (construction && k !== construction.key) continue;
       if (!r) continue;
       if (classificationIsMissingOrEmpty(r)) {
         const inheritFrom = currentRoomData || startRoom || null;
@@ -6318,7 +6893,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     updatedGameConsole = updatedGameConsole.replace(/Adjacent Rooms: .*/, `Adjacent Rooms: ${adjacentRoomsString}`);
     console.log("Updated Adjacent Rooms:", adjacentRoomsString);
 
-    await CharacterAuthorship.runWithLore($, agent => generateMonstersForRoomUsingGPT(agent, roomName, roomDescription));
+    await CharacterAuthorship.runWithLore($, agent => generateMonstersForRoomUsingGPT(agent, roomName, roomDescription, undefined, construction));
 
     // Boss Room Entry Logic (unchanged console behavior)
     const bossRoomCoordinatesMatch = updatedGameConsole.match(/Boss Room Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
@@ -6398,10 +6973,14 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     const activeTasks = sharedState.getCurrentTasks?.() || [];
     const activeTask = activeTasks[sharedState.getCurrentTaskIndex?.() || 0] || null;
     const recentKinds = Object.values(roomNameDatabasePlain).map(r => r.puzzleMechanism?.kind).filter(Boolean).slice(-3);
-    const definition = await generatePhysicalPuzzleDesign($, {
+    // holodek-1 only: design the puzzle in an isolated $.run (empty conversation) instead of inheriting the room prompt.
+    const definition = await (StoryPrompts.isHolodek1() ? (ctx => $.run(agent => generatePhysicalPuzzleDesign(agent, ctx))) : (ctx => generatePhysicalPuzzleDesign($, ctx)))({
       roomName, description: roomDescription, quest: currentQuest, task: activeTask,
-      seed: `${sharedState.getDungeonRunId()}:${coordKey}:${diversitySeed}`, recentKinds
+      seed: `${sharedState.getDungeonRunId()}:${coordKey}:${diversitySeed}`, recentKinds,
+      geoKey: coordKey, runId: sharedState.getDungeonRunId(),
+      mythCounts: Object.values(roomNameDatabasePlain).flatMap(r => r?.puzzleMechanism?.roomArt || []).flatMap(a => a.figures || []).reduce((m, f) => (m[f.subject] = (m[f.subject] || 0) + 1, m), {})
     });
+    try { (typeof CrossGameMemory !== 'undefined' ? CrossGameMemory : null)?.record(sharedState.getDungeonRunId(), 'murals', (definition?.roomArt || []).map(a => a.title || a.label).filter(Boolean)); CrossGameMemory.persistState(sharedState); } catch {}
     const puzzleText = LivingEnvironments.prose(definition);
     updatedGameConsole=ReadableItems.spawn(definition,currentRoomData,updatedGameConsole);
     puzzleInRoom = puzzleText.description;
@@ -6716,6 +7295,9 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
 // ===== end helpers =====
 
 async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast) {
+  const localQuestWork = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
+  const questLink = (component, parameters, data, instruction) => require('./holodekRoomWork').questReply($, component, parameters,
+    { quest: sharedState.getCurrentQuest(), ...data }, instruction);
   const currentQuest = sharedState.getCurrentQuest();
   if (!currentQuest || /^none$/i.test(String(currentQuest).trim())) return { questJustSeeded: false, questUpdate: '', activeTask: null };
   // ---------- small utils ----------
@@ -7072,7 +7654,8 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
 Quest: ${String(currentQuest).slice(0, 1200)}. Previous completed step: ${String(currentTasks[0]?.desc || '').slice(0, 300)}.
 Choose a meaningful, reachable location from these existing coordinates only: ${JSON.stringify(placements)}.
 Use the existing quest and characters for context. Do not place it inside the boss room, move the boss, create characters, or alter other quest tasks. Return only {"placement":"x,y,z"}.`;
-        const chosen = await $.assistant.generation({ maxTokens: 70, parameters: { placement: String } });
+        const chosen = localQuestWork ? await questLink('boss-key-placement', { placement: { type: String, enum: placements } },
+          { key: gate.keyName, previousStep: currentTasks[0]?.desc }, 'Choose only a meaningful reachable placement from the exact existing coordinate enum. Never relocate the boss or its room.') : await $.assistant.generation({ maxTokens: 70, parameters: { placement: String } });
         const candidate = parseOnlyJson(chosen.content, { placement: currentRoomKey }).placement;
         if (placements.includes(candidate)) selected = candidate;
       }
@@ -7161,7 +7744,8 @@ Use the existing quest and characters for context. Do not place it inside the bo
     }
     // 1) Decide how many elements are REQUIRED TO COMPLETE the step
     await $.user`How many required elements (0–3) are needed to COMPLETE the next quest step? These are world elements the player must use/defeat/deliver to finish the step (not just to begin it). Respond ONLY {"count": N} with N in {0,1,2,3}.`;
-    const reqCountResp = await $.assistant.generation({ maxTokens: 50,
+    const reqCountResp = localQuestWork ? await questLink('quest-required-count', { count: { type: Number, enum: [0, 1, 2, 3] } },
+      { room: roomNameDatabasePlain[currentRoomKey]?.name, existingMonsters: monstersInRoom }, 'Choose only the number (0-3) of ordinary required elements for a mechanically supported next task.') : await $.assistant.generation({ maxTokens: 50,
       parameters: { count: { type: Number, enum: [0, 1, 2, 3] } }
     });
     let countParsed = 0;
@@ -7179,13 +7763,15 @@ Use the existing quest and characters for context. Do not place it inside the bo
     const npcExcludeSet = new Set(partyNpcNames.map(n => n.toLowerCase()));
     for (let i = 0; i < reqCount; i++) {
       await $.user`For required element ${i + 1} of ${reqCount}, provide ONLY {"type":"X"} where X ∈ {"object","key","monster"} (non-boss). NEVER pick party NPCs as monsters: ${partyNpcNames}. If monsters are in the current room (${monstersInRoom}), strongly prefer "monster" to incorporate them.`;
-      const typeRespEl = await $.assistant.generation({ maxTokens: 50,
+      const typeRespEl = localQuestWork ? await questLink('quest-required-kind', { type: { type: String, enum: ['object', 'key', 'monster'] } },
+        { index: i, count: reqCount, existingMonsters: monstersInRoom, excludedPartyNames: partyNpcNames }, 'Choose only this required element kind. Prefer an existing appropriate non-boss inhabitant when present.') : await $.assistant.generation({ maxTokens: 50,
         parameters: { type: { type: String, enum: ["object", "key", "monster"] } }
       });
       const elType = (parseOnlyJson(typeRespEl.content, { type: "object" }).type || "object").toLowerCase();
       const enumList = (preferElsewhere && coordsExceptCurrent.length) ? coordsExceptCurrent : allCoords;
       await $.user`Pick the placement coordinates from this list: ${enumList.join(', ')}. If the element is a monster and there are monsters here, prefer the current room ${currentRoomKey}. Respond ONLY {"placement":"x,y,z"} using one of them.`;
-      const placeRespEl = await $.assistant.generation({ maxTokens: 50,
+      const placeRespEl = localQuestWork ? await questLink('quest-required-placement', { placement: { type: String, enum: enumList } },
+        { elementType: elType, currentRoomKey, alreadyUsed: [...usedPlacements] }, 'Choose only this element placement from the exact coordinate enum. Reuse an existing inhabitant at its saved location.') : await $.assistant.generation({ maxTokens: 50,
         parameters: { placement: { type: String, enum: enumList } }
       });
       let placement = (parseOnlyJson(placeRespEl.content, { placement: currentRoomKey }).placement || currentRoomKey).trim();
@@ -7263,7 +7849,8 @@ Use the existing quest and characters for context. Do not place it inside the bo
         // As a last resort, ask GPT to provide a monster name NOT in the excluded set
         if (!firstName || firstName === "Unknown" || npcExcludeSet.has(firstName.toLowerCase())) {
           await $.user`Provide ONLY {"name":"X"} where X is a unique monster name appropriate for ${(room.name || 'the room')} that is NOT any of: ${partyNpcNames.join(', ') || '(none)'} and not a party member.`;
-          const nresp = await $.assistant.generation({ maxTokens: 40, parameters: { name: String } });
+          const nresp = localQuestWork ? await questLink('quest-resident-name', { name: { type: String, maxLength: 70 } },
+            { room: room.name, excludedPartyNames: partyNpcNames }, 'Name only one ordinary non-divine monster appropriate to the saved room.') : await $.assistant.generation({ maxTokens: 40, parameters: { name: String } });
           firstName = (parseOnlyJson(nresp.content, { name: "shade revenant" }).name || "shade revenant").toString();
         }
         requiredElementsStrings.push(`monster|${firstName}|${placement}`);
@@ -7298,7 +7885,8 @@ NEVER select party NPCs as targets or monsters. Party NPCs: ${getNpcPartyNames(u
 Individual allegiances are authoritative: friendly residents are allies and neutrals have their own work. Do not make killing a friendly or neutral a routine prerequisite; use their dialogue or assistance when fitting. Only hostile inhabitants are normal combat objectives. Existing boss, key and active task bindings are unchanged.
 Pick the best task type from: ${JSON.stringify(taskTypes)}. Delivery is available only when all items have one unambiguous non-hostile recipient.
 Respond ONLY {"type":"X"}.`;
-    const typeResp = await $.assistant.generation({ maxTokens: 50,
+    const typeResp = localQuestWork ? await questLink('quest-task-kind', { type: { type: String, enum: taskTypes } },
+      { elements: actualElements, party: partyNpcNames }, 'Choose only the supported task type from the enum using these ALREADY EXISTING required elements. Delivery requires an unambiguous non-hostile recipient.') : await $.assistant.generation({ maxTokens: 50,
       parameters: { type: { type: String, enum: taskTypes } }
     });
     const pickedTypeRaw = (parseOnlyJson(typeResp.content, { type: "hybrid" }).type || "hybrid").toLowerCase();
@@ -7310,7 +7898,8 @@ Respond ONLY {"type":"X"}.`;
       pickedTypeRaw === 'defeat' ? ['defeat_monster'] : pickedTypeRaw === 'deliver' ? ['deliver_item'] : ['solve_puzzle'];
     await $.user`Pick the primary action the player must perform to COMPLETE the step (beyond prerequisites), given those elements.
 Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} using one of ${JSON.stringify(actionKinds)}. Deliver means actually handing each required item to its recipient.`;
-    const actResp = await $.assistant.generation({ maxTokens: 50,
+    const actResp = localQuestWork ? await questLink('quest-task-action', { actionKind: { type: String, enum: actionKinds } },
+      { type: pickedType, elements: actualElements }, 'Choose only the supported primary completion action. Do not change the accepted task type or placements.') : await $.assistant.generation({ maxTokens: 50,
       parameters: { actionKind: { type: String, enum: actionKinds } }
     });
     let actionKind = (parseOnlyJson(actResp.content, { actionKind: "other" }).actionKind || "other").toString();
@@ -7324,13 +7913,15 @@ Placements are authoritative. If targets occupy different rooms, describe a jour
 Use the full exact item and recipient names. Do not abbreviate an item to "the shroud" or replace a bound room with an invented "northern hall". A delivery means giving each item to its bound recipient, not dropping it or just meeting them.
 Respond ONLY {"desc":"..."}.
 `;
-    const descResp = await $.assistant.generation({ maxTokens: 80, parameters: { desc: String } });
+    const descResp = localQuestWork ? await questLink('quest-task-description', { desc: { type: String, minLength: 1, maxLength: 200 } },
+      { type: pickedType, actionKind, elements: actualElements }, 'Write one complete sentence describing completion. Preserve exact object/recipient names. Distinct placements mean a journey, never all targets at the entrance.') : await $.assistant.generation({ maxTokens: 80, parameters: { desc: String } });
     const desc = (parseOnlyJson(descResp.content, { desc: "Proceed." }).desc || "Proceed.").toString();
     await $.user`Define concise "metrics" to decide COMPLETION of this "${pickedType}" step, based ONLY on game console facts (e.g., items in Inventory, monster HP=0, door opened).
 These elements are REQUIRED TO COMPLETE the step. Party NPCs must NOT be used as monsters or targets.
 Respond ONLY {"metrics":"..."}.
 `;
-    const metricsResp = await $.assistant.generation({ maxTokens: 80, parameters: { metrics: String } });
+    const metricsResp = localQuestWork ? await questLink('quest-task-metrics', { metrics: { type: String, minLength: 1, maxLength: 240 } },
+      { type: pickedType, actionKind, desc, elements: actualElements }, 'Describe only engine-checkable completion metrics, such as actual inventory, target HP or an opened bound door.') : await $.assistant.generation({ maxTokens: 80, parameters: { metrics: String } });
     const metrics = (parseOnlyJson(metricsResp.content, { metrics: "Complete condition met" }).metrics || "Complete condition met").toString();
     const hardRequirements = buildHardRequirements(pickedType, actualElements);
     const actionRequirements = buildActionRequirements(pickedType, actualElements);
@@ -7446,7 +8037,11 @@ Use metrics: ${activeTask.metrics}.
 The engine has already verified completion=${mayComplete}, checks=${JSON.stringify(assessment.checks)}. This is authoritative. Describe only these verified facts; your status suggestion cannot change quest state. Hard requirements alone do not prove an action occurred.
 XP is committed by the existing action adjudication, not this progress evaluator. Do not invent an XP award; leave reward empty.
 Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote":".","narrative":".","reward":"XP gained: X"}.`;
-      const updateResult = await $.assistant.generation({ maxTokens: 200,
+      const updateResult = localQuestWork ? await questLink('quest-task-progress', {
+        updatedStatus: { type: String, enum: ['Pending', 'In Progress', 'Completed'] },
+        progressNote: { type: String, maxLength: 180 }, narrative: { type: String, maxLength: 320 }, reward: { type: String, enum: [''] }
+      }, { userInput, activeTask, completionVerified: mayComplete, checks: assessment.checks },
+      'Narrate only this engine-verified progress. Completed is forbidden unless completionVerified=true. Reward must stay empty; XP is already adjudicated elsewhere.') : await $.assistant.generation({ maxTokens: 200,
         parameters: {
           updatedStatus: { type: String, enum: ["Pending", "In Progress", "Completed"] },
           progressNote: String,
@@ -7542,6 +8137,7 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
 }
 
 async function generateQuest($) {
+    const localQuestWork = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
     // The visited counter can advance while still at the entrance; location is authoritative.
     const questRoomCoordinates = updatedGameConsole.match(/^Coordinates:[ \t]*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/m);
     if (!questRoomCoordinates || questRoomCoordinates.slice(1).every(value => Number(value) === 0)) return;
@@ -7577,7 +8173,8 @@ async function generateQuest($) {
               { consoleText: updatedGameConsole });
             $.model = "gpt-4.1-mini";
             $.temperature = 1.2;
-            $.user`Instructions for the Grave Master:
+            if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) $.user`${StoryPrompts.SHORT_GM}`; // holodek-1 only: compact rules instead of the inline 12.5k-token lore copy
+            else $.user`Instructions for the Grave Master:
             
             Hereafter, 'You' refers to you, who is adminstering this chat, which hereafter you shall refer to as the Grave Master. 'Me' and 'I' refers to the user, the player and me, the person writing this. You must store the following words into memory: Using all of the real-time game information from Current Game Console and the die rolls, write an AI-generated fantasy roleplaying interactive fiction game wherein Assistant is the Grave Master, the user is the player, and let's play in ChatGPT. Make up the story as you go including imagining the names and histories of people, places and things encountered, but you must allow me, the player, to type the commands, allowing for potential failure. Make it strange, unusual and as thought-provoking as possible. The Grave Master must always obey the player's commands and selections without improvisation and must not make any decisions or take any actions on behalf the player, however the Grave Master must describe and control the actions of all NPCs and monsters in the Current Game Console in the assistant prompt. The Grave Master must always do its best and follow the instructions as written herein without improvisation no matter what and is responsible for overseeing the game and describing the game world, but the player is responsible for making all choices and taking all actions within the game, while the Grave Master controls monsters and NPCs. Do not display the game console, but be sure to include the actions being taken by NPCs and monsters in the room. The Grave Master should not discuss rules with the player unless the player asks the rules. The Grave Master's job is the keep the illusion of the role playing game, or RPG, intact, by using this interactive fiction game format to create the story based on my commands. If any later instruction conflicts with this block, the later instruction overrides. In the background, the game uses javascript that constructs and maintains the 1000 navigable rooms with X: Y: Z: coordinates, exits, npcs, monsters and objects that are automatically stored in the system prompt to ensure they are connected starting with the Ruined Temple in Tartarus and leading either outdoors into the wastelands of Tartarus or deeper into the temple, ultimately leading to the 1000th room, the Throne Room in Hades, with north (n), south (s), east (e), west (w), northwest (nw), southwest (sw), northeast (ne), southeast (se), up (u) and down (d) exits for each room. The exits in the room description should be written based on the exits and connected rooms provided in the assistant prompt from the game console. This means that the exits in the room description should match the exits listed in the game console and lead to the connected rooms listed in the game console, and include npcs, monsters and objects. When the user enters a direction, the game's javascript automatically produces the next room's coordinates, exits, npcs, monsters and objects in the system prompt, thereby keeping the map of the 1000 rooms in memory so that the maze is persistent, with every room having at least one visible exit, always remembering your location in the map. Your job is to provide the room's descriptions and game responses, including exits, npcs, monsters and objects and the 21 artifacts (often guarded by monsters) and 15 quests needed to win the game into many of the locations of the 1000 rooms, allocating XP and score for the player along the way and telling the story of the Children of the Grave, utilizing the game's current, updated console below and using unique characters, plots, conflicts and battles to compose the adventure, and utilizing roleplaying game elements, combat and magic systems of your own design in describing the interactive fiction story. Do not change the exits and objects provided in the system prompt. The 15 quests must be of your own design and either advance the central narrative or are side quests, and should include defeating monsters and discovering the 21 artifacts, with the game beginning with the first quest, and each quest leading to the final quest to confront Arithus in Hades after all 21 artifacts have been discovered. Never forget the player's location in the maze by referring to the game's current, updated console, and always plan 10 rooms ahead, including any NPCs, objects, artifacts, quest hooks and game progress, the score, puzzles and encounters so that gameplay is consistent. NPCs in Party: who accompany the player and Monsters in Room: encountered listed in the game console are not the same, they are distinct. The monsters and NPCs encountered by the player could be hostile, friendly or neutral, whether monsters like undead or dragons or others suitable for a fantasy setting, and possibly be potential allies who may seed or assist in quests depending on the player's actions and choices. You, the Grave Master, must control NPCs and monsters and determine their courses of action every turn. The Grave Master should use this as inspiration: 'You have died and find yourself standing in the the first room in the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.'After the start menu is completed and all characters have been chosen and created, you must refer to the current, updated console below for the current room's Room Description:, Exits: NPCs, Monsters and Objects in Room: in writing the room's description to keep 1000 rooms connected. Proceed with the game when I have made my selections from the start menu of either Mortacia, goddess of death, Mortacia is (an 8 1/2 tall human-looking female with long blonde hair, large grey dragon wings that look slightly decayed with many holes and openings and can fly but not too far, and is on a quest to reclaim the Sepulchra to reclaim her throne in Hades, Suzerain, Knight of Atinus, the recurring hero of the Children of the Grave campaign setting who keeps having to save the world, die and go to the afterlife, raise an army of the dead souls to save the underworld plane of Hades from Arithus, and then be reborn again, who has just died and finds himself in the first room of the afterlife, or an adventuring party of seven adventurers named the Children of the Grave who have died and find themselves in the first room of the afterlife and been summoned by Mortacia, but who are unaware of their circumstances at first: 1 PC whom I direct, 5 NPCs you control and also Mortacia, who is also an NPC you control and joins the party, described herein, all the characters described herein have been created and I am in the Ruined Temple in Tartarus described herein and issued the command to proceed. Begin play when any of the following options from the start menu have been selected in the PC: portion of the game console: 1) Play as Mortacia, the goddess of death, the Bonedrake, the White Lady, level 50 assassin/fighter/necromancer/goddess, 750,000 XP, HP = 120 hit points + 1d20 hitpoints. 2) Play as Suzerain, a human male level 25 Knight of Atinus the God of War (Atinus is the god of war, the Wardrake, and has several holy orders of knights who serve him), 250,000 XP, HP = 80 hit points + 1d20 hit points. 3) Create character and play as party of 7 adventurers: 1 PC who I control and 5 NPCs, plus Mortacia, the goddess of death, level 50 assassin/fighter/necromancer/goddess, who is also an NPC and is the most powerful character in the party in the party, then you must wait for the player's command.  Assistant is the Grave Master and the user is the player in the interactive fantasy roleplaying interactive fiction game, called Children of the Grave. The Grave Master administers the game. The user is the player, an intrepid adventurer depending on which character the player selects. The game is played by the user typing commands and receiving responses in the form of text descriptions. The player will type the commands, and the Grave Master issues the responses. The Grave Master is not allowed to play or defeat the game on behalf of the player. The player can move around the game world by typing commands such as 'n' for north, 's' for south, 'e' for east, 'w' for west, 'ne' for northeast, 'se' for southeast, 'nw' for northwest, 'sw' for southwest, 'u' for up and 'd' for down, and can interact with objects in the game by using commands such as 'look', 'take', 'drop', and 'use', and 'i' to check the player's inventory which can include up to 25 items or groups of bundled items like arrows. The player starts out the game with no weapons (they must be acquired). Many of the rooms in the labyrinth will contain objects that the user may put into his inventory, and some of those will be useful in solving puzzles, opening doors or other objects, casting magic spells, performing rituals and so forth, but must never contain a map of the game. But if the player carries more than 25 items, it gets too heavy and he has to drop something. Objects can sometimes get damaged and no longer be useful, and if an object was crucial to solving a puzzle, that could make completing the game impossible. The Grave Master must remember the player's location in the labyrinth, inventory, how many turns have been taken and the objects in every room that is visited them whether the player picks them up or not and any NPCs in every room the player visits every single turn no matter what by referring the game's current, updated console in the assistant prompt. Regardless of the game mode chosen, each room, object, NPC (who may include some of the deities of Danae), puzzle, etc. encountered should endeavor to offer some clues and insight to uncover how Mortacia lost her power to judge the dead, the undead rose thanks to Dantuea, Hades fell to Arithus and how the balance between life and death might be restored by the heroes in the game, developing a rich narrative and story whose details you must create. The player in the chosen game mode assumes the role of a courageous hero who embarks on a perilous journey to fulfill a great destiny and save the realm from impending doom by uncovering why the underworld has fallen. The game's labyrinth starting from the Ruined Temple in Tartarus to the Throne Room in Hades contains 1000 interconnected rooms with n, s, e, w, nw, sw, ne, se, up and/or down exits using X, Y, Z Cartesian coordinates starting with X: 0, Y: 0, Z: 0. To ensure there are 1000 interconnected rooms leading from Tartarus to Hades, the Grave Master must always refer to the game's current, updated game console located in the assistant prompt which contains the current coordinates and room exits in order create a carefully designed labyrinthine structure where each room has unique exits that connect to other rooms in the sequence. This will provide a sense of progression and direction within the game while maintaining the desired number of rooms. Every new room must include the exits and objects displayed in the assistant prompt writing in the room's description. Each new room has a unique name, always use the exits and objects from the assistant prompt in writing the room's description, and describes the environment, objects and NPCs in each room. Every room should have a unique purpose and often contain useful objects and interesting NPCs. You have to remember where I am in the labyrinth and remember all the rooms I've already visited by referring to coordinates and exits in the assistant prompt. Some rooms will contain hints about how to find the end of the labyrinth, or hints on solutions to puzzles along the way, including useful descriptions of features in the room, including objects, the history of the room, including its construction whether natural or artificial, and the processes that were used to create the room, who is depicted in the scenes if there are paintings or frescoes including characters. NPCs should often talk to the player and to other NPCs. Some characters might only fight when they are attacked, while other monsters will be hostile no matter what. The road from Tartarus to Hades should include numerous NPCs, including animals, persons (living or dead), restless souls, monsters including undead and even the deities of Danae. The Grave Master must ensure NPCs are unique individuals with biases/emotions/backstories, creating a varied and dynamic gameplay experience. NPCs can range from friendly, neutral, to hostile, adding depth and unpredictability to the interactions with the player character. NPCs have unique motivations as the afterlife is populated by all of the souls who have ever lived, and who have had eternity to create communities and pursue their own objectives. The end of the labyrinth must be the 1000th room furthest away, the throne room in Hades, with some rooms indoors and others outdoors in the fantastic, otherworldly environment whether it is above ground or below ground, of Tartarus, which eventually, after a series of quests, leads to Hades, where Arithus awaits the player in Mortacia's old throne room and it has gone from being the City of the Dead under Mortacia to the Realm of the Damned under Arithus. Each room has a unique name that corresponds to the room's environment. The game can only be won after all of the dungeon's 15 puzzles have been solved, all of the 21 artifacts (the Sepulchra is the 21st artifact to be discovered) have been discovered and the 1000th room is reached, Arithus is defeated and Hades liberated and the game ends. The game must keep a score out of 1000 possible points. For every puzzle solved, which can include opening specific doors, the player must receive a set amount of points. A player can only get to 1000 by getting to the 1000th room and winning the game, therefore, you must decide how to proportionally divide the points assigned to puzzles and treasures and winning the game across the 1000 rooms. In addition, characters must accumulate XP as you decide for finding treasures and artifacts, solving puzzles and opening secret or locked doors and defeating enemies, as the characters progress through the game up to level 30, except for Mortacia who starts out at level 50. ...  
 
@@ -7646,7 +8243,8 @@ Narrative Guidelines
 Backend Integration: Programmatic vs. Narrative Handling`;
  
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next artifact to be found in the game taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultArtifact = await $.assistant.generation({ maxTokens: 40 });
+            const generationResultArtifact = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-artifact-name',
+              { name: { type: String, minLength: 1, maxLength: 70 } }, { previousQuest: currentQuest }, 'Name ONLY a new ordinary non-divine artifact, 1-5 words, no punctuation or description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
             nextArtifact = GeneratedNames.clean(generationResultArtifact.content);
             const finalDivineStage = Divinity.finalStage(updatedGameConsole);
             if (finalDivineStage) nextArtifact = 'Sepulchra';
@@ -7663,7 +8261,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next powerful boss monster taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultBoss = await $.assistant.generation({ maxTokens: 40 });
+            const generationResultBoss = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-boss-name',
+              { name: { type: String, minLength: 1, maxLength: 70 } }, { artifact: nextArtifact }, 'Name ONLY a new powerful non-divine boss monster, not a member of the reserved pantheon.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
             nextBoss = GeneratedNames.clean(generationResultBoss.content);
             if (finalDivineStage) nextBoss = 'Arithus';
             else if (Pantheon.name(nextBoss)) nextBoss = 'Throneward Sentinel ' + Inhabitants.hash(nextBoss + nextArtifact).toString(36);
@@ -7755,7 +8354,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             if (siteBossRoom) bossRoom = siteBossRoom.name;
             else {
             await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultBossRoom = await $.assistant.generation({ maxTokens: 40 });
+            const generationResultBossRoom = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-boss-location',
+              { name: { type: String, minLength: 1, maxLength: 70 } }, { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, 'Name ONLY the boss location, 1-5 words, not a description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
             bossRoom = generationResultBossRoom.content.trim();
             }
             if (finalDivineStage) bossRoom = 'Throne Room of Hades';
@@ -7770,7 +8370,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
             await $.assistant`Generate a unique description in a single paragraph with no line breaks for the next quest to retrieve ${nextArtifact} by defeating ${nextBoss} at ${bossRoom} taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-            const generationResultQuest = await $.assistant.generation({ maxTokens: 120 });
+            const generationResultQuest = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-premise',
+              { description: { type: String, minLength: 1, maxLength: 600 } }, { artifact: nextArtifact, boss: nextBoss, location: bossRoom, coordinates: bossCoordinates },
+              'Describe ONLY the next quest to retrieve this exact artifact by defeating this bound boss at this location. One complete concise paragraph, no new prerequisites or alternate boss.')).result.description } : await $.assistant.generation({ maxTokens: 120 });
             currentQuest = generationResultQuest.content.trim();
             console.log("Generated currentQuest:", currentQuest);
             // Check if the replacement string exists in the console
@@ -7912,6 +8514,22 @@ function dropMonsterItemsToRoom(targetMonster) {
 }
 
 async function tryReadableItemAction(userInput) {
+    // world1 LIBRARY_BOOKS: accept natural phrasing, then lazily generate the cover or the requested chapter (one call) before the normal read path.
+    if (typeof BookLore !== 'undefined' && typeof require === 'function' && require('./worldFlags').on('LIBRARY_BOOKS')) {
+        userInput = BookLore.normalize(userInput);
+        if (ReadableItems.intent(userInput)) try { console.info('[BookLore]', JSON.stringify(await BookLore.ensure(sharedState, userInput, updatedGameConsole))); }
+        catch (error) { console.warn('[BookLore]', error.message); return {content:'The pages blur; the book could not be read just now. Try again.',updatedGameConsole:sharedState.getUpdatedGameConsole(),combatCharactersString:sharedState.getCombatCharactersString(),roomNameDatabaseString:sharedState.getRoomNameDatabase(),actionOnly:true,readableItem:true}; }
+    }
+    // world1 LIBRARY_BOOKS: "search the catalog [for X]" / "browse the shelves" answers from shelf section labels and cached titles (no model call).
+    if (typeof require === 'function' && require('./worldFlags').on('LIBRARY_BOOKS') && /^\s*(search|consult|check|browse)\s+(the\s+)?(library\s+)?(catalog(ue)?|shelves|stacks)\b/i.test(userInput)) {
+        const L = require('../assets/libraryBooks'), d = sharedState.getRoomDungeon(sharedState.getLastCoords()), db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+        const cached = Object.values(db).flatMap(r => (r.readables || []).filter(x => x.bookLore && x.title).map(x => ({ title: x.title, author: x.author, contents: (x.chapters || []).map(c => c.title) })));
+        const q = userInput.replace(/^\s*(search|consult|check|browse)\s+(the\s+)?(library\s+)?(catalog(ue)?|shelves|stacks)\s*/i, ''), r = L.searchCatalog(d, q, cached);
+        const lines = r.counts.shelves ? [`The catalogue lists ${r.counts.books} volumes on ${r.counts.shelves} shelves${q ? ` (searching "${r.query}")` : ''}.`,
+          ...(r.sections.length ? r.sections.map(s => `Shelf ${s.shelf}: ${s.subject}, ${s.era}${s.scale === 'ruin' ? ' (damaged; few volumes survive)' : ''}.`) : [q ? 'No shelf section matches that subject.' : '']),
+          ...(r.titles.length ? ['Volumes already read here or elsewhere:', ...r.titles.map(t => `- ${t.title}${t.author && !/^(Anonymous|Unknown)$/.test(t.author) ? ' by ' + t.author : ''}`)] : [])] : ['There are no shelves or catalogue here.'];
+        return { content: lines.filter(Boolean).join('\n'), updatedGameConsole: sharedState.getUpdatedGameConsole(), combatCharactersString: sharedState.getCombatCharactersString(), roomNameDatabaseString: sharedState.getRoomNameDatabase(), actionOnly: true, readableItem: true, libraryCatalog: r };
+    }
     if(!ReadableItems.intent(userInput))return null;
     const coords=sharedState.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`;
     if(Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:[ \t]*(.*)$/m)?.[1])!==geoKey)return null;
@@ -8229,6 +8847,18 @@ async function handleCombatRound($, userInput, combatMode) {
     }
 }
 
+// world1 surprise: when an armed ambush exists for this room, hostiles act before the party this round.
+function applyCombatSurprise(initiativeOrder, combatTeams, combatLog) {
+    const c = sharedState.getLastCoords?.();
+    const info = c && (typeof Surprise !== 'undefined' ? Surprise : null)?.consume(`${c.x},${c.y},${c.z}`);
+    if (!info) return false;
+    const hostiles = new Set(combatTeams?.hostiles || []);
+    const ordered = Surprise.order(initiativeOrder, a => hostiles.has(a));
+    initiativeOrder.splice(0, initiativeOrder.length, ...ordered);
+    combatLog.push(`Ambush! The enemy surprised the party (rolled ${info.roll} against ${info.chance}%): the ambushers take the first turn, then normal initiative proceeds.`);
+    actionDice.recordCombat?.({ kind: 'surprise', roll: info.roll, chance: info.chance });
+    return true;
+}
 async function rollCombatInitiative(combatant, pc) {
     if (!Inhabitants.canAct(combatant)) return null;
     return combatTurnFlow ? combatTurnFlow.initiative(combatant, pc) : roll1d20();
@@ -8309,6 +8939,8 @@ async function resolveTurnedCombatant(combatant, combatLog) {
     return true;
 }
 
+// world1 RANGED_COMBAT: optional; absent when this file is evaluated without CommonJS (tests' vm harness).
+function rangedHook() { try { return typeof require === 'function' ? require('./rangedCombat') : null; } catch { return null; } }
 async function rollCombatAttack(combatant, target, pc, combatLog) {
     if (typeof SpellSystem !== 'undefined' && SpellSystem.turned(sharedState, combatant)) return null;
     if (combatSpace && !combatant.tacticalControlled && !combatSpace.canAttack(combatant, target)) {
@@ -8328,12 +8960,18 @@ async function rollCombatAttack(combatant, target, pc, combatLog) {
         combatLog.push(`${combatant.name} cannot find a clear route into attack range of ${target.name}.`);
         return null;
     }
+    // world1 RANGED_COMBAT: ammo/resource, falloff and cover (null when the flag is off or the weapon is melee).
+    try { const back = rangedHook()?.kite({ combatant, target, combatSpace }); if (back) { combatLog.push(`${combatant.name} steps back to keep a firing distance.`); sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(JSON.parse(sharedState.getCombatCharactersString() || '[]')))); } } catch (e) { console.warn('[ranged] kite', e.message); }
+    const ranged = rangedHook()?.preAttack({ combatant, target, combatSpace, sharedState, broadcast: typeof broadcast === 'function' ? broadcast : undefined });
+    if (ranged) { combatLog.push(...ranged.log); if (ranged.abort) return null; }
+    const coverAc = ranged?.acBonus || 0, rangedMod = ranged?.modifier || 0;
     const result = await actionDice.roll({
         actor: combatant.name, player: combatant.name === pc?.name,
-        label: 'Attack', target: target.name, modifier: combatant.attack - (combatSpace?.rangedPenalty?.(combatant) || 0) - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, combatant) : 0), difficulty: target.ac
+        label: 'Attack', target: target.name, modifier: combatant.attack + rangedMod - (combatSpace?.rangedPenalty?.(combatant) || 0) - (typeof SpellSystem !== 'undefined' ? SpellSystem.penalty(sharedState, combatant) : 0), difficulty: target.ac
     });
     if (!result) combatLog.push(`${combatant.name} did not roll in time and holds the attack.`);
     else combatLog.push(`${combatant.name}: d20 ${result.natural} + ${result.modifier} = ${result.total}.`);
+    if (result && coverAc && result.total >= target.ac && result.total < target.ac + coverAc) { combatLog.push(`The shot strikes ${target.name}'s cover.`); actionDice.recordCombat?.({ kind: 'miss', actor: combatant.name, target: target.name }); return { ...result, total: target.ac - 1 }; }
     if (result && result.total < target.ac) actionDice.recordCombat?.({ kind: 'miss', actor: combatant.name, target: target.name });
     return result;
 }
@@ -8549,6 +9187,7 @@ async function resolveCombatRound($, userInput, combatMode) {
     }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
+    applyCombatSurprise(initiativeOrder, combatTeams, combatLog);
     actionDice.recordCombat?.({ kind: 'initiative', order: initiativeOrder.map(a => ({ name: a.name, roll: a.initiative })) });
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
@@ -8821,6 +9460,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
+    applyCombatSurprise(initiativeOrder, combatTeams, combatLog);
     actionDice.recordCombat?.({ kind: 'initiative', order: initiativeOrder.map(a => ({ name: a.name, roll: a.initiative })) });
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
@@ -9104,7 +9744,8 @@ function broadcastCombatHealth() {
   broadcast({ type: 'combat_health', actionId: action.id, revision: action.healthRevision,
     geoKey: action.geoKey, runId: sharedState.getDungeonRunId?.(),
     updatedGameConsole: sharedState.getUpdatedGameConsole(),
-    combatCharactersString: sharedState.getCombatCharactersString(), population: combatPopulation });
+    combatCharactersString: sharedState.getCombatCharactersString(), population: combatPopulation,
+    sceneObjects: sharedState.getRoomDungeonForSimulation?.(sharedState.getLastCoords())?.sceneObjects });
 }
 
 function commitCombatHealth(pc, npcs, monsters) {
@@ -9332,6 +9973,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     }
 
     initiativeOrder.sort((a, b) => b.initiative - a.initiative);
+    applyCombatSurprise(initiativeOrder, combatTeams, combatLog);
     actionDice.recordCombat?.({ kind: 'initiative', order: initiativeOrder.map(a => ({ name: a.name, roll: a.initiative })) });
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
@@ -9909,7 +10551,9 @@ async function generateOutcomes($, userInput, updatedGameConsole, activeTask = n
 Classify the player's action into one of ${ACTION_ENUM.join(", ")}.
 Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
 
-  const intentResp = await $.assistant.generation({ maxTokens: 60,
+  const localActionWork = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
+  const intentResp = localActionWork ? await require('./holodekAdjudication').action($,
+    { userInput, objects: objectsInRoom, puzzle: puzzleInRoom, solution: puzzleSolution, task: activeTask }, ACTION_ENUM) : await $.assistant.generation({ maxTokens: 60,
     parameters: { action: { type: String, enum: ACTION_ENUM } }
   });
 
@@ -9944,7 +10588,10 @@ Respond ONLY {"action":"X"} with X ∈ {"${ACTION_ENUM.join('","')}"}.`;
     - Combat: Low rolls (1-6) miss/take damage (e.g., "Strikes miss, wraith retaliates with chilling claws that sap strength"), mid rolls (7-14) minor hits (e.g., "Grazes the wraith with a faint spark of dark energy"), high rolls (15-20) succeed (e.g., "Channels necromantic power, wounding the wraith deeply").
     Outcomes must prioritize the player’s action, be unique to each character’s role and motivations, and advance the Mortacia plot with lore fragments or dilemmas. If the room is exhausted and the action is Search or PuzzleSolving, generate non-discovery outcomes (e.g., "The shadows yield only echoes of a forsaken past"). For Movement, describe the destination vividly with underworld elements. For PuzzleSolving, if the input matches the puzzle solution, set success to 95+% (rolls 2-20). For Dialogue/ObjectInteraction, favor evocative information/discovery tied to the underworld. NPCs/monsters respond dynamically to the player’s action, reflecting their motivations and the underworld’s atmosphere. Ensure exactly 3-6 outcomes per character, covering 1-20 with no gaps or overlaps. Provide all outcomes in this single response.`;
 
-  const outcomesResponse = await $.assistant.generation({ maxTokens: Math.min(7200, 800 + selectedCharacters.length * 1000) });
+  const outcomesResponse = localActionWork ? await require('./holodekAdjudication').ranges($, {
+    actors: selectedCharacters, action, userInput, consoleText: updatedGameConsole, exhausted: isExhausted,
+    task: activeTask, evidenceIds: recalled?.evidence.map(row => row.id) || []
+  }) : await $.assistant.generation({ maxTokens: Math.min(7200, 800 + selectedCharacters.length * 1000) });
   const decodedMetadata = typeof AdjudicationMetadata !== 'undefined' ? AdjudicationMetadata.extract(outcomesResponse.content) : null;
   let outcomesData = (decodedMetadata?.content ?? outcomesResponse.content ?? "").trim();
   console.log("Raw LLM outcomes response:", outcomesData);
@@ -10123,6 +10770,10 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
 
   // Pull action from initial outcomes
   const action = String(initialOutcomes?.Action || initialOutcomes?.action || 'Unknown');
+  const localEffects = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? require('./holodekAdjudication') : null;
+  const effectLink = (component, parameters, instruction) => localEffects.json($, component, parameters,
+    { userInput, room: localEffects.facts(updatedGameConsole, { solution: true }), task: activeTask,
+      selectedResults: localEffects.selected(initialOutcomes) }, instruction);
 
   // ---------- init accumulators ----------
   let new_objects = [];
@@ -10151,7 +10802,8 @@ async function generateAdditionalOutcomes($, initialOutcomes, updatedGameConsole
 Is the player clearly attempting to complete the active quest step right now?
 Respond ONLY {"questAttempted":"X"} with X ∈ {"true","false"}.`;
 
-  const qaResp = metadataFlags ? { content: JSON.stringify({ questAttempted: initialOutcomes.metadata.some(row => row.questAttempted) }) } : await $.assistant.generation({ maxTokens: 50,
+  const qaResp = metadataFlags ? { content: JSON.stringify({ questAttempted: initialOutcomes.metadata.some(row => row.questAttempted) }) } : localEffects ?
+    await effectLink('quest-attempt', { questAttempted: { type: String, enum: TRUE_FALSE } }, 'Did this actual selected action attempt the active quest step? Return the flag only.') : await $.assistant.generation({ maxTokens: 50,
     parameters: { questAttempted: { type: String, enum: TRUE_FALSE } }
   });
 
@@ -10190,7 +10842,10 @@ Store this information in memory and await the next prompt`;
 Search success is not puzzle completion. For PuzzleSolving, searchSuccessful means the ENTIRE current solution was performed, not merely a clue, plan or intermediate step. Dialogue and observation cannot solve a puzzle unless the action is an actual puzzle-required utterance and classified as PuzzleSolving.
 Respond ONLY a JSON object with these exact keys.`;
 
-  const intentResponse = metadataFlags ? { content: JSON.stringify(metadataFlags) } : await $.assistant.generation({ maxTokens: 120,
+  const intentResponse = metadataFlags ? { content: JSON.stringify(metadataFlags) } : localEffects ?
+    await effectLink('action-effects', Object.fromEntries(['engagedInDialogue', 'justLooking', 'searchAttempted', 'searchSuccessful',
+      'objectDiscovered', 'exitDiscovered', 'puzzleRequiresExit', 'puzzleRequiresObject'].map(key => [key, Boolean])),
+    'Classify ONLY the actually selected outcomes. A hint or intermediate puzzle step is not completion. Discovery flags require an explicit selected discovery, not a proposed alternative.') : await $.assistant.generation({ maxTokens: 120,
     parameters: {
       engagedInDialogue: { type: Boolean },
       justLooking: { type: Boolean },
@@ -10432,7 +11087,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   if (objectToBeDiscovered || exitToBeDiscovered) {
     const xpEligibleCharacters = [...pcs, ...npcs];
     await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, assign XP for discovering new objects or exits in the room. Award up to 500 XP to each character who contributed to the discovery, based on the initial outcomes: ${serializedInitialOutcomes}. Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
-    const xpResponse = await $.assistant.generation({ maxTokens: 60 });
+    const xpResponse = localEffects ? await localEffects.xp($, xpEligibleCharacters, initialOutcomes,
+      'Assign 0-500 integer discovery XP; only contributors receive XP.') : await $.assistant.generation({ maxTokens: 60 });
     try { xp_awarded = JSON.parse((xpResponse.content || "{}").trim()); }
     catch { xp_awarded = {}; }
     console.log("XP awarded for discoveries:", xp_awarded);
@@ -10441,7 +11097,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   // ---------- object generation ----------
   if (objectToBeDiscovered) {
     await $.user`Based on the outcomes of actions, respond with ONLY the JSON object in the format: {"count": N} where N is the number of objects discovered (an integer). No explanations, comments, or text before or after the JSON.`;
-    const objectCountResponse = await $.assistant.generation({ maxTokens: 50 });
+    const objectCountResponse = localEffects ? await effectLink('discovery-count', { count: { type: Number, enum: [0, 1, 2, 3, 4, 5] } },
+      'Choose the number of ordinary portable objects justified by the selected discovery, at most five. Do not duplicate reserved quest items.') : await $.assistant.generation({ maxTokens: 50 });
     const countStr = objectCountResponse.content || String(objectCountResponse.result || "");
     let numberOfObjects = 1;
     {
@@ -10459,7 +11116,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
     numberOfObjects = Math.max(0, Math.min(5, numberOfObjects));
     for (let i = 0; i < numberOfObjects; i++) {
       await $.user`Generate a name for a portable object suitable for a fantasy roleplaying game, as described in the outcomes of actions. Respond with ONLY the JSON object in the format: {"name": "X"} where X is the lowercased object name (single-line text without punctuation, fitting the game's narrative). No explanations, comments, or text before or after the JSON.`;
-      const nameResponse = await $.assistant.generation({ maxTokens: 30 });
+      const nameResponse = localEffects ? await effectLink('discovery-name', { name: { type: String, maxLength: 40 } },
+        'Name only one newly discovered portable object, 1-4 lower-case words, no narration or reserved quest item.') : await $.assistant.generation({ maxTokens: 30 });
       const nameStr = nameResponse.content || String(nameResponse.result || "");
       let objectName = "unknown object";
       {
@@ -10474,7 +11132,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
       await $.user`Determine the type of the artifact named "${objectName}". Respond with ONLY the JSON object in the format: {"type": "X"} where X is one of "weapon", "armor", "shield", or "other". No explanations, comments, or text before or after the JSON.`;
-      const typeResponse = await $.assistant.generation({ maxTokens: 50,
+      const typeResponse = localEffects ? await localEffects.json($, 'discovery-type', { type: { type: String, enum: ['weapon', 'armor', 'shield', 'other'] } },
+        { name: objectName }, 'Classify only this exact portable object.') : await $.assistant.generation({ maxTokens: 50,
         parameters: { type: { type: String, enum: ["weapon","armor","shield","other"] } }
       });
       const typeStr = typeResponse.content || String(typeResponse.result || "");
@@ -10497,7 +11156,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   // ---------- exit generation ----------
   if (exitToBeDiscovered) {
     await $.user`Generate a unique room name for a room connected to "${roomName}", considering the conversation history, current location, coordinates in the game console, previous locations in the maze, and the game's lore. Respond with ONLY {"name":"X"} where X is lowercased, single-line, no punctuation.`;
-    const roomNameResponse = await $.assistant.generation({ maxTokens: 40 });
+    const roomNameResponse = localEffects ? await effectLink('discovery-room-name', { name: { type: String, maxLength: 70 } },
+      'Name only the engine-approved newly discovered connected location, 1-5 words, no description.') : await $.assistant.generation({ maxTokens: 40 });
     const rnStr = roomNameResponse.content || String(roomNameResponse.result || "");
     let newRoomName = "unknown chamber";
     {
@@ -10558,7 +11218,8 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   if (!exhausted || firstPuzzleCompletion) {
     const xpEligibleCharacters = firstPuzzleCompletion ? contributors : [...pcs, ...npcs];
     await $.user`For the following characters: ${xpEligibleCharacters.join(", ")}, decide which characters deserve XP based on their actions in the initial outcomes, excluding discovery-based XP already awarded, and assign up to 500 XP to each deserving character for non-discovery actions. ${firstPuzzleCompletion ? 'This is a verified FIRST puzzle completion: award positive puzzle-solving XP to these living contributors even though the room is now exhausted.' : ''} Respond with a JSON object mapping character names to their XP but do not include the word json, just the object, to avoid syntax errors.`;
-    const xpResponse = await $.assistant.generation({ maxTokens: Math.min(500, 60 + xpEligibleCharacters.length * 24) });
+    const xpResponse = localEffects ? await localEffects.xp($, xpEligibleCharacters, initialOutcomes,
+      'Assign 0-500 integer non-discovery XP, excluding discovery XP already awarded. ' + (firstPuzzleCompletion ? 'The engine verified a FIRST full puzzle completion; award positive XP to these living contributors.' : '')) : await $.assistant.generation({ maxTokens: Math.min(500, 60 + xpEligibleCharacters.length * 24) });
     let additionalXp = {};
     try { additionalXp = JSON.parse((xpResponse.content || "{}").trim()); } catch {}
     if (firstPuzzleCompletion) {
@@ -10611,7 +11272,12 @@ async function shouldRunAdjudication($, userInput, updatedGameConsole) {
   }
 
   // Clear definitions + lots of labeled examples so GPT can generalize without regex.
-  await $.user`
+  if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.user`Classify the player's latest input. Return ONLY JSON: {"engagedInDialogue":bool,"justLooking":bool,"commandToNPCs":bool,"physicalAction":bool,"puzzleAction":bool,"deterministicCommand":bool}
+engagedInDialogue: talking or asking, not attempting a puzzle step. justLooking: observing, reading or inspecting without doing. commandToNPCs: ordering NPCs or the party to act. physicalAction: a concrete action that may need a roll (search, force, climb, break, sneak, pick a lock). puzzleAction: a step toward solving a mechanism or riddle (a required pass-phrase counts here, not as dialogue). deterministicCommand: plain movement, known-key door, take/drop/equip, UI choices.
+Player input: "${userInput}"
+Game console excerpt:
+${consoleExcerpt}`; // holodek-1 only
+  else await $.user`
 You are a game arbiter. Classify the player's latest input by setting booleans.
 Return ONLY JSON with the keys specified below—no prose.
 
@@ -10676,7 +11342,8 @@ Return ONLY JSON with keys:
 {"engagedInDialogue":bool,"justLooking":bool,"commandToNPCs":bool,"physicalAction":bool,"puzzleAction":bool,"deterministicCommand":bool}
 `;
 
-  const intentResponse = await $.assistant.generation({ maxTokens: 120, 
+  const intentResponse = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ?
+    await require('./holodekAdjudication').gate($, userInput, updatedGameConsole) : await $.assistant.generation({ maxTokens: 120,
     parameters: {
       engagedInDialogue:   { type: Boolean },
       justLooking:         { type: Boolean },
@@ -11469,6 +12136,66 @@ async function logThreadMessages() {
     }
 }
 
+  if (options.prepareRoom) {
+    if (require('node:worker_threads').isMainThread) throw Error('Background construction requires an isolated worker.');
+    const job = options.prepareRoom, Build = require('./roomBuildState');
+    const buildStage = job.stage || 'all';
+    if (!['all', 'population', 'geometry', 'music', 'art'].includes(buildStage)) throw Error('Unknown room build stage.');
+    const database = JSON.parse(roomNameDatabaseString || '{}'), target = database[job.key];
+    const buildBase = job.baseRooms || JSON.parse(JSON.stringify(database));
+    if (!target || target.name !== job.name || sharedState.getDungeonRunId() !== job.runId) throw Error('Stale room work order.');
+    require('./roomBuildTopology').prepare(database, job.key, { seed: job.runId,
+      protectedKeys: new Set((job.assignment?.assignments || []).filter(other => other.owner !== job.id).map(other => other.destination)) });
+    sharedState.setRoomNameDatabase(JSON.stringify(database)); roomNameDatabaseString = sharedState.getRoomNameDatabase();
+    updatedGameConsole = Build.projectConsole(updatedGameConsole, target, job.key, database,
+      { pending: target.populationComplete !== true });
+    sharedState.setUpdatedGameConsole(updatedGameConsole);
+    const runtime = GraveMasterProtocol.runtimeFor(sharedState);
+    const checkpoint = stage => {
+      const candidate = sharedState.getRoomDungeonForSimulation(job.coords);
+      let music = sharedState.getRoomMusic(job.coords);
+      if (music && (stage === 'music' || stage === 'complete')) {
+        const archive = require('./sidArchive').record(music, { roomKey: job.key, runId: job.runId });
+        music = { ...music, archive: { id: archive.id } };
+      }
+      const result = { runId: job.runId, key: job.key, stage,
+        rooms: JSON.parse(sharedState.getRoomNameDatabase() || '{}'),
+        dungeon: candidate?.layout && candidate?.cells ? candidate : null, music };
+      const scoped = Build.scopeArtifact(job, result, buildBase);
+      options.onBuildCheckpoint?.(scoped); return scoped;
+    };
+    return runtime.run(runtime.retort(async $ => {
+      StoryPrompts.appendOriginal($);
+      await $.user`Background construction work order for ${job.name} at ${job.key}. Author this registered room only, using the supplied adventure, regional and quest context. The PC game server alone owns live state, assignments and commits. Other assigned destinations and visited rooms are read-only context; shared topology is a proposal for the PC. Other assignments: ${(job.assignment?.assignments || []).filter(other => other.owner !== job.id && !['complete', 'failed', 'discarded', 'cancelled'].includes(other.phase)).map(other => other.destination).join(', ') || 'none'}. Do not simulate a player turn, advance a quest or make a character act.\n${updatedGameConsole}`;
+      if (buildStage === 'all' || buildStage === 'population') await $.run(agent => generateMissingRoomDetails(agent, null, job));
+      const populated = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+      populated[job.key].description = updatedGameConsole.match(/^Room Description:[ \t]*(.*)$/m)?.[1] || '';
+      populated[job.key].puzzleDescription = updatedGameConsole.match(/^Puzzle in Room:[ \t]*(.*)$/m)?.[1] || 'None';
+      populated[job.key].puzzleSolution = updatedGameConsole.match(/^Puzzle Solution:[ \t]*(.*)$/m)?.[1] || 'None';
+      sharedState.setRoomNameDatabase(JSON.stringify(populated)); roomNameDatabaseString = sharedState.getRoomNameDatabase();
+      if (buildStage === 'population') return checkpoint('population');
+      if (buildStage === 'all') checkpoint('population');
+      const description = Build.description(populated[job.key]);
+      if (buildStage === 'all' || buildStage === 'geometry') {
+      await buildGeneratedRoom($, description, updatedGameConsole.match(/^Puzzle in Room:[ \t]*(.*)$/m)?.[1] || 'None', false, {});
+      const dungeon = sharedState.getRoomDungeonForSimulation(job.coords);
+      const population = populationService.prepare(updatedGameConsole, dungeon);
+      const built = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+      built[job.key].inhabitants = population; sharedState.setRoomNameDatabase(JSON.stringify(built));
+      checkpoint('geometry');
+      if (buildStage === 'geometry') return;
+      }
+      if (buildStage === 'all' || buildStage === 'music') {
+      await $.run(agent => getOrGenerateRoomMusic(agent, job.coords, description, []));
+      checkpoint('music');
+      if (buildStage === 'music') return;
+      }
+      await require('./roomIllustration').createService(sharedState).ensure(job.key, job.runId);
+      if (buildStage === 'art') return checkpoint('art');
+      return checkpoint('complete');
+    }));
+  }
+
     if (options.realtimeEncounter) {
       const result = await handleCombatRound({}, '__ENCOUNTER_DEFENCE__', combatMode);
       updatedGameConsole = sharedState.getUpdatedGameConsole();
@@ -11498,7 +12225,8 @@ async function logThreadMessages() {
               await $.assistant`The player has selected and confirmed their starting character: ${JSON.stringify(slimForLLM)}. Begin the game in the Ruined Temple Entrance with this exact character. Do not re-offer the start menu.`;
             }
 
-            $.user`Instructions for the Grave Master:
+            if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) $.user`${StoryPrompts.SHORT_GM}${StoryPrompts.settingOnce($)}`; // holodek-1 only: compact rules instead of the inline 12.5k-token lore copy
+            else $.user`Instructions for the Grave Master:
             
             Hereafter, 'You' refers to you, who is adminstering this chat, which hereafter you shall refer to as the Grave Master. 'Me' and 'I' refers to the user, the player and me, the person writing this. You must store the following words into memory: Using all of the real-time game information from Current Game Console and the die rolls, write an AI-generated fantasy roleplaying interactive fiction game wherein Assistant is the Grave Master, the user is the player, and let's play in ChatGPT. Make up the story as you go including imagining the names and histories of people, places and things encountered, but you must allow me, the player, to type the commands, allowing for potential failure. Make it strange, unusual and as thought-provoking as possible. The Grave Master must always obey the player's commands and selections without improvisation and must not make any decisions or take any actions on behalf the player, however the Grave Master must describe and control the actions of all NPCs and monsters in the Current Game Console in the assistant prompt. The Grave Master must always do its best and follow the instructions as written herein without improvisation no matter what and is responsible for overseeing the game and describing the game world, but the player is responsible for making all choices and taking all actions within the game, while the Grave Master controls monsters and NPCs. Do not display the game console, but be sure to include the actions being taken by NPCs and monsters in the room. The Grave Master should not discuss rules with the player unless the player asks the rules. The Grave Master's job is the keep the illusion of the role playing game, or RPG, intact, by using this interactive fiction game format to create the story based on my commands. If any later instruction conflicts with this block, the later instruction overrides. In the background, the game uses javascript that constructs and maintains the 1000 navigable rooms with X: Y: Z: coordinates, exits, npcs, monsters and objects that are automatically stored in the system prompt to ensure they are connected starting with the Ruined Temple in Tartarus and leading either outdoors into the wastelands of Tartarus or deeper into the temple, ultimately leading to the 1000th room, the Throne Room in Hades, with north (n), south (s), east (e), west (w), northwest (nw), southwest (sw), northeast (ne), southeast (se), up (u) and down (d) exits for each room. The exits in the room description should be written based on the exits and connected rooms provided in the assistant prompt from the game console. This means that the exits in the room description should match the exits listed in the game console and lead to the connected rooms listed in the game console, and include npcs, monsters and objects. When the user enters a direction, the game's javascript automatically produces the next room's coordinates, exits, npcs, monsters and objects in the system prompt, thereby keeping the map of the 1000 rooms in memory so that the maze is persistent, with every room having at least one visible exit, always remembering your location in the map. Your job is to provide the room's descriptions and game responses, including exits, npcs, monsters and objects and the 21 artifacts (often guarded by monsters) and 15 quests needed to win the game into many of the locations of the 1000 rooms, allocating XP and score for the player along the way and telling the story of the Children of the Grave, utilizing the game's current, updated console below and using unique characters, plots, conflicts and battles to compose the adventure, and utilizing roleplaying game elements, combat and magic systems of your own design in describing the interactive fiction story. Do not change the exits and objects provided in the system prompt. The 15 quests must be of your own design and either advance the central narrative or are side quests, and should include defeating monsters and discovering the 21 artifacts, with the game beginning with the first quest, and each quest leading to the final quest to confront Arithus in Hades after all 21 artifacts have been discovered. Never forget the player's location in the maze by referring to the game's current, updated console, and always plan 10 rooms ahead, including any NPCs, objects, artifacts, quest hooks and game progress, the score, puzzles and encounters so that gameplay is consistent. NPCs in Party: who accompany the player and Monsters in Room: encountered listed in the game console are not the same, they are distinct. The monsters and NPCs encountered by the player could be hostile, friendly or neutral, whether monsters like undead or dragons or others suitable for a fantasy setting, and possibly be potential allies who may seed or assist in quests depending on the player's actions and choices. You, the Grave Master, must control NPCs and monsters and determine their courses of action every turn. The Grave Master should use this as inspiration: 'You have died and find yourself standing in the the first room in the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.'After the start menu is completed and all characters have been chosen and created, you must refer to the current, updated console below for the current room's Room Description:, Exits: NPCs, Monsters and Objects in Room: in writing the room's description to keep 1000 rooms connected. Proceed with the game when I have made my selections from the start menu of either Mortacia, goddess of death, Mortacia is (an 8 1/2 tall human-looking female with long blonde hair, large grey dragon wings that look slightly decayed with many holes and openings and can fly but not too far, and is on a quest to reclaim the Sepulchra to reclaim her throne in Hades, Suzerain, Knight of Atinus, the recurring hero of the Children of the Grave campaign setting who keeps having to save the world, die and go to the afterlife, raise an army of the dead souls to save the underworld plane of Hades from Arithus, and then be reborn again, who has just died and finds himself in the first room of the afterlife, or an adventuring party of seven adventurers named the Children of the Grave who have died and find themselves in the first room of the afterlife and been summoned by Mortacia, but who are unaware of their circumstances at first: 1 PC whom I direct, 5 NPCs you control and also Mortacia, who is also an NPC you control and joins the party, described herein, all the characters described herein have been created and I am in the Ruined Temple in Tartarus described herein and issued the command to proceed. Begin play when any of the following options from the start menu have been selected in the PC: portion of the game console: 1) Play as Mortacia, the goddess of death, the Bonedrake, the White Lady, level 50 assassin/fighter/necromancer/goddess, 750,000 XP, HP = 120 hit points + 1d20 hitpoints. 2) Play as Suzerain, a human male level 25 Knight of Atinus the God of War (Atinus is the god of war, the Wardrake, and has several holy orders of knights who serve him), 250,000 XP, HP = 80 hit points + 1d20 hit points. 3) Create character and play as party of 7 adventurers: 1 PC who I control and 5 NPCs, plus Mortacia, the goddess of death, level 50 assassin/fighter/necromancer/goddess, who is also an NPC and is the most powerful character in the party in the party, then you must wait for the player's command.  Assistant is the Grave Master and the user is the player in the interactive fantasy roleplaying interactive fiction game, called Children of the Grave. The Grave Master administers the game. The user is the player, an intrepid adventurer depending on which character the player selects. The game is played by the user typing commands and receiving responses in the form of text descriptions. The player will type the commands, and the Grave Master issues the responses. The Grave Master is not allowed to play or defeat the game on behalf of the player. The player can move around the game world by typing commands such as 'n' for north, 's' for south, 'e' for east, 'w' for west, 'ne' for northeast, 'se' for southeast, 'nw' for northwest, 'sw' for southwest, 'u' for up and 'd' for down, and can interact with objects in the game by using commands such as 'look', 'take', 'drop', and 'use', and 'i' to check the player's inventory which can include up to 25 items or groups of bundled items like arrows. The player starts out the game with no weapons (they must be acquired). Many of the rooms in the labyrinth will contain objects that the user may put into his inventory, and some of those will be useful in solving puzzles, opening doors or other objects, casting magic spells, performing rituals and so forth, but must never contain a map of the game. But if the player carries more than 25 items, it gets too heavy and he has to drop something. Objects can sometimes get damaged and no longer be useful, and if an object was crucial to solving a puzzle, that could make completing the game impossible. The Grave Master must remember the player's location in the labyrinth, inventory, how many turns have been taken and the objects in every room that is visited them whether the player picks them up or not and any NPCs in every room the player visits every single turn no matter what by referring the game's current, updated console in the assistant prompt. Regardless of the game mode chosen, each room, object, NPC (who may include some of the deities of Danae), puzzle, etc. encountered should endeavor to offer some clues and insight to uncover how Mortacia lost her power to judge the dead, the undead rose thanks to Dantuea, Hades fell to Arithus and how the balance between life and death might be restored by the heroes in the game, developing a rich narrative and story whose details you must create. The player in the chosen game mode assumes the role of a courageous hero who embarks on a perilous journey to fulfill a great destiny and save the realm from impending doom by uncovering why the underworld has fallen. The game's labyrinth starting from the Ruined Temple in Tartarus to the Throne Room in Hades contains 1000 interconnected rooms with n, s, e, w, nw, sw, ne, se, up and/or down exits using X, Y, Z Cartesian coordinates starting with X: 0, Y: 0, Z: 0. To ensure there are 1000 interconnected rooms leading from Tartarus to Hades, the Grave Master must always refer to the game's current, updated game console located in the assistant prompt which contains the current coordinates and room exits in order create a carefully designed labyrinthine structure where each room has unique exits that connect to other rooms in the sequence. This will provide a sense of progression and direction within the game while maintaining the desired number of rooms. Every new room must include the exits and objects displayed in the assistant prompt writing in the room's description. Each new room has a unique name, always use the exits and objects from the assistant prompt in writing the room's description, and describes the environment, objects and NPCs in each room. Every room should have a unique purpose and often contain useful objects and interesting NPCs. You have to remember where I am in the labyrinth and remember all the rooms I've already visited by referring to coordinates and exits in the assistant prompt. Some rooms will contain hints about how to find the end of the labyrinth, or hints on solutions to puzzles along the way, including useful descriptions of features in the room, including objects, the history of the room, including its construction whether natural or artificial, and the processes that were used to create the room, who is depicted in the scenes if there are paintings or frescoes including characters. NPCs should often talk to the player and to other NPCs. Some characters might only fight when they are attacked, while other monsters will be hostile no matter what. The road from Tartarus to Hades should include numerous NPCs, including animals, persons (living or dead), restless souls, monsters including undead and even the deities of Danae. The Grave Master must ensure NPCs are unique individuals with biases/emotions/backstories, creating a varied and dynamic gameplay experience. NPCs can range from friendly, neutral, to hostile, adding depth and unpredictability to the interactions with the player character. NPCs have unique motivations as the afterlife is populated by all of the souls who have ever lived, and who have had eternity to create communities and pursue their own objectives. The end of the labyrinth must be the 1000th room furthest away, the throne room in Hades, with some rooms indoors and others outdoors in the fantastic, otherworldly environment whether it is above ground or below ground, of Tartarus, which eventually, after a series of quests, leads to Hades, where Arithus awaits the player in Mortacia's old throne room and it has gone from being the City of the Dead under Mortacia to the Realm of the Damned under Arithus. Each room has a unique name that corresponds to the room's environment. The game can only be won after all of the dungeon's 15 puzzles have been solved, all of the 21 artifacts (the Sepulchra is the 21st artifact to be discovered) have been discovered and the 1000th room is reached, Arithus is defeated and Hades liberated and the game ends. The game must keep a score out of 1000 possible points. For every puzzle solved, which can include opening specific doors, the player must receive a set amount of points. A player can only get to 1000 by getting to the 1000th room and winning the game, therefore, you must decide how to proportionally divide the points assigned to puzzles and treasures and winning the game across the 1000 rooms. In addition, characters must accumulate XP as you decide for finding treasures and artifacts, solving puzzles and opening secret or locked doors and defeating enemies, as the characters progress through the game up to level 30, except for Mortacia who starts out at level 50. ...  
 
@@ -11574,10 +12302,23 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       await CampaignSetting.prepareAtlas($, sharedState);
       roomNameDatabaseString = sharedState.getRoomNameDatabase();
     }
+    const preparedKey = Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:\s*(.*)$/m)?.[1]);
+    if (preparedKey) {
+      await require('./roomBuildQueue').service(sharedState).join(preparedKey);
+      roomNameDatabaseString = sharedState.getRoomNameDatabase();
+      const preparedDb = JSON.parse(roomNameDatabaseString || '{}'), prepared = preparedDb[preparedKey];
+      if (prepared?.preparedBuild?.runId === sharedState.getDungeonRunId()) {
+        updatedGameConsole = require('./roomBuildState').projectConsole(updatedGameConsole, prepared, preparedKey, preparedDb);
+        sharedState.setUpdatedGameConsole(updatedGameConsole);
+        console.info('[AdjacentRoomBuild]', JSON.stringify({ phase: 'used', key: preparedKey, ready: prepared.preparedBuild.ready, stage: prepared.preparedBuild.stage }));
+      }
+    }
     let roomDescriptionGenerated =  await $.run($ => generateMissingRoomDetails($));
+    require('./websiteRoomPipeline')?.begin?.(sharedState, updatedGameConsole);
     const entryRoomKey = Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:\s*(.*)$/m)?.[1]);
     const entryPrevious = sharedState.getLastCoords();
     const enteringRoom = roomDescriptionGenerated || entryRoomKey !== `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`;
+    // Background neighbors are queued only after the browser acknowledges a displayed room.
 
     
     const roomDescMatch = updatedGameConsole.match(/Room Description: ([^\n]+)/);
@@ -11689,12 +12430,12 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     // --- Enforce global rule: 0,0,0 is ALWAYS indoors ---
     const startKey = "0,0,0";
     let startRoom = roomNameDatabasePlain[startKey];
-    if (startRoom && typeof startRoom === "object") {
+    if (startRoom && typeof startRoom === "object" && !(typeof WorldSetting !== 'undefined' && WorldSetting.current())) {
       startRoom.indoor = true;
       startRoom.classification = { ...startRoom.classification, indoor: true, biome: 'temple' };
       startRoom.isIndoor = true;
       startRoom.isOutdoor = false;
-    } else {
+    } else if (!startRoom) {
       // If somehow missing, create the start room with indoor=true
       startRoom = {
         name: "Ruined Temple Entrance",
@@ -11715,8 +12456,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       roomNameDatabasePlain[startKey] = startRoom;
     }
     
-    // --- Enforce rule: the FIRST exit from 0,0,0 is ALWAYS outdoors ---
-    if (startRoom && startRoom.exits && typeof startRoom.exits === "object") {
+    if (typeof WorldSetting !== 'undefined' && WorldSetting.current()) WorldSetting.applyStartRoom(startRoom);
+    // CotG alone requires its first exit to lead outdoors.
+    if (startRoom && !(typeof WorldSetting !== 'undefined' && WorldSetting.current()) && startRoom.exits && typeof startRoom.exits === "object") {
       const exitDirs = Object.keys(startRoom.exits);
       if (exitDirs.length > 0) {
         const firstDir = exitDirs[0];
@@ -11945,6 +12687,8 @@ let charactersAttack = '';
 if (userInput.toLowerCase().includes("attack") && (monstersInRoom && monstersInRoom.toLowerCase() !== 'none' || CombatProvocation.companionTarget(updatedGameConsole, userInput))) {
     const combatResult = await handleCombatRound($, userInput, combatMode);
     combatLog = combatResult.combatLog || ''; // Extract the combat log from the result
+    try { const RC = rangedHook(); RC?.endRound(sharedState);
+      if (/monsters? (have been |are )?defeated|combat (is )?over|victory/i.test(combatLog)) { const rec = RC.endCombat(sharedState); if (rec.length) combatLog += '\n' + rec.map(r => `Recovered ${r.recovered} ${r.ammo} for the ${r.weapon}.`).join('\n'); } } catch (e) { console.warn('[ranged] after-round', e.message); }
     console.log("combatLog (programmatic only): ", combatLog);
 
     // Always conclude with just the programmatic combat log (including any "all monsters defeated").
@@ -12100,6 +12844,7 @@ const monstersState2 = monstersStateMatch2 ? monstersStateMatch2[1].trim() : '';
   
 StoryPrompts.appendStory($, { roomName, activeTask, questUpdate, currentSituation, questJustSeeded,
   updatedGameConsole, sharedState, parseNpcPartyNamesFromConsole });
+if (StoryPrompts.isHolodek1()) await StoryPrompts.injectRecall($, { userInput, consoleText: updatedGameConsole, task: activeTask });
 console.log('Starting final Retort-JS execution...');
 // Provide character positions context (from live client world state) so periodic simulation
 // turns (via chatbotprocessinput every 45s) let the main narrative follow exact room positions
@@ -12172,423 +12917,7 @@ let returnObj = { content: '', updatedGameConsole, musicArrangement };
 
 // === LLM-GENERATED 3D DUNGEON + C64 SPRITES (THE SOUL OF TARTARUS) ===
 
-// Parse coordinates
-let currentX = 0, currentY = 0, currentZ = 0;
-const coordMatch = updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
-if (coordMatch) {
-  currentX = parseInt(coordMatch[1]);
-  currentY = parseInt(coordMatch[2]);
-  currentZ = parseInt(coordMatch[3]);
-}
-
-const geoCoords = { x: currentX, y: currentY, z: currentZ };
-const geoKey = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
-
-// Parse turn count (authoritative for first-room boot)
-const turnsMatch = updatedGameConsole.match(/Turns:\s*(\d+)/);
-const turns = turnsMatch ? parseInt(turnsMatch[1], 10) : null;
-
-// Detect first turn explicitly
-const isFirstTurn = turns === 0;
-
-// Fall back to lastCoords comparison for normal movement
-const lastCoords = sharedState.getLastCoords();
-const lastGeoKey =
-  lastCoords &&
-  typeof lastCoords.x === "number" &&
-  typeof lastCoords.y === "number" &&
-  typeof lastCoords.z === "number"
-    ? `${lastCoords.x},${lastCoords.y},${lastCoords.z}`
-    : null;
-
-// Final room-entry decision
-// lastCoords is already updated earlier this turn (music + coords bookkeeping), so a plain
-// coordinate comparison misses real moves. Also treat "no dungeon built for this room yet" as new.
-let hasRoomDungeon = false;
-let cachedRoomDungeon = null;
-let staleRoomDungeon = false;
-try {
-  cachedRoomDungeon = sharedState.getRoomDungeon && sharedState.getRoomDungeon(geoCoords);
-  const input = sceneInputFromConsole(updatedGameConsole, { coords: geoCoords });
-  const source = cachedRoomDungeon?.sceneSpec?.source;
-  const normalize = text => String(text || '').trim().replace(/\s+/g, ' ');
-  staleRoomDungeon = !!cachedRoomDungeon && (!source || normalize(source.roomName) !== normalize(input.roomName) ||
-    normalize(source.description) !== normalize(input.description));
-  if (geoKey === '0,0,0' && cachedRoomDungeon &&
-      (cachedRoomDungeon.classification?.indoor === false || cachedRoomDungeon.sceneSpec?.indoor === false)) staleRoomDungeon = true;
-  hasRoomDungeon = !!cachedRoomDungeon?.layout && !!cachedRoomDungeon?.cells && !staleRoomDungeon;
-} catch (error) { console.warn('[DungeonEntry] Cached room validation failed:', error.message); }
-const isNewGeoRoom =
-  isFirstTurn ||
-  !lastGeoKey ||
-  geoKey !== lastGeoKey ||
-  !hasRoomDungeon;
-
-console.info('[DungeonEntry]', JSON.stringify({ geoKey, lastGeoKey, isFirstTurn,
-  hasRoomDungeon, staleRoomDungeon, isAutoSimAdvance, build: !!(isNewGeoRoom && roomDescription && !isAutoSimAdvance),
-  reason: isAutoSimAdvance ? 'automatic-turn' : staleRoomDungeon ? 'description-changed' : !hasRoomDungeon ? 'missing-dungeon' : isNewGeoRoom ? 'room-entry' : 'cached-room' }));
-
-if (isNewGeoRoom && roomDescription && !isAutoSimAdvance) {
-  console.log('TARTARUS AWAKENS — VISUAL STYLE / SPRITE-BASED DUNGEON FOR', geoKey);
-  const { generateSpriteFromStyle } = require('../assets/renderSprite_poke.js');
-  // 🧭 STEP 0 — classify biome & size
-  
-  const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
-  let forcedIndoor = geoKeyString === '0,0,0' ? true : null;
-  try {
-    const db = JSON.parse(roomNameDatabaseString || "{}");
-    const entry = db[geoKeyString];
-    if (forcedIndoor === null && entry && typeof entry.indoor === 'boolean') {
-      forcedIndoor = entry.indoor;
-    }
-  } catch (e) {
-    console.error('Failed to read indoor flag from roomNameDatabase:', e);
-  }
-  
-let classification = await classifyDungeon(roomDescription);
-console.log('Dungeon classification (raw):', classification);
-
-// Override indoor/outdoor with our authoritative flag
-if (forcedIndoor !== null) {
-  classification = classification || {};
-  classification.indoor = forcedIndoor;
-  console.log('Dungeon classification (after indoor override):', classification.indoor);
-}
-
-// === INSERT: NEW PERSISTENCE LOGIC (REPLACE the line below if it exists, or add after the override) ===
-// (If you have an existing `classification = ...` line here, replace it with the full block below)
-try {
-  // Safeguard: Use cached if complete, else re-classify
-  let db = JSON.parse(roomNameDatabaseString || "{}");
-  const geoKeyString = `${geoCoords.x},${geoCoords.y},${geoCoords.z}`;
-  let cachedClassification = db[geoKeyString]?.classification;
-  if (!cachedClassification || cachedClassification.indoor === null || cachedClassification.biome === null) {
-    // Re-classify only if incomplete
-    classification = await classifyDungeon(roomDescription);
-    console.log('Re-classified incomplete room:', geoKeyString);
-  } else {
-    classification = cachedClassification;
-    console.log('Using cached classification for re-visited room:', geoKeyString);
-  }
-
-  // Override with authoritative flag (if available)
-  if (forcedIndoor !== null) {
-    classification = classification || {};
-    classification.indoor = forcedIndoor;
-    console.log('Classification after indoor override:', classification.indoor);
-  }
-
-  // Persist: Merge into DB entry (preserve exits/objects/etc.)
-  if (geoKeyString === '0,0,0') classification.biome = 'temple';
-  db[geoKeyString] = db[geoKeyString] || {};
-  db[geoKeyString].classification = {
-    ... (db[geoKeyString].classification || {}),  // Preserve any non-null existing details
-    ... classification  // Override with fresh/cached computation
-  };
-  db[geoKeyString].indoor = classification.indoor;  // Sync top-level flag
-
-  // Save updated DB
-  roomNameDatabaseString = JSON.stringify(db, null, 2);  // Update local string (pretty-print for logs)
-  if (sharedState.setRoomNameDatabase) {
-    sharedState.setRoomNameDatabase(roomNameDatabaseString);
-  }
-  console.log('Persisted classification for', geoKeyString, ':', JSON.stringify(db[geoKeyString].classification, null, 2));
-} catch (persistErr) {
-  console.error('Failed to persist classification for', geoKeyString, ':', persistErr);
-  // Fallback: Use local classification for this turn's rendering
-}
-
-// === AFTER (existing code continues) ===
-  // Room text is the source of truth: parse name/description/exits/objects into a scene spec
-  // that overrides the classifier wherever the text is explicit.
-  const sceneSpec = buildSceneSpec(sceneInputFromConsole(updatedGameConsole, {
-    coords: geoCoords,
-    indoorHint: forcedIndoor !== null ? forcedIndoor : undefined
-  }));
-  if (geoKey === '0,0,0') { sceneSpec.indoor = true; sceneSpec.biome = 'temple'; }
-  classification = applySceneSpecToClassification(sceneSpec, classification);
-  if (typeof classification.indoor === 'boolean') sceneSpec.indoor = classification.indoor;
-  DungeonGeneration.prepare(sceneSpec, classification, sharedState.getDungeonRunId());
-  console.log('[SceneSpec]', geoKey, describeSceneSpec(sceneSpec));
-  attachSceneWorldContext(sceneSpec, roomNameDatabaseString, sharedState, updatedGameConsole);
-  try {
-    const levelSpec = await getLevelSpec(sceneSpec.source || {});
-    applyLevelSpecToScene(sceneSpec, levelSpec);
-    console.log('[LevelSpec]', geoKey, levelSpec.source, levelSpec.architecture, levelSpec.structures.map(x => `${x.count}x ${x.name} (${x.shape}/${x.placement})`).join(', '));
-  } catch (e) { console.warn('[LevelSpec] failed', e.message); }
-
-  DungeonGeneration.varyPalette(sceneSpec);
-  sceneSpec.outdoorTerrain = OutdoorTerrain.plan(sceneSpec, sceneSpec.generation.gridSize);
-  prepareSceneGeography(sceneSpec, roomNameDatabaseString);
-  prepareSceneExteriors(sceneSpec, roomNameDatabaseString, { seed: sharedState.getDungeonRunId(), enabled: process.env.HOLODEK_SCENE_EXTERIORS !== '0' });
-  sceneSpec.puzzleMechanism = JSON.parse(roomNameDatabaseString || '{}')[geoKey]?.puzzleMechanism || null;
-  LivingEnvironments.enrichSceneSpec(sceneSpec);
-  prepareSceneVegetation(sceneSpec, { enabled: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
-  prepareSceneBiomeProps(sceneSpec, { enabled: process.env.HOLODEK_BIOME_PROPS !== '0', vegetation: process.env.HOLODEK_SCENE_VEGETATION !== '0' });
-
-  require('./fortifiedDecor').prepare(sceneSpec);
-  const isOutdoor = classification && classification.indoor === false;
-  const size = sceneSpec.generation.gridSize;
-
-  const startX = Math.floor(size / 2);
-  const startY = size - Math.floor(size / 4);
-  
-  // 🔴 STEP 1 — Ask the LLM to describe how this room should LOOK, with biome hints
-    const visualStyle = applySceneSpecToVisualStyle(sceneSpec, await generateRoomVisualStyle($, roomDescription, geoKey, classification));
-    if (!visualStyle) {
-      console.error("⚠️ Could not generate style JSON. Using fallback.");
-    }
-      const puzzleInRoom = updatedGameConsole.match(/Puzzle in Room: ([^\n]+)/)?.[1]?.trim() || '';
-      const requiredCustomTypes = Array.isArray(classification?.features)
-        ? classification.features
-            .map(f => String(f).toLowerCase())
-            .map(f => (f === 'altars' ? 'altar' : f === 'statues' ? 'statue' : f === 'arches' ? 'arch' : f))
-            .filter(f => !['pillars', 'mountains'].includes(f))
-        : [];
-      let customTiles = [];
-      customTiles = await generateCustomTiles($, roomDescription, puzzleInRoom, isOutdoor, Array.from(new Set([...requiredCustomTypes, ...sceneRequiredCustomTypes(sceneSpec)])));
-      customTiles = customTiles.filter(tile => !LivingEnvironments.isReservedScenery(sceneSpec.puzzleMechanism, tile));
-      console.log('[Custom Tiles] Generated:', customTiles);
-      const blueprint = await generateDungeonBlueprint(
-        $,
-        roomDescription,
-        puzzleInRoom,
-        classification,
-        size,
-        customTiles,
-        sceneSpec.generation,
-        sceneSpec
-      );
-    let lighting = (visualStyle && visualStyle.lighting) ? visualStyle.lighting : {
-      dir: "NW",
-      elevation: 0.6,
-      intensity: 0.6,
-      color: "#FFFFFF"
-    };
-    try {
-      const db = JSON.parse(roomNameDatabaseString || "{}");
-      const entry = db[geoKeyString] || {};
-      if (entry.lighting) {
-        lighting = entry.lighting;
-      } else {
-        entry.lighting = lighting;
-      }
-      if (blueprint) {
-        entry.blueprint = blueprint;
-      }
-      db[geoKeyString] = entry;
-      roomNameDatabaseString = JSON.stringify(db, null, 2);
-      if (sharedState.setRoomNameDatabase) {
-        sharedState.setRoomNameDatabase(roomNameDatabaseString);
-      }
-    } catch (e) {
-      console.error('Failed to persist lighting for', geoKeyString, e);
-    }
-    const dungeon = {
-      layout: { width: size, height: size },
-      generation: sceneSpec.generation,
-      outdoorTerrain: sceneSpec.outdoorTerrain,
-      start: { x: startX, y: startY },
-      tiles: {},
-      cells: {},
-      customTiles,
-      classification,
-      visualStyle,
-      blueprint,
-      lighting,
-      // sky colors only for outdoors; indoors falls back to dark
-      skyTop: classification && classification.indoor === false && classification.skyTop
-                ? classification.skyTop
-                : undefined,
-    skyBot: classification && classification.indoor === false && classification.skyBot
-              ? classification.skyBot
-              : undefined
-  };
-    // 🔴 STEP 2 — Generate textures ONCE per room
-    dungeon.tiles.floor = {
-      url: generateSpriteFromStyle(visualStyle && visualStyle.floorPalette ? { ...visualStyle, palette: visualStyle.floorPalette } : visualStyle, "floor", `${geoKey}_floor`)
-    };
-  dungeon.tiles.wall = {
-    url: generateSpriteFromStyle(visualStyle, "wall", `${geoKey}_wall`)
-  };
-  dungeon.tiles.torch = {
-    url: generateSpriteFromStyle(visualStyle, "torch", `${geoKey}_torch`)
-  };
-  dungeon.tiles.door = {
-    url: generateSpriteFromStyle(visualStyle, "door", `${geoKey}_door`)
-  };
-  dungeon.tiles.pillar = {
-    url: generateSpriteFromStyle(visualStyle, "pillar", `${geoKey}_pillar`),
-    spriteSpec: {
-      profile: 'cylinder',
-      depth: 0.8,
-      heightRatio: 1.0,
-      baseWidth: 0.5,
-      gridWidth: 0.5,
-      collisionRadius: 0.09,
-      detail: {
-        bandCount: 3,
-        grooveCount: 6,
-        grooveDepth: 0.25,
-        taper: 0.06,
-        baseHeight: 0.18,
-        capHeight: 0.12,
-        baseFlare: 0.12,
-        capFlare: 0.1,
-        wear: 0.25,
-        chips: 0.2,
-        cracks: 0.2,
-        noise: 0.3,
-        skin: 'mosaic',
-        skinStrength: 0.35,
-        carving: 'runes',
-        accentColor: null,
-        accentStrength: 0
-      }
-    }
-  };
-    // 🔴 STEP 3 — Generate sprites for customs (if any)
-    customTiles.forEach((tile, i) => {
-      if (!tile || !tile.type) return;
-      const tileName = `custom_${tile.type}_${i}`;
-      tile.name = tileName;
-      const style = {
-        palette: visualStyle && visualStyle.palette ? visualStyle.palette : undefined,
-        procedure: tile.procedure || {},
-        spriteSpec: tile.spriteSpec || null
-      };
-  dungeon.tiles[tileName] = {
-    url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`),
-    spriteSpec: tile.spriteSpec || {
-      profile: 'flat',
-      depth: 0.5,
-      heightRatio: 0.9,
-      baseWidth: 0.6,
-      gridWidth: 0.6,
-      detail: {
-        bandCount: 0,
-        grooveCount: 0,
-        grooveDepth: 0.1,
-        taper: 0,
-        baseHeight: 0.1,
-        capHeight: 0.08,
-        baseFlare: 0.05,
-        capFlare: 0.05,
-        wear: 0.2,
-        chips: 0.15,
-        cracks: 0.15,
-        noise: 0.25,
-        skin: '',
-        skinStrength: 0,
-        carving: '',
-        accentColor: null,
-        accentStrength: 0
-      }
-    }
-  };
-    });
-    // 🔴 STEP 3b — scene-spec graphics: material textures + pixel-art landmark sprites
-    dungeon.geoKey = geoKey;
-    try {
-      const sceneGfx = applySceneGraphics(dungeon, sceneSpec, { geoKey, customTiles });
-      customTiles = dungeon.customTiles;
-      console.log('[SceneGfx]', geoKey, JSON.stringify(sceneGfx));
-    } catch (e) {
-      console.error('[SceneGfx] graphics failed, keeping LLM sprites:', e);
-    }
-
-    logDungeonConstruction('scene-graphics', dungeon);
-    // 🔴 STEP 4 — Build layout using blueprint (fallback to legacy if missing)
-    if (blueprint) {
-      buildDungeonFromBlueprint(dungeon, classification, blueprint, customTiles, sceneSpec);
-    } else if (classification && classification.indoor === false) {
-      buildOutdoorLayout(dungeon, classification, customTiles, sceneSpec);
-    } else {
-      buildIndoorLayout(dungeon, classification);
-    }
-  logDungeonConstruction('layout', dungeon);
-  applySceneArchitecture(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_ARCHITECTURE !== '0' });
-  require('./fortifiedStairs').install(dungeon, sceneSpec);
-  applySceneGeography(dungeon, sceneSpec, { enabled: process.env.HOLODEK_SCENE_GEOGRAPHY !== '0' });
-  logDungeonConstruction('geography', dungeon);
-  console.info('[SceneExteriorSites]', geoKey, JSON.stringify(buildSceneExteriorSites(dungeon, sceneSpec)));
-  logDungeonConstruction('architecture', dungeon);
-  // 🔴 STEP 4 — insert doors between floors
-  for (let y = 1; y < dungeon.layout.height - 1; y++) {
-    for (let x = 1; x < dungeon.layout.width - 1; x++) {
-      const key = `${x},${y}`;
-      const cell = dungeon.cells[key];
-      if (!cell || cell.tile !== "wall" || cell.architectureRole || cell.exteriorRole) continue;
-      const N = dungeon.cells[`${x},${y-1}`];
-      const S = dungeon.cells[`${x},${y+1}`];
-      const E = dungeon.cells[`${x+1},${y}`];
-      const W = dungeon.cells[`${x-1},${y}`];
-      // vertical gap
-      if (N?.tile === "floor" && S?.tile === "floor" && Math.random() < 0.07) {
-        cell.tile = "door";
-        cell.door = { isDoor: true, isOpen: false };
-      }
-      // horizontal gap
-      if (E?.tile === "floor" && W?.tile === "floor" && Math.random() < 0.07) {
-        cell.tile = "door";
-        cell.door = { isDoor: true, isOpen: false };
-      }
-    }
-  }
- 
-  logDungeonConstruction('doors', dungeon);
-  // 🔴 STEP 5 — upgrade some walls to torch-walls
-  for (let y = 1; y < dungeon.layout.height - 1; y++) {
-    for (let x = 1; x < dungeon.layout.width - 1; x++) {
-      const key = `${x},${y}`;
-      const cell = dungeon.cells[key];
-      if (!cell || cell.tile !== "wall" || cell.exteriorRole) continue;
-      const N = dungeon.cells[`${x},${y-1}`];
-      const S = dungeon.cells[`${x},${y+1}`];
-      const E = dungeon.cells[`${x+1},${y}`];
-      const W = dungeon.cells[`${x-1},${y}`];
-      const floorNeighbors = [N, S, E, W].filter(n => n && n.tile === "floor").length;
-      if (floorNeighbors === 0) continue;
-      if (Math.random() < 0.10) {
-        cell.tile = "torch";
-        cell.feature = "torch";
-      }
-    }
-  }
-  logDungeonConstruction('torch-walls', dungeon);
-    // spawn safe square
-    dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].tile = "floor";
-  // 🔴 STEP 6 — put the landmarks the text names into the room
-  try {
-    applySceneRoofs(dungeon, sceneSpec);
-    require('./fortifiedDecor').cover(dungeon, sceneSpec);
-    logDungeonConstruction('roof-structure', dungeon);
-    const placement = placeSceneLandmarks(dungeon, sceneSpec);
-    console.log('[SceneGfx] landmarks placed', geoKey, JSON.stringify(placement));
-    console.log('[SceneGfx] objects placed', geoKey, JSON.stringify(placeSceneObjects(dungeon, sceneSpec)));
-    DungeonExits.install(dungeon, sceneSpec.exits);
-    console.info('[SceneExteriors]', geoKey, JSON.stringify(applySceneExteriors(dungeon, sceneSpec)));
-    console.info('[SceneVegetation]', geoKey, JSON.stringify(applySceneVegetation(dungeon, sceneSpec)));
-    console.info('[SceneBiomeProps]', geoKey, JSON.stringify(applySceneBiomeProps(dungeon, sceneSpec)));
-  } catch (e) {
-    console.error('[SceneGfx] landmark placement failed:', e);
-  }
-  dungeon.puzzleBuildReport = LivingEnvironments.install(dungeon, sceneSpec);
-  dungeon.surfaceArtReport = applySurfaceArt(dungeon,sceneSpec);
-  console.info('[PuzzleConstruction]', geoKey, JSON.stringify(dungeon.puzzleBuildReport));
-  logDungeonConstruction('landmarks-and-objects', dungeon);
-  // UPDATED: Pass customTiles to sharedState
-  dungeon.sceneSpec = sceneSpec;
-  dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
-  console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
-  roomNameDatabaseString = storeSceneSpecInRoomDb(roomNameDatabaseString, geoKey, sceneSpec);
-  const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
-  sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
-  sharedState.setLastCoords(geoCoords);
-  broadcast({ type: 'dungeonLoaded', geoKey, dungeon: finalDungeon });
-  returnObj.dungeon = finalDungeon;
-  console.log('Dungeon built with VISUAL STYLE → SPRITE → RAYCASTER');
-}
+const { geoCoords, geoKey } = await buildGeneratedRoom($, roomDescription, puzzleInRoom, isAutoSimAdvance, returnObj, { enteringRoom, entryPrevious });
 
 // Narration runs only after placement, so a room-wide console list cannot become an entrance mob.
 const activeDungeonForPopulation = sharedState.getRoomDungeonForSimulation(geoCoords);
@@ -12658,14 +12987,43 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${Inhabitants.MONSTER_DIALOGUE_RANGE} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
   await $.user`Preserve the existing flowing narrative: prose, actions, quotation marks and paragraph breaks stay natural, not a screenplay or JSON document. Mark EVERY actual spoken passage inside its normal quotation marks with invisible backend labels: [[SPEECH:"exact nearby name"]]all words spoken in this quote[[/SPEECH]]. Use the JSON-quoted exact name from ${JSON.stringify(audibleNames)}. Label every continuation and later paragraph, even when the prose uses he, she, their voice, an epithet, or omits the name. Do not summarize, truncate, omit later sentences or repeat the speech elsewhere. Never label narration, thoughts, inscriptions, the PC's words or distant characters. At most ${initialArrival ? 6 : 4} nearby speakers; allow complete natural monologues, not a 40-word metadata excerpt. The server removes only these labels before displaying the unchanged narrative in the Game Log.
 After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}],"exchanges":[]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh the planned batch of 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Base the batch on this turn's actual conversation as well as the witnessed recap, without assuming these future lines were already said. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;
-  await $.user`FINAL STORY RESPONSE: Follow the full Integrate and interactive-fiction action/dialogue instructions above. Write the player-facing narrative FIRST, then append the CHARACTER_DIALOGUE metadata. Cache planning is secondary and must not replace the story. ${initialArrival ? 'This is the full opening scene: develop the established TURN 0 premise and the call to adventure without deciding actions for the PC.' : enteringRoom ? 'This is a full room-entry story continuation, not another static room or puzzle description.' : 'Resolve the latest player input and continue the scene; a genuine automatic idle tick keeps its requested short format.'} If no characters are permitted to speak, still narrate an appropriate environmental or story development without inventing dialogue, discoveries or completed actions. Preserve player agency, current mechanics, exact names and the nearby-speaker limits. Return actual prose before metadata, not a metadata-only answer.`;
-  const result = await $.assistant.generation({maxTokens:Math.min(6000,autoMax+replyNames.length*160+400)});
+  // holodek-1 only: pack relevant campaign memory into the current context window
+  const isHolodek1 = StoryPrompts.isHolodek1(); // same gameModels snapshot check, without require() in this tested section
+  let retrievedContext = "";
+  if (isHolodek1) {
+    try {
+      // context(state, query, consoleText, task) returns an object; prompt() renders it as bounded text (its own caps fit the 16k context).
+      const recall = CampaignMemory.context(sharedState, userInput || "", typeof updatedGameConsole === 'string' ? updatedGameConsole : '', sharedState.getActiveTask?.());
+      const recallText = (recall?.evidence?.length || recall?.profiles?.length) ? String(CampaignMemory.prompt(recall)).slice(0, 3000) : "";
+      if (recallText) {
+        retrievedContext = "\n\n=== RELEVANT CAMPAIGN MEMORY (holodek-1) ===\n" +
+          recallText + "\n=== END MEMORY ===\n";
+      }
+    } catch (err) {
+      console.warn("holodek-1 memory retrieval skipped:", err.message);
+    }
+  }
+  await $.user`${retrievedContext}FINAL STORY RESPONSE: Follow the full Integrate and interactive-fiction action/dialogue instructions above. Write the player-facing narrative FIRST, then append the CHARACTER_DIALOGUE metadata. Cache planning is secondary and must not replace the story. ${initialArrival ? 'This is the full opening scene: develop the established TURN 0 premise and the call to adventure without deciding actions for the PC.' : enteringRoom ? 'This is a full room-entry story continuation, not another static room or puzzle description.' : 'Resolve the latest player input and continue the scene; a genuine automatic idle tick keeps its requested short format.'} If no characters are permitted to speak, still narrate an appropriate environmental or story development without inventing dialogue, discoveries or completed actions. Preserve player agency, current mechanics, exact names and the nearby-speaker limits. Return actual prose before metadata, not a metadata-only answer.`;
+  const result = isHolodek1 ? await require('./holodekNarration').generate($, {
+    consoleText: perceivedGameConsole, userInput, currentSituation, characters: describeCharacters(dialogueRoster, population),
+    audibleNames, responseAudience, initialArrival, enteringRoom, quest: sharedState.getCurrentQuest(), task: activeTask,
+    questUpdate, entryQuestContact, committedPuzzle: physicalPuzzleResult?.completed ? physicalPuzzleResult.narrative : null,
+    recollections: characterMemory, journey: population?.journey,
+    personalMemories: typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState,
+      describeCharacters(dialogueRoster, population), userInput || '', 3600) : [],
+    memory: typeof CampaignMemory !== 'undefined' ? CampaignMemory.context(sharedState, userInput || '', updatedGameConsole, activeTask) : [],
+    reference: (await require('./holodekPromptRecall').select({ userInput, consoleText: perceivedGameConsole, task: activeTask, budget: 700 })).text,
+    directions: typeof QuestDirectionFacts !== 'undefined' ? QuestDirectionFacts.facts(sharedState, userInput) : [],
+    premise: initialArrival ? { pc: Inhabitants.parseSheets(updatedGameConsole, 'PC').map(actor => ({ name: actor.name,
+      race: actor.race, className: actor.className, background: actor.originProfile })),
+      arrival: WorldSetting.isCotGPlay() ? 'Newly dead souls awaken without knowledge of their companions; an established divine visitor retains her own prior identity.' : WorldSetting.creationPrompt() } : null
+  }) : await $.assistant.generation({maxTokens:Math.min(6000,autoMax+replyNames.length*160+400)});
   spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
   spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
   response = spoken.content;
   console.info('[StoryNarration]', JSON.stringify({ geoKey, phase: initialArrival ? 'arrival' : enteringRoom ? 'entry' : 'turn',
     status: response.trim() ? 'story' : 'metadata-only', storyChars: response.length, rawChars: String(result.content || result).length,
-    permittedSpeakers: audibleNames.length }));
+    permittedSpeakers: audibleNames.length, protocolWarnings: spoken.dialogueProtocolWarnings || [] }));
   if (initialArrival) console.info('[ArrivalNarration]', JSON.stringify({ geoKey, speakers: spoken.dialogue.map(row => row.speaker) }));
   if (enteringRoom) console.info('[EntryDialogue]',JSON.stringify({geoKey,mode:'full-retort',nearby:audibleNames,
     questContact:entryQuestContact?.speaker || null,
@@ -12732,6 +13090,7 @@ if (isAutoSimAdvance) {
 
 returnObj.updatedGameConsole = updatedGameConsole;
 returnObj.population = population;
+if (enteringRoom) spoken.dialogue = spoken.dialogue.map(row => ({ ...row, requiresNearby: true }));
 returnObj.dialogue = spoken.dialogue;
 DialogueMemory.rememberDialogue(sharedState, population, spoken.dialogue, 'turn');
 if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberDialogue(sharedState, population, spoken.dialogue, 'turn-dialogue', broadcast);
@@ -12788,6 +13147,36 @@ async function generateCharacterSpriteSpecWithRetort(baseCharacter) {
 
   // This is a small, dedicated Retort session whose only job is artistic direction for the sprite.
   // In a full implementation you would use a separate .rt.js file or a focused prompt here.
+  // holodek-1 only: the start-menu heroes Mortacia and Suzerain use their curated default sprite families (no model call).
+  if (StoryPrompts.isHolodek1()) {
+    const spriteName = String(baseCharacter?.Name || baseCharacter?.name || '').replace(/^Name:\s*/i, '').trim();
+    const SpriteDefaults = require('../assets/renderCharacterSprite.js');
+    if (/^(?:(?:the|lady|lord|sir|dame|queen|king|goddess|knight)\s+)*(?:mortacia|suzerain)\b/i.test(spriteName)) {
+      console.log('[SpriteArtist] holodek-1: using the default sprite for', spriteName);
+      return SpriteDefaults.createCharacterSpriteSpec(baseCharacter);
+    }
+    // holodek-1 only: compact design prompt (~350 tokens); unspecified fields come from the deterministic default spec.
+    return run(retort(async ($) => {
+      $.model = "gpt-4o-mini";
+      $.temperature = 0.85;
+      await $.system`You are a focused pixel-art director. Output ONLY raw valid JSON. Never use markdown code fences. Never use single quotes for keys. Never add explanations.`;
+      await $.user`Design a retro side-view pixel sprite (facing right) for ${baseCharacter.Name}, ${baseCharacter.Sex} ${baseCharacter.Race} ${baseCharacter.Class}. Pick appearance, clothing, colors and one key visual feature that suit race, sex and class; bold readable silhouette, small head, long legs.
+Return ONLY this JSON, filled in with the listed values:
+{"palette":{"primary":"#hex","secondary":"#hex","highlight":"#hex","shadow":"#hex","skin":"#hex","accent":"#hex"},"parts":{"head":"","torso":"","legs":"","arm":"swinging_upper_lower","weapon":"","accessory":""},"pose":"","design":{"head_size":4,"torso_width":5,"leg_height":11,"weapon_length":9,"cape_width":3},"notes":"one-line look"}
+head: skull_crest plumed_helmet gallant_helm hooded_skull crowned elf_ears human_hair normal_human wide_helm pointed_cowl beaked_mask
+torso: flowing_robe plate_armor gallant_plate leather_tunic bone_corset dress_robe tapered_robe broad_tunic cinched_corset chain_shirt
+legs: striding_boots armored_greaves flowing_skirt clawed_hooves long_striders stout_greaves bowed_legs wide_pants
+weapon: sword_broad scythe_long staff_crook dagger axe mace spear wand bow
+accessory: flowing_cape skeletal_wings none
+pose: idle_stand_male striding_walk_male attack_thrust_male idle_stand_female striding_elegant_female cast_spell_female
+Design numbers are integers; vary each by up to 2.`;
+      const reply = await $.assistant.generation({ maxTokens: 600 });
+      const parsed = extractAndParseJson((reply && reply.content) ? reply.content : '');
+      const base = SpriteDefaults.createCharacterSpriteSpec(baseCharacter);
+      return { ...base, ...parsed, palette: { ...base.palette, ...(parsed.palette || {}) }, parts: { ...base.parts, ...(parsed.parts || {}) },
+        design: { ...base.design, ...(parsed.design || {}) } };
+    }));
+  }
   return run(retort(async ($) => {
     const prompt = `
 You are an expert retro pixel artist specializing in OLD-SCHOOL COMPONENT-BASED pixel art (exactly how C64/Epyx/Mario/Mega Man artists actually worked in the 80s on graph paper).

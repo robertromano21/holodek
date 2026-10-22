@@ -8,6 +8,7 @@ function designs() {
   require('../tools/sfx-build/effects')(api);
   require('../tools/sfx-build/keyedStems')(api);
   require('../tools/sfx-build/voices')(api);
+  require('../tools/sfx-build/rangedEffects')(api); // world1 ranged weapons (additive)
   return out;
 }
 const names = [...designs().keys()];

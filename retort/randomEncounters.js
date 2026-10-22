@@ -75,7 +75,7 @@ async function maybeGenerate({ state, service, visit, player, isCurrent = () => 
       require('./graveMasterStoryPrompts').appendOriginal($);
       await Campaign.appendPlanning($, state, 'supplemental encounter: fresh local themes, prior encounters, factions and unresolved choices', { consoleText });
       return generateInhabitants($, { roomName: room.name, roomDescription: room.description || consoleText.match(/^Room Description:[ \t]*(.*)$/m)?.[1],
-        geoKey: p.geoKey, indoor: d.classification?.indoor !== false,
+        geoKey: p.geoKey, indoor: d.classification?.indoor !== false, rooms: db,
         campaignSetting: room.campaignSetting?.village ? { ...room.campaignSetting, village: undefined } : room.campaignSetting,
         partyNames: ready.roster.filter(a => a.type !== 'monster').map(a => a.name),
         usedNames: Object.values(db).flatMap(r => Object.keys(r?.inhabitants?.actors || {})), quest: state.getCurrentQuest?.(),

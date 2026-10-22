@@ -1,4 +1,7 @@
 const serverLog = require('./serverLogger').installServerLogger();
+// world1 expansion (each feature behind its own flag; see retort/worldFlags.js).
+const Surprise = require('./retort/surprise');
+const WorldFlags = require('./retort/worldFlags');
 
 const express = require('express');
 const { createGameJsonParser, gameJsonErrorHandler, createRoomDatabaseReceiver } = require('./gameStateTransport');
@@ -35,7 +38,7 @@ const SecretDoors = require('./retort/secretDoors');
 const { buildEnvironmentLab, descriptions: environmentLabKinds } = require('./retort/environmentLab');
 const { buildInitialWorldConsole, buildInitialGameConsole } = require('./retort/initialGameState');
 const app = express();
-const port = 3000;
+const port = Number(process.env.HOLODEK_PORT || process.env.PORT) || 3000; // world1: test copies may run beside the live server
 const roomDatabaseReceiver = createRoomDatabaseReceiver();
 
 // Middleware
@@ -43,12 +46,42 @@ app.use(createGameJsonParser());
 app.use(cors());
 require('./retort/roomIllustration').install(app, sharedState);
 require('./retort/gameModels').install(app);
+require('./retort/websiteAi').install(app, { onChange: () => require('./retort/gameModels').invalidate() });
+require('./retort/roomPrefetchRoutes').install(app, sharedState);
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
 require('./retort/audioPalette').install(app, sharedState); // same-score SID variants; effects rendered off-thread
 require('./retort/sidArchive').install(app, express);
 // Stock / Enhanced SID switch (♫ panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
 const SidMode = require('./retort/sidMode');
 app.get('/sid-mode', (req, res) => res.json({ mode: SidMode.get() }));
+app.get('/world1-flags', (req, res) => res.json({ ...WorldFlags.snapshot(), ...(require('./retort/devSandbox').enabled(port) ? { DEV_SANDBOX: true } : {}), ...(require('./retort/campaignBuilderRoutes').enabled(port) ? { CAMPAIGN_BUILDER: true } : { CAMPAIGN_BUILDER: false }), GM_NAME: (() => { try { return require('./retort/settingLayer').gmName(); } catch { return 'Grave Master'; } })(),
+  HOMEBREW_ACTIVE: (() => { try { return WorldFlags.on('HOMEBREW') && !!require('./retort/settingLayer').current(); } catch { return false; } })(),
+  RESOURCE_NAME: (() => { try { const b = require('./retort/settingLayer').current(); return b ? (b.resourceName || 'Luck') : 'Magic'; } catch { return 'Magic'; } })() }));
+// world1 RANGED_COMBAT: ammo readouts for the party's equipped ranged weapons (separate from the Magic/Tech/Luck stat).
+app.get('/ranged/readouts', (req, res) => { try { if (!WorldFlags.on('RANGED_COMBAT')) return res.json({ rows: [] }); const sharedState = require('./sharedState'), Spells = require('./retort/spellSystem');
+  const actors = Spells.allActors(sharedState.getUpdatedGameConsole() || '').filter(a => a.type !== 'monster').map(a => ({ name: a.name, equipped: require('./assets/dungeonInhabitants').parseEquipment(a.lines?.[9] || '') || {} }));
+  res.json({ rows: require('./retort/rangedCombat').readouts(sharedState, actors) }); } catch (e) { res.json({ rows: [], error: e.message }); } });
+// Playtest-only live room editor (HOLODEK_DEV_SANDBOX=1 on a test port; never on 3000).
+require('./retort/devSandbox').install(app, express, port);
+// Campaign Builder (CAMPAIGN_BUILDER flag, test servers only; never on 3000).
+require('./retort/campaignBuilderRoutes').install(app, express, port, sharedState, { busy: () => typeof inputTaskInFlight !== 'undefined' && inputTaskInFlight });
+// world1 FOOT_EXITS / QUEST_LOCAL: exits walked on foot and local quest spots reached are saved in the room database.
+const World1Db = { read: () => JSON.parse(sharedState.getRoomNameDatabase() || '{}'), write: db => { const text = JSON.stringify(db); sharedState.setRoomNameDatabase(text); return text; } };
+app.post('/exits/traversed', express.json({ limit: '2kb' }), (req, res) => {
+  const { geoKey, direction } = req.body || {};
+  if (!WorldFlags.on('FOOT_EXITS') || typeof geoKey !== 'string' || typeof direction !== 'string') return res.status(400).json({ error: 'Bad exit.' });
+  const db = World1Db.read(), room = db[geoKey];
+  if (!room?.exits || !Object.hasOwn(room.exits, direction)) return res.status(404).json({ error: 'No such exit.' });
+  const back = require('./assets/questMap').markTraversed(db, geoKey, direction); // also the return exit of the next room
+  res.json({ ok: true, footExits: room.footExits, returnExit: back, roomNameDatabaseString: World1Db.write(db) });
+});
+app.post('/quest/objective', express.json({ limit: '2kb' }), (req, res) => {
+  const { geoKey, missionId } = req.body || {};
+  const db = World1Db.read(), objective = require('./retort/roomCast').reachObjective(db, geoKey, missionId);
+  if (!objective) return res.status(409).json({ error: 'Nothing to do here yet.' });
+  res.json({ ok: true, objective, roomNameDatabaseString: World1Db.write(db) });
+});
+
 app.post('/sid-mode', express.json({ limit: '1kb' }), (req, res) => {
   const want = SidMode.norm(req.body && req.body.mode); if (!want) return res.status(400).json({ error: 'mode must be 1x, 2x or 4x' });
   res.json({ mode: SidMode.set(want), music: 'next room song renders in this mode' });
@@ -102,7 +135,8 @@ app.get('/combat-updates2', (req, res) => {
       actionId: actionDice.active.id, revision: actionDice.active.healthRevision || 0,
       geoKey: actionDice.active.geoKey, runId: sharedState.getDungeonRunId(),
       updatedGameConsole: sharedState.getUpdatedGameConsole(),
-      combatCharactersString: sharedState.getCombatCharactersString(), population });
+      combatCharactersString: sharedState.getCombatCharactersString(), population,
+      sceneObjects: sharedState.getRoomDungeonForSimulation(coords)?.sceneObjects });
 
     req.on('close', () => {
         clearInterval(keepAlive);
@@ -273,6 +307,9 @@ app.post('/combat/move', async (req, res) => {
 });
 
 const tasks = new Map();  // { taskId: { status: 'processing', result: null } }
+const startupTasks = require('./retort/startupTasks').create({ tasks, scope: () => ({
+  model: require('./retort/gameModels').current().id, world: require('./retort/settingLayer').current()
+}) });
 let inputTaskInFlight = false;
 
 // Isolated exhibits use the production builder/renderer but never touch campaign state.
@@ -467,7 +504,8 @@ app.post('/economy/view', (req, res) => {
     const book = Economy.project(sharedState);
     const result = req.body.actor ? Economy.view(sharedState, req.body.actor) : { silver: book.silver, revision: book.revision };
     if (result.error) return res.status(409).json(result);
-    res.json({ ...result, ...(update.changed ? { economyResult: economyStateEvent(req.body.geoKey, update) } : {}) });
+    res.json({ ...result, sceneObjects: sharedState.getRoomDungeonForSimulation(sharedState.getLastCoords())?.sceneObjects,
+      ...(update.changed ? { economyResult: economyStateEvent(req.body.geoKey, update) } : {}) });
   } catch (error) { console.warn('[Economy]', error.message); res.status(503).json({ error: 'The economy records could not be read.' }); }
 });
 app.post('/economy/action', (req, res) => {
@@ -526,17 +564,21 @@ app.post('/room-population/engage', async (req, res) => {
   if (visit.error) return res.status(visit.status).json({ error: visit.error });
   if (visit.dialogue.length) broadcast({type:'character_dialogue',dialogue:visit.dialogue,geoKey:req.body.geoKey,runId:sharedState.getDungeonRunId()});
   const record = visit.population.actors[req.body.target], coords = sharedState.getLastCoords();
+  const ambushGroup = visit.population.groups?.find(g => g.members?.includes(req.body.target) && g.ambush?.party && !g.ambushSpent);
+  const reachLimit = ambushGroup ? 8.5 : 3.5;
   const dungeon = sharedState.getRoomDungeonForSimulation(coords);
   const livingPc=JSON.parse(sharedState.getCombatCharactersString() || '[]').some(a=>a.type==='pc'&&(a.hp ?? 1)>0);
   if (!livingPc || visit.population.starting && !record?.pursuit?.arrivedThrough || !record?.position || record.status !== 'present' || record.allegiance !== 'Hostile' ||
-      Math.hypot(record.position.x + 0.5 - req.body.player.x, record.position.y + 0.5 - req.body.player.y) > 3.5 ||
+      Math.hypot(record.position.x + 0.5 - req.body.player.x, record.position.y + 0.5 - req.body.player.y) > reachLimit ||
       !Inhabitants.lineClear(dungeon, req.body.player, { x: record.position.x + 0.5, y: record.position.y + 0.5 })) return res.status(409).json({ error: 'There is no nearby hostile encounter.' });
   inputTaskInFlight = true;
   const runId = sharedState.getDungeonRunId(), eventId = require('node:crypto').randomUUID();
   try {
-    const result = await retortWithUserInput('', broadcast, sharedState.getCombatMode(), { realtimeEncounter: record.name });
+    if (ambushGroup) { ambushGroup.ambushSpent = true; if (typeof Surprise !== 'undefined') Surprise.arm(req.body.geoKey, ambushGroup.ambush); }
+    const result = await retortWithUserInput('', broadcast, sharedState.getCombatMode(), { realtimeEncounter: record.name, surprise: ambushGroup?.ambush || null });
     const event = { type: 'realtime_combat_result', runId, geoKey: req.body.geoKey, eventId,
-      ...result, updatedGameConsole: sharedState.getUpdatedGameConsole(), population: sharedState.getRoomPopulation(req.body.geoKey) };
+      ...result, updatedGameConsole: sharedState.getUpdatedGameConsole(), population: sharedState.getRoomPopulation(req.body.geoKey),
+      sceneObjects: sharedState.getRoomDungeonForSimulation(sharedState.getLastCoords())?.sceneObjects };
     broadcast(event); res.json(event);
   } catch (error) { console.warn('[EncounterCombat]', error.message); res.status(503).json({ error: 'The encounter could not resolve.' }); }
   finally { actionDice.end(); inputTaskInFlight = false; }
@@ -594,6 +636,8 @@ app.post('/processInput7', async (req, res) => {
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
   inputTaskInFlight = true;
+  // world1: whatever the player types during character creation (their character/party names) is player text: exempt from homebrew renaming.
+  try { if (sharedState.getCharacterGenerationInProgress?.() && typeof req.body.userInput === 'string') { const CB = require('./retort/campaignBuilder'); CB.__creation = ((CB.__creation || '') + ' ' + req.body.userInput).slice(-2000); CB.setPlayerText('creation', CB.__creation); } } catch {}
   const puzzleDefinition = sharedState.getRoomDungeon(sharedState.getLastCoords())?.physicalPuzzle?.definition;
   const physicalPuzzleCommand = puzzleDefinition && PhysicalPuzzles.intent(req.body.userInput, puzzleDefinition);
   let resolvePuzzleNarration;
@@ -666,10 +710,20 @@ app.post('/processInput7', async (req, res) => {
 // New endpoint: Client calls this after the user clicks "Save" on the character sprite review menu.
 // This tells the Retort session "the player has finalized their starting character (with sprite) — now proceed with dungeon generation".
 app.post('/startGameWithCharacter', async (req, res) => {
+  if (!req.body?.character || typeof req.body.character !== 'object' || Array.isArray(req.body.character))
+    return res.status(400).json({ error: 'Missing starting character.' });
+  try {
+    const existing = startupTasks.find(req.body, sharedState.getDungeonRunId());
+    if (existing) return res.status(202).json({ taskId: existing.taskId, joined: true });
+  } catch (error) { return res.status(409).json({ error: error.message }); }
+  // world1 HOMEBREW: a homebrew world never loads the Children of the Grave PREMADE menu choices (1/2). Names the player types are never
+  // filtered, renamed or rejected (a player may call their character Mortacia); they are registered as player text so translation leaves them alone.
+  try { if (typeof require === 'function' && WorldFlags.on('HOMEBREW') && require('./retort/settingLayer').current()) { const b = req.body || {};
+    if (b.choice === '1' || b.choice === '2') return res.status(409).json({ error: `homebrew world: Children of the Grave premades are disabled (choice ${b.choice}); create a party (3)` });
+    require('./retort/campaignBuilder').setPlayerText('party', [b.character?.Name, b.character?.name, ...(Array.isArray(b.npcs) ? b.npcs.flatMap(n => [n?.Name, n?.name]) : [])]); } } catch {}
   if (inputTaskInFlight) return res.status(409).json({ error: 'Finish the pending action before starting another game.' });
   if (!req.body?.character || typeof req.body.character !== 'object') return res.status(400).json({ error: 'Missing starting character.' });
-  const taskId = Date.now().toString();
-  tasks.set(taskId, { status: 'processing', result: null });
+  const { taskId } = startupTasks.begin(req.body);
   inputTaskInFlight = true;
 
   (async () => {
@@ -681,6 +735,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
 
       console.log(`[Server] Starting game with finalized character:`, characterData?.Name || characterData?.name);
       const runId = sharedState.beginDungeonRun();
+      startupTasks.bind(taskId, runId);
       actionDice.setPaused(false);
       roomDatabaseReceiver.reset();
       broadcast({ type: 'dungeonRun', runId });
@@ -722,11 +777,21 @@ app.post('/startGameWithCharacter', async (req, res) => {
       // Seed the updatedGameConsole with the PC stats so the main console display (and the LLM prompt)
       // includes them above the prompt, exactly as the last-known-good 1/2 path in chatbotprocessinput did.
       const initialWorld = buildInitialWorldConsole(req.body.initialState);
+      { const Setting = typeof require === 'function' ? require('./retort/settingLayer') : null, b = Setting && WorldFlags.on('HOMEBREW') ? Setting.current() : null;
+        if (b) { // world1 HOMEBREW: the first room comes from the world's bible, never the Children of the Grave Ruined Temple Entrance.
+          const room = Setting.firstRoom(b), db = JSON.parse(initialWorld.roomNameDatabaseString); const cell = db['0,0,0'] ||= {};
+          Object.assign(cell, { name: room.name, description: room.description, setting: b }); delete cell.complexId;
+          Setting.applyStartRoom(cell,b);
+          initialWorld.roomNameDatabaseString = JSON.stringify(db);
+          initialWorld.console = initialWorld.console.replace(/^Room Name:.*$/m, `Room Name: ${room.name}`).replace(/^Room Description:.*$/m, `Room Description: ${room.description}`);
+          console.log(`[Server] Homebrew start: ${b.name} -> first room "${room.name}"`); } }
       sharedState.setRoomNameDatabase(initialWorld.roomNameDatabaseString);
       sharedState.setPersonalNarrative('');
       sharedState.setUpdatedGameConsole(buildInitialGameConsole(initialWorld.console, characterData, partyNpcData));
       Economy.start(sharedState, characterData, partyNpcData);
-      const profiles = typeof generatePartyCharacterProfiles === 'function' ? await generatePartyCharacterProfiles([characterData, ...partyNpcData], runId) : [];
+      tasks.get(taskId).phase = 'party-profiles';
+      const profiles = typeof generatePartyCharacterProfiles === 'function' ? await startupTasks.track(taskId,
+        () => generatePartyCharacterProfiles([characterData, ...partyNpcData], runId)) : [];
       if (profiles.length) CampaignMemory.rememberProfiles(sharedState, profiles, broadcast);
       if (profiles.length) {
         const profileRoster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
@@ -738,7 +803,8 @@ app.post('/startGameWithCharacter', async (req, res) => {
       // and use the provided character directly, then begin dungeon generation.
       const specialInput = `__START_WITH_CHARACTER__${JSON.stringify(characterData)}`;
 
-      const result = await retortWithUserInput(specialInput, broadcast, combatMode);
+      tasks.get(taskId).phase = 'first-room';
+      const result = await startupTasks.track(taskId, () => retortWithUserInput(specialInput, broadcast, combatMode));
       CampaignMemory.rememberRoomHistory(sharedState, '', result.content, sharedState.getUpdatedGameConsole(), broadcast);
       Economy.refresh(sharedState);
 
@@ -753,7 +819,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
       const currentQuest = sharedState.getCurrentQuest();
 
       const finalResult = {
-        response: (result && result.content) || 'The game begins in the Ruined Temple Entrance...',
+        response: (result && result.content) || `The game begins in the ${(/^Room Name: (.*)$/m.exec(updatedGameConsole) || [])[1] || 'first room'}...`,
         updatedGameConsole,
         combatCharactersString,
         roomNameDatabaseString,
@@ -765,10 +831,10 @@ app.post('/startGameWithCharacter', async (req, res) => {
         characterConfirmed: true
       };
 
-      tasks.set(taskId, { status: 'complete', result: finalResult });
+      tasks.set(taskId, { ...tasks.get(taskId), status: 'complete', phase: 'complete', result: finalResult });
     } catch (err) {
       console.error('startGameWithCharacter error:', err);
-      tasks.set(taskId, { status: 'error', result: err.message });
+      tasks.set(taskId, { ...tasks.get(taskId), status: 'error', result: err.message, canResume: false });
     } finally {
       actionDice.end();
       inputTaskInFlight = false;
@@ -783,6 +849,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
 // BEFORE the main dungeon creation logic ever runs.
 app.post('/beginCharacterGeneration', async (req, res) => {
   if (inputTaskInFlight) return res.status(409).json({ error: 'Finish the pending action before creating another character.' });
+  startupTasks.clear();
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
 
@@ -943,7 +1010,7 @@ app.get('/poll-task2/:taskId', (req, res) => {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.json(task);
-    tasks.delete(req.params.taskId); // Cleanup
+    if (!task.startup) tasks.delete(req.params.taskId); // Startup receipts survive a dropped completion poll/reconnect.
   } else {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');

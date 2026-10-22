@@ -199,7 +199,7 @@
         personality: text(row.personality, 220), voice: text(row.voice, 140), motivation: text(row.motivation, 180),
         history: text(row.history, 600), profile: row.profile && Profiles ? Profiles.create({ ...row, name }, '', row.profile) : undefined,
         routine: ROUTINES.includes(row.routine) ? row.routine : state === 'Hostile' ? 'patrol' : 'work',
-        dialogue: (Array.isArray(row.dialogue) ? row.dialogue : []).map(line => text(line, 220)).filter(Boolean).slice(0, 3) }];
+        dialogue: (Array.isArray(row.dialogue) ? row.dialogue : []).map(line => text(line, MAX_SPEECH_LENGTH)).filter(Boolean).slice(0, 3) }];
     });
   }
   function createPopulation(geoKey, rows, { indoor = true, starting = false } = {}) {
@@ -607,18 +607,59 @@
     }).join('');
     return filtered === prose ? prose : filtered.replace(/(?:\r?\n[ \t]*){3,}/g, '\n\n').trim();
   }
+  function dialoguePackaging(raw) {
+    const source=String(raw||''),warnings=new Set(),blocks=[];
+    const marker=/\[{1,2}\s*(\/?)CHARACTER_DIALOGUE\s*\]{1,2}|⟦\s*(\/?)CHARACTER_DIALOGUE\s*⟧/gi;
+    const closing=/\[{1,2}\s*\/CHARACTER_DIALOGUE\s*\]{1,2}|⟦\s*\/CHARACTER_DIALOGUE\s*⟧/gi;
+    let content='',cursor=0,match;
+    function jsonEnd(start){
+      const stack=[];let quoted=false,escape=false;
+      for(let i=start;i<source.length;i++){
+        const ch=source[i];if(quoted){if(escape)escape=false;else if(ch==='\\')escape=true;else if(ch==='"')quoted=false;continue;}
+        if(ch==='"'){quoted=true;continue;}if(ch==='{'||ch==='[')stack.push(ch);
+        if(ch==='}'||ch===']'){if(stack.pop()!==(ch==='}'?'{':'['))return null;if(!stack.length)return i+1;}
+      }
+      return null;
+    }
+    while((match=marker.exec(source))){
+      content+=source.slice(cursor,match.index);
+      if(match[0].startsWith('⟦'))warnings.add('unicode-marker');
+      else if(!match[0].startsWith('[[')||!match[0].endsWith(']]'))warnings.add('single-bracket-marker');
+      if(match[1]||match[2]){warnings.add('orphan-closing-marker');cursor=marker.lastIndex;continue;}
+      let start=marker.lastIndex;while(/\s/.test(source[start]||'')&&start<source.length)start++;
+      const end=/[\[{]/.test(source[start]||'')?jsonEnd(start):null;
+      closing.lastIndex=end??start;const close=closing.exec(source);
+      let stop,payload;
+      if(end!==null){payload=source.slice(start,end);stop=end;
+        if(close&&/^\s*$/.test(source.slice(end,close.index)))stop=closing.lastIndex;else warnings.add('missing-closing-marker');
+      }else{payload=source.slice(start,close?.index??source.length);stop=close?closing.lastIndex:source.length;if(!close)warnings.add('missing-closing-marker');}
+      try{blocks.push(JSON.parse(payload));}catch{warnings.add('invalid-metadata-json');}
+      // Separate prose on either side of metadata; never treat cached text as live speech.
+      content+=' ';cursor=stop;marker.lastIndex=stop;
+    }
+    content+=source.slice(cursor);
+    let parsed=blocks[0]||[];
+    if(Array.isArray(parsed?.replies)&&parsed.replies.some(row=>row&&(!row.speaker&&typeof row.name==='string'||!Array.isArray(row.lines)&&typeof row.line==='string'))){
+      warnings.add('cached-reply-field-aliases');const grouped=new Map();
+      for(const row of parsed.replies.slice(0,128)){
+        const speaker=row?.speaker??row?.name,lines=Array.isArray(row?.lines)?row.lines:typeof row?.line==='string'?[row.line]:[];
+        if(typeof speaker!=='string'||!lines.length||!grouped.has(speaker)&&grouped.size>=32)continue;
+        const previous=grouped.get(speaker)||[];grouped.set(speaker,[...previous,...lines.filter(line=>typeof line==='string')].slice(0,8));
+      }
+      parsed={...parsed,replies:[...grouped].map(([speaker,lines])=>({speaker,lines}))};
+    }
+    return {content:content.trim(),parsed,warnings:[...warnings]};
+  }
   function extractDialogue(raw, names, options = {}) {
     const allowed = new Map(names.map(name => [keyOf(name), name]));
     const audible = Array.isArray(options.audibleNames) ? new Set(options.audibleNames.map(keyOf)) : null;
-    const tagged = String(raw || '').match(/\[\[CHARACTER_DIALOGUE\]\]([\s\S]*?)\[\[\/CHARACTER_DIALOGUE\]\]/i);
-    let parsed = [];
-    if (tagged) { try { parsed = JSON.parse(tagged[1]); } catch {} }
+    const packaging=dialoguePackaging(raw),parsed=packaging.parsed;
     const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.spoken) ? parsed.spoken : [];
     let dialogue = rows.slice(0, 32).flatMap(row => {
       const speaker = allowed.get(keyOf(row?.speaker)), line = text(row?.line, MAX_SPEECH_LENGTH);
       return speaker && (!audible || audible.has(keyOf(speaker))) && line ? [{ speaker, line, ...(typeof row.remember === 'string' && row.remember.trim() ? { remember: text(row.remember, 180) } : {}) }] : [];
     });
-    let prose=String(raw || '').replace(/\[\[CHARACTER_DIALOGUE\]\][\s\S]*?(?:\[\[\/CHARACTER_DIALOGUE\]\]|$)/ig, '').trim();
+    let prose=packaging.content;
     if (audible) prose = filterInaudibleSpeech(prose, names, options.audibleNames);
     let { content, spans } = extractSpeechSpans(prose, allowed);
     if (spans.length) dialogue = dialogue.filter(row => !spans.some(span => span.line &&
@@ -644,7 +685,7 @@
     }));
     dialogue = dialogue.map(row => ({ ...row, ...(memories.has(row.speaker) ? { remember: memories.get(row.speaker) } : {}),
       ...(recipients.has(row.speaker) ? { recipient: recipients.get(row.speaker) } : {}) }));
-    return { content, dialogue,
+    return { content, dialogue, ...(packaging.warnings.length?{dialogueProtocolWarnings:packaging.warnings}:{}),
       replies: sanitizeReplies(parsed?.replies, names), exchanges: sanitizeExchanges(parsed?.exchanges, names) };
   }
   function extractSpeechSpans(prose, allowed) {
@@ -745,7 +786,7 @@
     const normalized = value => String(value || '').replace(/\s+/g, ' ').trim();
     const witnesses = (Array.isArray(evidence) ? evidence : []).filter(row => allowed.includes(row?.speaker) && typeof row.line === 'string');
     const vocal = '\\b(?:voice|tone|gaze|eyes|lips|mouth|expression|face)\\b';
-    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed|gives?|gave|shrugs?|shrugged|grunts?|grunted)';
+    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed|gives?|gave|shrugs?|shrugged|grunts?|grunted|steadies|steadied|checks?|checked)';
     // Resolve the narrative subject clause by clause, rather than requiring a
     // name immediately beside every quote or possessive voice/gaze reference.
     function narrativeOwner(prefix, previous) {
@@ -1093,7 +1134,7 @@
   }
   function consoleView(value, previous = {}) {
     const text = String(value || ''), line = label => text.match(new RegExp(`^${label}:[ \\t]*([^\\r\\n]*)`, 'm'))?.[1]?.trim();
-    return { ...previous, roomName: line('Room Name'), roomDescription: line('Room Description'), coordinates: line('Coordinates'),
+    const next = { ...previous, roomName: line('Room Name'), roomDescription: line('Room Description'), coordinates: line('Coordinates'),
       objects: line('Objects in Room') || 'None', objectsInRoomProperties: line('Objects in Room Properties') || 'None',
       exits: line('Exits') || 'None', inventory: line('Inventory') || 'Empty', inventoryProperties: line('Inventory Properties') || 'None',
       silverPieces: Math.max(0, Number(line('Silver Pieces')) || 0), region: line('Region') || 'Tartarus',
@@ -1107,6 +1148,13 @@
       questRequirements: line('Quest Requirements') || '', nextArtifact: line('Next Artifact') || 'None',
       nextBoss: line('Next Boss') || 'None', nextBossRoom: line('Next Boss Room') || 'None', bossCoordinates: line('Boss Room Coordinates') || 'None',
       adjacentRooms: line('Adjacent Rooms') || 'None' };
+    // Partial same-room notifications must not erase the loaded console.
+    if (previous.coordinates && (!line('Coordinates') || line('Coordinates') === previous.coordinates)) {
+      const fields = { roomName:'Room Name',roomDescription:'Room Description',coordinates:'Coordinates',objects:'Objects in Room',objectsInRoomProperties:'Objects in Room Properties',exits:'Exits',inventory:'Inventory',inventoryProperties:'Inventory Properties',silverPieces:'Silver Pieces',region:'Region',patronage:'Patronage',community:'Community',localMissions:'Local Missions',pc:'PC',npcs:'NPCs in Party',monsters:'Monsters in Room',monstersState:'Monsters State',currentQuest:'Current Quest',questProgress:'Quest Progress',questRequirements:'Quest Requirements',nextArtifact:'Next Artifact',nextBoss:'Next Boss',nextBossRoom:'Next Boss Room',bossCoordinates:'Boss Room Coordinates',adjacentRooms:'Adjacent Rooms' };
+      for (const [field,label] of Object.entries(fields)) if (line(label) === undefined && previous[field] !== undefined) next[field] = previous[field];
+      next.puzzle = { inRoom: line('Puzzle in Room') ?? previous.puzzle?.inRoom ?? next.puzzle.inRoom, solution:line('Puzzle Solution') ?? previous.puzzle?.solution ?? next.puzzle.solution };
+    }
+    return next;
   }
   function dialogueRefreshDelay(population, actors, now = Date.now()) {
     const nearby = (actors || []).filter(canAct), names = new Set(nearby.map(actor => actor.name));

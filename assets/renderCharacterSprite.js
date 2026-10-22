@@ -2331,6 +2331,17 @@ function createSemanticCharacterVoxelFrame(character, spriteSpec = null, options
     drawLine(handX + frontDir, centerY, tipZ - 1, handX + frontDir * 3, centerY, tipZ - 3, 1, bladeColor);
   }
 
+  // world1 GENRE_KITS: genre held items / gear at the locked weapon hand, drawn with this function's own fillBox/drawLine.
+  if (spec && spec.genreGear) {
+    const GK = typeof window !== 'undefined' ? (window.HolodekFlags?.GENRE_KITS && window.GenreKits) : (typeof require === 'function' ? require('./genreKits') : null);
+    if (GK) GK.gearHook(spec, { fillBox, drawLine, handX, handZ, centerY, frontDir, color: h => hexToVoxelColor(h, '#808080'),
+      torso: { x0: torsoX0, x1: torsoX1, z0: torsoZ0, z1: torsoZ1 }, head: { x0: headX0, x1: headX1, z0: headZ0, z1: headZ1 } });
+  }
+  if (traits.genreGarb && !['beast','draconic','serpent','spider','ooze','elemental'].includes(traits.bodyPlan)) {
+    const A = typeof window !== 'undefined' ? window.GenreArchitecture : require('./genreArchitecture');
+    const filled=(x,y)=>{const z=size-1-Math.floor(y);if(x<0||x>=size||z<0||z>=size)return false;for(let d=0;d<size;d++)if(voxels[Math.floor(x)+d*size+z*size*size])return true;return false;};
+    A?.drawGarb({grid:size,filled,rect:(x,y,w,h,c)=>fillBox(x,x+w-1,centerY-2,centerY+2,size-y-h,size-y-1,hexToVoxelColor(c,'#808080'))},traits.genreGarb,traits.palette||palette);
+  }
   return { size, voxels, colors };
 }
 
@@ -2958,6 +2969,14 @@ function c64HeldItem(ctx, item, hx, hy, pal, frame, facing = 1) {
   if (!item) return false;
   const type = item.type;
   const ip = c64ItemPalette(item, pal);
+  if (type === 'pistol' || type === 'rifle') {
+    const length=type==='rifle'?7:4;
+    c64R(ctx,hx,hy,1,2,ip.secondary);
+    c64R(ctx,facing<0?hx-length:hx,hy-1,length+1,1,ip.highlight);
+    if(type==='rifle')c64R(ctx,hx-facing,hy,2,1,ip.accent);
+    return true;
+  }
+  if(type==='scanner'){c64R(ctx,hx-1,hy-3,3,4,ip.secondary);c64R(ctx,hx,hy-2,1,2,pal.glow);return true;}
   if (C64_ONE_HANDED.includes(type)) { c64OneHandedWeapon(ctx, item, hx, hy, pal, frame); return true; }
   if (C64_WEAPON_MAP[type]) {
     const len = type === 'greatsword' || type === 'scythe' || type === 'staff' || type === 'spear' || type === 'trident' || type === 'banner' ? 12
@@ -3599,6 +3618,15 @@ function c64VaryPalette(pal, rng, signature) {
   return { ...pal, outfit: nudge(pal.outfit, 0.35), primary: nudge(pal.primary, 0.3), trim: nudge(pal.trim, 0.3), highlight: nudge(pal.highlight, 0.25) };
 }
 
+// world1 GENRE_ARCH: genre garb (wide-brim hats, dusters, gunbelts, visors, goggles...) layered on the drawn body in
+// native cells, before the outline + colour-limit passes so it reads as part of the same sprite.
+function c64GenreGarb(ctx, garb, pal) {
+  const GA = typeof window !== 'undefined' ? window.GenreArchitecture : (typeof require === 'function' ? require('./genreArchitecture') : null);
+  if (!GA || !ctx.getImageData) return false;
+  const size = ctx.canvas.width, grid = Math.floor(size / C64_U), data = ctx.getImageData(0, 0, size, size).data;
+  const filled = (x, y) => x >= 0 && y >= 0 && x < grid && y < grid && data[(x * C64_U + y * C64_U * size) * 4 + 3] > 0;
+  return GA.drawGarb({ grid, filled, rect: (x, y, w, h, c) => { if (w > 0 && h > 0 && x + w > 0 && y + h > 0 && x < grid && y < grid) c64NativeRect(ctx, Math.max(0, x), Math.max(0, y), w, h, c); } }, garb, pal);
+}
 function c64NativeDetails(ctx,t,pal){
   const geometry=ctx._c64Geometry;if(!geometry||geometry.scale<=1.05)return;
   const size=ctx.canvas.width,grid=size/C64_U,data=ctx.getImageData(0,0,size,size).data;
@@ -3639,6 +3667,7 @@ function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
   else if (plan === 'ooze') c64Ooze(ctx, spec, t, pal, fr, rng);
   else if (plan === 'elemental') c64Elemental(ctx, spec, t, pal, fr, rng);
   else c64Humanoid(ctx, spec, t, pal, fr, rng);
+  if (t.genreGarb && !['beast','draconic','serpent','spider','ooze','elemental'].includes(plan)) c64GenreGarb(ctx, t.genreGarb, pal);
   c64NativeDetails(ctx,t,pal);
   if (options.outline !== false) c64OutlinePass(ctx, pal.outline, true);
   c64LimitColours(ctx, pal);

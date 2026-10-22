@@ -6,7 +6,7 @@
   function observer() {
     const ctx = root.getDungeonLifeContext?.();
     if (!ctx?.dungeon || !ctx.player) throw Error('The room is not ready.');
-    return { runId: root.dungeonRunId, geoKey: ctx.dungeon.geoKey, player: ctx.player, objectView: root.ObjectDiscovery?.snapshot(ctx.dungeon),
+    return { runId: root.dungeonRunId, geoKey: ctx.dungeon.geoKey, player: { ...ctx.player }, objectView: root.ObjectDiscovery?.snapshot(ctx.dungeon),
       actors: ctx.actors.map(a => ({ name: a.name, mazeX: a.mazeX, mazeY: a.mazeY, mazePoint: a.mazePoint, discoveryRevision: a.discoveryRevision })) };
   }
   async function post(path, body) {
@@ -20,13 +20,24 @@
   function sameRoom(ctx) { return ctx.runId === root.dungeonRunId && ctx.geoKey === root.currentDungeon?.geoKey; }
   async function transact(request) {
     const ctx = observer();
-    await root.prepareEconomyState?.();
     if (request.kind === 'take' && !root.ObjectDiscovery?.isVisible(root.currentDungeon, request.item)) throw Error('That object is no longer in view.');
+    const selected = request.kind === 'take' ? root.currentDungeon.sceneObjects?.find(item => key(item.name) === key(request.item)) : null;
+    const placement = selected ? { x:selected.x, y:selected.y } : null;
+    // Capture the valid browser observation before persistence/network waits.
+    await root.prepareEconomyState?.();
+    if (!sameRoom(ctx)) throw Error('The room or game changed.');
     const balance = await post('/economy/view', ctx);
     if (balance.economyResult && sameRoom(ctx)) await root.applyRealtimeCombatResult?.(balance.economyResult);
     if (!sameRoom(ctx)) throw Error('The room or game changed.');
-    if (request.kind === 'take' && !root.ObjectDiscovery?.isVisible(root.currentDungeon, request.item)) throw Error('That object is no longer in view.');
-    const event = await post('/economy/action', { ...observer(), ...request, revision: balance.revision,
+    if (Array.isArray(balance.sceneObjects)) {
+      root.currentDungeon.sceneObjects = balance.sceneObjects;
+      root.renderDungeonView?.();
+    }
+    if (placement) {
+      const current = root.currentDungeon.sceneObjects?.find(item => key(item.name) === key(request.item));
+      if (!current || current.x !== placement.x || current.y !== placement.y) throw Error('That object moved. Approach it again before taking it.');
+    }
+    const event = await post('/economy/action', { ...(request.kind === 'take' ? ctx : observer()), ...request, revision: balance.revision,
       nonce: root.crypto?.randomUUID?.() || 'transaction:' + Date.now() + ':' + Math.random().toString(36).slice(2) });
     if (sameRoom(ctx)) await root.applyRealtimeCombatResult?.(event);
     return event;

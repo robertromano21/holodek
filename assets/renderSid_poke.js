@@ -224,7 +224,9 @@ const FCFG = deriveFilterGlobal(vT);
 const hx  = (n)=> (n&0xFF).toString(16).padStart(2,'0');
 const IMM = (n)=> '#$'+hx(n);
 const LIT = (n)=> '$'+hx(n);
-const bytes  = (arr)=>arr.map(x=>LIT(x)).join(',');
+// xa limits source-line length; long suites must split data without changing addresses.
+const byteList = tokens => tokens.map((value, index) => (index ? index % 16 ? ',' : '\n  .byte ' : '') + value).join('');
+const bytes  = (arr)=>byteList(arr.map(x=>LIT(x)));
 const bytesFF= (arr)=>arr.map(n=>n===255?'$ff':LIT(n)).join(',');
 
 // ---------- shared music tick ----------
@@ -504,7 +506,7 @@ vib_dir:  .byte 0,1,1,0,0,2,2,0
 ${[0,1,2].map(i=>`v${i}_order: .byte ${bytes(ORDERS[i].concat([0xFF]))}`).join('\n')}
 
 ; pattern pointer table
-${[0,1,2].map(i=>`v${i}_pat_lo: .byte ${VOICE_PATS[i].map(k=>'<pat'+k).join(',')}\nv${i}_pat_hi: .byte ${VOICE_PATS[i].map(k=>'>pat'+k).join(',')}`).join('\n')}
+${[0,1,2].map(i=>`v${i}_pat_lo: .byte ${byteList(VOICE_PATS[i].map(k=>'<pat'+k))}\nv${i}_pat_hi: .byte ${byteList(VOICE_PATS[i].map(k=>'>pat'+k))}`).join('\n')}
 
 ; patterns - 4 bytes per step - freq index or FF rest - ticks - arp shape - wave override - FE ends
 ${PAT_BYTES.map((b,k)=>`pat${k}: .byte ${bytes(b)}`).join('\n')}

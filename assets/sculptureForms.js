@@ -23,7 +23,7 @@
   }
   function normalize(s={}) {
     const deity=Iconography.name(s.deity) || (!(s.race||s.className||s.patron)&&Iconography.find(s.label)),canon=Iconography.pantheon[deity];
-    const person=s.race||s.className?People.characterSpec(s):null,form=canon?.form||(s.race?People.form(s):s.form)||'human';
+    const person=s.race||s.className?People.characterSpec(s):null,form=s.aspect==='avatar'&&canon?'human':canon?.form||(s.race?People.form(s):s.form)||'human';
     const patron=s.className?People.defaults(s).patron:null;
     return {...s,form,...(deity?{deity}:{}),...(patron?{patron}:{}),
       attribute:s.attribute??canon?.attribute??People.defaults(s).attribute,
@@ -45,7 +45,8 @@
       if(Iconography.name(s.deity)&&Object.keys(person).length)throw Error('Invalid mortal overrides on a canonical deity.');
       const normalized=normalize({label:s.label.trim(),pose:s.pose,head:s.head,robe:s.robe,attribute:s.attribute,...person,
         ...(s.form?{form:s.form}:{}),...(s.deity?{deity:s.deity}:{}),...(s.motif?{motif:s.motif}:{}),...(s.workmanship?{workmanship:s.workmanship}:{}),
-        ...(s.sculptureStyle?{sculptureStyle:s.sculptureStyle}:{})});
+        ...(s.sculptureStyle?{sculptureStyle:s.sculptureStyle}:{}),
+        ...(s.aspect==='avatar'?{aspect:'avatar'}:{}),...(s.dragonVariety&&typeof s.dragonVariety==='object'?{dragonVariety:{...s.dragonVariety}}:{})});
       // Saved definitions use their serialized order in the original mechanism hash.
       // Preserve that order after validating values, including an originally inferred form.
       if(typeof s.wings==='string'&&typeof s.hair==='string'){
@@ -56,12 +57,20 @@
       return normalized;
     });
   }
+  // world1: every dragon deity gets a fixed, distinct carved variety so statues of different gods never look alike.
+  function dragonVariety(deity){
+    const n=Characters.hashString('dragon-variety:'+deity);
+    return{horns:n%4,hornStyle:['straight','swept','curled'][(n>>>2)%3],crest:3+(n>>>4)%6,crestStyle:['spines','frill'][(n>>>7)%2],
+      coils:(n>>>8)%3,ridges:!!((n>>>10)%2),wingSpan:['spread','raised','folded'][(n>>>11)%3],pose:['coiled','rearing','couchant'][(n>>>13)%3]};
+  }
   function visualSpec(raw,enabled=true,seed=''){
     if(!raw)return raw;
     const result={...raw};
     if(!enabled||raw.workmanship==='classic'){delete result.sculptureStyle;return result;}
     result.workmanship='carved';
     result.sculptureStyle=raw.sculptureStyle||styles[Characters.hashString(raw.label||String(seed))%styles.length];
+    if(raw.world1Variety&&raw.form==='dragon'&&raw.deity&&!raw.dragonVariety)result.dragonVariety=dragonVariety(raw.deity);
+    delete result.world1Variety;
     return result;
   }
   function build(size,seed,raw={}){
@@ -195,6 +204,6 @@
       ctx.imageSmoothingEnabled=false;ctx.drawImage(image,box.x,box.y,box.width,box.height);
     }
   }
-  return{poses,heads,robes,attributes,forms,styles,altarTypes,validateShrines,normalize,validate,visualSpec,build,characterSpec,paintFigure,
+  return{poses,heads,robes,attributes,forms,styles,altarTypes,validateShrines,normalize,validate,visualSpec,dragonVariety,build,characterSpec,paintFigure,
     toolbox:()=>({poses,heads,robes,attributes,forms,workmanship:['classic','carved'],sculptureStyle:styles,altarTypes,deities:Iconography.toolbox(),people:People.toolbox()})};
 });

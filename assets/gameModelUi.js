@@ -2,8 +2,8 @@
   'use strict';
   let panel, select, status, apply, refresh, details, data, serial = 0, busy = false, controller;
   function describe() {
-    const row = data?.models.find(row => row.id === select.value);
-    details.textContent = row ? row.description + '. Reasoning off.' + (row.shutdownDate ? ' Scheduled retirement: ' + row.shutdownDate + '.' : '') :
+    const row = (data?.all || data?.models || []).find(row => row.id === select.value);
+    details.textContent = row ? (row.status && row.status !== 'ready' ? '[' + row.status + '] ' : '') + (row.note ? row.note + '. ' : '') + row.description + (row.id === 'groq-gpt-oss-120b' || row.id === 'gpt-oss-20b' || row.id === 'holodek-1' ? '. Reasoning low.' : '. Reasoning off.') + (row.shutdownDate ? ' Scheduled retirement: ' + row.shutdownDate + '.' : '') :
       'Restores the original per-task models (primarily GPT-4.1 Mini and GPT-4o Mini).';
     apply.disabled = busy || !data || select.value === data.current.id;
   }
@@ -17,11 +17,13 @@
       const option = document.createElement('option'); option.value = id; option.textContent = name; option.disabled = disabled; select.appendChild(option);
     };
     add('original', 'Original settings (restore)');
-    for (const row of data.models) add(row.id, row.name + (row.shutdownDate ? ' (retiring ' + row.shutdownDate + ')' : ''));
-    if (data.current.id !== 'original' && !data.models.some(row => row.id === data.current.id)) add(data.current.id, data.current.name + ' (access not verified)', true);
+    const order = { local: 0, groq: 1, xai: 2, openai: 3 }, group = { local: 'Local', openai: 'OpenAI', xai: 'xAI', groq: 'Groq' };
+    const all = [...(data.all || data.models)].sort((a, b) => (order[a.provider || 'openai'] ?? 3) - (order[b.provider || 'openai'] ?? 3)); // Local, xAI, OpenAI
+    for (const row of all) add(row.id, (group[row.provider] ? group[row.provider] + ': ' : '') + row.name + (row.status && row.status !== 'ready' ? ' (' + row.status + ')' : '') + (row.shutdownDate ? ' (retiring ' + row.shutdownDate + ')' : ''));
+    if (data.current.id !== 'original' && !all.some(row => row.id === data.current.id)) add(data.current.id, data.current.name + ' (access not verified)', true);
     select.value = data.current.id;
     document.getElementById('open-game-model-button').textContent = 'Game Model: ' + data.current.name;
-    status.textContent = data.warning || 'Current: ' + data.current.name + '. Reasoning off.';
+    status.textContent = data.warning || 'Current: ' + data.current.name + ((data.current.id === 'gpt-oss-20b' || data.current.id === 'holodek-1' || data.current.id === 'groq-gpt-oss-120b') ? '. Reasoning low.' : '. Reasoning off.') + (data.startupNote && data.current.revision <= 1 ? ' ' + data.startupNote : '') + (data.localWarning ? ' ' + data.localWarning : '');
     describe();
   }
   async function request(url, options) {
@@ -35,7 +37,7 @@
     } finally { clearTimeout(timer); }
   }
   async function load(recheck = false) {
-    const token = ++serial; setBusy(true); status.textContent = 'Checking available non-reasoning models...';
+    const token = ++serial; setBusy(true); status.textContent = 'Checking available models...';
     try {
       const value = await request('/game-models' + (recheck ? '?refresh=1' : ''), {});
       if (token === serial && panel.open) render(value);
@@ -44,6 +46,10 @@
   }
   async function save() {
     if (busy || !data || apply.disabled) return;
+    const row = (data.all || []).find(r => r.id === select.value);
+    if (row?.status === 'needs key') { // masked key prompt, then select
+      if (!root.ModelSelectUi?.askKey || !(await root.ModelSelectUi.askKey(row.provider, panel))) { status.textContent = 'No key saved; the current model is unchanged.'; return; }
+      const id = select.value; await load(true); select.value = id; }
     const token = ++serial; setBusy(true); status.textContent = 'Applying model for the next action...';
     try {
       const value = await request('/game-models', { method: 'POST', headers: { 'Content-Type': 'application/json' },

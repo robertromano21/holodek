@@ -1,0 +1,115 @@
+{
+  "source": "Observed live Luna room 2026-10-22; no player state.",
+  "plan": {
+    "title": "Names Beneath Ash",
+    "rationale": "A spare procession recalls names erased from the funeral floor. Its melody rises in a clear arc, retreats, and returns against a separate answering phrase.",
+    "style": "modal_procession",
+    "key": "D",
+    "bpm": 104,
+    "suiteForm": "single_theme",
+    "leadPatch": "flute_tri",
+    "bassPatch": "round_tri",
+    "arpPatch": "soft_pulse",
+    "mood": "underworld",
+    "bassStyle": "pedal",
+    "arpStyle": "pendulum",
+    "phraseForm": "processional",
+    "register": "middle",
+    "sequenceStep": 1,
+    "picardy": false,
+    "leitmotif": "vary",
+    "motifRhythm": [
+      4,
+      8,
+      4,
+      8,
+      4
+    ],
+    "motifContour": [
+      0,
+      2,
+      4,
+      2,
+      0
+    ],
+    "answerRhythm": [
+      8,
+      4,
+      4,
+      8,
+      4
+    ],
+    "contrastRhythm": [
+      4,
+      4,
+      8,
+      4,
+      8
+    ],
+    "contrastContour": [
+      0,
+      1,
+      3,
+      2,
+      1
+    ],
+    "answerTransform": "transpose_up",
+    "contrastTransform": "fragment_sequence",
+    "developmentPath": [
+      "transpose_up",
+      "retrograde",
+      "invert",
+      "fragment_sequence"
+    ],
+    "arrangementArc": "long_journey",
+    "performance": {
+      "groove": "clave",
+      "harmonicRhythm": "two_bars",
+      "bassVariation": "answering",
+      "rhythmicDevelopment": [
+        "displace",
+        "rotate",
+        "fragment_rest"
+      ]
+    },
+    "extensions": {
+      "profile": "reed_resonance",
+      "motion": "breath",
+      "depth": 0.15,
+      "transients": "off"
+    },
+    "themes": [],
+    "ambience": [
+      {
+        "tag": "wind",
+        "level": 0.18
+      },
+      {
+        "tag": "sandstorm",
+        "level": 0.12
+      }
+    ],
+    "scale": "dorian",
+    "progression": "quest_minor",
+    "contrastProgression": "dorian_vamp",
+    "texture": "counterpoint",
+    "percussion": "none",
+    "frameArp": true
+  },
+  "rejectedContours": [
+    [
+      0,
+      1,
+      2,
+      1,
+      0
+    ],
+    [
+      0,
+      1,
+      3,
+      2,
+      0
+    ]
+  ]
+}

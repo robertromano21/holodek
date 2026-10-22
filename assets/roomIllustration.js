@@ -1,9 +1,13 @@
 (function(root, factory) {
-  const api = factory();
+  const node = typeof module === 'object' && module.exports;
+  const api = factory(node ? require('./designCatalog') : root.DesignCatalog,
+    name => node ? require('../retort/worldFlags').on(name) : root.HolodekFlags?.[name] === true,
+    node ? require('./genreExpansion') : root.GenreExpansion);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.RoomIllustration = api;
-})(typeof window === 'object' ? window : globalThis, function() {
+})(typeof window === 'object' ? window : globalThis, function(Catalog, flagFn, Expansion) {
   'use strict';
+  const flag = flagFn || (() => false);
   const width = 320, height = 200;
   const palette = ['#000000', '#ffffff', '#883932', '#67b6bd', '#8b3f96', '#55a049', '#40318d', '#d6cf6a',
     '#a86432', '#68451d', '#bf6c78', '#424242', '#777777', '#a0cf83', '#7869c4', '#aaaaaa'];
@@ -11,6 +15,10 @@
     'tree', 'roots', 'pool', 'river', 'crystal', 'stalactite', 'statue', 'grave', 'obelisk', 'brazier',
     'fresco', 'mosaic', 'rubble', 'grass', 'mist', 'sun', 'moon', 'cloud', 'mountain', 'dunes', 'tower', 'citadel', 'road', 'stars'];
   const patterns = ['plain', 'stone', 'sand', 'tiles', 'cracked', 'ripples', 'stipple'];
+  // world1 ART_CATALOG: APPEND set pieces; existing kinds keep their exact painters. ROOM_PIXEL: crisp low-res dithered finish.
+  const catalogOn = !!Catalog && flag('ART_CATALOG'), pixelOn = !!Catalog && flag('ROOM_PIXEL');
+  const catalogKinds = catalogOn ? Catalog.ILLUSTRATION_KINDS.filter(k => !kinds.includes(k)) : [], allKinds = [...kinds, ...catalogKinds,
+    ...(Expansion && flag('ARCHITECTURE_EXPANSION') ? Object.keys(Expansion.SHAPES) : [])];
   const color = c => /^#[0-9a-f]{6}$/i.test(c) || Number.isInteger(c) && c >= 0 && c < palette.length;
   function description(room, fallback = '') {
     return [room?.description, room?.roomDescription, room?.sceneSpec?.source?.description, fallback].find(value =>
@@ -26,14 +34,16 @@
     if (raw.ground === raw.shadow || raw.stone === raw.shadow || raw.light === raw.shadow) throw Error('Room art needs distinct material, light and shadow colors.');
     if (!Array.isArray(raw.layers) || raw.layers.length < 6 || raw.layers.length > 36) throw Error('Room art needs 6..36 component layers.');
     const layers = raw.layers.map((p, i) => {
-      if (!p || !kinds.includes(p.kind) || !integer(p.x, -80, 319) || !integer(p.y, -60, 199) ||
+      if (!p || !allKinds.includes(p.kind) || !integer(p.x, -80, 319) || !integer(p.y, -60, 199) ||
           !integer(p.w, 3, 400) || !integer(p.h, 3, 260) || p.x + p.w <= 0 || p.y + p.h <= 0 ||
           !color(p.color) || !color(p.shade) || !color(p.detail) ||
           !integer(p.count, 1, 10) || !patterns.includes(p.pattern)) throw Error(`Invalid room art component ${i}.`);
       return Object.fromEntries(['kind', 'x', 'y', 'w', 'h', 'color', 'shade', 'detail', 'count', 'pattern'].map(k => [k, p[k]]));
     });
+    const picks = catalogOn ? Object.fromEntries([['palette', Object.keys(Catalog.PALETTES)], ['lighting', Catalog.LIGHTING], ['composition', Catalog.COMPOSITIONS], ['motif', Catalog.ORNAMENTS]]
+      .map(([k, list]) => [k, Catalog.sanitizeChoice(raw[k], list)]).filter(([, v]) => v)) : {};
     return { view: raw.view, horizon: raw.horizon, vanishing: raw.vanishing,
-      ...Object.fromEntries(colors.map(k => [k, raw[k]])), groundPattern: raw.groundPattern, layers };
+      ...Object.fromEntries(colors.map(k => [k, raw[k]])), groundPattern: raw.groundPattern, layers, ...picks };
   }
   function hash(s) { let h = 2166136261; for (const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
   function paint(ctx, raw, seed = 1) {
@@ -142,8 +152,68 @@
       poly([[0, 0], [60, plan.horizon], [0, 170]], plan.shadow);
       poly([[320, 0], [260, plan.horizon], [320, 170]], plan.shadow);
     }
+    // ---- world1 ART_CATALOG painters (built from the same primitives) ----
+    const band = (x, y, w, h, motif, c, s, d) => { rect(x, y, w, h, s); if (!Catalog) return;
+      const m = Catalog.ORNAMENTS.includes(motif) ? motif : plan.motif || 'meander_field';
+      for (let yy = 1; yy < h - 1; yy++) for (let xx = 0; xx < w; xx++) { const v = Catalog.field(m, xx, yy * 64 / h, 12); if (v) rect(x + xx, y + yy, 1, 1, v === 2 ? d : c); }
+      line(x, y, x + w - 1, y, d); line(x, y + h - 1, x + w - 1, y + h - 1, 0); };
+    function extraKind(p) {
+      const { x, y, w, h, color: c, shade: s, detail: d, count, pattern } = p, cx = x + w / 2;
+      switch (p.kind) {
+        case 'pyramid_stepped': case 'ziggurat': { const n = Math.max(3, count + 2);
+          for (let i = 0; i < n; i++) { const f = 1 - i / n, ww = w * f, hh = h / n; rect(cx - ww / 2, y + h - (i + 1) * hh, ww, hh + 1, i % 2 ? c : s);
+            rect(cx + ww * .1, y + h - (i + 1) * hh, ww * .4, hh, s); line(cx - ww / 2, y + h - (i + 1) * hh, cx + ww / 2, y + h - (i + 1) * hh, d); }
+          rect(cx - w * .05, y + h * .12, w * .1, h * .88, d); for (let yy = y + h * .14; yy < y + h; yy += 3) line(cx - w * .05, yy, cx + w * .05, yy, s);
+          if (p.kind === 'ziggurat') rect(cx - w * .08, y, w * .16, h / n, c); break; }
+        case 'pyramid_smooth': poly([[x, y + h], [cx, y], [x + w, y + h]], c, 0); poly([[cx, y], [x + w, y + h], [cx + w * .1, y + h]], s);
+          for (let i = 1; i < 10; i++) { const f = i / 10; line(cx - w / 2 * f, y + h * f, cx + w * .1 * f, y + h * f, s); }
+          rect(cx - 3, y + h * .62, 6, 8, 0); line(cx - 1, y, cx + 1, y + 3, d); break;
+        case 'colonnade': for (let i = 0; i < Math.max(3, count + 2); i++) column(x + i * (w - 8) / Math.max(2, count + 1), y + 6, 8, h - 6, c, s, d); rect(x - 2, y, w + 4, 6, s); line(x - 2, y, x + w + 2, y, d); break;
+        case 'cornice_band': case 'dado_band': case 'frieze_band': band(x, y, w, Math.max(4, h), plan.motif, c, s, d); break;
+        case 'coffered_ceiling': for (let j = 0; j < 3; j++) for (let i = 0; i < Math.max(3, count + 2); i++) { const cw = w / Math.max(3, count + 2), ch = h / 3;
+          rect(x + i * cw, y + j * ch, cw - 1, ch - 1, s); rect(x + i * cw + 2, y + j * ch + 2, cw - 5, ch - 5, c); rect(x + i * cw + cw / 2 - 1, y + j * ch + ch / 2 - 1, 2, 2, d); } break;
+        case 'vault': case 'dome': for (let i = 0; i < 6; i++) ellipse(x + i * 2, y + i * 2, w - i * 4, h * 2 - i * 4, i % 2 ? c : s); rect(x, y + h, w, h, plan.sky === undefined ? s : 0); rect(x - 1, y + h - 2, w + 2, 3, d); break;
+        case 'tracery_window': arch(x, y, w, h, c, s, d); rect(x + w * .15, y + h * .45, w * .7, h * .5, plan.light); line(cx, y + h * .2, cx, y + h, s);
+          for (const [a, b] of [[.35, .3], [.65, .3], [.5, .18]]) ellipse(x + w * a - 3, y + h * b, 6, 6, plan.light); break;
+        case 'lattice_screen': rect(x, y, w, h, s); for (let i = 0; i < w; i += 5) line(x + i, y, x + i, y + h - 1, c); for (let j = 0; j < h; j += 5) line(x, y + j, x + w - 1, y + j, c);
+          for (let i = 0; i < w; i += 10) line(x + i, y, x + i + 10, y + h, d); break;
+        case 'tiered_roof': for (let i = 0; i < Math.max(2, count); i++) { const f = 1 - i * .22, yy = y + h - (i + 1) * h / Math.max(2, count);
+          poly([[cx - w / 2 * f - 4, yy + 6], [cx, yy - 4], [cx + w / 2 * f + 4, yy + 6], [cx + w / 2 * f, yy + 10], [cx - w / 2 * f, yy + 10]], c, s); rect(cx - w * f * .35, yy + 10, w * f * .7, h / Math.max(2, count) - 10, s); } break;
+        case 'terrace_steps': for (let i = 0; i < count + 3; i++) { const yy = y + i * h / (count + 3); rect(x + i * 3, yy, w - i * 6, h / (count + 3) + 1, i % 2 ? c : s); line(x + i * 3, yy, x + w - i * 3, yy, d); } break;
+        case 'aqueduct': for (let i = 0; i < Math.max(2, count); i++) arch(x + i * w / Math.max(2, count), y + h * .2, w / Math.max(2, count) + 1, h * .8, c, s, d); rect(x, y, w, h * .2, s); line(x, y + 2, x + w, y + 2, plan.accent); break;
+        case 'guardian_beast': case 'sphinx_like': rect(x, y + h * .75, w, h * .25, s); poly([[x + w * .1, y + h * .75], [x + w * .2, y + h * .4], [x + w * .7, y + h * .4], [x + w * .9, y + h * .75]], c, s);
+          poly([[x + w * .6, y + h * .45], [x + w * .65, y], [x + w * .9, y + h * .1], [x + w * .88, y + h * .45]], c, s); rect(x + w * .72, y + h * .12, 2, 2, d); break;
+        case 'banner': rect(x, y, 2, h, s); poly([[x + 2, y + 2], [x + w, y + 2], [x + w, y + h * .8], [x + w / 2 + 1, y + h * .65], [x + 2, y + h * .8]], c, s); rect(x + w * .4, y + h * .25, w * .3, h * .2, d); break;
+        case 'lantern': for (let i = 0; i < 14; i++) rect(cx - w + random() * w * 2, y + random() * h * 1.2, 1, 1, plan.light); line(cx, y, cx, y + h * .3, s); rect(x, y + h * .3, w, h * .6, s); rect(x + 1, y + h * .35, w - 2, h * .5, plan.light); break;
+        case 'bookshelf': rect(x, y, w, h, s); for (let j = 0; j < Math.max(3, count); j++) { const yy = y + 2 + j * (h - 4) / Math.max(3, count), sh = (h - 4) / Math.max(3, count) - 2;
+          for (let xx = x + 2; xx < x + w - 2; xx += 3) rect(xx, yy + (hash(xx + ':' + j) % 3), 2, sh - (hash(xx + ':' + j) % 3), [c, d, plan.accent][hash(j + ':' + xx) % 3]); line(x, yy + sh, x + w, yy + sh, 0); } break;
+        case 'sarcophagus': case 'altar': rect(x, y + h * .3, w, h * .7, c); rect(x - 2, y + h * .2, w + 4, h * .15, s); band(x + 3, y + h * .45, w - 6, h * .3, plan.motif, s, c, d); break;
+        case 'fountain': case 'well': ellipse(x, y + h * .6, w, h * .4, s); ellipse(x + 3, y + h * .62, w - 6, h * .28, plan.accent); rect(cx - 2, y + h * .1, 4, h * .55, c);
+          if (p.kind === 'fountain') for (let i = 0; i < 12; i++) rect(cx - w * .3 + random() * w * .6, y + random() * h * .6, 1, 2, plan.light); else rect(x + 2, y, w - 4, 3, s); break;
+        case 'gate': rect(x, y, w * .18, h, c); rect(x + w * .82, y, w * .18, h, c); rect(x, y, w, h * .15, s); for (let i = x + w * .2; i < x + w * .8; i += 4) line(i, y + h * .15, i, y + h, s); break;
+        case 'canopy': case 'tent': poly([[x, y + h * .5], [cx, y], [x + w, y + h * .5]], c, s); for (let i = 0; i < 4; i++) line(x + i * w / 3, y + h * .5, x + i * w / 3, y + h, s); break;
+        case 'dragon_skull': ellipse(x, y, w * .6, h * .6, c); poly([[x + w * .5, y + h * .2], [x + w, y + h * .45], [x + w * .5, y + h * .6]], c, s); rect(x + w * .2, y + h * .2, w * .12, h * .12, 0);
+          for (let i = 0; i < 5; i++) line(x + w * (.55 + i * .08), y + h * .5, x + w * (.55 + i * .08), y + h * .62, d); line(x + w * .2, y, x - w * .1, y - h * .3, s); break;
+        case 'bones': for (let i = 0; i < count * 3; i++) { const xx = x + random() * w, yy = y + random() * h; line(xx, yy, xx + 4 + random() * 6, yy + (random() - .5) * 4, i % 2 ? c : d); } break;
+        case 'sandstorm': case 'fog_bank': for (let i = 0; i < 40 + count * 20; i++) { const yy = y + random() * h; rect(x + random() * w, yy, 4 + random() * 22, 1, i % 3 ? c : d); } break;
+        case 'light_rays': for (let i = 0; i < count + 3; i++) { const xx = x + i * w / (count + 3); for (let yy = 0; yy < h; yy += 2) rect(xx + yy * .35, y + yy, 2, 1, i % 2 ? c : d); } break;
+        case 'chasm': poly([[x, y], [x + w, y], [x + w * .8, y + h], [x + w * .2, y + h]], 0, s); for (let i = 0; i < 6; i++) line(x + w * .1 + i * w * .14, y, x + w * .25 + i * w * .1, y + h, s); break;
+        case 'lava': rect(x, y, w, h, s); for (let i = 0; i < w * h / 12; i++) rect(x + random() * w, y + random() * h, 3, 1, i % 3 ? c : d); break;
+        case 'waterfall': rect(x, y, w, h, s); for (let i = 0; i < w; i += 2) line(x + i, y, x + i, y + h, i % 4 ? c : d); ellipse(x - 4, y + h - 4, w + 8, 8, d); break;
+        case 'palm': line(cx, y + h, cx + w * .1, y + h * .2, s); line(cx + 1, y + h, cx + w * .1 + 1, y + h * .2, s); for (let i = 0; i < 6; i++) { const a = Math.PI + i * Math.PI / 5; line(cx + w * .1, y + h * .2, cx + w * .1 + Math.cos(a) * w * .5, y + h * .2 + Math.sin(a) * -h * .15 + h * .1, c); } break;
+        case 'cypress': ellipse(x, y, w, h, s); ellipse(x + 2, y + 2, w - 5, h - 4, c); line(cx, y + h * .2, cx, y + h, d); break;
+        case 'balustrade': rect(x, y, w, 3, s); rect(x, y + h - 3, w, 3, s); for (let i = x + 2; i < x + w - 2; i += 5) { ellipse(i, y + 3, 4, h - 6, c); } break;
+        case 'throne': rect(x + w * .1, y, w * .8, h * .6, s); rect(x, y + h * .5, w, h * .2, c); rect(x + w * .1, y + h * .7, w * .2, h * .3, c); rect(x + w * .7, y + h * .7, w * .2, h * .3, c); rect(cx - 3, y + h * .15, 6, 6, plan.accent); break;
+        case 'scaffold': for (let i = 0; i <= count; i++) line(x + i * w / Math.max(1, count), y, x + i * w / Math.max(1, count), y + h, c); for (let j = 0; j < 4; j++) line(x, y + j * h / 4, x + w, y + j * h / 4, s); line(x, y, x + w, y + h, d); break;
+        case 'campfire': for (let i = 0; i < 4; i++) line(x + i * w / 4, y + h, x + w - i * w / 4, y + h - 3, s); for (let i = 0; i < count + 4; i++) poly([[cx - w * .25 + random() * w * .5, y + h - 2], [cx + (random() - .5) * w * .3, y + random() * h * .6], [cx + w * .1, y + h - 2]], i % 2 ? c : d); break;
+      }
+    }
     for (const p of plan.layers) {
       const { x, y, w, h, color: c, shade: s, detail: d, count, pattern } = p;
+      if (flag('ARCHITECTURE_EXPANSION') && Expansion?.has(p.kind)) {
+        Expansion.paint(ctx,p.kind,x,y,w,h,[typeof c==='number'?palette[c]:c,typeof s==='number'?palette[s]:s,typeof d==='number'?palette[d]:d]);
+        continue;
+      }
       switch (p.kind) {
         case 'cloud': {
           const lobes = [];
@@ -292,9 +362,31 @@
           for (let i = 0; i < count * 8; i++) { const xx = x + random() * w, yy = y + random() * h; line(xx, yy, xx + (random() - .5) * 5, yy - 2 - random() * 4, i % 3 ? c : d); } break;
         case 'rubble':
           for (let i = 0; i < count * 3; i++) { const xx = x + random() * w, yy = y + random() * h, ww = 2 + random() * Math.min(10, w / 3); poly([[xx, yy], [xx + ww, yy - 2], [xx + ww + 2, yy + 3], [xx - 1, yy + 3]], i % 2 ? c : s, 0); rect(xx + 1, yy, ww - 1, 1, d); } break;
+        default: if (catalogOn) extraKind(p); break;
       }
+    }
+    if (catalogOn && plan.lighting) lightingPass(ctx, plan);
+    if (pixelOn && plan.palette && ctx.getImageData) { // only plans that chose a catalog palette; older plans render exactly as before
+      const img = ctx.getImageData(0, 0, width, height), cols = plan.palette ? Catalog.PALETTES[plan.palette] : [plan.sky, plan.ground, plan.stone, plan.shadow, plan.light, plan.accent];
+      Catalog.pixelate(img.data, width, height, cols, 2); ctx.putImageData(img, 0, 0);
     }
     return ctx.canvas;
   }
-  return { width, height, palette, kinds, patterns, validate, hash, paint, description };
+  function lightingPass(ctx, plan) {
+    const img = ctx.getImageData(0, 0, width, height), d = img.data, L = plan.lighting;
+    const source = { shaft_from_above: [160, 0], golden_hour: [300, plan.horizon], moonlit: [60, 20], backlit_silhouette: [160, plan.horizon], lava_underglow: [160, 200],
+      crystal_glow: [160, 150], candle_pools: [80, 160], twin_braziers: [60, 150], torch_flicker: [40, 110], chandelier_glow: [160, 30], lamp_reading: [120, 120] }[L] || [160, 90];
+    const tint = { golden_hour: [1.12, 1, .82], moonlit: [.8, .88, 1.15], lava_underglow: [1.2, .85, .7], crystal_glow: [.85, 1.05, 1.15], sandstorm_haze: [1.08, 1, .8],
+      storm_flash: [.9, .95, 1.1], aurora_veil: [.85, 1.1, 1.05], dappled_canopy: [.92, 1.08, .88], fog_bank: [.95, .97, 1] }[L] || [1.06, 1, .92];
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const k = (y * width + x) * 4, dist = Math.hypot(x - source[0], (y - source[1]) * 1.3) / 260;
+      let f = Math.max(.55, 1.25 - dist);
+      if (L === 'dappled_canopy') f *= (hash(`${x >> 3},${y >> 3}`) % 5) ? 1 : .8;
+      if (L === 'twin_braziers') f = Math.max(f, 1.25 - Math.hypot(x - 260, (y - 150) * 1.3) / 260);
+      if (L === 'fog_bank' || L === 'sandstorm_haze') { const m = Math.min(.45, (y - plan.horizon + 40) / 220); if (m > 0) for (let i = 0; i < 3; i++) d[k + i] = d[k + i] * (1 - m) + 200 * m; }
+      for (let i = 0; i < 3; i++) d[k + i] = Math.min(255, d[k + i] * f * tint[i]);
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+  return { width, height, palette, kinds, catalogKinds, allKinds, patterns, validate, hash, paint, description };
 });

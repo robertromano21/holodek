@@ -36,7 +36,11 @@
     };
     button.addEventListener('click', () => root.DungeonExplorationMap?.toggle());
     journal?.addEventListener('click', () => root.AdventureJournalUi?.toggle());
-    spellbook?.addEventListener('click', () => root.PartySpellbookUi?.open());
+    let spellTap = null;
+    spellbook?.addEventListener('click', () => {
+      if (spellTap !== null) { clearTimeout(spellTap); spellTap = null; root.PartySpellbookUi?.open(); }
+      else spellTap = setTimeout(() => { spellTap = null; root.PartySpellbookUi?.openQuick(); }, 280);
+    });
     position(); root.addEventListener('resize', position);
     if (root.ResizeObserver) {
       const observer = new root.ResizeObserver(position);

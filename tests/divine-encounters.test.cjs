@@ -5,6 +5,7 @@ const I = require('../assets/dungeonInhabitants'), E = require('../retort/econom
 const S = require('../retort/questScenes'), Q = require('../retort/questProgress'), Give = require('../retort/itemTransfer');
 const { generateInhabitants } = require('../retort/inhabitantGeneration');
 const inhabitantReply = require('./fixtures/inhabitants.cjs');
+const { batchRows } = require('./fixtures/inhabitant-batch.cjs');
 const { createPopulationService } = require('../retort/roomPopulation');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
 const row = (name, hp = 20, allegiance = 'Neutral') => formatStartingCharacterSheet({ Name: name, Race: 'Human',
@@ -196,8 +197,8 @@ test('Arithus temples generate hostile cults, never services; neutral temples ke
   const friendly = { ...evil, faction: { ...evil.faction, allegiance: 'Neutral' }, religion: { patron: 'Rama' } };
   const rules = { level: () => 2, random: () => 5, sex: () => 'Female', xp: () => 100, equipment: async () => null };
   for (const [setting, hostile] of [[evil, true], [friendly, false]]) {
-    const $ = { user: async () => {}, assistant: { generation: async () => ({ content: JSON.stringify({ inhabitants:
-      inhabitantReply(8, Array.from({ length: 8 }, (_, slot) => ({ slot, name: 'Priest ' + slot, allegiance: 'Friendly' }))) }) }) } };
+    const $ = { user: async () => {}, assistant: { generation: async options => ({ content: JSON.stringify({ inhabitants:
+      batchRows(inhabitantReply(8, Array.from({ length: 8 }, (_, slot) => ({ slot, name: 'Priest ' + slot, allegiance: 'Friendly' }))), options) }) }) } };
     const r = await generateInhabitants($, { geoKey: '1,0,0', roomName: 'Occupied Temple', indoor: true,
       campaignSetting: setting, quest: 'Recover a record', questSeed: true }, rules);
     assert.equal(Object.values(r.population.actors).some(a => P.name(a.name)), false);

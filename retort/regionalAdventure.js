@@ -180,6 +180,14 @@ async function trySeed($, state, database, origin, gate, text) {
       firstSiteName: database[route(database,origin,gate.targetKey).rooms[0]]?.name, campaign: database['0,0,0'].campaignAtlas })}`;
     const limits = { title: 70, premise: 220, hook: 400, rumor: 220, investigation: 400, rescue: 400, conclusion: 400, burialText: 700, testimonyText: 700 };
     const generated = await Contracts.request($, { component: 'regional-adventure', context: { runId: state.getDungeonRunId(), geoKey: origin }, maxTokens: 3200,
+      localWork: {
+        brief: `Author one connected underworld adventure, supplementing the existing quest without replacing its boss/key. Existing contact: ${contact.name}; origin: ${database[origin]?.name}; main quest: ${state.getCurrentQuest()}; bound boss room: ${database[gate.targetKey]?.name}. Existing first site name: ${database[route(database, origin, gate.targetKey).rooms[0]]?.name || 'not named'}. Four sites IN ORDER: oasis/community, outdoor graveyard, dangerous road, indoor temple. Six NEW non-divine actors IN ORDER: oasis representative, prisoner, two road extortionists, two temple jailers. Never reuse contact/party names: ${JSON.stringify([contact.name, ...I.parseSheets(text, 'PC').concat(I.parseSheets(text, 'NPCs in Party')).map(a => a.name)])}. Preserve accepted exact names; use single-line complete sentences comfortably below limits. Engine stages: existing contact hook, check rumor in burial record, defeat road/temple guards, rescue prisoner OR read testimony, resolve a defensible choice between shared wells and caravan stewardship. No new keys, completion metrics or rewards.`,
+        leading: ['templePatron', 'sites', 'actors', 'title', 'premise', 'rumor', 'burialText', 'testimonyText'],
+        arrays: { sites: { count: 4, max: 4, batch: 1 }, actors: { count: 6, max: 6, batch: 1 } },
+        specific: (part, prior) => part.includes('sites') ? 'Author only site #' + ((prior.nextIndex || 0) + 1) + '. The temple name must agree with templePatron.' :
+          part.includes('actors') ? 'Author only actor #' + ((prior.nextIndex || 0) + 1) + ' with the assigned role. This is a new unique identity, not a site name.' :
+          'Writings and dialogue must agree with the accepted rumor, revelation, locations and actor names. Historical testimony is evidence to investigate, not a completed quest.'
+      },
       parameters: { ...Object.fromEntries(Object.entries(limits).map(([field, max]) => [field, { ...Contracts.text(max), pattern: '^[^<>\\r\\n|`]+$' }])),
         sites: Contracts.list({ name: Contracts.text(80), flavor: Contracts.text(240) }),
         actors: Contracts.list({ name: Contracts.text(60), history: Contracts.text(220), personality: Contracts.text(160) }),

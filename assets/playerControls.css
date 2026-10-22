@@ -1,0 +1,25 @@
+#holodek-audio-panel{display:flex;gap:5px;align-items:center}
+#holodek-audio-panel>button{width:30px!important;height:30px!important;min-width:30px!important;border:1px solid #a48d62!important;border-image:none!important;border-radius:50%!important;background:#141210e6;color:#ead29d;box-shadow:1px 2px 3px #0008!important;cursor:pointer;padding:0!important;font-size:15px}
+#auto-take-toggle svg{display:block;width:20px;height:20px;margin:auto;pointer-events:none}
+#holodek-audio-panel>button:focus-visible{outline:2px solid #ffe5ac;outline-offset:2px}
+#player-help{position:fixed;inset:8vh max(12px,calc((100vw - 700px)/2));box-sizing:border-box;overflow:auto;max-height:84vh;z-index:20000;padding:24px;background:#141210fa;color:#ead29d;border:1px solid #a48d62;font:16px/1.5 Georgia,serif;white-space:normal}
+#player-help[hidden]{display:none!important}
+#player-help h2,#player-help h3{color:#ffe5ac;margin:12px 0 6px}#player-help p,#player-help dl{margin:8px 0}#player-help dt{font-weight:bold}#player-help dd{margin-left:16px}
+#player-help button{background:#29251e;color:#ffe5ac;border:1px solid #a48d62;padding:5px 10px;cursor:pointer}#player-help .help-close{float:right;font-size:22px}#player-help .help-bindings{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:6px}#player-help .help-bindings label{display:flex;justify-content:space-between;align-items:center;gap:8px}#player-help .binding-status{min-height:1.5em}
+
+#graphics-settings-toggle svg{display:block;width:20px;height:20px;margin:auto;pointer-events:none}
+#graphics-settings{width:min(520px,calc(100vw / var(--game-ui-scale,1) - 24px));max-width:calc(100vw / var(--game-ui-scale,1) - 24px);max-height:calc(100vh / var(--game-ui-scale,1) - 24px);box-sizing:border-box;overflow:auto;padding:20px;background:#141210fa;color:#ead29d;border:1px solid #a48d62;font-size:10px!important;line-height:1.8;z-index:20000}
+#graphics-settings::backdrop{background:#0007}
+#graphics-settings form{position:relative;display:grid;gap:16px;min-width:0;margin:0}
+#graphics-settings h2{color:#ffe5ac;margin:0;padding-right:36px;font-size:13px!important;line-height:1.8;overflow-wrap:normal;word-break:normal}
+#graphics-settings h3{margin:8px 0 14px;font-size:11px!important;line-height:1.8}
+#graphics-settings .graphics-option{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:7px;margin:0 0 14px;min-width:0;white-space:normal;word-break:normal;overflow-wrap:normal}
+#graphics-settings .graphics-option:has(input[type=checkbox]){grid-template-columns:minmax(0,1fr) auto;align-items:center}
+#graphics-settings .graphics-option>span{min-width:0}
+#graphics-settings select,#graphics-settings button{background:#141210;color:#ead29d;border:1px solid #a48d62;padding:8px;font-size:9px!important;line-height:1.8;box-sizing:border-box}
+#graphics-settings select,#graphics-settings input[type=range]{width:100%;max-width:100%;min-width:0;margin:0}
+#graphics-settings input[type=checkbox]{margin:0;accent-color:#c9ad72}
+#graphics-settings .graphics-close{position:absolute;right:0;top:0;float:none;width:28px;height:28px;padding:0;cursor:pointer;line-height:1}
+#graphics-settings p{font-size:8px!important;line-height:1.9;color:#c5bda9;margin:0 0 10px;white-space:normal;word-break:normal}
+#graphics-settings output{white-space:nowrap;color:#ffe5ac}
+@media(max-width:600px){#graphics-settings{padding:14px;font-size:8px!important}#graphics-settings h2{font-size:10px!important}#graphics-settings h3{font-size:9px!important}#graphics-settings select{font-size:7px!important;padding:7px}}

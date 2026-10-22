@@ -244,7 +244,7 @@ test('normal player narration generates the queued batch in its existing request
 });
 
 test('five-minute fallback receives party progress and recent conversation recap in one batched request', async () => {
-  const f = fixture(), a = agent({ spoken: [], replies: [{ speaker: 'Noria', lines: ['The keeper is still counting on us.'] }], exchanges: [exchange] });
+  const f = fixture(), a = agent({ spoken: [], replies: [{ speaker: 'Noria', lines: ['The keeper is still counting on us.', 'I will remember the promise.'] }], exchanges: [exchange] });
   Campaign.add(f.state, [record('keeper', 'He asked us not to abandon him.', { turn: 9 })]);
   const logs = [], context = { Inhabitants: I, DialogueMemory: Memory, JourneyMemory: Journey, CampaignMemory: Campaign,
     describeCharacters, generateCharacterDialogue, sharedState: f.state,
@@ -260,7 +260,8 @@ test('five-minute fallback receives party progress and recent conversation recap
 });
 
 test('an exhausted restored cache bypasses freshness once without replaying old dialogue', async () => {
-  const f = fixture(), a = agent({ spoken: [], replies: [{ speaker: 'Noria', lines: ['Will we return to the keeper before nightfall?'] }] });
+  const fresh = ['Will we return to the keeper before nightfall?', 'I have not forgotten our promise.'];
+  const f = fixture(), a = agent({ spoken: [], replies: [{ speaker: 'Noria', lines: fresh }] });
   I.applyReplies(f.population, [{ speaker: 'Noria', lines: ['The bell remains silent.'] }], f.actors);
   f.population.companions.Noria.dialogueIndex = 1;
   f.population.lastDialogueRefreshAt = Date.now();
@@ -273,6 +274,6 @@ test('an exhausted restored cache bypasses freshness once without replaying old 
   vm.runInNewContext(tickCode, context);
   assert.equal((await context.runNpcAutonomyTick()).refreshed, true);
   assert.equal(a.requests.length, 1); assert.equal(f.population.dialogueResumePending, undefined);
-  assert.deepEqual(f.population.companions.Noria.dialogue, ['Will we return to the keeper before nightfall?']);
+  assert.deepEqual(f.population.companions.Noria.dialogue, fresh);
   assert.equal((await context.runNpcAutonomyTick()).cached, true); assert.equal(a.requests.length, 1);
 });

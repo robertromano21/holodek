@@ -151,13 +151,28 @@ test('Take All sends only currently visible names and includes the rendered came
   assert.deepEqual(actions[0].body.objectView.names, ['shown sword']);
   assert.equal(actions[0].body.objectView.camera.dirX, 1);
 });
-test('turning away during state preparation or balance lookup cancels a pickup before mutation', async () => {
+test('turning away during state preparation or balance lookup preserves the original valid pickup snapshot', async () => {
   for (const stage of ['prepare', 'view']) {
     const f = fixture(); show(f, ['shown sword']);
     if (stage === 'prepare') f.window.prepareEconomyState = async () => show(f, []);
     else f.hook(async () => { show(f, []); return { ok: true, json: async () => ({ revision: 7 }) }; });
     assert.equal(await f.window.CommerceUi.handleCommand('take shown sword'), true);
-    assert.equal(f.requests.filter(r => r.path.endsWith('action')).length, 0);
-    assert.match(f.notices.at(-1).message, /no longer in view/);
+    assert.equal(f.requests.filter(r => r.path.endsWith('action')).length, 1);
+    assert.deepEqual(f.requests.find(r => r.path.endsWith('action')).body.objectView.names, ['shown sword']);
   }
 });
+
+test('pickup reconciles authoritative corpse loot positions before taking a fresh camera snapshot', async () => {
+  for (const stillVisible of [true, false]) {
+    const f = fixture(), item = { name: 'shown sword', x: 8, y: 7 };
+    show(f, [item.name]); f.window.currentDungeon.sceneObjects = [{ ...item, x: 5, y: 4 }];
+    let renders = 0;
+    f.window.renderDungeonView = () => { renders++; assert.equal(f.window.currentDungeon.sceneObjects[0].x, 8); show(f, stillVisible ? [item.name] : []); };
+    f.hook(async request => ({ ok: true, json: async () => request.path.endsWith('view') ? { revision: 7, sceneObjects: [item] } : { eventId: 'taken' } }));
+    await f.window.CommerceUi.handleCommand('take shown sword'); assert.equal(renders, 1);
+    assert.equal(f.requests.filter(r => r.path.endsWith('action')).length, 0);
+    assert.match(f.notices.at(-1).message, /object moved/);
+  }
+});
+
+test('pickup retains its browser position when the player moves during persistence',async()=>{const f=fixture(),player={x:4.5,y:4.5};show(f,['shown sword']);f.window.getDungeonLifeContext=()=>({dungeon:f.window.currentDungeon,player,actors:[]});f.window.prepareEconomyState=async()=>{player.x=5.5;show(f,[]);};await f.window.CommerceUi.handleCommand('take shown sword');const action=f.requests.find(r=>r.path.endsWith('action'));assert.equal(action.body.player.x,4.5);assert.deepEqual(action.body.objectView.names,['shown sword']);});

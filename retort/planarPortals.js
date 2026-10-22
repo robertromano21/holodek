@@ -77,6 +77,9 @@ Choose zero to three local factions and zero to two NEW local gods with name, na
 Return structured fields only. Text limits in characters: names80, nature500, population400; faction/god names60, nature220. For portal:false use empty strings, indoor:false, biome:wasteland, valid placeholder colors and empty lists.`;
   const group = () => Contracts.list({ name: Contracts.text(60), nature: Contracts.text(220), relation: Contracts.choice(['unaware', 'independent', 'allied', 'opposed']) });
   const result = await Contracts.request($, { component: 'planar-portal', context: { geoKey: sourceKey }, maxTokens: 1600,
+    localWork: { brief: `Decide if this new location warrants a RARE portal, otherwise portal:false: ${JSON.stringify({ name: source.name, region: require('./holodekRoomWork').region(source.campaignSetting), quest: input.currentQuest })}. A portal is a purple arch to an original alien plane with real walkable terrain and its own residents, culture and concerns, not merely a purple Tartarus. Engine supplies unused coordinates and a return link. New local gods are cosmology, not spawned actors or replacements for the canonical pantheon. Relations to the war may be unaware, independent, allied or opposed. No extra mechanics, items, exits, quests, rewards, battles or target relocation. For portal:false use empty prose, valid colors, indoor:false, biome:wasteland, empty factions/gods.`,
+      arrays: { factions: { count: (_root, prior) => prior.portal === false ? 0 : undefined, max: 3, batch: 1 },
+        gods: { count: (_root, prior) => prior.portal === false ? 0 : undefined, max: 2, batch: 1 } } },
     parameters: { portal: Boolean, planeName: { type: String, maxLength: 80 }, roomName: { type: String, maxLength: 80 },
       nature: { type: String, maxLength: 500 }, population: { type: String, maxLength: 400 }, indoor: Boolean,
       biome: Contracts.choice(['cave', 'wasteland', 'ruins', 'temple', 'crypt']),

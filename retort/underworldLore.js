@@ -14,4 +14,8 @@ const BUILDINGS = [
   ['cinder_forge', true, 'fortress', 'warehouse', 'Inside a cinder forge, a stone-roofed workshop has a furnace bay, smithing benches and ventilated service passages.', 'Name a forge or repair workshop serving an underworld community.']
 ];
 
-module.exports = { GUIDANCE, BUILDINGS };
+// Setting layer: GUIDANCE resolves at call time, so an active homebrew bible replaces this block everywhere it is used.
+module.exports = { BUILDINGS, DEFAULT_GUIDANCE: GUIDANCE };
+// holodek-1 only: a compact CotG setting line (fresh check on every read); homebrew bibles and other models are unchanged.
+function shortGuidance() { try { const P = require('./graveMasterStoryPrompts'); return P.isHolodek1() && P.cotgPlay(); } catch { return false; } }
+Object.defineProperty(module.exports, 'GUIDANCE', { enumerable: true, get: () => shortGuidance() ? require('./graveMasterStoryPrompts').SHORT_SETTING : require('./settingLayer').guidance(GUIDANCE) });

@@ -179,5 +179,5 @@ test('seeded puzzle briefs vary first-room families and refuse repeated example-
   const context={seed:'rotating',roomName:'Ruined Temple Entrance',recentKinds:['alignment','alignment']},brief=P.fallback(context.seed,context.roomName,context);
   assert.notEqual(brief.kind,'alignment');assert.match(designPrompt(context),new RegExp('REQUIRES kind:"'+brief.kind+'"'));assert.ok(!designPrompt(context).includes('"label":"West dial"'));
   let calls=0;const agent={user(){},assistant:{generation:async()=>{calls++;return{content:JSON.stringify({...P.fallback('wrong','Hall'),kind:'alignment'})};}}};
-  const result=await generateDesign(agent,context);assert.equal(result.kind,brief.kind);assert.equal(result.moduleKit,brief.moduleKit);assert.equal(calls,2);
+  const result=await generateDesign(agent,context);assert.equal(result.kind,brief.kind);assert.equal(result.moduleKit,brief.moduleKit);assert.equal(calls,4);
 });

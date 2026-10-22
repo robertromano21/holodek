@@ -18,6 +18,13 @@ function build(dungeon, plan = {}, base = {}) {
     plan = { rooms: [{ x: .03, y: .03, w: .94, h: .94, shape: 'irregular', role: 'entrance', clearance: 14 }], corridors: [] };
     base = { ...base, ceil: 14 };
   }
+  // world1 GENRE_ARCH: when the designer authored no rooms, a homebrew genre room shape (main street, storefront,
+  // timber church nave, mine tunnel, corridor grid, ship deck...) supplies the plan; the carving/repair below is unchanged.
+  if (!(Array.isArray(plan.rooms) && plan.rooms.length) && !base.cavernVillage) {
+    try { const a = dungeon.genreArch || require('./genreLayer').archFor({ name: dungeon.sceneSpec?.roomName || dungeon.roomName || '', roomKey: dungeon.generation?.roomKey || '', seed: dungeon.generation?.seed || '' });
+      const shaped = a && require('../assets/genreArchitecture').roomPlan(a.shape, dungeon.generation?.seed || a.zone);
+      if (shaped) { plan = { ...plan, ...shaped }; dungeon.genreShape = a.shape; } } catch { /* keep the default plan */ }
+  }
   const rng = random(`${dungeon.generation?.seed || dungeon.blueprint?.seed || 'indoor'}:blueprint`);
   const floor = finite(base.floor, 0), clearance = clamp(finite(base.ceil, 2.5), 2, 14);
   const cells = dungeon.cells;

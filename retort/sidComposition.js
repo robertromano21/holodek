@@ -57,44 +57,49 @@ function rhythm(value,label){
 }
 function choice(value,choices,label){if(!choices.includes(value))throw Error(label+': choose exactly '+choices.join(', '));}
 function validateTheme(p,label){
+  const errors=[];
+  const fail=message=>errors.push(message);
+  const check=(value,choices,name)=>{try{choice(value,choices,name);}catch(error){fail(error.message);}};
+  if(!p||typeof p!=='object')throw Error(label+': a theme object is required.');
   if(p.performance){
     for(const [field,choices]of Object.entries({groove:Grammar.GROOVES,harmonicRhythm:['bar','two_bars'],bassVariation:['steady','answering','interlock']}))
-      choice(p.performance[field],choices,label+'.performance.'+field);
+      check(p.performance[field],choices,label+'.performance.'+field);
     const ops=p.performance.rhythmicDevelopment;
     if(!Array.isArray(ops)||ops.length<2||ops.length>4||new Set(ops).size!==ops.length||ops.some(op=>!Grammar.RHYTHMIC_OPS.includes(op)))
-      throw Error(label+'.performance.rhythmicDevelopment: 2-4 distinct executable rhythm operations required.');
-    if(ops.includes('diminish_repeat')&&p.motifRhythm?.includes(16))throw Error(label+': diminish_repeat needs a motif without sixteenths.');
+      fail(label+'.performance.rhythmicDevelopment: 2-4 distinct executable rhythm operations required.');
+    if(Array.isArray(ops)&&ops.includes('diminish_repeat')&&p.motifRhythm?.includes(16))fail(label+': diminish_repeat needs a motif without sixteenths.');
   }
   for(const [field,choices]of Object.entries({mood:spec.moods,scale:spec.scales,progression:Object.keys(spec.progressions),bassStyle:spec.bassStyles,
     arpStyle:spec.arpStyles,phraseForm:spec.phraseForms,texture:spec.textures,percussion:PERCUSSION,register:['middle','high'],
-    answerTransform:TRANSFORMS,contrastTransform:TRANSFORMS,leitmotif:['none','vary','quote']}))choice(p[field],choices,label+'.'+field);
+    answerTransform:TRANSFORMS,contrastTransform:TRANSFORMS,leitmotif:['none','vary','quote']}))check(p[field],choices,label+'.'+field);
   for(const field of['progression','contrastProgression']){
-    choice(p[field],Object.keys(spec.progressions),label+'.'+field);
-    if(!Theory.PROGRESSIONS[p[field]].modes.includes(p.scale))throw Error(label+'.'+field+': progression must support the selected mode.');
+    const path=Theory.PROGRESSIONS[p[field]];
+    if(!path?.modes.includes(p.scale))fail(label+'.'+field+': for '+p.scale+' choose '+Object.keys(Theory.PROGRESSIONS).filter(k=>Theory.PROGRESSIONS[k].modes.includes(p.scale)).join(', ')+'.');
   }
-  if(![-2,-1,1,2].includes(p.sequenceStep))throw Error(label+'.sequenceStep: exact signed scale step required.');
-  choice(p.arrangementArc,spec.arrangementArcs,label+'.arrangementArc');
+  if(![-2,-1,1,2].includes(p.sequenceStep))fail(label+'.sequenceStep: exact signed scale step required.');
+  check(p.arrangementArc,spec.arrangementArcs,label+'.arrangementArc');
   if(!Array.isArray(p.developmentPath)||p.developmentPath.length<3||p.developmentPath.length>6||
-    !p.developmentPath.every((op,i)=>TRANSFORMS.includes(op)&&(i===0||op!==p.developmentPath[i-1])))throw Error(label+'.developmentPath: 3-6 exact transform enums, without adjacent repeats.');
-  for(const field of['frameArp','picardy'])if(typeof p[field]!=='boolean')throw Error(label+'.'+field+': boolean required.');
-  if(p.percussion!=='none'&&(!p.frameArp||['drone','sparse'].includes(p.texture)))throw Error(label+': percussion needs frameArp and arpeggios/counterpoint texture.');
+    !p.developmentPath.every((op,i)=>TRANSFORMS.includes(op)&&(i===0||op!==p.developmentPath[i-1])))fail(label+'.developmentPath: 3-6 exact transform enums, without adjacent repeats.');
+  for(const field of['frameArp','picardy'])if(typeof p[field]!=='boolean')fail(label+'.'+field+': boolean required.');
+  if(p.percussion!=='none'&&(!p.frameArp||['drone','sparse'].includes(p.texture)))fail(label+': percussion needs frameArp and arpeggios/counterpoint texture.');
   const rhythmErrors=[];
   for(const field of['motifRhythm','answerRhythm','contrastRhythm']){
     try{rhythm(p[field],label+'.'+field);}catch(error){rhythmErrors.push(error.message);}
   }
-  if(rhythmErrors.length)throw Error(rhythmErrors.join('\n'));
+  errors.push(...rhythmErrors);
   const c=p.motifContour;
-  if(!Array.isArray(c)||c.length!==p.motifRhythm.length||!c.every(n=>Number.isInteger(n)&&n>=-4&&n<=7)||c[0]!==0||new Set(c).size<3)
-    throw Error(label+'.motifContour: match rhythm length, start at 0, use three distinct integer degrees within -4..7.');
-  const intervals=c.slice(1).map((n,i)=>Math.abs(n-c[i]));
-  if(intervals.some(n=>n>5)||intervals.filter(n=>n>=3).length>2)throw Error(label+'.motifContour: mostly steps, optionally one or two expressive leaps of 3-5 scale steps.');
-  if(Math.max(...c)-Math.min(...c)>8||intervals.filter(n=>n===0).length>Math.floor(intervals.length/2))throw Error(label+'.motifContour: keep within eight scale steps and avoid excessive repeated notes.');
+  if(!Array.isArray(c)||c.length!==p.motifRhythm?.length||!c.every(n=>Number.isInteger(n)&&n>=-4&&n<=7)||c[0]!==0||new Set(c).size<3)
+    fail(label+'.motifContour: match rhythm length, start at 0, use three distinct integer degrees within -4..7.');
+  const intervals=Array.isArray(c)?c.slice(1).map((n,i)=>Math.abs(n-c[i])):[];
+  if(intervals.some(n=>n>5)||intervals.filter(n=>n>=3).length>2)fail(label+'.motifContour: mostly steps, optionally one or two expressive leaps of 3-5 scale steps.');
+  if(Array.isArray(c)&&(Math.max(...c)-Math.min(...c)>8||intervals.filter(n=>n===0).length>Math.floor(intervals.length/2)))fail(label+'.motifContour: keep within eight scale steps and avoid excessive repeated notes.');
   if(p.contrastContour!==undefined){
     const b=p.contrastContour;
-    if(!Array.isArray(b)||b.length!==p.contrastRhythm.length||b[0]!==0||new Set(b).size<3||
+    if(!Array.isArray(b)||b.length!==p.contrastRhythm?.length||b[0]!==0||new Set(b).size<3||
       b.some((n,i)=>!Number.isInteger(n)||n < -4||n>7||i>0&&Math.abs(n-b[i-1])>5)||Math.max(...b)-Math.min(...b)>8)
-      throw Error(label+'.contrastContour: a singable second cell must start at zero, match contrastRhythm and stay within -4..7.');
+      fail(label+'.contrastContour: a singable second cell must start at zero, match contrastRhythm and stay within -4..7.');
   }
+  if(errors.length)throw Error(errors.join('\n'));
 }
 function motifOf(song){
   if(song.composition?.acceptedPlan)return song.composition.acceptedPlan;
@@ -132,13 +137,16 @@ function validate(raw,recent=[]){
   if(!raw||typeof raw!=='object'||Array.isArray(raw))throw Error('A complete structured music plan is required.');
   for(const[field,max]of[['title',30],['rationale',360]])if(typeof raw[field]!=='string'||!raw[field].trim()||raw[field].length>max||/[\r\n<>]/.test(raw[field]))throw Error(field+': bounded single-line text required.');
   for(const[field,choices]of Object.entries({key:spec.keys,bpm:spec.bpm,suiteForm:Object.keys(spec.suiteForms),leadPatch:spec.leadPatches,bassPatch:spec.bassPatches,arpPatch:spec.arpPatches,style:parameters.style.enum}))choice(raw[field],choices,field);
-  validateTheme(raw,'room');
+  const errors=[];
+  const check=fn=>{try{fn();}catch(error){errors.push(error.message);}};
+  check(()=>validateTheme(raw,'room'));
   // Archived plans predate this optional palette; strict new generations include it.
-  if(raw.extensions !== undefined)Extended.validate(raw.extensions);
-  if(raw.percussion === 'none' && raw.extensions && raw.extensions.transients !== 'off')throw Error('extensions.transients must be off for a drumless score.');
+  if(raw.extensions !== undefined)check(()=>Extended.validate(raw.extensions));
+  if(raw.percussion === 'none' && raw.extensions && raw.extensions.transients !== 'off')errors.push('extensions.transients must be off for a drumless score.');
   const wanted=spec.suiteForms[raw.suiteForm];
   if(!Array.isArray(raw.themes)||raw.themes.length!==wanted.length||new Set(raw.themes.map(t=>t.role)).size!==wanted.length||raw.themes.some(t=>!wanted.includes(t.role)))throw Error('themes must contain exactly the roles required by suiteForm, with no duplicates.');
-  for(const t of raw.themes){validateTheme(t,t.role);if(!Number.isInteger(t.keyShift)||t.keyShift < -6||t.keyShift>7)throw Error(t.role+'.keyShift: -6..7 required.');}
+  for(const t of raw.themes){check(()=>validateTheme(t,t.role));if(!Number.isInteger(t.keyShift)||t.keyShift < -6||t.keyShift>7)errors.push(t.role+'.keyShift: -6..7 required.');}
+  if(errors.length)throw Error(errors.join('\n'));
   if(!Array.isArray(raw.ambience)||raw.ambience.length<1||raw.ambience.length>3||new Set(raw.ambience.map(a=>a.tag)).size!==raw.ambience.length||
     raw.ambience.some(a=>!parameters.ambience[0].type.tag.enum.includes(a.tag)||typeof a.level!=='number'||!Number.isFinite(a.level)||a.level<0||a.level>1))throw Error('ambience: 1-3 distinct valid tags with level 0..1. Quiet layers such as 0.1 are valid.');
   for(const p of recent)if(motifSignature(raw)===motifSignature(motifOf(p.song||p)))throw Error('The room motif repeats a recent song, even ignoring transposition. Compose a different rhythmic/interval cell, not just a new key or title.');
@@ -151,7 +159,7 @@ function transform(contour,operation,count,step){
   return Theory.developContour(contour,operation,count,step);
 }
 function develop(raw){
-  const p={...raw,compositionVersion:3};
+  const p={...raw,compositionVersion:3,preserveContourExtrema:true};
   if(raw.performance || !['sentence','period','arch','call_response','ostinato'].includes(raw.phraseForm))
     p.performance=structuredClone(raw.performance||Grammar.DEFAULT);
   // Select complete harmonic paths, not independent random chord roots.
@@ -180,9 +188,11 @@ function assertScore(song){
   }
   if(!lengths[0]||new Set(lengths).size!==1||lengths[0]!==song.plan.bars*16)throw Error('SID voices drift: unequal musical lengths.');
   // Judge the realized statement after chord snapping, not just its requested contour.
-  for(const theme of song.plan.themes){
+  for(const [index,theme] of song.plan.themes.entries()){
     const statement=statementOf(song,theme.startBar+(theme.sections[0]==='intro'?4:0)).filter(s=>s.pitch!==null).map(s=>s.pitch);
-    if(new Set(statement).size<3||Math.max(...statement)-Math.min(...statement)<5)throw Error('The realized '+theme.role+' motif flattened after chord anchoring: use a more distinct, singable contour.');
+    const distinct = new Set(statement).size, span = statement.length ? Math.max(...statement)-Math.min(...statement) : 0;
+    if(distinct<3||span<5) throw require('./generationRepair').invalid([{ path: index ? '$.themes['+(index-1)+'].motifContour' : '$.motifContour',
+      message: 'Realized '+theme.role+' motif flattened after chord anchoring: pitches '+JSON.stringify(statement)+', intervals '+JSON.stringify(statement.slice(1).map((n,i)=>n-statement[i]))+', '+distinct+' distinct notes, span '+span+' semitones. Author only this contour for at least 3 distinct notes and 5 semitones; retain accepted harmony, rhythm, instruments and other movements.' }]);
   }
   return song;
 }
@@ -214,10 +224,15 @@ Supported choices and suite roles: ${JSON.stringify({...spec,leitmotif:parameter
 Recent room identities to contrast with, without merely transposing: ${JSON.stringify(recentSummaries(recent))}
 Provide title and a concise rationale tied to THIS room. All musical choices must use the provided enums. themes must contain exactly suiteForm's required roles (zero for single_theme).`;
   await $.user`Author contrastContour as a real second, singable cell matching contrastRhythm, starting at zero and using the same degree/leap bounds as the room motif. It may share an interval or gesture with the statement, but it need not be only its mechanical inversion. contrastTransform develops that cell later. Keep both identities recognizable. Style/rationale labels do not change the notes: the rhythm, contours and performance choices must carry the distinction.`;
-  const roomParameters={...parameters,suiteForm:enumField(suiteChoices(context)),...Object.fromEntries(Object.entries(diversity.allowed).map(([field,choices])=>[field,enumField(choices)]))};
+  const contract=require('./sidCompositionChoices').create(parameters,seed);
+  await $.user`STRUCTURED CHOICES: harmony is one complete mode/progression/contrastProgression enum. orchestration is one complete texture/percussion/framing/transients enum (themes omit transients). Choose each as a unit; do not return those individual fields. Each rhythm is a STRING enum containing a complete valid bar, not an array to invent or add up. Choose from ${JSON.stringify(contract.bars)}; count its comma-separated events to match the contour. These complete choices supersede earlier suggestions to invent rhythms. You still author every contour, development and performance choice. Drumless transients are already off in the orchestration choice.`;
+  const roomParameters={...contract.parameters,suiteForm:enumField(suiteChoices(context)),...Object.fromEntries(Object.entries(diversity.allowed).map(([field,choices])=>[field,enumField(choices)]))};
   const result=await Contracts.request($,{component:'sid-composition',context:{geoKey:roomKey,runId},parameters:roomParameters,maxTokens:4800,attempts:3,
+    localWork:{...require('./sidLocalWork').rules(),leading:['title','rationale','style','key','bpm','suiteForm','leadPatch','bassPatch','arpPatch','harmony','orchestration','motifRhythm','motifContour','answerRhythm','contrastRhythm','contrastContour'],
+      brief:`Compose original SID exploration music for ${roomKey}: ${description}. Setting data: ${JSON.stringify(context)}. Choose exact enums from each part's schema. No tune borrowed from another game. Instrument shortlists are authoritative. Write a memorable, mostly stepwise motif and real contrast cell; each contour starts at zero, mostly steps, degree offsets -4..7, at most two leaps of 3-5, and has exactly as many entries as its chosen rhythm string. Rhythm is one complete bar enum totaling 16 units. Preserve the accepted key, harmony, patches and suiteForm while authoring later movements. Harmony is a complete mode/progression/contrast enum, orchestration a complete texture/percussion/frame/transients enum. A drumless texture has no percussion or transients. developmentPath needs 3-6 transform enums with no adjacent repeats. performance.rhythmicDevelopment needs 2-4 distinct ops; diminish_repeat requires no sixteenths in motifRhythm. Themes must have exactly these roles by suiteForm: ${JSON.stringify(spec.suiteForms)}. Each theme has its own compatible mood, harmony, rhythms, contours and performance; instruments are shared. Extensions are optional companion colors, not new voices. Ambience 1-3 quiet distinct tags supports the location. Recent identities not to repeat: ${JSON.stringify(recentSummaries(recent))}.`,
+      },
     validate:value=>{
-      const accepted=validate(value,recent);
+      const accepted=validate(contract.decode(value),recent);
       if (!suiteChoices(context).includes(accepted.suiteForm)) throw Error('Portal and planar rooms need a multi-movement suite, not single_theme.');
       Diversity.check(accepted,recent,diversity.allowed);
       const song=assertScore(Theory.arrangeSuite(develop(accepted),description,seed));

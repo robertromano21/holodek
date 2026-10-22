@@ -86,8 +86,18 @@ function compactFingerprint(fp) {
 function publicEntry(e) {
   if (!e) return null;
   const stature = e.stature || (e.traits ? PC.characterStature({name:e.name,race:e.sheet?.race,traits:e.traits}) : null);
-  return { name: e.name, traits: e.traits || null, stature, appearance: e.source === 'llm' && e.sheet ? compactSheet(e.sheet) : null,
+  return { name: e.name, traits: withGenreGarb(e), stature, appearance: e.source === 'llm' && e.sheet ? compactSheet(e.sheet) : null,
     salt: e.salt >>> 0, variant: e.variant | 0, source: e.source || 'pending', attempts: e.attempts || 0 };
+}
+// world1 GENRE_ARCH: homebrew worlds dress humanoid sprites in their genre's garb (hat/coat/belt/gear), chosen by
+// genre weight per character; stamped on the outgoing copy only (the cached anatomy is untouched). CotG -> no garb.
+function withGenreGarb(e) {
+  const t = e.traits || null; if (!t) return t;
+  try {
+    const Flags = require('./worldFlags'); if (!Flags.on('GENRE_ARCH') || !Flags.on('GENRE_KITS')) return t;
+    const Layer = require('./genreLayer'), r = require('../assets/genreKits').resolve({}, Layer.activeSetting()); if (!r.homebrew || r.locked) return t;
+    const garb = require('../assets/genreArchitecture').garbFor(r.mix, keyOf(e.name)); return garb ? { ...t, genreGarb: garb } : t;
+  } catch { return t; }
 }
 function randomSalt() { return (Math.floor(Math.random() * 0xffffffff) >>> 0); }
 
@@ -141,6 +151,13 @@ function buildMessages(sheet, problems) {
     description: deity.domain, size: deity.name === 'Mortacia' ? 'medium' : 'large',
     instruction: 'Use the canonical anatomy, not a generic mortal. Respect the trait schema and only depict actual equipped items.' };
   const messages = [{ role: 'system', content: sys }, { role: 'user', content: 'Character sheet:\n' + JSON.stringify(user) }];
+  if(require('./worldFlags').on('GENRE_EXPANSION')||require('./worldFlags').on('ARCHITECTURE_EXPANSION')){
+    const setting=require('./settingLayer').current();
+    if(setting){const kit=require('../assets/genreKits').resolve({},setting);
+      messages[0].content=messages[0].content.replace('a dark-fantasy pixel-art RPG',`an original ${setting.genres.join('/')} pixel-art RPG`);
+      messages.push({role:'user',content:`World art direction (authoritative): ${JSON.stringify({genres:setting.genreWeights,peoples:setting.peoples,style:require('../assets/genreExpansion').PROFILES[kit.genre]?.label,clothing:require('../assets/genreKits').GENRES[kit.genre]?.clothing})}. Keep the established procedural anatomy, proportions, pixel clusters and body plan. Outfit examples in the generic schema do not require medieval armor or robes: interpret their geometry as genre-appropriate clothing. A western lawkeeper reads as a western lawkeeper; a station engineer reads as a station engineer. Only depict actual equipped gear, using pistol/rifle/scanner types where appropriate. Never turn nonhumanoid creatures into costumed humans.`});
+    }
+  }
   if (problems && problems.length) messages.push({ role: 'user', content: 'Your previous answer failed validation: ' + problems.join('; ') + '. Return a corrected JSON object.' });
   return messages;
 }

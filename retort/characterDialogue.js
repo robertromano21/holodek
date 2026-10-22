@@ -5,10 +5,14 @@ const Puzzles = require('../assets/physicalPuzzles');
 const Grounding = require('./dialogueGrounding');
 const Contracts = require('./generationContracts');
 const Diagnostics = require('./generationDiagnostics');
+const Repair = require('./generationRepair');
+const Schema = require('./structuredSchema');
 function describeCharacters(roster, population) {
   const characters = roster.filter(a=>a.type!=='pc' && (a.hp ?? 1)>0 && Inhabitants.state(a)!=='Dead').slice(0,32).map(actor=>{
     const record=population?.actors?.[actor.name] || population?.companions?.[actor.name];
-    return { name:actor.name,partyMember:actor.type==='npc',allegiance:Inhabitants.allegiance(actor),job:record?.job || actor.job || 'companion',
+    const sex = actor.sex || actor.Sex || record?.sex || record?.Sex || 'Unknown';
+    return { name:actor.name,sex,pronouns:actor.pronouns || record?.pronouns || (sex === 'Female' ? 'she/her' : sex === 'Male' ? 'he/him' : 'use exact name; do not infer'),
+      partyMember:actor.type==='npc',allegiance:Inhabitants.allegiance(actor),job:record?.job || actor.job || 'companion',
       race:record?.race || actor.race || '',className:record?.className || actor.className || '',
       activity:record?.activity || actor.activity || 'accompanying the player',personality:record?.personality || actor.personality || '',motivation:record?.motivation || actor.motivation || '',
       encountered:Inhabitants.hasEncountered(actor, population),
@@ -25,6 +29,15 @@ function describeCharacters(roster, population) {
 
 async function generateCharacterDialogue($, { characters, roomDescription, quest, journey, recollections, personalMemories = [], conversation, entry = false, factionMemory = '' }) {
   if (!characters.length) return { dialogue: [], replies: [] };
+  if (require('./graveMasterStoryPrompts').isHolodek1()) {
+    const Local = require('./holodekNarration');
+    if (!entry) return Local.cache($, { characters, roomDescription, quest, journey, recollections, personalMemories, conversation });
+    const result = await Local.generate($, { consoleText: `Room Description: ${roomDescription || ''}`,
+      characters, audibleNames: characters.slice(0, 2).map(actor => actor.name), enteringRoom: true, quest,
+      userInput: conversation || '', journey, recollections, personalMemories });
+    const extracted = Inhabitants.extractDialogue(result.content, characters.map(actor => actor.name));
+    return { dialogue: extracted.dialogue, replies: extracted.replies, exchanges: extracted.exchanges };
+  }
   $.model = 'gpt-4.1-mini'; $.temperature = 0.75;
   await $.user(Puzzles.HINT_POLICY);
   await $.system`You direct individual character voices in Children of the Grave. Tartarus is an inhabited afterlife; Mortacia's existing quests guide the journey toward Hades. Each soul has work, biases, memories and limited knowledge. Never speak for the player, invent characters, resolve combat, give rewards, complete quests or change world state. Output only valid JSON: {"spoken":[{"speaker":"exact existing name","line":"short spoken words"}],"replies":[{"speaker":"exact existing name","lines":["short contextual remark","a different short remark"]}]}.`;
@@ -36,18 +49,43 @@ Friendly residents support the party; neutrals mind their own business; hostiles
   await $.user(Grounding.prompt(characters, personalMemories, journey));
   if(factionMemory)await $.user(factionMemory);
   const names = characters.map(actor => actor.name);
-  const speech = { speaker: Contracts.choice(names), line: Contracts.text(220) };
+  const speech = { speaker: Contracts.choice(names), line: Contracts.wordText() };
+  const allocation = Grounding.batchPlan(characters), perSpeaker = new Map(allocation.map(row => [row.name, row.lines]));
+  const lineMaximum = Math.max(2, ...allocation.map(row => row.lines));
+  const cache = Schema.discriminated({ speaker: Contracts.choice(names), lines: { type: [Contracts.wordText()], minItems: 2, maxItems: lineMaximum } },
+    'speaker', Object.fromEntries(allocation.map(row => [row.name, { properties: { lines: { type: [Contracts.wordText()], minItems: 2, maxItems: row.lines } } }])));
   const result = await Contracts.request($, { component: 'dialogue-cache', context: { entry }, maxTokens: Grounding.outputBudget(characters),
-    parameters: { spoken: Contracts.list(speech), replies: Contracts.list({ speaker: Contracts.choice(names), lines: [String] }),
-      exchanges: { type: Contracts.list({ lines: Contracts.list(speech) }), optional: true } },
+    parameters: { spoken: { type: Contracts.list(speech), minItems: 0, maxItems: entry ? 2 : 0 },
+      replies: { type: [cache], minItems: 0, maxItems: names.length },
+      exchanges: { type: Contracts.list({ lines: { type: Contracts.list(speech), minItems: 2, maxItems: 2 } }), minItems: 0, maxItems: 2, optional: true } },
     validate(parsed) {
       if (!Array.isArray(parsed?.spoken) || !Array.isArray(parsed?.replies)) throw Error('spoken and replies must be arrays.');
-      for (const row of [...parsed.spoken, ...parsed.replies]) {
+      if (parsed.spoken.length > (entry ? 2 : 0)) throw Error(entry ? 'spoken: at most two entry greetings.' : 'spoken: a cache refresh must not speak now.');
+      if (parsed.replies.length > names.length || new Set(parsed.replies.map(row => row?.speaker)).size !== parsed.replies.length)
+        throw Error('replies: at most one cache per listed character.');
+      const issues = [];
+      for (const [section, rows] of [['spoken', parsed.spoken], ['replies', parsed.replies]]) for (let index = 0; index < rows.length; index++) {
+        const row = rows[index], path = `$.${section}[${index}]`;
         if (!names.includes(row?.speaker)) throw Error('Unknown dialogue speaker: ' + String(row?.speaker));
         const lines = row.lines || [row.line];
-        if (!Array.isArray(lines) || lines.some(line => typeof line !== 'string' || !line.trim() || line.trim().split(/\s+/).length > 20))
-          throw Error(`${row.speaker}: each cached/spoken line must be nonempty and at most 20 words.`);
+        if (row.lines && (row.lines.length < 2 || row.lines.length > perSpeaker.get(row.speaker)))
+          issues.push(Repair.issue(path + '.lines', `2-${perSpeaker.get(row.speaker)} lines`, row.lines.length));
+        if (!Array.isArray(lines)) throw Error(`${row.speaker}: lines must be an array.`);
+        lines.forEach((line, n) => issues.push(...Repair.wordIssues(line, row.lines ? path + `.lines[${n}]` : path + '.line')));
       }
+      if (parsed.exchanges !== undefined) {
+        if (!Array.isArray(parsed.exchanges) || parsed.exchanges.length > 2) throw Error('exchanges: at most two future conversations.');
+        const party = new Set(characters.filter(actor => actor.partyMember).map(actor => actor.name));
+        for (const exchange of parsed.exchanges) {
+          if (!Array.isArray(exchange?.lines) || exchange.lines.length !== 2 || new Set(exchange.lines.map(row => row?.speaker)).size !== 2)
+            throw Error('exchanges: each conversation needs two different party speakers.');
+          for (const [index, row] of exchange.lines.entries()) {
+            if (!party.has(row?.speaker)) throw Error('exchanges: use listed party members.');
+            issues.push(...Repair.wordIssues(row.line, `$.exchanges[${parsed.exchanges.indexOf(exchange)}].lines[${index}].line`));
+          }
+        }
+      }
+      if (issues.length) throw Repair.invalid(issues);
       return parsed;
     } });
   if (result.value) {

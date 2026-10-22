@@ -6,14 +6,16 @@
   #holodek-audio-panel > div, #dungeon-map-shortcut, #dungeon-inventory-shortcut,
   #dungeon-journal-shortcut, #dungeon-spellbook-shortcut) {
   border-radius: 0 !important;
-  border-image: url("/assets/ui-pixel-frame.svg") 6 / 6px / 2px stretch !important;
-  box-shadow: 3px 3px 0 #0009 !important;
+  border-image: url("/assets/ui-pixel-frame-bold.svg") 8 / 8px / 2px stretch !important;
+  box-shadow: 4px 4px 0 #000b !important;
 }
 
 :is(#phaser-header, #game-log-header, #combat-header, .inventory-header,
   .exploration-map-header) {
-  background: linear-gradient(#505050 0 35%, #3c3c3c 35% 65%, #292929 65%) !important;
+  background: linear-gradient(#65655d 0 3px, #42423e 3px calc(100% - 3px), #181818 calc(100% - 3px)) !important;
   border-radius: 0 !important;
+  border-bottom: 2px solid #080808;
+  box-shadow: inset 3px 0 #bcbcb4, inset -3px 0 #181818;
 }
 
 :is(.popup-button, .game-menu-button, #chatbotbutton, #chatuserinput,
@@ -55,7 +57,30 @@
   pointer-events: none;
 }
 
+:is(.game-menu-button,.party-spellbook-tabs button,#game-menu-toggle,#chatbotbutton){
+  border-radius:0!important;border:2px solid #151510!important;
+  box-shadow:inset 2px 2px #bcbcb4,inset -2px -2px #242420,3px 3px #0009!important;
+  background-image:none!important;
+}
+:is(.game-menu-button,.party-spellbook-tabs button,#game-menu-toggle,#chatbotbutton):active{
+  box-shadow:inset 2px 2px #242420,inset -2px -2px #bcbcb4!important;transform:translate(1px,1px);
+}
+#phaser-container,#game-log-container{scrollbar-color:#bcbcb4 #181818;scrollbar-width:thin}
+#phaser-container::-webkit-scrollbar,#game-log-container::-webkit-scrollbar{width:12px}
+#phaser-container::-webkit-scrollbar-track,#game-log-container::-webkit-scrollbar-track{background:#181818;border-left:2px solid #000}
+#phaser-container::-webkit-scrollbar-thumb,#game-log-container::-webkit-scrollbar-thumb{background:#787878;border:2px solid #181818;border-radius:0}
+
 :is(#dungeon-map-shortcut, #dungeon-inventory-shortcut, #dungeon-journal-shortcut,
   #dungeon-spellbook-shortcut):hover img {
   transform: none !important;
 }
+
+/* Compact map chrome reserves the available height for terrain and known markers. */
+#exploration-map-popup{min-width:0;max-width:calc(100vw - 16px)}
+#exploration-map-popup .exploration-map-tools{gap:4px;padding:5px 8px}
+#exploration-map-popup .exploration-map-tools button{font-size:8px!important;line-height:1.5!important;padding:5px 7px}
+#exploration-map-popup #exploration-map-landmarks{font-size:7px!important;line-height:1.5!important;padding:5px}
+#exploration-map-caption{font-size:7px!important;line-height:1.7!important;max-height:4em;overflow:auto}
+#exploration-map-popup .exploration-map-help{font-size:6px!important;line-height:1.7!important;margin:5px 8px}
+#exploration-map-popup .exploration-map-help summary{cursor:pointer;color:#ead29d}
+#exploration-map-popup .exploration-map-hint{font-size:6px!important;line-height:1.8!important}

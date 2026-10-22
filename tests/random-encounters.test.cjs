@@ -3,6 +3,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const fs = require('node:fs'), I = require('../assets/dungeonInhabitants'), E = require('../retort/randomEncounters');
 const Catalog = require('../assets/monsterRaces'), { generateInhabitants } = require('../retort/inhabitantGeneration');
 const fixtures = require('./fixtures/inhabitants.cjs'), { formatStartingCharacterSheet } = require('../retort/initialGameState');
+const { batchRows } = require('./fixtures/inhabitant-batch.cjs');
 const key = '4,4,0';
 function setup(indoor = false) {
   const d = { geoKey: key, layout: { width: 96, height: 96 }, start: { x: 20, y: 20 }, classification: { indoor }, cells: {} };
@@ -26,7 +27,7 @@ function setup(indoor = false) {
 }
 function runtime(reply, call = () => {}) {
   const prompts = [], agent = { user(p, ...v) { prompts.push(typeof p === 'string' ? p : String.raw({ raw: p }, ...v)); },
-    assistant: { async generation(options) { call(options); return { content: JSON.stringify(reply) }; } } };
+    assistant: { async generation(options) { call(options); return { content: JSON.stringify({ ...reply, inhabitants: batchRows(reply.inhabitants, options) }) }; } } };
   return { prompts, run: async fn => fn(agent), retort: fn => fn };
 }
 
@@ -59,7 +60,7 @@ test('stationary waiting and teleport-sized movement do not accrue encounter tra
 
 test('regular inhabitants retain Tartarus race notes and free-form races', async () => {
   let schema;
-  const rt = runtime({ inhabitants: fixtures(8) }, options => { schema = options.parameters.inhabitants[0].type; });
+  const rt = runtime({ inhabitants: fixtures(8) }, options => { schema = options.parameters.inhabitants.type[0].type; });
   await rt.run($ => generateInhabitants($, { roomName: 'The Ash Crossing', roomDescription: 'A route through Tartarus.',
     geoKey: key, indoor: true },
     { level: () => 1, random: () => 2, sex: () => 'Female', xp: () => 0, equipment: async () => null }));
@@ -76,7 +77,7 @@ for (const indoor of [true, false]) test(`on-the-fly ${indoor ? 'indoor' : 'outd
   const ctx = setup(indoor), count = E.policy(indoor).groupSize, names = Catalog.map(r => r.name);
   const rows = fixtures(count, Array.from({ length: count }, (_, slot) => ({ slot, name: `Unfamiliar Soul ${slot}`, race: 'Allip',
     allegiance: 'Hostile', encounterId: 'lost-caravan', history: 'Haunts a forgotten caravan route. Its tormented murmurs preserve one broken memory.' })));
-  const rt = runtime({ skip: false, inhabitants: rows }, options => assert.deepEqual(options.parameters.inhabitants[0].type.race.enum, names));
+  const rt = runtime({ skip: false, inhabitants: rows }, options => assert.deepEqual(options.parameters.inhabitants.type[0].type.race.enum, names));
   const old = JSON.stringify(ctx.p.actors['Existing Watch']);
   const result = await E.maybeGenerate({ ...ctx, runtime: rt, now: 200000 });
   assert.equal(ctx.p.randomEncounters.count, 1); assert.equal(Object.keys(ctx.p.actors).length, count + 1);

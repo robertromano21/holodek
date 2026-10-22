@@ -1,4 +1,5 @@
 'use strict';
+const CampaignMap = require('./campaignMap');
 const { coordinates, keyOf, direction, exitEntries, resolveExit, indexDatabase, coordinateKeys } = require('../assets/outdoorRoutes');
 const Campaign = require('./campaignSetting');
 const Contracts = require('./generationContracts');
@@ -179,7 +180,7 @@ async function chooseEnvironmentIntents($, input = {}) {
         targets.has(targetKey) ? 'duplicate-target' : null;
     if (reason) { protectedMetadata.skipped.push({ direction, targetKey, reason }); continue; }
     targets.add(targetKey);
-    candidates.push({ direction, targetKey, constraint: sourceKey === '0,0,0' ?
+    candidates.push({ direction, targetKey, constraint: sourceKey === '0,0,0' && !require('./settingLayer').current() ?
       direction === first ? 'root-first-wasteland' : 'root-other-indoor' : null });
   }
   if (!candidates.length) return result;
@@ -217,6 +218,7 @@ CATALOG: ${JSON.stringify(Object.fromEntries(Object.entries(CATALOG).map(([id, c
       await $.assistant`${prompt}`;
       const accepted = {};
       const result = await Contracts.request($, { component: 'environment-intent', context: { geoKey: sourceKey }, maxTokens: 600,
+        localWork: { brief: `Choose only an environment template and atmospheric hint for the requested declared neighbor. No actors, items, exits, quests, rewards or completed events. Exact allowed template enums are in each part's schema. root-first-wasteland means wasteland; root-other-indoor and z<0 mean covered indoor space. Natural underground places retain real rock ceilings and connected dry routes; a village in a cavern is cavern-scale, not a house. Preserve bound targets and use the supplied quest only for spatial affordances. Existing saved places are never renamed or replaced. Read-only context: ${JSON.stringify({ ...context, atlas: undefined })}` },
         parameters: { directions: Contracts.object(Object.fromEntries(candidates.map(candidate => [candidate.direction, Contracts.object({
           template: Contracts.choice(allowed(candidate)), hint: { type: String, maxLength: 240 } })]))) },
         validate(parsed) {
@@ -258,12 +260,26 @@ CATALOG: ${JSON.stringify(Object.fromEntries(Object.entries(CATALOG).map(([id, c
     if (!choice) Diagnostics.report('environment-intent', { status: 'fallback', geoKey: sourceKey, direction: candidate.direction,
       reason: failure, replacement: 'seeded-template', constraint: candidate.constraint });
     const selected = choice?.template || fallbackTemplate(seed, candidate, sourceIndoor);
-    const template = choice || process.env.CAMPAIGN_SETTING === 'off' ? selected : Campaign.frontierTemplate({ ...candidate, template: selected, seed, sourceIndoor });
+    let template = choice || process.env.CAMPAIGN_SETTING === 'off' ? selected : Campaign.frontierTemplate({ ...candidate, template: selected, seed, sourceIndoor });
     fellBack ||= !choice;
     const scheduled = template !== selected;
     result.intents[candidate.direction] = { ...CATALOG[template], narrativeHint: scheduled ? '' : choice?.hint || '',
       evidence: { source: scheduled ? 'campaign-site-schedule' : choice ? 'model' : 'seeded-fallback', reason: scheduled ? 'frontier-variety' : choice ? 'validated-choice' : failure,
         constraint: candidate.constraint }, targetKey: candidate.targetKey };
+    // world1 CAMPAIGN_MAP: additive steering of NEW neighbours only. The root-first-wasteland intent keeps its
+    // template; it is merely tagged so the map can find the first wasteland later.
+    if (candidate.constraint === 'root-first-wasteland') { if (require('./worldFlags').on('CAMPAIGN_MAP')) result.intents[candidate.direction].mapRole = 'route-wasteland'; }
+    else {
+      const steered = CampaignMap.steer({ database: input.database, sourceKey, seed,
+        candidate: { ...candidate, preferred: candidate.direction === CampaignMap.preferredDirection(candidates.map(x => x.direction)) } });
+      if (steered && Object.hasOwn(CATALOG, steered.template) && (coordinates(candidate.targetKey)?.z >= 0 || CATALOG[steered.template].indoor) &&
+          (candidate.constraint !== 'root-other-indoor' || CATALOG[steered.template].indoor)) {
+        template = steered.template;
+        result.intents[candidate.direction] = { ...CATALOG[template], narrativeHint: steered.hint, mapRole: steered.mapRole,
+          ...(steered.complexId ? { complexId: steered.complexId } : {}), ...(steered.citySite ? { citySite: steered.citySite } : {}),
+          evidence: { source: 'campaign-map', reason: steered.mapRole, constraint: candidate.constraint }, targetKey: candidate.targetKey };
+      }
+    }
     if (process.env.CAMPAIGN_SETTING !== 'off') result.intents[candidate.direction].campaignSetting = Campaign.plan({
       ...input, seed, sourceKey, targetKey: candidate.targetKey, template });
   }

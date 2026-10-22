@@ -479,6 +479,53 @@ test('logged speech can be displayed before a known sheet has a positioned world
   assert.equal(f.nodes.get('dungeon-dialogue').hidden, false);
 });
 
+test('entry greetings wait for a positioned actor, even when the same prose is in the Game Log', () => {
+  const f = fixture(), line = 'The bead is guarded in the sepulchre.', actor = f.actor;
+  f.ctx.actors = [];
+  f.root.DungeonLife.receiveTurnDialogue(`${actor.name} says, "${line}"`, { ...f.event, consoleText: '',
+    dialogue: [{ speaker: actor.name, line, requiresNearby: true }] });
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+  assert.ok(f.reports.some(row => row.stage === 'deferred'));
+  f.ctx.actors = [actor]; f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, line);
+  assert.equal(f.reports.filter(row => row.stage === 'displayed').length, 1);
+});
+
+test('Dorrik and Pellin action-led replies actually reach consecutive subtitle cards without speech labels', () => {
+  const f = fixture(); f.actor.name = 'Dorrik Slatehymn';
+  f.ctx.actors.push({ ...f.actor, name: 'Pellin Reedcup', mazeX: 4, mazeY: 5 });
+  const first = 'A straight marker can still carry a crooked account.';
+  const second = 'You have to leave room for the one who arrives thirsty.';
+  const prose = `Dorrik Slatehymn steadies the weather-worn marker. "${first}"\n\nPellin Reedcup checks the cover on her clay cup. "${second}"`;
+  f.root.DungeonLife.receiveTurnDialogue(prose, { ...f.event, dialogue: [], consoleText: '' });
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, first);
+  f.advance(20000); f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, second);
+  assert.deepEqual(f.reports.filter(row => row.stage === 'displayed').map(row => row.speaker), ['Dorrik Slatehymn', 'Pellin Reedcup']);
+});
+
+test('an entry greeting cannot speak across the level or through a sealed wall', () => {
+  for (const change of [f => { f.actor.mazeX = 25; }, f => { f.actor.mazeX = 6; f.ctx.dungeon.cells['5,4'].tile = 'wall'; }]) {
+    const f = fixture(); change(f);
+    const line = 'The bead is guarded in the sepulchre.';
+    f.root.DungeonLife.receiveTurnDialogue(`${f.actor.name} says, "${line}"`, { ...f.event, consoleText: '',
+      dialogue: [{ speaker: f.actor.name, line, requiresNearby: true }] });
+    assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
+    assert.ok(f.reports.some(row => row.stage === 'skipped'));
+    assert.ok(!f.reports.some(row => row.stage === 'displayed'));
+  }
+});
+
+test('entry range is checked again when a queued greeting reaches the front', () => {
+  const f = fixture();
+  f.root.DungeonLife.receiveDialogue(f.event);
+  f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [{ speaker: f.actor.name,
+    line: 'The bead is guarded in the sepulchre.', requiresNearby: true }] });
+  f.actor.mazeX = 25; f.advance(20000); f.root.DungeonLife.tick();
+  assert.ok(f.reports.some(row => row.stage === 'skipped' && row.reason === 'out-of-range'));
+  assert.equal(f.reports.filter(row => row.stage === 'displayed').length, 1);
+});
+
 test('all action-led Tarn recollections reach subtitles even across the room with no structured speech labels', () => {
   const f = fixture();
   f.ctx.actors = tarn.rows.map((row, index) => ({ ...f.actor, name: row.speaker, type: 'npc', mazeX: 25, mazeY: 20 + index }));

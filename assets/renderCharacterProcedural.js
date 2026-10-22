@@ -131,6 +131,7 @@
   const HELMS = ['none', 'hood', 'open', 'closed', 'horned', 'crown', 'circlet', 'cowl'];
   const SYMBOLS = ['none', 'holy', 'skull', 'eye', 'rune', 'sun', 'moon', 'flame', 'star'];
   const ITEM_TYPES = ['sword', 'greatsword', 'scimitar', 'axe', 'staff', 'bow', 'crossbow', 'dagger', 'mace', 'hammer', 'flail', 'spear', 'trident', 'scythe', 'sickle', 'wand', 'whip', 'claws', 'orb', 'crystal', 'amulet', 'crown', 'tome', 'lantern', 'ring', 'skull', 'horn', 'banner', 'shield'];
+  ITEM_TYPES.push('pistol','rifle','scanner');
   const ITEM_SLOTS = ['weapon', 'shield', 'armor', 'other'];
   const SHIELD_SHAPES = ['round', 'kite', 'tower', 'heater', 'buckler', 'spiked'];
   const PALETTE_KEYS = ['skin', 'skin2', 'hair', 'outfit', 'outfit2', 'trim', 'metal', 'eye', 'glow', 'aura'];
@@ -382,6 +383,9 @@
   defCls('dancer courtesan', { style: 'dress', prio: 2 });
 
   const ITEM_WORDS = [
+    ['rifle', /\b(rifle|shotgun|carbine|musket|smg|tommy gun|lever[- ]action)\b/],
+    ['pistol', /\b(pistol|revolver|flintlock|sidearm|blaster|handgun|smartgun)\b/],
+    ['scanner', /\b(scanner|datapad|phone|deck|communicator)\b/],
     ['greatsword', /(greatsword|claymore|zweihander|great ?blade|warblade)/],
     ['scimitar', /(scimitar|sabre|saber|cutlass|falchion|khopesh|katana|tulwar|reaver)/],
     ['sword', /(sword|blade|brand|rapier|longsword|edge|glaive?blade)/],
@@ -1838,6 +1842,15 @@
     const P = PART.ITEM;
     const x = hx;
     switch (item.type) {
+      case 'pistol': case 'rifle': {
+        const long=item.type==='rifle',dir=side<0?-1:1,len=long?10:6;
+        px.rect(x,hy-1,2,4,dk,P,F_NOSHADE);
+        px.rect(dir<0?x-len:x,hy-2,len+2,2,c,P,0);
+        px.rect(dir<0?x-len:x+len,hy-2,1,1,hi,P,F_NOSHADE);
+        if(long)px.rect(x-dir*2,hy,3,2,wood,P,0);
+        break;
+      }
+      case 'scanner': px.rect(x-2,hy-4,4,6,dk,P,0);px.rect(x-1,hy-3,2,3,acc,P,F_NOSHADE);break;
       case 'sword': case 'greatsword': case 'scimitar': {
         const wide = item.type === 'greatsword';
         const tipDown = !!D.tipDown; // resting pose: tip on the floor, hilt in the hand
@@ -3146,6 +3159,11 @@
       default: L = drawHumanoid(D); break;
     }
     const px = D.px;
+    if(t.genreGarb && L && !['beast','draconic','serpent','spider','ooze','elemental'].includes(t.bodyPlan)){
+      const A=typeof module==='object'&&module.exports?require('./genreArchitecture'):root.GenreArchitecture;
+      A?.drawGarb({grid:GRID,filled:(x,y)=>px.alpha(Math.floor(x),Math.floor(y))>0,
+        rect:(x,y,w,h,color)=>px.rect(Math.round(x),Math.round(y),Math.max(1,Math.round(w)),Math.max(1,Math.round(h)),hexToRgb(color),PART.DETAIL,0)},t.genreGarb,t.palette);
+    }
     if (t.translucency > 0) {
       if (t.bodyPlan === 'spectral' && L) passTranslucency(px, t.translucency * 0.75, L.yLegTop - 1, L.ground + 3);
       else passTranslucency(px, t.translucency);

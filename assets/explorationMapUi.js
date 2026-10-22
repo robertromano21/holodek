@@ -2,15 +2,37 @@
   'use strict';
   if (!root.DungeonCartography) return;
   let dbPromise, panel, canvas, caption, current, bitmap, bitmapRoom, bitmapRevision = -1;
-  let open = false, range = 96, lastPaint = 0, timer = null;
+  let open = false, range = 32, lastPaint = 0, timer = null;
   let viewCenter = null, drag = null;
   let encounterSelect, encounterSignature = '', selectedEncounter = '';
   let mapProjection = null, hover;
   const portraits = new Map(), itemIcons = new Map();
   function encounterMarkers(dungeon) {
     return [...root.DungeonCartography.landmarks(dungeon, current?.state),
-      ...root.DungeonCartography.knownObjects(dungeon, root.getVisibleSceneObjects?.() || dungeon.sceneObjects || []),
-      ...root.DungeonCartography.knownEncounters(dungeon, current?.state, root.DungeonLife?.population(), root.getDungeonLifeContext?.()?.actors || [])];
+      ...root.DungeonCartography.knownObjects(dungeon, root.getVisibleSceneObjects?.() || dungeon.sceneObjects || []).map((marker,index)=>({...marker,badge:index+1})),
+      ...root.DungeonCartography.knownEncounters(dungeon, current?.state, root.DungeonLife?.population(), root.getDungeonLifeContext?.()?.actors || []),
+      ...questMarkers(dungeon).markers];
+  }
+  // world1: quest objectives in this room, exit labels for objectives elsewhere, and giver map reveals.
+  function questMarkers(dungeon) {
+    const db = root.getRoomNameDatabase?.();
+    if (!root.QuestMap || !db) return { markers: [], exitLabels: {} };
+    return root.QuestMap.mapMarkers(dungeon, db, { flags: root.HolodekFlags, landmarks: root.LandmarkCatalog?.catalog(dungeon) || [] });
+  }
+  function applyQuestReveals(state, dungeon) {
+    const db = root.getRoomNameDatabase?.(), room = db?.get?.(dungeon.geoKey);
+    if (!root.QuestMap || !room?.mapReveals) return 0;
+    const out = root.QuestMap.revealCells(dungeon, room, { flags: root.HolodekFlags, landmarks: root.LandmarkCatalog?.catalog(dungeon) || [] });
+    const done = new Set(state.questRevealsApplied || []), fresh = out.applied.filter(id => !done.has(id));
+    if (!fresh.length) return 0;
+    for (const c of out.cells) {
+      if (c.x < 0 || c.y < 0 || c.x >= state.width || c.y >= state.height) continue;
+      const i = c.y * state.width + c.x;
+      if (!(state.bits[i >> 3] & (1 << (i & 7)))) { state.bits[i >> 3] |= 1 << (i & 7); state.count++; }
+    }
+    state.knownLandmarks = [...new Set([...(state.knownLandmarks || []), ...out.landmarkIds])];
+    state.questRevealsApplied = [...done, ...fresh]; state.revision++;
+    return fresh.length;
   }
   function encounterPortrait(marker) {
     const actor = root.getDungeonLifeContext?.()?.actors?.find(a => a.name === marker.name);
@@ -52,7 +74,7 @@
     encounterSelect.appendChild(overview);
     for (const marker of markers) {
       const option = document.createElement('option'); option.value = marker.id;
-      option.textContent = `${marker.glyph} ${marker.label}`; encounterSelect.appendChild(option);
+      option.textContent = `${marker.badge ? marker.badge + "." : marker.glyph} ${marker.label}`; encounterSelect.appendChild(option);
     }
     if (selectedEncounter && !markers.some(m => m.id === selectedEncounter)) { selectedEncounter = ''; viewCenter = null; }
     encounterSelect.value = selectedEncounter;
@@ -167,16 +189,25 @@
         continue;
       }
       if (marker.kind === 'object') {
-        ctx.fillRect(x - 8, y - 8, 16, 16); ctx.strokeRect(x - 8, y - 8, 16, 16);
+        ctx.fillStyle='#17130f'; ctx.fillRect(x-16,y-16,32,32);ctx.strokeStyle=selectedEncounter===marker.id?'#ffffff':'#ffe39a';ctx.lineWidth=3;ctx.strokeRect(x-16,y-16,32,32);
         const icon = itemIcon(marker);
-        if (icon) ctx.drawImage(icon, x - 8, y - 8, 16, 16);
-        else { ctx.fillStyle = '#16120d'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center'; ctx.fillText('*', x, y + 4); }
+        if (icon) ctx.drawImage(icon, x-14,y-14,28,28);
+        else { ctx.fillStyle='#ffe39a';ctx.font='bold 18px monospace';ctx.textAlign='center';ctx.fillText('*',x,y+6); }
+        ctx.fillStyle='#ffe39a';ctx.fillRect(x+6,y-21,19,17);ctx.fillStyle='#080808';ctx.font='bold 13px monospace';ctx.textAlign='center';ctx.fillText(String(marker.badge),x+15,y-8);
+        if (scale>=12 || selectedEncounter===marker.id) {
+          const label=marker.label.length>26?marker.label.slice(0,25)+'…':marker.label;
+          ctx.font='bold 13px monospace';ctx.textAlign='center';ctx.lineWidth=4;ctx.strokeStyle='#080808';ctx.fillStyle='#ffe39a';
+          const labelX=Math.max(110,Math.min(canvas.width-110,x));ctx.strokeText(label,labelX,y+31);ctx.fillText(label,labelX,y+31);
+        }
         continue;
       }
       ctx.beginPath(); ctx.moveTo(x, y - 8); ctx.lineTo(x + 8, y); ctx.lineTo(x, y + 8); ctx.lineTo(x - 8, y); ctx.closePath();
       ctx.fill(); ctx.stroke(); ctx.fillStyle = '#16120d'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
       ctx.fillText(marker.glyph, x, y + 4);
+      if (marker.kind === 'quest') { ctx.fillStyle = '#f3d582'; ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.font = 'bold 11px Arial'; ctx.textAlign = 'left';
+        ctx.strokeText(marker.label, x + 11, y + 4); ctx.fillText(marker.label, x + 11, y + 4); }
     }
+    const questExitLabels = questMarkers(d).exitLabels;
     for (const marker of d.roomExits?.markers || []) {
       const x = (marker.x + 0.5 - left) * scale, y = (marker.y + 0.5 - top) * scale;
       if (x < 4 || y < 4 || x > canvas.width - 4 || y > canvas.height - 4) continue;
@@ -184,6 +215,9 @@
       ctx.font = 'bold 13px Arial'; ctx.textAlign = 'center';
       ctx.strokeStyle = '#000'; ctx.lineWidth = 3; ctx.strokeText(marker.label, x, y - 7);
       ctx.fillText(marker.label, x, y - 7);
+      for (const [n, text] of (questExitLabels[marker.direction] || []).slice(0, 2).entries()) {
+        ctx.fillStyle = '#f3d582'; ctx.font = 'bold 11px Arial'; ctx.strokeText(`! ${text}`, x, y + 14 + n * 13); ctx.fillText(`! ${text}`, x, y + 14 + n * 13);
+      }
     }
     const x = (player.x - left) * scale, y = (player.y - top) * scale;
     ctx.save(); ctx.translate(x, y); ctx.rotate(angle);
@@ -199,7 +233,7 @@
     if (!panel || !open) return;
     const bounds = panel.getBoundingClientRect(), zoom = panel.offsetWidth ? bounds.width / panel.offsetWidth : 1;
     const viewportWidth = root.innerWidth / zoom, viewportHeight = root.innerHeight / zoom;
-    const width = Math.max(1, Math.min(390, viewportWidth - 16));
+    const width = Math.max(1, Math.min(640, viewportWidth - 16));
     panel.style.width = width + 'px';
     panel.style.left = (viewportWidth - width) / 2 + 'px';
     paint(true);
@@ -214,7 +248,8 @@
     const chromeHeight = panel.offsetHeight - canvas.offsetHeight;
     panel.style.maxHeight = available + 'px';
     panel.style.overflowY = 'auto';
-    canvas.style.maxHeight = Math.max(0, Math.min(370, available - chromeHeight - 2)) + 'px';
+    const side = Math.max(1, Math.min(width - 20, available - chromeHeight - 8));
+    canvas.style.maxHeight = 'none'; canvas.style.width = side + 'px'; canvas.style.height = side + 'px'; canvas.style.margin = '0 auto';
     panel.style.top = (top + Math.max(0, available - panel.offsetHeight) / 2) + 'px';
     paint(true);
   }
@@ -239,7 +274,7 @@
     document.getElementById('exploration-map-zoom-in').addEventListener('click', () => { range = Math.max(24, range / 2); paint(true); });
     document.getElementById('exploration-map-zoom-out').addEventListener('click', () => { range = Math.min(512, range * 2); paint(true); });
     document.getElementById('exploration-map-whole').addEventListener('click', () => { range = 512; viewCenter = null; selectedEncounter = ''; if (encounterSelect) encounterSelect.value = ''; paint(true); });
-    document.getElementById('exploration-map-follow').addEventListener('click', () => { range = current?.dungeon.classification?.indoor === false ? 96 : 64; viewCenter = null; selectedEncounter = ''; if (encounterSelect) encounterSelect.value = ''; paint(true); });
+    document.getElementById('exploration-map-follow').addEventListener('click', () => { range = current?.dungeon.classification?.indoor === false ? 96 : 32; viewCenter = null; selectedEncounter = ''; if (encounterSelect) encounterSelect.value = ''; paint(true); });
     canvas.addEventListener('pointerdown', event => {
       if (!current || event.button !== 0) return;
       hover.hidden = true;
@@ -266,9 +301,17 @@
         y: Math.max(0, Math.min(current.state.height, drag.center.y - (event.clientY - drag.y) / bounds.height * extent)) };
       paint(true);
     });
-    canvas.addEventListener('pointerup', () => { drag = null; });
+    canvas.addEventListener('pointerup', event => {
+      if(drag && mapProjection && Math.hypot(event.clientX-drag.x,event.clientY-drag.y)<4){
+        const b=canvas.getBoundingClientRect(),x=(event.clientX-b.left)*canvas.width/b.width,y=(event.clientY-b.top)*canvas.height/b.height;
+        const marker=mapProjection.markers.filter(m=>m.id).map(m=>({m,d:Math.hypot((m.x-mapProjection.left)*mapProjection.scale-x,(m.y-mapProjection.top)*mapProjection.scale-y)})).sort((a,b)=>a.d-b.d)[0];
+        if(marker&&marker.d<=24){selectedEncounter=marker.m.id;if(encounterSelect)encounterSelect.value=selectedEncounter;paint(true);}
+      }
+      drag=null;
+    });
     canvas.addEventListener('pointercancel', () => { drag = null; });
     canvas.addEventListener('pointerleave', () => { hover.hidden = true; });
+    panel.querySelector('.exploration-map-help')?.addEventListener('toggle', fit);
     root.addEventListener('resize', fit);
     root.addEventListener('pagehide', () => atlas.flushAll());
     document.addEventListener('visibilitychange', () => { if (document.hidden) atlas.flushAll(); });
@@ -297,8 +340,10 @@
       bitmapRevision = -1;
       viewCenter = null;
       selectedEncounter = ''; encounterSignature = '';
+      range = dungeon.classification?.indoor === false ? 96 : 32;
     }
     current = { dungeon, player, angle, state };
+    if (applyQuestReveals(state, dungeon)) bitmapRevision = -1;
     const changed = atlas.reveal(state, dungeon, player, dungeon.classification?.indoor === false ? 8 : 6);
     if (changed.length && bitmapRoom === dungeon && bitmapRevision >= 0) {
       const bc = bitmap.getContext('2d');

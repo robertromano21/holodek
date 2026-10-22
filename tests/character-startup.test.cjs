@@ -200,7 +200,7 @@ test('startup runs the complete console updater; dialogue retains monsters, equi
   const handoffStart = source.lastIndexOf('addPromptAndResponse(userInput, messages[0].content');
   const handoff = source.slice(handoffStart, source.indexOf('const formattedUpdatedGameConsole =', handoffStart));
   const retort = read('retort/retortWithUserInput.js');
-  const gate = retort.slice(retort.indexOf('let hasRoomDungeon = false;'), retort.indexOf('if (isNewGeoRoom && roomDescription && !isAutoSimAdvance)'));
+  const gate = retort.slice(retort.indexOf('let hasRoomDungeon = false;'), retort.indexOf('if (isNewGeoRoom && !hasRoomDungeon && roomDescription && !isAutoSimAdvance)'));
   const startingCharacter = { Name: 'Mortacia', Sex: 'Female', Race: 'Goddess', Class: 'Assassin', HP: 120, MaxHP: 120, Level: 50 };
   const names = ['Zharvok the Duskwither', 'Kaeltharion the Veiled Prophet', 'Zirethra the Veilcrawler', 'Valmortis the Chainbearer'];
   const sheets = names.map(Name => formatStartingCharacterSheet({ Name, Sex: 'Male', Race: 'Wraith', Class: 'Sentinel',
@@ -236,7 +236,7 @@ test('startup runs the complete console updater; dialogue retains monsters, equi
     objectsInRoomString: '', completedStartResult: { characterConfirmed: true },
     currentCoordinates: { x: 0, y: 0, z: 0 }, conversationHistory: initial, serverGameConsole: initial, updatedGameConsole: initial,
     geoCoords: { x: 0, y: 0, z: 0 }, geoKey: '0,0,0', lastGeoKey: '0,0,0',
-    isFirstTurn: false, isAutoSimAdvance: false, sceneInputFromConsole,
+    isFirstTurn: false, isAutoSimAdvance: false, sceneInputFromConsole, WorldSetting: { current: () => null },
     sharedState: { getRoomDungeon: () => ({ layout: { width: 32, height: 32 }, cells: {}, sceneSpec: {
       source: sceneInputFromConsole(initial)
     } }) }
@@ -380,19 +380,36 @@ test('contradictory saved starting flags are corrected without changing quests, 
   assert.ok(!f.calls.some(call => call.startsWith('text:')), 'A saved room does not repopulate or rewrite its description');
 });
 
-test('production and test builders reject outdoor overrides specifically for the starting temple', () => {
+test('production and test builders preserve CotG temple starts and homebrew start profiles', () => {
   const source = read('retort/retortWithUserInput.js');
-  assert.equal((source.match(/let forcedIndoor = geoKeyString === '0,0,0' \? true : null;/g) || []).length, 2);
-  assert.equal((source.match(/if \(geoKey === '0,0,0'\) \{ sceneSpec.indoor = true; sceneSpec.biome = 'temple'; \}/g) || []).length, 2);
-  const start = source.indexOf('// Final room-entry decision'), end = source.indexOf('if (isNewGeoRoom && roomDescription && !isAutoSimAdvance)', start);
+  const expressions = [...source.matchAll(/let forcedIndoor = (geoKeyString === '0,0,0'[^;]+);/g)].map(m => m[1]);
+  const overrides = source.match(/if \(geoKey === '0,0,0'\) \{ const start=WorldSetting.startRoomProfile\(\);[^\n]+\}/g) || [];
+  assert.equal(expressions.length, 2); assert.equal(overrides.length, 2);
+  for (const profile of [null, { indoor: false, classification: { biome: 'wasteland' } }, { indoor: true, classification: { biome: 'fortress' } }]) {
+    const WorldSetting = { current: () => profile, startRoomProfile: () => profile };
+    for (const expression of expressions) {
+      assert.equal(vm.runInNewContext(expression, { geoKeyString: '0,0,0', WorldSetting }), profile?.indoor ?? true);
+      assert.equal(vm.runInNewContext(expression, { geoKeyString: '1,0,0', WorldSetting }), null);
+    }
+    for (const override of overrides) {
+      const sceneSpec = {}; vm.runInNewContext(override, { geoKey: '0,0,0', WorldSetting, sceneSpec });
+      assert.deepEqual(sceneSpec, { indoor: profile?.indoor ?? true, biome: profile?.classification.biome || 'temple' });
+    }
+  }
+  const start = source.indexOf('// Final room-entry decision'), end = source.indexOf('if (isNewGeoRoom && !hasRoomDungeon && roomDescription && !isAutoSimAdvance)', start);
   const gate = source.slice(start, end), text = buildInitialWorldConsole().console, input = sceneInputFromConsole(text), logs = [];
   const context = { geoKey: '0,0,0', geoCoords: { x: 0, y: 0, z: 0 }, lastGeoKey: '0,0,0', isFirstTurn: false,
     isAutoSimAdvance: false, updatedGameConsole: text, roomDescription: input.description, sceneInputFromConsole,
-    console: { ...quiet, info: (...args) => logs.push(args) },
+    console: { ...quiet, info: (...args) => logs.push(args) }, WorldSetting: { current: () => null },
     sharedState: { getRoomDungeon: () => ({ classification: { indoor: false }, sceneSpec: { indoor: false, source: input }, cells: {}, layout: {} }) } };
   vm.runInNewContext(gate, context);
   assert.equal(JSON.parse(logs[0][1]).staleRoomDungeon, true);
   assert.equal(JSON.parse(logs[0][1]).build, true);
+  const homebrewLogs = [], outdoor = { classification: { indoor: false }, sceneSpec: { indoor: false, source: input }, cells: {}, layout: {} };
+  vm.runInNewContext(gate, { ...context, WorldSetting: { current: () => ({ kind: 'homebrew' }) },
+    console: { ...quiet, info: (...args) => homebrewLogs.push(args) }, sharedState: { getRoomDungeon: () => outdoor } });
+  assert.equal(JSON.parse(homebrewLogs[0][1]).staleRoomDungeon, false);
+  assert.equal(JSON.parse(homebrewLogs[0][1]).build, false);
 });
 
 test('one-exit startup with Adjacent Rooms: None runs the complete existing population pipeline', async () => {
@@ -692,11 +709,12 @@ test('server startup seeds a complete world and releases its lock after a task e
   const values = {};
   const context = {
     app: { post: (url, handler) => routes.set(url, handler) }, inputTaskInFlight: false, tasks,
+    startupTasks: require('../retort/startupTasks').create({ tasks }),
     console: quiet, broadcast() {}, roomDatabaseReceiver: { reset() {} }, buildInitialWorldConsole, buildInitialGameConsole,
     Economy: { start() {}, refresh() {} },
     actionDice: { end() { values.diceEnded = true; }, setPaused(value) { assert.equal(value, false); } },
     sharedState: {
-      getCombatMode: () => 'Combat Map-Based', beginDungeonRun: () => 'new-run', setCurrentPC() {},
+      getDungeonRunId: () => 'new-run', getCombatMode: () => 'Combat Map-Based', beginDungeonRun: () => 'new-run', setCurrentPC() {},
       setCharacterGenerationInProgress() {}, setPendingCharacterForReview() {}, setCombatCharactersString() {},
       setUpdatedGameConsole: v => { values.console = v; }, setRoomNameDatabase: v => { values.rooms = v; }, setPersonalNarrative() {}
     },

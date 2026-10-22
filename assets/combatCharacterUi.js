@@ -15,7 +15,11 @@
     if(!Number.isFinite(x)||!Number.isFinite(y))return null;
     for(let i=targets.length-1;i>=0;i--){
       const t=targets[i];if(!t.character||!(t.size>0)||x<t.x||y<t.y||x>=t.x+t.size||y>=t.y+t.size)continue;
-      const u=(x-t.x)/t.size,v=(y-t.y)/t.size;
+      let u=(x-t.x)/t.size,v=(y-t.y)/t.size;
+      if(t.rotation){
+        const c=Math.cos(t.rotation),s=Math.sin(t.rotation),dx=u-.5,dy=v-.5;
+        u=.5+dx*c+dy*s;v=.5-dx*s+dy*c;
+      }
       if(sampleAlpha&&sampleAlpha(t,t.flipped?1-u:u,v)===0)continue;
       return t.character;
     }
@@ -25,7 +29,7 @@
     let targets=scene.combatActorHitTargets||[];
     if(!scene._lastDungeonDraw?.dungeon)targets=Object.entries(scene.characters||{}).filter(([,v])=>v.sprite?.visible).map(([name,v])=>({
       character:(root.combatCharacters||[]).find(c=>c.name===name),texKey:v.sprite.texture?.key,frameName:v.sprite.frame?.name,
-      flipped:!!v.sprite.flipX,x:v.sprite.x-v.sprite.displayWidth/2,y:v.sprite.y-v.sprite.displayHeight/2,size:v.sprite.displayWidth}));
+      flipped:!!v.sprite.flipX,rotation:v.sprite.rotation||0,x:v.sprite.x-v.sprite.displayWidth/2,y:v.sprite.y-v.sprite.displayHeight/2,size:v.sprite.displayWidth}));
     return pick(targets,x,y,(t,u,v)=>{
       if(!t.texKey||!scene.textures?.getPixelAlpha)return 255;
       const f=scene.textures.getFrame(t.texKey,t.frameName),w=f?.cutWidth||96,h=f?.cutHeight||96;
@@ -105,6 +109,6 @@
     const top=Math.max(12,Math.min(visible?consoleBox.bottom+5*zoom:72,root.innerHeight-100));
     Object.assign(popup.style,{left:left/zoom+'px',top:top/zoom+'px',width:width/zoom+'px',maxHeight:(root.innerHeight-top-12)/zoom+'px'});
   }
-  root.addEventListener?.('resize',()=>document.querySelectorAll('.combat-target-actions').forEach(positionActions));
-  return{pick,pickScene,open,openConsoleTarget,confirmAttackCommand};
+  root.addEventListener?.('resize',()=>document.querySelectorAll('.combat-target-actions, .combat-spell-targets').forEach(positionActions));
+  return{pick,pickScene,open,openConsoleTarget,confirmAttackCommand,positionActions};
 });

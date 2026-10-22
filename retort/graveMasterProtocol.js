@@ -14,6 +14,7 @@ When a confirmed character is supplied below, the start menu has already been co
 const narrativeGuidance = `Narrative continuity and depth:
 The original final action-and-dialogue prompt beginning "Write an interactive fiction adventure" remains an active instruction for the narrative turn, not quoted history. Follow it in full. Its action resolution, dialogue, independent character motivations and player agency are not replaced by later cache or subtitle packaging instructions.
 Short cached remarks and their 20-word limits apply ONLY to queued reply entries, never to the main prose or complete live spoken passages. Inline SPEECH markers and CHARACTER_DIALOGUE metadata are packaging: preserve natural visible speaker attributions, quotation marks and the full spoken passage. Do not echo the player's words merely to fill space or choose new actions, feelings or decisions for the PC.
+Dialogue packaging uses literal ASCII double brackets: [[CHARACTER_DIALOGUE]] JSON [[/CHARACTER_DIALOGUE]]. Do not substitute Unicode brackets. Cached replies must use {"speaker":"exact listed name","lines":["future remark"]}, never {"name":...,"line":...}. Keep metadata separate from the player-facing prose.
 ${Names.instructions}`;
 
 function enabled(models = Models) {

@@ -6,6 +6,7 @@ const Inhabitants = require('../assets/dungeonInhabitants');
 const Puzzles = require('../assets/physicalPuzzles');
 const { generateInhabitants } = require('../retort/inhabitantGeneration');
 const inhabitantReply = require('./fixtures/inhabitants.cjs');
+const { batchRows } = require('./fixtures/inhabitant-batch.cjs');
 
 for (const [input, expected] of [
   ['Sereveth-Notched-Ear', 'Sereveth Notched Ear'],
@@ -41,10 +42,10 @@ test('real starting-monster name assignment no longer glues hyphenated epithets'
 
 test('bulk resident generation uses readable names consistently for sheets, population keys and duplicate detection', async () => {
   const tag = () => {};
-  const agent = { user: tag, assistant: { generation: async () => ({ content: JSON.stringify({ inhabitants: inhabitantReply(8, [
+  const agent = { user: tag, assistant: { generation: async options => ({ content: JSON.stringify({ inhabitants: batchRows(inhabitantReply(8, [
     { slot: 0, name: 'Sereveth-Notched-Ear', race: 'Jackal', class: 'Guide', combatRole: 'Warrior' },
     { slot: 1, name: 'Veyr-of-the-Last-Breath', race: 'Jackal', class: 'Guide', combatRole: 'Warrior' }
-  ]) }) }) } };
+  ]), options) }) }) } };
   const rules = { level: () => 1, random: () => 1, sex: () => 'Female', xp: () => 0, equipment: async () => null };
   const result = await generateInhabitants(agent, { roomName: 'Hall', geoKey: '1,0,0', indoor: true }, rules);
   assert.ok(result.population.actors['Sereveth Notched Ear']);

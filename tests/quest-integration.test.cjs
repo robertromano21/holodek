@@ -194,7 +194,7 @@ test('real quest manager seeds the first LLM regional adventure while retaining 
   assert.ok(!h.state.prompts.some(p=>/How many required elements/.test(p)));
 });
 test('real quest manager falls through to the unchanged generator after a rejected regional proposal',async()=>{
-  const h=regionalHarness();await h.turn({responses:['not JSON','still not JSON',{count:0}]});
+  const h=regionalHarness();await h.turn({responses:['not JSON','still not JSON','still invalid','final invalid',{count:0}]});
   assert.equal(h.state.tasks.length,0);assert.equal(h.db()['0,0,0'].regionalAdventure,undefined);
   assert.ok(h.state.prompts.some(p=>/How many required elements/.test(p)));
   assert.equal(h.db()[BOSS_KEY].bossGate.keySeeded,false);

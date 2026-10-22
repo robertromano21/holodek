@@ -42,9 +42,12 @@ function computeDungeonGeometryStamp(dungeon, geoKey) {
     mix(cell.tile || 'floor');
     mix(Number.isFinite(cell.floorHeight) ? Math.round(cell.floorHeight * 1000) : 0);
     mix(Number.isFinite(cell.ceilHeight) ? Math.round(cell.ceilHeight * 1000) : 0);
-    if (cell.roof) mix(`roof:${cell.roof.style}:${cell.roof.height}`);
+    if (cell.roof) mix(`roof:${cell.roof.style}:${cell.roof.height}:${cell.roof.slopeX}:${cell.roof.slopeY}`);
+    if (cell.structureHeight) mix(`support:${cell.structureHeight}`);
     if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
   }
+  mix(JSON.stringify(dungeon.sceneStructures || []));
+  if(dungeon.surfaceArt?.length)mix(JSON.stringify(dungeon.surfaceArt));
   return `${keys.length}:${(hash >>> 0).toString(16)}`;
 }
 
@@ -296,6 +299,8 @@ async function switchDungeonForCoordinates(coordString) {
     return;
   }
 
+  await window.RoomEntry?.prepare?.(cached,geoKey);
+  if(request!==dungeonSwitchRequest)return;
   console.log('Switching dungeon due to coordinate change:', geoKey);
 
   currentDungeon = ensureDungeonGeometryStamp(cached, geoKey);
@@ -303,13 +308,14 @@ async function switchDungeonForCoordinates(coordString) {
   window.CombatTacticalUi?.changeFloor(geoKey, currentDungeon.sceneSpec?.worldContext?.fortifiedFloor?.version === 1);
   if (cached.inhabitants) window.DungeonLife?.receivePopulation({ population: cached.inhabitants, runId: window.dungeonRunId });
 
-  const rawStart  = currentDungeon.start || { x: 10, y: 18 };
+  const rawStart  = world1ArrivalStart(currentDungeon, geoKey) || currentDungeon.start || { x: 10, y: 18 };
   const safeStart = findNearestWalkableStart(currentDungeon, rawStart);
 
   currentDungeon.start = safeStart;
   playerDungeonX = safeStart.x;
   playerDungeonY = safeStart.y;
   playerZInitialized = false;
+  window.resetDungeonArrivalMomentum?.();
   playerPosX = playerDungeonX + 0.5;
   playerPosY = playerDungeonY + 0.5;
   playerAngle = choosePlayerSpawnAngle(currentDungeon, playerDungeonX, playerDungeonY, playerAngle);
@@ -672,6 +678,7 @@ eventSource.onmessage = function(event) {
       window.DungeonCampaignMemory?.begin(data.runId);
       ++dungeonSwitchRequest;
       currentDungeon = null;
+      window.RoomEntry?.reset?.();
       window.DungeonExplorationMap?.reset();
       window.InventoryUi?.reset();
       window.DungeonLife?.reset();
@@ -760,7 +767,7 @@ eventSource.onmessage = function(event) {
 
     // DUNGEON LOADED — THE DEMON HAS SPOKEN
     if (data.type === 'dungeonLoaded') {
-      ++dungeonSwitchRequest;
+      const request=++dungeonSwitchRequest;
       (async () => {
         const dungeon = data.dungeon;
         if (dungeon?._meta?.runId && window.dungeonRunId && dungeon._meta.runId !== window.dungeonRunId) {
@@ -768,6 +775,8 @@ eventSource.onmessage = function(event) {
           return;
         }
         const geoKey  = data.geoKey || currentDungeon?.geoKey;
+        if(dungeon&&geoKey)await window.RoomEntry?.prepare?.(dungeon,geoKey);
+        if(request!==dungeonSwitchRequest)return;
     
         if (!geoKey) {
           console.warn('dungeonLoaded with no geoKey; using transient dungeon');
@@ -809,13 +818,14 @@ eventSource.onmessage = function(event) {
         }
     
         // --- NORMAL FLOW CONTINUES ---
-        const rawStart  = currentDungeon.start || { x: 10, y: 18 };
+        const rawStart  = world1ArrivalStart(currentDungeon, geoKey) || currentDungeon.start || { x: 10, y: 18 };
         const safeStart = findNearestWalkableStart(currentDungeon, rawStart);
     
         currentDungeon.start = safeStart;
         playerDungeonX = safeStart.x;
         playerDungeonY = safeStart.y;
         playerZInitialized = false;
+        window.resetDungeonArrivalMomentum?.();
         playerPosX = playerDungeonX + 0.5;
         playerPosY = playerDungeonY + 0.5;
         playerAngle = choosePlayerSpawnAngle(currentDungeon, playerDungeonX, playerDungeonY, playerAngle);
@@ -848,6 +858,8 @@ eventSource.onmessage = function(event) {
   // Existing combat map movement
   if (data.type === 'combat_maze_step') {
     applyCombatMazeStep(data);
+  } else if (data.type === 'ranged_fx') {
+    window.RangedFx?.show(data);
   } else if (data.type === 'movement') {
     const { character, path } = data;
     path.forEach((step, index) => {
@@ -1803,8 +1815,23 @@ function getCombatMapRotationAngle() {
   return -(playerAngle + Math.PI / 2);
 }
 
+const controllerMove = { forward:0, strafe:0, turn:0, run:false };
+window.setDungeonControlInput = input => {
+  let changed = false;
+  for (const key of ['forward','strafe','turn','run']) { const value = key === 'run' ? !!input[key] : Math.max(-1,Math.min(1,Number(input[key]) || 0)); if (controllerMove[key] !== value) changed = true; controllerMove[key] = value; }
+  if (changed) startDungeonMovementLoop();
+};
+window.releaseDungeonMoveKey = action => { if (Object.hasOwn(DUNGEON_MOVE.keys,action)) DUNGEON_MOVE.keys[action] = false; };
+window.resetDungeonArrivalMomentum = () => {DUNGEON_MOVE.velX=DUNGEON_MOVE.velY=0;DUNGEON_MOVE.lastTime=performance.now();};
+window.resumeDungeonHeldMovement = () => {
+  if(window.PlayerControls?.blocked?.(true))return;
+  for(const action of window.PlayerControls?.heldMovement?.()||[])if(Object.hasOwn(DUNGEON_MOVE.keys,action))DUNGEON_MOVE.keys[action]=true;
+  DUNGEON_MOVE.lastTime=performance.now();startDungeonMovementLoop();
+};
+window.clearDungeonMoveKeys = () => { for (const key of Object.keys(DUNGEON_MOVE.keys)) DUNGEON_MOVE.keys[key] = false; };
 function updateDungeonMovement(now) {
-  if (window.gamePaused || window.actionDiceState?.active || isCombatRoundActive()) {
+  if (window.gamePaused || window.actionDiceState?.active || isCombatRoundActive() || window.PlayerControls?.blocked(true)) {
+    window.clearDungeonMoveKeys();
     DUNGEON_MOVE.lastTime = now;
     DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
     return false;
@@ -1818,14 +1845,14 @@ function updateDungeonMovement(now) {
   DUNGEON_MOVE.lastTime = now;
 
   const leftRight = (DUNGEON_MOVE.keys.right ? 1 : 0) - (DUNGEON_MOVE.keys.left ? 1 : 0);
-  const turnInput = leftRight;
+  const turnInput = Math.max(-1, Math.min(1, leftRight + controllerMove.turn));
   if (turnInput !== 0) {
     playerAngle += turnInput * TURN_SPEED * dt;
   }
 
-  const moveInput = (DUNGEON_MOVE.keys.forward ? 1 : 0) - (DUNGEON_MOVE.keys.backward ? 1 : 0);
-  const strafeInput = (DUNGEON_MOVE.keys.strafeRight ? 1 : 0) - (DUNGEON_MOVE.keys.strafeLeft ? 1 : 0);
-  const runMult = DUNGEON_MOVE.keys.run ? RUN_MULT : 1.0;
+  const moveInput = Math.max(-1,Math.min(1,(DUNGEON_MOVE.keys.forward ? 1 : 0) - (DUNGEON_MOVE.keys.backward ? 1 : 0) + controllerMove.forward));
+  const strafeInput = Math.max(-1,Math.min(1,(DUNGEON_MOVE.keys.strafeRight ? 1 : 0) - (DUNGEON_MOVE.keys.strafeLeft ? 1 : 0) + controllerMove.strafe));
+  const runMult = DUNGEON_MOVE.keys.run || controllerMove.run ? RUN_MULT : 1.0;
   const dirX = Math.cos(playerAngle);
   const dirY = Math.sin(playerAngle);
   const strafeX = -dirY;
@@ -1982,7 +2009,16 @@ function startDungeonMovementLoop() {
   }
   const step = (now) => {
     if (!DUNGEON_MOVE.active) return;
-    const keepGoing = updateDungeonMovement(now);
+    let keepGoing;
+    try { keepGoing = updateDungeonMovement(now); }
+    catch (error) {
+      // A render/interaction exception must not leave an unscheduled loop permanently "active".
+      DUNGEON_MOVE.active = false;
+      DUNGEON_MOVE.raf = 0;
+      DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
+      console.error('[DungeonMovement] Frame failed; movement can retry on the next input.', error);
+      return;
+    }
     if (keepGoing) {
       DUNGEON_MOVE.raf = requestAnimationFrame(step);
     } else {
@@ -2016,7 +2052,9 @@ function syncDungeonExitNavigation() {
     console.info('[DungeonExits]', currentDungeon.geoKey, report);
   }
   const player = { x: playerPosX, y: playerPosY };
+  world1QuestProximity(player);
   const near = window.DungeonExits.nearby(currentDungeon, player);
+  if (near) window._world1FootExit = { geoKey: currentDungeon.geoKey, direction: near.direction, at: Date.now() };
   if (!near) {
     if (!window.DungeonExits.nearby(currentDungeon, player, 2.2)) dungeonExitPromptKey = null;
     document.querySelector('.popup-container[data-dungeon-proximity]')?.remove();
@@ -2031,6 +2069,57 @@ function syncDungeonExitNavigation() {
   link.click(); // Reuse the original Go / Unlock / Cancel command path, including locked exits.
   const popup = document.querySelector('.popup-container[data-dungeon-exit]');
   if (popup) popup.dataset.dungeonProximity = 'true';
+}
+
+// ---- world1: on-foot exits and local quest objectives -----------------------------------------------
+window.getRoomNameDatabase = () => roomNameDatabase;
+// Arrival at the facing gate (north -> south gate, up -> down stairs), for walking and console travel alike.
+function world1ArrivalStart(dungeon, geoKey) {
+  const move = window._world1Arrival;
+  if (!window.RoomArrival || !move || !geoKey || move.fromKey === geoKey || Date.now() - move.at > 10 * 60000) return null;
+  window._world1Arrival = null;
+  const prepared = dungeon.entryPlacement;
+  if (prepared?.version === 1 && prepared.fromKey === move.fromKey && prepared.direction === move.direction &&
+      Number.isFinite(prepared.start?.x) && Number.isFinite(prepared.start?.y)) return { ...prepared.start };
+  const raw = dungeon.sceneSpec?.exits ?? dungeon.sceneSpec?.source?.exits ?? [];
+  const point = window.RoomArrival.arrivalPoint(dungeon, move.direction, raw, window.DungeonExits, window.HolodekFlags);
+  if (point) console.info('[Arrival]', geoKey, move.direction, '->', point.gate, point.x, point.y);
+  return point ? { x: point.x, y: point.y } : null;
+}
+function world1ApplyDatabase(text) {
+  if (!text) return;
+  roomNameDatabaseString = text; roomNameDatabasePlainObject = JSON.parse(text); roomNameDatabase.clear();
+  for (const [key, room] of Object.entries(roomNameDatabasePlainObject)) roomNameDatabase.set(key, room);
+}
+// True when the player is standing at this exit on foot right now; records the traversal in the save.
+function world1FootExitPass(direction) {
+  const ready = window._world1FootExit, geoKey = coordinatesToString(currentCoordinates);
+  if (!ready || ready.direction !== direction || ready.geoKey !== geoKey || Date.now() - ready.at > 60000) return false;
+  const room = roomNameDatabase.get(geoKey);
+  if (room) { room.footExits ||= {}; room.footExits[direction] = true; }
+  const target = window.QuestMap?.neighbourKey(geoKey, direction), back = window.RoomArrival?.OPPOSITE[direction];
+  if (target && back) { const next = roomNameDatabase.get(target); if (next) { next.footExits ||= {}; next.footExits[back] = true; } }
+  fetch('/exits/traversed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ geoKey, direction }) })
+    .then(r => r.ok ? r.json() : null).then(body => body?.roomNameDatabaseString && world1ApplyDatabase(body.roomNameDatabaseString)).catch(() => {});
+  return true;
+}
+const world1ReachedObjectives = new Set();
+function world1QuestProximity(player) {
+  if (!window.QuestMap || !currentDungeon?.geoKey) return;
+  const landmarks = window.LandmarkCatalog?.catalog(currentDungeon) || [];
+  const { markers } = window.QuestMap.mapMarkers(currentDungeon, roomNameDatabase, { flags: window.HolodekFlags, landmarks });
+  for (const m of markers) {
+    const key = `${m.missionId}:${m.label}`;
+    if (!m.local || world1ReachedObjectives.has(key) || Math.hypot(m.x - player.x, m.y - player.y) > 1.8) continue;
+    world1ReachedObjectives.add(key);
+    fetch('/quest/objective', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ geoKey: currentDungeon.geoKey, missionId: m.missionId }) })
+      .then(r => r.ok ? r.json() : null).then(body => {
+        if (!body) return;
+        world1ApplyDatabase(body.roomNameDatabaseString);
+        const chatLog = document.getElementById('chatlog');
+        if (chatLog) { chatLog.innerHTML += `<br><br><i>${String(m.label).replace(/[<>&]/g, '')} — done. Next: ${String(body.objective.step).replace(/[<>&]/g, '')}</i>`; scrollToBottom(); }
+      }).catch(() => world1ReachedObjectives.delete(key));
+  }
 }
 
 function drawDungeonExitMapMarkers(scene, draw) {
@@ -2074,9 +2163,17 @@ class MainScene extends Phaser.Scene {
         if (existingPopup) {
             existingPopup.remove();
         }
-                // Safely use the passed data or set defaults
+                // A transient scene restart may arrive before console data; rehydrate the same room only.
+        if (!data?.coordinates || data.coordinates === 'None') {
+          const text = window.lastServerGameConsole;
+          const key = window.DungeonInhabitants?.roomKey?.(String(text || '').match(/^Coordinates:\s*(.*)$/m)?.[1]);
+          if (key && key === currentDungeon?.geoKey) data = window.DungeonInhabitants.consoleView(text, window.latestUpdatedData);
+          else if (document.querySelector('#phaser-container [data-room-object-list]') && currentDungeon) return;
+        }
+        // Safely use the passed data or set defaults
+        if (typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) data = { ...(data || {}), roomName: holodekScrubStartName(data?.roomName || holodekStartRoomName()) }; // world1: never the CotG start room in a homebrew world
         const roomName = window.OutdoorRoutes?.displayName?.(data?.roomName || "Ruined Temple Entrance") || data?.roomName || "Ruined Temple Entrance";
-        const roomDescription = data?.roomDescription || "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...";
+        const roomDescription = (((typeof holodekHomebrewActive === "function" && holodekHomebrewActive()) && /Ruined Temple|Tartarus/i.test(String(data?.roomDescription || ''))) ? null : data?.roomDescription) || ((typeof holodekHomebrewActive === "function" && holodekHomebrewActive()) ? "Holodek is still writing this room..." : "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons...");
         const coordinates = data?.coordinates || "None";
         const objects = data?.objects || "None";
         // Render clickable objects
@@ -2926,16 +3023,16 @@ function drawCombatTextureOnRT(scene, texKey, frameName, x, y, size, character) 
   x *= pixelScale; y *= pixelScale; size *= pixelScale;
   const frame = frameName || undefined;
   const flipped = getCombatFacingFlip(character);
+  const down = window.DungeonInhabitants?.isDown(character) || character?.type === 'pc' && window.DungeonInhabitants?.isDown((window.combatCharacters || []).find(a => a.type === 'pc'));
   if(scene.combatActorHitTargets&&character?.name){
     const scale=scene.actorRT?1:scene.PIXEL_SCALE||1;
-    scene.combatActorHitTargets.push({character,texKey,frameName,flipped,x:x*scale,y:y*scale,size:size*scale});
+    scene.combatActorHitTargets.push({character,texKey,frameName,flipped,rotation:down?Math.PI/2:0,x:x*scale,y:y*scale,size:size*scale});
   }
 
   if (scene.make && typeof scene.make.sprite === 'function') {
     const temp = scene.make.sprite({ x: x + size / 2, y: y + size / 2, key: texKey, frame, add: false });
     temp.setOrigin(0.5, 0.5);
     temp.setDisplaySize(size, size);
-    const down = window.DungeonInhabitants?.isDown(character) || character?.type === 'pc' && window.DungeonInhabitants?.isDown((window.combatCharacters || []).find(a => a.type === 'pc'));
     if (down) temp.setAngle?.(90);
     if (typeof temp.setFlipX === 'function') temp.setFlipX(flipped);
     target.draw(temp);
@@ -3187,49 +3284,16 @@ class CombatScene extends Phaser.Scene {
       return tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable;
     };
 
-    const setMoveKey = (event, isDown) => {
-      const key = event.key;
-      if (key === 'Shift') {
-        DUNGEON_MOVE.keys.run = isDown;
-        return;
-      }
-      if (key === 'ArrowUp' || key === 'w' || key === 'W') {
-        DUNGEON_MOVE.keys.forward = isDown;
-      }
-      if (key === 'ArrowDown' || key === 's' || key === 'S') {
-        DUNGEON_MOVE.keys.backward = isDown;
-      }
-      if (key === 'q' || key === 'Q') {
-        DUNGEON_MOVE.keys.strafeLeft = isDown;
-      }
-      if (key === 'e' || key === 'E') {
-        DUNGEON_MOVE.keys.strafeRight = isDown;
-      }
-      if (key === 'ArrowLeft' || key === 'a' || key === 'A') {
-        DUNGEON_MOVE.keys.left = isDown;
-      }
-      if (key === 'ArrowRight' || key === 'd' || key === 'D') {
-        DUNGEON_MOVE.keys.right = isDown;
-      }
-    };
-
-    this.input.keyboard.on('keydown', (event) => {
-      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'q', 'e', 'W', 'A', 'S', 'D', 'Q', 'E', 'Shift'].includes(event.key)) return;
-      if (isTypingTarget(event)) return;
-      if (window.gamePaused || window._gameOver) return;
-      if (event.preventDefault) event.preventDefault();
-      if (event.stopPropagation) event.stopPropagation();
-      setMoveKey(event, true);
-      startDungeonMovementLoop();
+    const movementAction = event => window.PlayerControls?.actionFor(event) || (!window.PlayerControls ? ({ArrowUp:'forward',ArrowDown:'backward',ArrowLeft:'left',ArrowRight:'right',w:'forward',s:'backward',a:'left',d:'right',q:'strafeLeft',e:'strafeRight',Shift:'run'})[event.key] : null);
+    this.input.keyboard.on('keydown', event => {
+      const action = movementAction(event);
+      if (!Object.hasOwn(DUNGEON_MOVE.keys,action) || isTypingTarget(event) || window.gamePaused || window._gameOver || window.PlayerControls?.blocked(true)) return;
+      event.preventDefault?.(); DUNGEON_MOVE.keys[action] = true; startDungeonMovementLoop();
     });
-
-    this.input.keyboard.on('keyup', (event) => {
-      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'w', 'a', 's', 'd', 'q', 'e', 'W', 'A', 'S', 'D', 'Q', 'E', 'Shift'].includes(event.key)) return;
-      if (isTypingTarget(event)) return;
-      if (event.preventDefault) event.preventDefault();
-      if (event.stopPropagation) event.stopPropagation();
-      setMoveKey(event, false);
-      startDungeonMovementLoop();
+    this.input.keyboard.on('keyup', event => {
+      const action = movementAction(event);
+      if (!Object.hasOwn(DUNGEON_MOVE.keys,action)) return;
+      DUNGEON_MOVE.keys[action] = false;
     });
 
     }
@@ -4476,6 +4540,7 @@ const unconnectedRooms = new Set();
 // Function to generate unique exits for a room based on its coordinates
 function generateUniqueExits(coordinates, updatedGameConsole) {
   const planned = roomNameDatabase.get(coordinatesToString(coordinates));
+  if (planned?.preparedBuild || planned?.backgroundTopology?.version === 1) return Object.keys(planned.exits || {});
   if (planned?.planarRealm) {
     const exits = new Set(Object.keys(planned.exits || {})), anchor = window.OutdoorRoutes.coordinates(planned.planarRealm.anchorKey);
     const offsets = { north: [0, 1], east: [1, 0], south: [0, -1], west: [-1, 0] };
@@ -5420,8 +5485,8 @@ function ensurePCProperties(char) {
         };
 
         // Apply the base modifiers if the class and race are found
-        const classModifiers = baseClassModifiers[char.Class];
-        const raceModifiers = baseRaceModifiers[char.Race];
+        const classModifiers = baseClassModifiers[char.Class] || window.HolodekRoster?.classStats?.[char.Class];
+        const raceModifiers = baseRaceModifiers[char.Race] || window.HolodekRoster?.raceStats?.[char.Race];
 
         if (classModifiers) {
             char.Attack += classModifiers.Attack;
@@ -6060,8 +6125,8 @@ npcs.forEach(npc => {
   // Get the exits for the current room
 let exits = [];
   if (currentCoordinates.x === 0 && currentCoordinates.y === 0 && currentCoordinates.z === 0 && !matchingConsole) {
-    roomName = "Ruined Temple Entrance"
-    roomHistory = "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons..."; // Set preset value for specific coordinates
+    roomName = holodekStartRoomName()
+    roomHistory = (typeof holodekHomebrewActive === "function" && holodekHomebrewActive()) ? "Holodek is still writing this room..." : "You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels and powerful demons..."; // Set preset value for specific coordinates
     exits = generateUniqueExits(currentCoordinates, conversationHistory);
     // Example usage: update unvisited rooms set whenever roomNameDatabase or visitedRooms changes
 updateUnvisitedRoomsSet(currentCoordinates);
@@ -7663,17 +7728,30 @@ let characterCreationStep = 0;
 // Initialize an array to store NPCs and Mortacia
 
 // Function to initialize NPCs and Mortacia
+// world1 HOMEBREW: the world's generated classes and races replace the Children of the Grave lists for character creation (PC and party).
+window.HolodekRoster = { classStats: {}, raceStats: {}, install(r) {
+  if (!Array.isArray(r?.classes) || !Array.isArray(r?.races) || r.classes.length < 4 || r.races.length < 2) throw new Error('Holodek: world roster missing or invalid; cannot create characters for this world');
+  characterClasses.splice(0, characterClasses.length, ...r.classes.map(c => ({ name: c.name, hp: `${c.hitDie - 2} + 1d${c.hitDie}`, description: c.description, abilities: c.abilities, gear: c.gear, ammo: c.ammo, bodyPlan: c.bodyPlan })));
+  characterRaces.splice(0, characterRaces.length, ...r.races.map(x => ({ name: x.name, description: x.description, hpBonus: x.hpBonus, bodyPlan: x.bodyPlan })));
+  this.classStats = Object.fromEntries(r.classes.map(c => [c.name, c.stats])); this.raceStats = Object.fromEntries(r.races.map(x => [x.name, x.stats])); return characterClasses.length; } };
+// world1 HOMEBREW: a homebrew / Campaign Builder world never loads Children of the Grave named characters or their sprite presets.
+function holodekStartRoomName() { return holodekHomebrewActive() ? (window.HolodekFlags.FIRST_ROOM || 'First Room') : 'Ruined Temple Entrance'; }
+function holodekScrubStartName(n) { return (holodekHomebrewActive() && /Ruined Temple/i.test(String(n || ''))) ? holodekStartRoomName() : n; } // world1: a homebrew world never shows the CotG start room, even from a stale client cache
+function holodekHomebrewActive() { return !!(window.HolodekFlags && window.HolodekFlags.HOMEBREW_ACTIVE); }
 function initializeNPCs() {
   // Create NPCs and Mortacia only if the npcs array is empty
+  if (npcs.length === 0 && (typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) && window.HolodekFlags.HOMEBREW_PARTY === false) return; // world1: the player chose to play solo
   if (npcs.length === 0) {
     for (let i = 0; i < 5; i++) {
       const npc = createRandomNPC();
       npcs.push(npc);
     }
 
-    // Create Mortacia
-    const mortacia = createMortaciaNPC();
-    npcs.push(mortacia);
+    // Create Mortacia (Children of the Grave only; a homebrew world gets one more original companion instead)
+    npcs.push((typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) ? createRandomNPC() : createMortaciaNPC());
+    if ((typeof holodekHomebrewActive === 'function' && holodekHomebrewActive())) for (const n of npcs) n.Class = String(n.Class || '').replace(/Knight of (Atinus|Atricles|Urther|Poena)/g, 'Knight');
+    if ((typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) && Object.keys(window.HolodekRoster?.classStats || {}).length) npcs.forEach((n, i) => { // party drawn from the world's own classes and races
+      const c = characterClasses[(i * 7 + 3) % characterClasses.length], r = characterRaces[(i * 5 + 1) % characterRaces.length]; n.Class = c.name; n.Race = r.name; });
   }
 }
 
@@ -9350,6 +9428,7 @@ window.applyLiveCombatHealth = event => {
   window.lastServerGameConsole = text;
   updateCharacterSheetsFromConsole(text);
   // Health-only projection: do not respawn actors, change camera/positions or release the action lock.
+  if (Array.isArray(event.sceneObjects)) currentDungeon.sceneObjects = event.sceneObjects;
   for (const actor of window.combatCharacters || []) {
     const sheet = byName.get(String(actor.name || actor.Name).toLowerCase());
     if (sheet) Object.assign(actor, { hp: sheet.hp, maxHp: sheet.maxHp, state: api.state(sheet) });
@@ -9393,7 +9472,7 @@ window.applyRealtimeCombatResult = async event => {
     for(const [key,room] of Object.entries(database))roomNameDatabase.set(key,room);
   }
   if (event.type === 'economy_result' || event.type === 'spell_result') roomDatabaseSyncClient.reset();
-  if (event.type === 'economy_result' && Array.isArray(event.sceneObjects)) currentDungeon.sceneObjects = event.sceneObjects;
+  if (Array.isArray(event.sceneObjects)) currentDungeon.sceneObjects = event.sceneObjects;
   window.lastServerGameConsole = text;
   updateCharacterSheetsFromConsole(text);
   if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
@@ -9987,10 +10066,15 @@ window.startReviewedGame = async function(payload) {
   window._characterStartupPending = true;
   try {
     currentCoordinates = { x: 0, y: 0, z: 0 };
-    const initialConsole = updateGameConsole('', currentCoordinates, '');
+    let initialConsole = updateGameConsole('', currentCoordinates, '');
+    if (typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) { // world1: drop any cached Children of the Grave start console (from the menu's 'start') before a homebrew world starts
+      initialConsole = String(initialConsole).replace(/^Room Name:.*$/m, `Room Name: ${holodekStartRoomName()}`).replace(/^Room Description:.*$/m, 'Room Description: Holodek is still writing this room...');
+      try { const e = roomNameDatabase.get('0,0,0'); if (e && /Ruined Temple/i.test(typeof e === 'string' ? e : e.name || '')) roomNameDatabase.delete('0,0,0'); } catch {} }
     const initialState = { updatedGameConsole: initialConsole, roomNameDatabaseString: JSON.stringify(mapToPlainObject(roomNameDatabase)) };
     updateChatLog('<br>Building the first room...<br>');
     return await window.CharacterStartup.start({ ...payload, initialState }, {
+      onWait: () => updateChatLog('<br>The server is still building the same first room. Waiting for its next update; no new game was started.<br>'),
+      onRetry: (n) => { if (n === 1) updateChatLog('<br>Holodek is still painting the first room (the model is taking a while)...<br>'); },
       onResult: async result => {
         window._statsRolled = true;
         window._skipStartMenu = true;
@@ -10038,6 +10122,7 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
 }
 
 async function chatbotprocessinput(textin) {
+  if (window.__builderWalk) { displayMessage('Walk-around mode: turns are paused. Open the Campaign Builder and choose Stop walking, or use the menu entry "Return to game".'); return; }
   if (window._gameOver) { updateChatLog('<br>This adventure has ended. Start a new game.<br>'); return; }
   if (window.gamePaused) { updateChatLog('<br>The game is paused. Press P outside the command prompt to resume.<br>'); return; }
   const completedStartResult = textin?.completedStartResult;
@@ -10344,6 +10429,8 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
 }
 
   if (validDirection) {
+  // world1 ARRIVAL_EDGES: remember how the party left, so the next room places them at the facing gate.
+  window._world1Arrival = { direction: validDirection, fromKey: coordinatesToString(currentCoordinates), at: Date.now() };
   if (window.dungeonTestingMode) {
     currentCoordinates = generateCoordinates(currentCoordinates, validDirection, gameConsoleData);
   } else {
@@ -10353,6 +10440,12 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
       chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput + "<br><br><b></b>" + message.replace(/\n/g, "<br>");
       scrollToBottom();
       return; // Prevent further execution
+    }
+    // world1 FOOT_EXITS: an exit must first be walked to on foot; afterwards console travel through it is unchanged.
+    if (window.QuestMap && !world1FootExitPass(validDirection) &&
+        window.QuestMap.exitLocked(roomNameDatabase, coordinatesToString(currentCoordinates), validDirection, window.HolodekFlags)) {
+      displayLocalCommandResult(chatLog, chatHistory, userInput, window.QuestMap.LOCK_MESSAGE);
+      return;
     }
     // Calculate target coordinates
     const directionMap = {
@@ -10383,6 +10476,7 @@ if (currentRoom && currentRoom.exits && isUnlockIntent) {
         return; // Prevent movement if not traversable
       }
       if (traversable) {
+        window.RoomEntry?.begin?.(coordinatesToString(currentCoordinates),coordinatesToString(targetCoordinates));
         currentCoordinates = generateCoordinates(currentCoordinates, validDirection, gameConsoleData);
       }
     }
@@ -10450,6 +10544,8 @@ let classIndex = parseInt(character.Class) - 1;
 let selectedClass = characterClasses[classIndex];
 
 if (!isCharacterCreationInProgress() && userWords[0] !== "start") { 
+  if ((userWords[0] === '1' || userWords[0] === '2') && charactersString.length <= 0 && (typeof holodekHomebrewActive === 'function' && holodekHomebrewActive())) { // world1 HOMEBREW: no CotG premades
+    displayMessage('Holodek: this world has no premade heroes. Create your party (3).'); userWords = ['3']; }
   if (userWords[0] === '1' && charactersString.length <= 0) {
     // Original last-known-good method: use createMortaciaCharacter() to generate stats,
     // push to characters array, so data is transported via existing chatbotprocessinput
@@ -10508,6 +10604,7 @@ State: ${characterState(char, 'pc')}`;
     window._pendingStartingCharacter = character;
     window._pendingPartyReview = null;
     window._awaitingSpriteSave = true;
+    window._spriteReviewClosed = false; // world1: a new creation may open the sprite popup again (once)
 
     if (typeof window.showCharacterSpriteReviewMenu === 'function') {
       window._statsRolled = false; // reset so after next stats load, blank enter is allowed to auto-proceed
@@ -10590,6 +10687,7 @@ State: ${characterState(char, 'npc')}`;
     window._pendingStartingCharacter = character;
     window._pendingPartyReview = null;
     window._awaitingSpriteSave = true;
+    window._spriteReviewClosed = false; // world1: a new creation may open the sprite popup again (once)
 
     if (typeof window.showCharacterSpriteReviewMenu === 'function') {
       window._statsRolled = false; // reset so after next stats load, blank enter is allowed to auto-proceed
@@ -10627,9 +10725,14 @@ State: ${characterState(char, 'npc')}`;
     displayMessage('Step 1: Enter character name'); 
     console.log('charactersString:', charactersString);
     return;
+  } else if (userWords[0] === "4" && charactersString.length <= 0 && window.HolodekFlags?.CAMPAIGN_BUILDER && window.CampaignBuilderUi) {
+    // world1 Campaign Builder (option 4; options 1-3 unchanged)
+    displayMessage('Campaign Builder opened. Design rooms, objects, encounters and the setting; "Play this world" seeds a campaign.');
+    window.CampaignBuilderUi.open({ fromGame: false, tab: 'Setting' });
+    return;
   } else if (charactersString.length <= 0){
     displayMessage('Invalid option. Please enter 1, 2, or 3.');
-    displayMessage('Start Menu: \n \n 1) Play as Mortacia, goddess of death. \n 2) Play as Suzerain, knight of Atinus. \n 3) Create character and play as a party of 7 adventurers.');
+    displayMessage(((typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) ? 'Start Menu: \n \n 3) Create character and play as a party of 7 adventurers.' : 'Start Menu: \n \n 1) Play as Mortacia, goddess of death. \n 2) Play as Suzerain, knight of Atinus. \n 3) Create character and play as a party of 7 adventurers.') + (window.HolodekFlags?.CAMPAIGN_BUILDER ? ' \n 4) Campaign Builder: design your own world.' : ''));
     return;
   }
 }
@@ -10809,7 +10912,7 @@ initializeNPCs();
 }).join('\n');
 
         // Notify the user that NPCs have been added
-        displayMessage('5 NPCs and Mortacia have joined your party.');
+        displayMessage((typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) ? `${npcs.length} companions have joined your party.` : '5 NPCs and Mortacia have joined your party.');
 
         // Include NPCs in charactersString
         charactersString += '\n' + npcs.map((char, index) => {
@@ -10837,6 +10940,7 @@ initializeNPCs();
         // Pause here for a full-party sprite review before starting the dungeon.
         window._pendingPartyReview = { roster: [character, ...npcs], index: 0 };
         window._awaitingSpriteSave = true;
+        window._spriteReviewClosed = false; // world1: popup opens once for this review
         window._statsRolled = false;
         displayMessage('Character creation is complete. Review each party sprite, then click Save & Continue.');
         if (typeof window.showPartySpriteReviewMenu === 'function') {
@@ -10879,7 +10983,7 @@ if (userWords[0] === "start" && !window._skipStartMenu) {
   let startMenuOption = null;
 
   // Display the start menu options in the chat log
-  displayMessage('Start Menu: \n \n 1) Play as Mortacia, goddess of death. \n 2) Play as Suzerain, knight of Atinus. \n 3) Create character and play as a party of 7 adventurers. \n');
+  displayMessage(((typeof holodekHomebrewActive === 'function' && holodekHomebrewActive()) ? 'Start Menu: \n \n 3) Create character and play as a party of 7 adventurers.' : 'Start Menu: \n \n 1) Play as Mortacia, goddess of death. \n 2) Play as Suzerain, knight of Atinus. \n 3) Create character and play as a party of 7 adventurers.') + ' \n' + (window.HolodekFlags?.CAMPAIGN_BUILDER ? ' 4) Campaign Builder: design your own world. \n' : ''));
 
   // Handle the player's choice from the start menu
   switch (userInput) {
@@ -12701,6 +12805,7 @@ try {
   currentCoordinates = coordinatesBeforeCommand;
   clearInterval(window.keepAliveInterval);
   console.error('[StateSyncFailed] Command withheld:', error);
+  window.RoomEntry?.cancel?.();
   window._combatCommandPending = false;
   window._combatRoundActiveUntil = 0;
   updateChatLog('<br><b>Error:</b> Could not synchronize the room with the server. Your command was not sent; please try again.<br>');
@@ -12735,6 +12840,7 @@ const taskRequest = {
             clearInterval(pollInterval); // Stop polling on complete/error
         
             if (pollResponse.status === 'error') {
+              window.RoomEntry?.cancel?.();
               window._combatCommandPending = false;
               window._combatRoundActiveUntil = 0;
               console.error('Task error:', pollResponse.result);
@@ -13062,16 +13168,18 @@ const taskRequest = {
           clearInterval(pollInterval);
           window._combatCommandPending = false;
           window._combatRoundActiveUntil = 0;
+          window.RoomEntry?.cancel?.();
           console.log('Polling error:', error);
           updateChatLog("<br><b>Error:</b> Unable to get a response from the server.<br>");
         }
       });
-    }, 10000); // Reduced to 2 seconds for faster detection
+    }, window.RoomEntry?.isPending?.() ? 750 : 10000); // Entry results should not wait for the ordinary ten-second poll.
   },
   error: function(error) {
     clearInterval(window.keepAliveInterval);
     window._combatCommandPending = false;
     window._combatRoundActiveUntil = 0;
+    window.RoomEntry?.cancel?.();
     console.log('Initial request error:', error);
     updateChatLog("<br><b>Error:</b> Unable to start the task.<br>");
   }
@@ -13126,8 +13234,9 @@ function resolveCustomTileURL(tile, index = 0) {
 
 // FIXED: Updated preload to use the helper (keeps original structure)
 function preloadDungeonTextures() {
-  dungeonTextures = {};
-  dungeonTexturesMeta = {};
+  const prepared=window.RoomEntry?.texturesFor?.(currentDungeon);
+  dungeonTextures = prepared?.textures ? {...prepared.textures} : {};
+  dungeonTexturesMeta = prepared?.meta ? {...prepared.meta} : {};
   if (!currentDungeon) return;
   // 1. Load regular dungeon tiles (legacy system)
   if (currentDungeon.tiles) {
@@ -13139,6 +13248,7 @@ function preloadDungeonTextures() {
       if (cfg.spriteSpec) {
         dungeonTexturesMeta[name] = cfg.spriteSpec;
       }
+      if(isTextureReady(dungeonTextures[name]))continue;
       const img = new Image();
       img.onload = () => console.log('Loaded dungeon texture:', name, cfg.url);
       img.onerror = () => console.warn('Failed to load dungeon texture:', name, cfg.url);
@@ -13199,169 +13309,7 @@ function isTextureReady(img) {
 // Ensure the player spawns on a walkable tile (not in a solid wall)
 // by scanning outward from the server-provided start.
 function findNearestWalkableStart(dungeon, start, maxRadius = 25) {
-  if (!dungeon || !dungeon.cells) return start || { x: 0, y: 0 };
-
-  const sx = (start && typeof start.x === 'number') ? start.x : 0;
-  const sy = (start && typeof start.y === 'number') ? start.y : 0;
-
-  const cells = dungeon.cells;
-  const key = (x, y) => `${x},${y}`;
-  const isWalkable = (cell) => cell && !isSpawnBlockedCell(cell);
-
-  const indoorRooms = Array.isArray(dungeon.indoorRooms) ? dungeon.indoorRooms : null;
-  const isIndoor = dungeon.classification && dungeon.classification.indoor !== false;
-
-  const isInRoom = (x, y) => {
-    if (!isIndoor || !indoorRooms) return false;
-    for (const room of indoorRooms) {
-      if (
-        x >= room.x &&
-        x < room.x + room.w &&
-        y >= room.y &&
-        y < room.y + room.h
-      ) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  const floorNeighborCount = (x, y) => {
-    const neighbors = [
-      cells[`${x + 1},${y}`],
-      cells[`${x - 1},${y}`],
-      cells[`${x},${y + 1}`],
-      cells[`${x},${y - 1}`]
-    ];
-    return neighbors.filter(n => n && n.tile === 'floor').length;
-  };
-
-  const floorDensity3x3 = (x, y) => {
-    let count = 0;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const c = cells[`${x + dx},${y + dy}`];
-        if (c && c.tile === 'floor') count++;
-      }
-    }
-    return count;
-  };
-
-  const isCorridor = (x, y, cell) => {
-    if (!isIndoor) return false;
-    if (!cell || cell.tile !== 'floor') return false;
-    if (indoorRooms) return !isInRoom(x, y);
-    const neighbors = floorNeighborCount(x, y);
-    if (neighbors < 2) return false;
-    const density = floorDensity3x3(x, y);
-    return density <= 5;
-  };
-
-  // Build the largest walkable connected component for traversal safety.
-  const visitedAll = new Set();
-  let largestComponent = null;
-  let largestSize = 0;
-
-  for (const cellKey of Object.keys(cells)) {
-    if (visitedAll.has(cellKey)) continue;
-    const cell = cells[cellKey];
-    if (!isWalkable(cell)) {
-      visitedAll.add(cellKey);
-      continue;
-    }
-
-    const queue = [cellKey];
-    const comp = [];
-    visitedAll.add(cellKey);
-
-    while (queue.length) {
-      const k = queue.shift();
-      comp.push(k);
-      const [xStr, yStr] = k.split(',');
-      const x = parseInt(xStr, 10);
-      const y = parseInt(yStr, 10);
-      const neighborKeys = [
-        key(x + 1, y),
-        key(x - 1, y),
-        key(x, y + 1),
-        key(x, y - 1)
-      ];
-      for (const nk of neighborKeys) {
-        if (visitedAll.has(nk)) continue;
-        const nCell = cells[nk];
-        if (!isWalkable(nCell)) {
-          visitedAll.add(nk);
-          continue;
-        }
-        visitedAll.add(nk);
-        queue.push(nk);
-      }
-    }
-
-    if (comp.length > largestSize) {
-      largestSize = comp.length;
-      largestComponent = new Set(comp);
-    }
-  }
-
-  const inLargest = (x, y) => !largestComponent || largestComponent.has(key(x, y));
-  const pickFirstFromLargest = () => {
-    if (!largestComponent) return null;
-    for (const k of largestComponent) {
-      const [xStr, yStr] = k.split(',');
-      return { x: parseInt(xStr, 10), y: parseInt(yStr, 10) };
-    }
-    return null;
-  };
-
-  const visited = new Set([key(sx, sy)]);
-  const queue = [{ x: sx, y: sy, dist: 0 }];
-  let nearestWalkable = null;
-
-  while (queue.length) {
-    const { x, y, dist } = queue.shift();
-    const cell = cells[key(x, y)];
-
-    if (isWalkable(cell) && inLargest(x, y)) {
-      if (!nearestWalkable) {
-        nearestWalkable = { x, y };
-      }
-      if (!isIndoor || isCorridor(x, y, cell)) {
-        return { x, y };
-      }
-    }
-
-    if (dist >= maxRadius) continue;
-
-    const neighbors = [
-      { x: x + 1, y },
-      { x: x - 1, y },
-      { x, y: y + 1 },
-      { x, y: y - 1 }
-    ];
-
-    for (const n of neighbors) {
-      const k = key(n.x, n.y);
-      if (!visited.has(k)) {
-        visited.add(k);
-        queue.push({ x: n.x, y: n.y, dist: dist + 1 });
-      }
-    }
-  }
-
-  if (largestComponent && isIndoor) {
-    for (const k of largestComponent) {
-      const [xStr, yStr] = k.split(',');
-      const x = parseInt(xStr, 10);
-      const y = parseInt(yStr, 10);
-      const cell = cells[k];
-      if (isCorridor(x, y, cell)) {
-        return { x, y };
-      }
-    }
-  }
-
-  return nearestWalkable || pickFirstFromLargest() || { x: sx, y: sy };
+  return window.RoomArrival.safeStart(dungeon, start, maxRadius);
 }
 
 // Add this helper function if not already present
@@ -15352,6 +15300,7 @@ function renderDungeonView() {
   window.playerZ = playerZ;
   window.PLAYER_EYE_HEIGHT = PLAYER_EYE_HEIGHT;
   if (!currentDungeon) return;
+  window.RoomEntry?.onFrame?.(currentDungeon,navigationPosition,window.dungeonRunId);
   if (!window.debugVoxel) {
     window.debugVoxel = function debugVoxel(tileName, voxels, size) {
       if (!voxels || !size) return;
@@ -15385,6 +15334,8 @@ function renderDungeonView() {
       if (typeof window.webglDungeonRenderer.renderScene === 'function') {
         window.webglDungeonRenderer.renderScene();
         window.RetroGraphics?.presentRenderer(window.webglDungeonRenderer, container);
+        window.WebsiteRoomReady?.shown(currentDungeon);
+        window.RoomEntry?.shown?.(currentDungeon);
         scheduleDungeonRenderingDiagnostic();
         if (window.combatGame) {
           const scene = window.combatGame.scene.getScene('CombatScene');
@@ -15402,11 +15353,13 @@ function renderDungeonView() {
     if (typeof window.webglDungeonRenderer.render === 'function') {
       window.webglDungeonRenderer.render(rasterCanvas);
       window.RetroGraphics?.presentRenderer(window.webglDungeonRenderer, container, rasterCanvas);
+      window.WebsiteRoomReady?.shown(currentDungeon);
       return;
     }
     }
     const rasterCanvas = renderDungeonViewCanvas(false);
     window.RetroGraphics?.present(rasterCanvas, container);
+    window.WebsiteRoomReady?.shown(currentDungeon);
     logDungeonCombatSync('render-canvas');
   }
 

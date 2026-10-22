@@ -7,6 +7,7 @@ const { createCombatSpace } = require('../retort/dungeonReach');
 const { createPopulationService } = require('../retort/roomPopulation');
 const { generateInhabitants, needsQuestIntroduction } = require('../retort/inhabitantGeneration');
 const inhabitantReply = require('./fixtures/inhabitants.cjs');
+const { batchRows, slotIds } = require('./fixtures/inhabitant-batch.cjs');
 const { ActionDice } = require('../retort/actionDice');
 const { buildInitialWorldConsole, buildInitialGameConsole, formatStartingCharacterSheet } = require('../retort/initialGameState');
 function dungeon(size = 64) {
@@ -238,7 +239,7 @@ test('a quest introduction is claimed once outside the starting temple, not on e
 
 test('cast generation reserves one neutral quest contact only for an explicit introduction', async () => {
   const prompts = [], agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); },
-    assistant: { generation: async () => ({ content: JSON.stringify({ inhabitants: inhabitantReply(16) }) }) } };
+    assistant: { generation: async options => ({ content: JSON.stringify({ inhabitants: batchRows(inhabitantReply(16), options) }) }) } };
   const rules = { level: () => 1, random: () => 5, sex: () => 'Female', xp: () => 0, equipment: async () => null };
   const context = { roomName: 'Ash Crossing', roomDescription: 'An open trail.', geoKey: '1,0,0', indoor: false,
     quest: 'Find the seal before entering the Wyrm lair.' };
@@ -260,7 +261,7 @@ test('the LLM picks individual custom native archetypes and spell preferences, b
     { slot: 2, name: 'Keeper Three', race: 'Human', class: 'Warrior Priest', combatRole: 'Warrior', combatArchetype: 'Cleric', spellPreferences: ['prayer_mending'] },
     { slot: 3, name: 'Keeper Four', race: 'Human', class: 'Ash Ritualist', combatArchetype: 'Witch', spellPreferences: ['curse', 'invented', 'curse'] }
   ];
-  const agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); }, assistant: { generation: async () => ({ content: JSON.stringify({ inhabitants: inhabitantReply(8, rows) }) }) } };
+  const agent = { user(parts, ...values) { prompts.push(String.raw({ raw: parts }, ...values)); }, assistant: { generation: async options => ({ content: JSON.stringify({ inhabitants: batchRows(inhabitantReply(8, rows), options) }) }) } };
   const result = await generateInhabitants(agent, { roomName: 'Market', geoKey: '1,0,0', indoor: true },
     { level: () => 3, random: (min, max) => { rolls.push(max); return min; }, sex: () => 'Female', xp: () => 6000, equipment: async () => null });
   const actors = I.parseBlocks(result.sheets);
@@ -277,14 +278,18 @@ test('the LLM picks individual custom native archetypes and spell preferences, b
   assert.match(prompts[0], /choose exactly one combatArchetype/); assert.match(prompts[0], /Choose spellPreferences individually/);
 });
 
-for(const indoor of [true,false]) test(`batched ${indoor?'indoor':'outdoor'} generation creates diverse groups using one cast request`,async()=>{
-  const prompts=[],requests=[],agent={user(parts,...values){prompts.push(String.raw({raw:parts},...values));},assistant:{generation:async options=>{requests.push(options);return {content:JSON.stringify({inhabitants:inhabitantReply(indoor?8:16)})}}}};
+for(const indoor of [true,false]) test(`batched ${indoor?'indoor':'outdoor'} generation creates diverse groups using bounded cast requests`,async()=>{
+  const prompts=[],requests=[],agent={user(parts,...values){prompts.push(String.raw({raw:parts},...values));},assistant:{generation:async options=>{requests.push(options);return {content:JSON.stringify({inhabitants:batchRows(inhabitantReply(indoor?8:16),options)})}}}};
   const result=await generateInhabitants(agent,{roomName:'Grave Market',roomDescription:'A vaulted market.',geoKey:'1,0,0',indoor,partyNames:['Mortacia']},
     {level:()=>2,random:()=>5,sex:()=> 'Female',xp:()=>2000,equipment:async()=>null});
-  assert.equal(requests.length,1);assert.equal(I.parseSheets(`Monsters in Room:\n${result.sheets}\nMonsters Equipped Properties: None`).length,indoor?8:16);
+  assert.equal(requests.length,indoor?2:4);assert.deepEqual(requests.flatMap(slotIds),Array.from({length:indoor?8:16},(_,slot)=>slot));
+  assert.ok(requests.every(request=>request.parameters.inhabitants.minItems===4&&request.parameters.inhabitants.maxItems===4));
+  assert.equal(I.parseSheets(`Monsters in Room:\n${result.sheets}\nMonsters Equipped Properties: None`).length,indoor?8:16);
   const states=Object.values(result.population.actors).map(a=>a.allegiance);
   assert.ok(states.includes('Hostile')&&states.includes('Friendly')&&states.includes('Neutral'));
-  assert.ok(prompts[0].includes('grave masons'));
+  assert.ok(prompts[0].includes('not a fixed list of trades'));
+  assert.ok(prompts.some(p=>p.includes('ROOM-SPECIFIC SCENARIO VARIETY')));
+  assert.ok(!prompts[0].includes('ferrymen, grave masons, mourners'));
 });
 
 test('discovery requires local line of sight and only plays an introduction once; pause/stale games reject it',()=>{

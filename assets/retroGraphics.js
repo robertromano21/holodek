@@ -18,8 +18,20 @@
   ].map(color => Object.freeze(color)));
   const modes = Object.freeze({
     modern: Object.freeze({ label: 'Modern' }),
-    c64_glazed: Object.freeze({ label: 'Retro Mode', width: 160, height: 200 })
+    c64_glazed: Object.freeze({ label: 'Retro Mode', width: 320, height: 200 })
   });
+  const sizes=Object.freeze({cc65:[320,200],cc110:[640,400],cc220:[1280,800]});
+  let resolution='cc65',colorCount=32;
+  const displayPreset='32-at-320-v1';
+  try{const saved=JSON.parse(root.localStorage?.getItem('holodek-retro-display')||'{}');if(saved.preset===displayPreset){if(Object.hasOwn(sizes,saved.resolution))resolution=saved.resolution;if([16,32,64].includes(saved.colors))colorCount=saved.colors;}else root.localStorage?.setItem('holodek-retro-display',JSON.stringify({resolution,colors:colorCount,preset:displayPreset}));}catch{}
+  function setDisplay(options={}){
+    const nextResolution=options.resolution??resolution,nextColors=options.colors??colorCount;
+    if(!Object.hasOwn(sizes,nextResolution)||![16,32,64].includes(nextColors))throw new RangeError('Unsupported retro display setting');
+    resolution=nextResolution;colorCount=nextColors;apiFrame=null;
+    try{root.localStorage?.setItem('holodek-retro-display',JSON.stringify({resolution,colors:colorCount,preset:displayPreset}));}catch{}
+    setMode(mode);return{resolution,colors:colorCount};
+  }
+  const Details = typeof module === 'object' && module.exports ? require('./retroDetails') : root.RetroDetails;
   const distance = (a, b) => 2 * (a[0] - b[0]) ** 2 + 4 * (a[1] - b[1]) ** 2 + 3 * (a[2] - b[2]) ** 2;
   const luminance = rgb => (77 * rgb[0] + 150 * rgb[1] + 29 * rgb[2]) / 256;
   let lookup, coloredLookup;
@@ -43,7 +55,7 @@
   function createConverter(mode) {
     const spec = modes[mode];
     if (!spec?.width) throw new RangeError('Unknown C64 graphics mode: ' + mode);
-    const { width, height } = spec, lut = colorLookup();
+    const [width,height] = sizes[resolution], lut = colorLookup();
     const result = { width, height, data: new Uint8ClampedArray(width * height * 4),
       indices: new Uint8Array(width * height) };
     function convert(rgba) {
@@ -59,6 +71,7 @@
     return { width, height, convert };
   }
 
+  let apiFrame = null;
   let mode = 'modern', canvas, sample, sampleCtx, outputCtx, outputImage, converter;
   let lastSource, lastContainer, failures = new WeakMap(), failure = '', frames = 0, lastFrameMs = 0, bound = false;
   const artCache = new WeakMap(), characterArtCache = new WeakMap(), surfaceCache = new Map(), combatBindings = new WeakSet(), combatGames = new Set();
@@ -113,16 +126,26 @@
     }
     return data;
   }
-  function prepareImage(image, kind = 'surface') {
+  function detailCanvas(base, kind, material) {
+    if (!Details) return base;
+    const scale = Math.max(1, Math.min(4, Math.floor(128 / Math.max(base.width, base.height))));
+    const layer = root.document.createElement('canvas'); layer.width = base.width * scale; layer.height = base.height * scale;
+    const ctx = layer.getContext('2d', { willReadFrequently:true }); ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(base,0,0,layer.width,layer.height);
+    const pixels=ctx.getImageData(0,0,layer.width,layer.height);
+    pixels.data.set(Details.paint(pixels.data,layer.width,layer.height,{kind,material}));ctx.putImageData(pixels,0,0);
+    layer.complete=true;layer.naturalWidth=layer.width;layer.naturalHeight=layer.height;return layer;
+  }
+  function prepareImage(image, kind = 'surface', material = 'stone') {
     if (!fullbright() || !image || !root.document) return image;
     if (image._retroPrepared) return image;
     const w = image.naturalWidth || image.width, h = image.naturalHeight || image.height;
     if (!(w > 0 && h > 0) || image.complete === false) return image;
-    const signature = [kind, w, h, image.currentSrc || image.src || '', image._revision || 0].join('|');
+    const signature = [kind, material, w, h, image.currentSrc || image.src || '', image._revision || 0].join('|');
     let entries = artCache.get(image);
     if (!entries) { entries = new Map(); artCache.set(image, entries); }
     if (entries.has(signature)) return entries.get(signature);
-    const c = root.document.createElement('canvas');
+    let c = root.document.createElement('canvas');
     const limit = kind === 'prop' ? 64 : 32, ratio = Math.min(1, limit / Math.max(w, h));
     c.width = Math.max(1, Math.round(w * ratio)); c.height = Math.max(1, Math.round(h * ratio));
     const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -131,6 +154,7 @@
     const pixels = ctx.getImageData(0, 0, c.width, c.height);
     pixels.data.set(palettePixels(pixels.data, c.width, c.height, { outline: kind === 'prop', details: kind === 'wall', material: kind }));
     ctx.putImageData(pixels, 0, 0);
+    c = detailCanvas(c, kind, material);
     c.complete = true; c.naturalWidth = c.width; c.naturalHeight = c.height;
     c._webglKey = 'c64-art-' + (++artSerial);
     c._retroPrepared = true;
@@ -217,7 +241,7 @@
   function makeSurface(kind, colors = {}, material = 'stone') {
     const key = JSON.stringify([kind, colors, material]);
     if (surfaceCache.has(key)) return surfaceCache.get(key);
-    const canvas = root.document.createElement('canvas'); canvas.width = canvas.height = 32;
+    let canvas = root.document.createElement('canvas'); canvas.width = canvas.height = 32;
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = colors.primary || (kind === 'floor' ? '#787878' : '#aeaeae'); ctx.fillRect(0, 0, 32, 32);
     ctx.fillStyle = '#000';
@@ -233,7 +257,9 @@
     }
     canvas.complete = true; canvas.naturalWidth = canvas.naturalHeight = 32;
     const pixels = ctx.getImageData(0, 0, 32, 32);
-    pixels.data.set(palettePixels(pixels.data, 32, 32, { material: kind })); ctx.putImageData(pixels, 0, 0);
+    pixels.data.set(palettePixels(pixels.data, 32, 32, { material: kind }));
+    ctx.putImageData(pixels, 0, 0);
+    canvas = detailCanvas(canvas, kind, material);
     canvas._webglKey = 'c64-art-' + (++artSerial);
     canvas._retroPrepared = true;
     const result = canvas;
@@ -280,6 +306,7 @@
     if (!Object.hasOwn(modes, value)) throw new RangeError('Unknown graphics mode: ' + value);
     mode = value; converter = null; failures = new WeakMap(); combatFailures = new WeakSet(); failure = ''; hide();
     syncControl();
+    if(root.CustomEvent)root.document?.dispatchEvent?.(new root.CustomEvent('retro-display-change'));
     root.RoomArtUi?.recolor?.();
     for (const game of combatGames) {
       game.scene?.getScene('CombatScene')?.redrawCombatRT?.();
@@ -319,9 +346,16 @@
       }
       sampleCtx.fillStyle = '#000'; sampleCtx.fillRect(0, 0, sample.width, sample.height);
       sampleCtx.drawImage(source, 0, 0, sample.width, sample.height);
-      outputImage.data.set(converter.convert(sampleCtx.getImageData(0, 0, sample.width, sample.height).data).data);
+      const sourcePixels = sampleCtx.getImageData(0, 0, sample.width, sample.height).data;
+      const finalFrame = Details ? Details.enhanced(sourcePixels,converter.width,converter.height,colorCount) : converter.convert(sourcePixels);
+      outputImage.data.set(finalFrame.data);
+      // Retain only the latest bounded frame for a bounded frame; legacy exports are explicitly downconverted.
+      if (Details) apiFrame = finalFrame;
       outputCtx.putImageData(outputImage, 0, 0);
       if (canvas.parentNode !== container) container.appendChild(canvas);
+      // Fill the viewport; the Retro camera compensates for its display aspect.
+      if(canvas.style.setProperty){canvas.style.setProperty('width','100%','important');canvas.style.setProperty('height','100%','important');}
+      canvas.style.inset='0';canvas.style.left='0';canvas.style.top='0';canvas.style.transform='none';canvas.style.boxShadow='none';
       canvas.hidden = false;
       frames++; lastFrameMs = (root.performance?.now() || 0) - started;
       if (failure) { failure = ''; syncControl(); }
@@ -341,7 +375,7 @@
   }
   function status() {
     return { mode, active: !!canvas && !canvas.hidden && !!canvas.parentNode, width: converter?.width || 0,
-      height: converter?.height || 0, palette: 'Colodore VIC-II (16 colors)', fullbright: fullbright(), frames, lastFrameMs,
+      height: converter?.height || 0, resolution, colors:colorCount, palette: resolution+' palette ('+colorCount+' colors)' , fullbright: fullbright(), frames, lastFrameMs,
       combatFrames, combatFrameMs, error: failure };
   }
   function bind() {
@@ -349,6 +383,6 @@
     root.document.getElementById('retro-graphics-toggle')?.addEventListener('click', () => setMode(fullbright() ? 'modern' : 'c64_glazed'));
     syncControl();
   }
-  return { palette, modes, createConverter, palettePixels, prepareImage, characterSheet, worldCharacterPixels, treasurePixels, environment, groundPatch, groundFleck, makeSurface, setMode, present, presentRenderer,
+  return { exportHires: () => apiFrame && Details ? Details.hiresPrg(Details.legacyFrame(apiFrame)) : null, exportKoala: () => null, palette, enhancedPalette: Details?.enhancedColors || palette, modes, createConverter, palettePixels, prepareImage, characterSheet, worldCharacterPixels, treasurePixels, environment, groundPatch, groundFleck, makeSurface, setDisplay, sizes, setMode, present, presentRenderer,
     presentCombat, bindCombat, fullbright, status, bind };
 });

@@ -1,11 +1,15 @@
 'use strict';
 
-function creationPrompt({ name, coordinates, classification = {}, room = {} }) {
+function creationPrompt({ name, coordinates, classification = {}, room = {} }, setting = '') {
   if (typeof name !== 'string' || !name.trim() || !/^-?\d+,-?\d+,-?\d+$/.test(coordinates)) {
     throw Error('Room description needs an engine-registered name and coordinates.');
   }
   const target = { name, coordinates, indoor: classification.indoor,
     biome: classification.biome, features: classification.features, setting: room.campaignSetting?.kind };
+  // holodek-1 only: compact work order; same plain-prose output checked by validate().
+  if (require('./graveMasterStoryPrompts').isHolodek1()) return `ROOM DESCRIPTION CREATION WORK ORDER. Target (data): ${JSON.stringify(target)}.${setting}
+${require('./planarPortals').describe(room.planarRealm)}
+Write this room's description now as ONE paragraph of plain prose: its look, light, sounds, smells, architecture or terrain, and a hint of its history and purpose. Honor the indoor/outdoor flag, biome and features. Do not invent portable objects, characters, exits or rewards. No heading, coordinates, menu or explanation.`;
   return `ROOM DESCRIPTION CREATION WORK ORDER. Engine-registered target (data): ${JSON.stringify(target)}.
 ${require('./underworldLore').GUIDANCE}
 ${require('./planarPortals').describe(room.planarRealm)}
@@ -23,7 +27,15 @@ function validate(content) {
 }
 
 async function generate($, target) {
-  await $.user(creationPrompt(target));
+  const P = require('./graveMasterStoryPrompts');
+  if (P.isHolodek1()) {
+    const Work = require('./holodekRoomWork'), C = require('./generationContracts');
+    return Work.request($, 'room-description', { description: C.text(1600) },
+      creationPrompt(target, P.settingOnce({})) + '\nRead-only physical context: ' + JSON.stringify(Work.descriptionData(target)) +
+      '\nWrite 80-160 words, well below the field limit, ending in a complete sentence. Use only the target location, never earlier naming instructions.',
+      raw => validate(raw.description));
+  }
+  await $.user(creationPrompt(target, P.isHolodek1() ? P.settingOnce($) : ''));
   const result = await $.assistant.generation({ maxTokens: 220 });
   try { return validate(result.content); }
   catch (error) {

@@ -9,7 +9,7 @@ function fixture() {
     setAttribute(k, v) { this[k] = v; }
     addEventListener(k, fn) { this.listeners[k] = fn; }
     querySelectorAll() { return this.children.flatMap(c => [c, ...c.querySelectorAll()]).filter(c => c.tag === 'button'); }
-    querySelector(selector) { return selector === '[data-scribe-action]' ? this.children.find(c => c.dataset.scribeAction) : null; }
+    querySelector(selector) { return selector === '[data-scribe-action]' ? this.children.find(c => c.dataset.scribeAction) : selector === '[data-target-magic]' ? this.children.find(c => c.dataset.targetMagic) : null; }
     remove() { this.isConnected = false; }
     click() { return this.listeners.click?.(); }
   }
@@ -93,15 +93,60 @@ test('weave menus expose higher-level choices but disable them and show exact un
   assert.ok(f.nodes.some(n => /no class healing/.test(n.textContent)));
 });
 
-test('spellbook, weave and scroll choices explain actual mechanics, costs and ranges before committing', async () => {
+test('spellbook, weave and scroll choices explain actual mechanics, costs and line-of-sight rules before committing', async () => {
   const f = fixture(); f.data.casters[0].items[0].known = [];
   f.window.SpellUi.addItemAction(f.body, f.data.scrolls[0].name);
-  assert.ok(f.nodes.some(n => /Magic Missile at its unlock level: 3 Magic.*1d4\+1.*Range: 8 tiles/.test(n.textContent)));
+  assert.ok(f.nodes.some(n => /Magic Missile at its unlock level: 3 Magic.*1d4\+1.*Requires clear line of sight in the same room; no distance limit/.test(n.textContent)));
   await f.window.SpellUi.open(null, f.data.scrolls[0].name);
-  assert.ok(f.nodes.some(n => /3 Magic per cast.*2d4\+2.*Range: 8 tiles/.test(n.textContent)));
+  assert.ok(f.nodes.some(n => /3 Magic per cast.*2d4\+2.*Requires clear line of sight in the same room; no distance limit/.test(n.textContent)));
   assert.ok(f.nodes.some(n => /Damage: 2d4\+2.*without an attack roll/.test(n.textContent)));
   const g = fixture(); Object.assign(g.data.casters[0].items[0], { className: 'Warlock', tradition: 'Warlock', bookRequired: false,
     learnable: [{ ...R.classSpell('pact_veil', 1), available: true }] });
   await g.window.SpellUi.open();
-  assert.ok(g.nodes.some(n => /Absorb 3 damage for 3 rounds.*Range: 1 tile/.test(n.textContent)));
+  assert.ok(g.nodes.some(n => /Absorb 3 damage for 3 rounds.*Requires clear line of sight in the same room; no distance limit/.test(n.textContent)));
+});
+
+test('an injured avatar opens only server-approved support casts, including another party caster', async () => {
+  const f = fixture(), caster = f.data.casters[0];
+  caster.choices.push({ ...caster.choices[0], spellId: 'mend', name: 'Grave Mending', target: 'Sella', effect: 'heal', cost: 1 });
+  caster.items[0].spells.push({ id: 'mend', name: 'Grave Mending', description: 'Heal 1d6+1 HP.', range: 3, cost: 1 });
+  assert.equal(await f.window.SpellUi.openForTarget('Sella'), true);
+  assert.equal(f.button('Cast on Enemy'), undefined);
+  const cast = f.button('Grave Mending on Sella by PC'); assert.ok(cast);
+  await cast.click(); await new Promise(resolve => setImmediate(resolve));
+  const sent = f.requests.find(r => r.path === '/spells/cast');
+  assert.equal(sent.body.target, 'Sella'); assert.equal(sent.body.caster, 'PC'); assert.equal(sent.body.spellId, 'mend');
+  assert.equal(f.requests.some(r => r.path === '/spells/prepare'), false, 'Casting never forgets or prepares a formula');
+});
+
+test('target spell menus explain unavailable healing without fabricating casts', async () => {
+  const f = fixture(); await f.window.SpellUi.openForTarget('Sella');
+  assert.ok(f.nodes.some(n => /No valid casts right now.*same room and clear sight/.test(n.textContent)));
+  assert.equal(f.nodes.some(n => / on Sella by /.test(n.textContent)), false);
+  assert.ok(f.button('All Spells'));
+});
+
+test('spellbook Cast filters the exact memorized formula and respects stale room and pause guards', async () => {
+  const f = fixture(); await f.window.SpellUi.openSpell('PC', 'missile');
+  const cast = f.button('Magic Missile on Enemy by PC'); assert.ok(cast);
+  f.window.gamePaused = true; await cast.click(); assert.equal(f.requests.length, 1);
+  f.window.gamePaused = false; f.window.currentDungeon = { geoKey: 'other' };
+  await cast.click(); assert.equal(f.requests.length, 1); assert.match(f.notices[0].message, /another room/);
+});
+
+test('combat target and spellbook casting route through the current initiative prompt, not exploration endpoints', async () => {
+  const f = fixture(), calls = [];
+  f.window.actionDiceState = { active: { kind: 'combat' } };
+  f.window.CombatCharacterUi = { open: actor => calls.push(actor.name) };
+  f.window.CombatTurnUi = { openSpells: (caster, id) => calls.push([caster, id]) };
+  f.window.SpellUi.openForTarget('Sella'); f.window.SpellUi.openSpell('PC', 'mend');
+  assert.deepEqual(calls, ['Sella', ['PC', 'mend']]); assert.equal(f.requests.length, 0);
+});
+
+test('party portraits expose a visible magic action for living allies, not room enemies or the dead', () => {
+  const f = fixture(); f.window.combatCharacters = [{ name: 'Sella', type: 'npc', hp: 1 }, { name: 'Dead', type: 'npc', state: 'Dead' }, { name: 'Enemy', type: 'monster' }];
+  assert.ok(f.window.SpellUi.addTargetAction(f.body, 'Sella'));
+  assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Sella'), undefined);
+  assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Dead'), undefined);
+  assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Enemy'), undefined);
 });

@@ -23,12 +23,17 @@
       (range ? `Ranged: ${range} tiles (one SRD range increment). Requires clear sight; -4 Attack when an enemy threatens you. Ammunition and reloading are abstracted into one attack per turn.` : 'Melee: adjacent target and clear sight.') :
       `Adds ${ac} to Armor and combat AC while equipped in the ${type === 'armor' ? 'Armor' : 'Shield'} slot. No damage reduction. One item per slot; armor and shield bonuses combine.`
   }]));
+  const rangedRules = () => typeof module === 'object' && module.exports ? require('./rangedRules') : (typeof window === 'object' ? window.RangedRules : null);
+  const rangedOn = () => { try { return typeof module === 'object' && module.exports ? require('../retort/worldFlags').on('RANGED_COMBAT') : !!window.HolodekFlags?.RANGED_COMBAT; } catch { return false; } };
   const key = value => String(value?.name || value || '').trim().toLowerCase();
   function weapon(actor) {
     const name = key(actor?.equipped?.Weapon || actor?.equipped?.weapon || actor?.Equipped?.Weapon);
     if (catalog[name]?.type === 'weapon') return catalog[name];
     const ranged = /\b(light crossbow|crossbow|longbow|shortbow|bow|sling)\b/.exec(name)?.[1];
     if (ranged) return catalog[ranged === 'crossbow' ? 'light crossbow' : ranged === 'bow' ? 'shortbow' : ranged];
+    // world1 RANGED_COMBAT: genre ranged weapons (revolver, blaster, smartgun...) resolve through RangedRules.
+    const R = rangedOn() && rangedRules(); const g = R && R.find(name);
+    if (g && g.damage_dice) return { name: g.name, type: 'weapon', damage_dice: g.damage_dice, range_tiles: g.range_tiles, price_silver: g.price_silver, attack_modifier: 0, damage_modifier: 0, magic: 0, equipment_source: 'world1-ranged', description: R.tooltip(g) };
     return null;
   }
   function reach(actor) { return weapon(actor)?.range_tiles || (/\b(spear|pike|halberd)\b/.test(key(actor?.equipped?.Weapon)) ? 2 : 1.5); }
@@ -36,5 +41,7 @@
   function armorBonus(actor) {
     return ['Armor', 'Shield'].reduce((sum, slot) => sum + (catalog[key(actor?.equipped?.[slot])]?.ac || 0), 0);
   }
-  return { catalog, weapon, reach, ranged, armorBonus, stock: () => Object.values(catalog).map(item => ({ ...item, quantity: 2 })) };
+  return { catalog, weapon, reach, ranged, armorBonus, stock: (genre) => [...Object.values(catalog).map(item => ({ ...item, quantity: 2 })),
+    // world1 RANGED_COMBAT: genre ranged weapons and ammo bundles (rare resource items are loot-only).
+    ...(rangedOn() && rangedRules() ? rangedRules().stock(genre || 'cotg').filter(i => !catalog[i.name]) : [])] };
 });

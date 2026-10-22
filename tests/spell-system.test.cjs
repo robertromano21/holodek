@@ -58,7 +58,7 @@ test('equipped item casts spend real Magic, damage real HP, remove all bonuses a
   const preId = S.preserve(f.state, S.write(before, 'Party Equipped Properties', JSON.stringify({ ...f.item, owner: 'PC', slot: 'Weapon' })));
   assert.equal(I.parseEquipment(I.parseSheets(preId.text, 'PC')[0].lines[9]).Weapon, 'None', 'Pre-ID snapshots also cannot restore destroyed equipment');
 });
-test('invalid, paused, foreign, stale, unequipped, dead and out-of-range casts consume nothing', () => {
+test('invalid, paused, foreign, stale, unequipped and occluded casts consume nothing', () => {
   const f = fixture({ item: { magic: 2 } }), input = f.input();
   for (const change of [{ runId: 'other' }, { geoKey: '2,0,0' }, { revision: -1 }, { nonce: 'bad' }, { itemId: 'invented' }, { spellId: 'resurrection' }, { target: 'Ally' }, { caster: 'Enemy' }]) {
     assert.ok(S.cast(f.state, null, { ...input, ...change }, { combat: true }).error); assert.equal(f.pool().items[input.itemId].remaining, 2);
@@ -67,8 +67,8 @@ test('invalid, paused, foreign, stale, unequipped, dead and out-of-range casts c
   f.d.cells['3,2'].tile = 'wall'; assert.ok(S.cast(f.state, null, input, { combat: true }).error);
   f.d.cells['3,2'].tile = 'floor';
   const roster = JSON.parse(f.state.getCombatCharactersString()); roster.find(a => a.name === 'Enemy').mazeX = 15; f.state.setCombatCharactersString(JSON.stringify(roster));
-  assert.ok(S.cast(f.state, null, input, { combat: true }).error);
-  assert.equal(f.pool().items[input.itemId].remaining, 2);
+  assert.equal(S.cast(f.state, null, input, { combat: true }).error, undefined, 'Clear same-room casts ignore distance');
+  assert.equal(f.pool().items[input.itemId].remaining, 1);
 });
 test('a normal scroll can be cast exactly once by a Fighter', () => {
   const scroll = R.scroll('missile', 'test'), f = fixture({ item: scroll });
@@ -623,4 +623,17 @@ test('turning cooldown spans sources, damage breaks turning, and withdrawal expi
   assert.equal(S.cast(f.state, null, { ...f.input('turn_undead'), itemId: 'class:PC' }, { combat: true, random: () => 1 }).error, undefined);
   S.consumeTurn(f.state, f.actor('Enemy')); assert.equal(S.turned(f.state, f.actor('Enemy')).remainingTurns, 0);
   S.advance(f.state); assert.equal(S.turned(f.state, f.actor('Enemy')), null);
+});
+test('distant same-room spells preserve sight, resource, and room restrictions', () => {
+  const f = fixture({ enemyX: 15, item: { magic: 2 } }), input = f.input();
+  assert.ok(S.rollPlan(f.state, input, { combat: true }).length);
+  f.d.cells['10,2'].tile = 'wall';
+  assert.throws(() => S.rollPlan(f.state, input, { combat: true }), /line of sight/);
+  assert.equal(f.pool().items[input.itemId].remaining, 2);
+  f.d.cells['10,2'].tile = 'floor';
+  let roster = JSON.parse(f.state.getCombatCharactersString()); roster.find(a => a.name === 'Enemy').mazeRoomKey = '2,0,0'; f.state.setCombatCharactersString(JSON.stringify(roster));
+  assert.throws(() => S.rollPlan(f.state, input, { combat: true }), /same room/);
+  roster.find(a => a.name === 'Enemy').mazeRoomKey = '1,0,0'; f.state.setCombatCharactersString(JSON.stringify(roster));
+  const db = JSON.parse(f.state.getRoomNameDatabase()); db['0,0,0'].spellSystem.items[input.itemId].remaining = 0; f.state.setRoomNameDatabase(JSON.stringify(db));
+  assert.throws(() => S.rollPlan(f.state, input, { combat: true }), /Magic remaining/);
 });

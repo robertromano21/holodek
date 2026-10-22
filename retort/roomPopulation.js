@@ -4,6 +4,8 @@ const MonsterConsoleSync = require('./monsterConsoleSync');
 const Discovery = require('../assets/outdoorDiscovery');
 const Pursuit = require('./hostilePursuit');
 const Divinity = require('./divineEncounters');
+const Surprise = require('./surprise');
+const RoomCast = require('./roomCast');
 
 function prepareEntryQuestContact(population, dungeon, roster, perception, quest) {
   const introduction = population?.questIntroduction, text = String(quest || '').trim();
@@ -161,6 +163,10 @@ function createPopulationService(state) {
     const previousRevision=state.getRoomPopulation(geoKey)?.revision;
     const population = get(geoKey, undefined, dungeon, player);
     let persistentChange=previousRevision!==population.revision;
+    if (population.roomCast && RoomCast.enabled()) {
+      const db = JSON.parse(state.getRoomNameDatabase() || '{}');
+      if (RoomCast.revisit(db, geoKey, population)) { state.setRoomNameDatabase(JSON.stringify(db)); population.revision++; persistentChange = true; }
+    }
     const roster = JSON.parse(state.getCombatCharactersString() || '[]');
     for (const incoming of Array.isArray(actors) ? actors.slice(0, 32) : []) {
       if (!incoming || typeof incoming.name !== 'string') continue;
@@ -209,7 +215,13 @@ function createPopulationService(state) {
       const speakers = group.members.map(name => population.actors[name]).filter(a => a?.status === 'present' && a.encounteredAt > 0 &&
         Inhabitants.dialogueReach(dungeon, speakerActor(a), player).canSpeak);
       if (!deferIntroductions || group.introPlayed) candidates.push(...speakers.filter(a=>a.dialogueIndex<a.dialogue.length));
-      if (near.length && group.status === 'unseen') { group.status = 'discovered'; population.revision++;persistentChange=true; Discovery.release(population, group.id); }
+      if (near.length && group.status === 'unseen') { group.status = 'discovered'; population.revision++;persistentChange=true; Discovery.release(population, group.id);
+        // world1: hostile monsters may surprise the party on first sight (60% base); they then open combat themselves.
+        if (!group.ambush && near.some(a => a.allegiance === 'Hostile')) {
+          const pcSheet = roster.find(a => a.type === 'pc');
+          const ambush = Surprise.roll({ pc: pcSheet, starting: population.starting || geoKey === '0,0,0', settlement: !!population.settlement });
+          if (ambush) group.ambush = ambush;
+        } }
       // Seeing a resident is not a conversation. Keep its introduction unspent until approached.
       if (!speakers.length) continue;
       if (dialogue.length>=2) continue;

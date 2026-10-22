@@ -5,6 +5,7 @@ const I = require('../assets/dungeonInhabitants');
 const { prepareEntryQuestContact } = require('../retort/roomPopulation');
 const { generateInhabitants } = require('../retort/inhabitantGeneration');
 const inhabitantReply = require('./fixtures/inhabitants.cjs');
+const { batchRows, slotIds } = require('./fixtures/inhabitant-batch.cjs');
 const { describeCharacters, generateCharacterDialogue } = require('../retort/characterDialogue');
 const quest = 'Find the missing keeper before confronting the bound boss.';
 function fixture() {
@@ -48,14 +49,15 @@ test('a first-time contact cannot be discovered through a pillar, but a previous
 });
 
 for (const proposed of ['Friendly', 'Hostile']) test(`quest-contact generation protects ${proposed === 'Friendly' ? 'a friendly ally' : 'a nonhostile contact'} while other residents retain model-chosen allegiance`, async () => {
-  let requests = 0;
-  const agent = { user() {}, assistant: { generation: async () => { requests++; return { content: JSON.stringify({ inhabitants: inhabitantReply(8, [
+  const requests = [];
+  const agent = { user() {}, assistant: { generation: async options => { requests.push(options); return { content: JSON.stringify({ inhabitants: batchRows(inhabitantReply(8, [
     { slot: 0, name: 'Guide', allegiance: proposed, dialogue: ['The keeper is missing. Can you investigate?'] },
     { slot: 3, name: 'Guard', allegiance: 'Friendly' }
-  ]) }) }; } } };
+  ]), options) }) }; } } };
   const result = await generateInhabitants(agent, { roomName: 'Cloister', roomDescription: 'A ruined cloister.', geoKey: '1,0,0', indoor: true, quest, questSeed: true },
     { level: () => 1, random: () => 5, sex: () => 'Female', xp: () => 0, equipment: async () => null });
-  assert.equal(requests, 1); assert.equal(result.population.actors.Guide.allegiance, proposed === 'Friendly' ? 'Friendly' : 'Neutral');
+  assert.equal(requests.length, 2); assert.deepEqual(requests.flatMap(slotIds), [0, 1, 2, 3, 4, 5, 6, 7]);
+  assert.equal(result.population.actors.Guide.allegiance, proposed === 'Friendly' ? 'Friendly' : 'Neutral');
   assert.equal(result.population.actors.Guard.allegiance, 'Friendly');
   assert.equal(result.population.questIntroduction.hook, 'The keeper is missing. Can you investigate?');
   const d = fixture().dungeon; I.place(result.population, d);

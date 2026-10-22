@@ -20,6 +20,7 @@ let roomMusicDatabase = {};
 let graphicsRebuildPending = new Set();
 let roomDungeonDatabase = {};   // ← NEW: 3D dungeon per geo-room
 let dungeonRunId = randomUUID();
+let restoreRevision = 0;
 let roomPopulations = new Map();
 let gamePaused = false;
 let dialogueMemory = { characters: {}, recent: [] };
@@ -57,10 +58,13 @@ module.exports = {
       lastCoords, currentPC, characterGenerationInProgress, pendingCharacterForReview } = next);
     roomPopulations = new Map(Object.entries(next.roomPopulations));
     graphicsRebuildPending = new Set(Object.keys(roomDungeonDatabase).filter(key => !graphicsReady.includes(key)));
+    restoreRevision++;
   },
   // --- existing getters/setters ---
   getDungeonRunId: () => dungeonRunId,
+  getRestoreRevision: () => restoreRevision,
   beginDungeonRun: () => {
+    restoreRevision++;
     dungeonRunId = randomUUID();
     roomDungeonDatabase = {};
     graphicsRebuildPending.clear();
@@ -89,7 +93,9 @@ module.exports = {
   getUpdatedGameConsole: () => updatedGameConsole,
   setUpdatedGameConsole: (consoleData) => { updatedGameConsole = consoleData; },
   getRoomNameDatabase: () => roomNameDatabaseString,
-  setRoomNameDatabase: (database) => { roomNameDatabaseString = database; },
+  setRoomNameDatabase: (database) => {
+    roomNameDatabaseString = require('./retort/roomBuildState').protectDatabase(roomNameDatabaseString, database, dungeonRunId);
+  },
   getCombatCharactersString: () => combatCharactersString,
   setCombatCharactersString: (characters) => { combatCharactersString = characters; },
   getLiveWorldState: () => liveWorldState,

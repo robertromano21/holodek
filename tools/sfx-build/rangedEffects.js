@@ -1,0 +1,22 @@
+'use strict';
+// world1 RANGED_COMBAT SID effects (same DSL as effects.js). One per ranged weapon sound family + lights.
+module.exports = ({ shot, midi, ad, sr }) => {
+  const off = { gate: 0 }, expl = (a, b, x) => a * Math.pow(b / a, Math.max(0, Math.min(1, x)));
+  shot('rg_twang', 14, t => ({ v: [{ hz: expl(420, 180, t / 12), wave: 'tri', gate: t < 6, ad: ad(0, 7), sr: sr(0, 6) }, { hz: 2600, wave: 'noise', gate: t < 1, ad: ad(0, 4), sr: sr(0, 3) }, off], f: { cut: 2200 - t * 120, res: 6, route: 3, mode: 'lp', vol: 14 } }));
+  shot('rg_clack', 12, t => ({ v: [{ hz: 1800, wave: 'noise', gate: t < 2, ad: ad(0, 5), sr: sr(0, 4) }, { hz: expl(300, 120, t / 10), wave: 'pulse', pw: 1200, gate: t < 4, ad: ad(0, 6), sr: sr(0, 5) }, off], f: { cut: 1800, res: 8, route: 3, mode: 'bp', vol: 14 } }));
+  shot('rg_whirr', 16, t => ({ v: [{ hz: 300 + 120 * Math.sin(t * 1.6), wave: 'tri', gate: t < 12, ad: ad(2, 6), sr: sr(6, 4) }, off, off], f: { cut: 1200, res: 3, route: 1, mode: 'lp', vol: 12 } }));
+  shot('rg_whoosh', 14, t => ({ v: [{ hz: expl(1200, 3800, t / 12), wave: 'noise', gate: t < 10, ad: ad(4, 6), sr: sr(6, 4) }, off, off], f: { cut: expl(600, 3000, t / 12), res: 5, route: 1, mode: 'bp', vol: 12 } }));
+  shot('rg_bang', 16, t => ({ v: [{ hz: 3400, wave: 'noise', gate: t < 3, ad: ad(0, 8), sr: sr(0, 7) }, { hz: expl(180, 40, t / 12), wave: 'pulse', pw: 2048, gate: t < 4, ad: ad(0, 8), sr: sr(0, 7) }, off], f: { cut: expl(4000, 300, t / 14), res: 4, route: 3, mode: 'lp', vol: 15 } }));
+  shot('rg_crack', 18, t => ({ v: [{ hz: 5000, wave: 'noise', gate: t < 2, ad: ad(0, 9), sr: sr(0, 8) }, { hz: expl(240, 50, t / 16), wave: 'saw', gate: t < 3, ad: ad(0, 9), sr: sr(0, 8) }, off], f: { cut: expl(6000, 400, t / 16), res: 6, route: 3, mode: 'lp', vol: 15 } }));
+  shot('rg_boom', 26, t => ({ v: [{ hz: 2400, wave: 'noise', gate: t < 6, ad: ad(0, 10), sr: sr(0, 9) }, { hz: expl(120, 30, t / 22), wave: 'pulse', pw: 2048, gate: t < 8, ad: ad(0, 10), sr: sr(0, 9) }, off], f: { cut: expl(2500, 150, t / 24), res: 8, route: 3, mode: 'lp', vol: 15 } }));
+  shot('rg_thunk', 12, t => ({ v: [{ hz: expl(200, 70, t / 8), wave: 'pulse', pw: 1800, gate: t < 4, ad: ad(0, 6), sr: sr(0, 5) }, off, off], f: { cut: 900, res: 6, route: 1, mode: 'lp', vol: 15 } }));
+  shot('rg_zap', 16, t => ({ v: [{ hz: expl(2600, 300, t / 14), wave: 'pulse', pw: 400 + t * 180, gate: t < 10, ad: ad(0, 7), sr: sr(4, 5) }, { hz: expl(2610, 305, t / 14), wave: 'saw', gate: t < 8, ad: ad(0, 6), sr: sr(2, 4), ring: true }, off], f: { cut: 3000, res: 10, route: 3, mode: 'bp', vol: 14 } }));
+  shot('rg_burst', 20, t => ({ v: [{ hz: 3600, wave: 'noise', gate: t % 5 < 2 && t < 16, ad: ad(0, 4), sr: sr(0, 3) }, { hz: 150, wave: 'pulse', pw: 2048, gate: t % 5 < 2 && t < 16, ad: ad(0, 4), sr: sr(0, 3) }, off], f: { cut: 2600, res: 4, route: 3, mode: 'lp', vol: 15 } }));
+  shot('rg_hiss', 14, t => ({ v: [{ hz: 6000, wave: 'noise', gate: t < 9, ad: ad(1, 6), sr: sr(4, 4) }, off, off], f: { cut: expl(5000, 1500, t / 12), res: 3, route: 1, mode: 'hp', vol: 12 } }));
+  { const n = [72, 79, 84]; shot('rg_chime', 24, t => ({ v: [{ hz: midi(n[Math.min(2, t >> 3)]), wave: 'tri', gate: t < 20, ad: ad(0, 8), sr: sr(6, 8) }, { hz: midi(n[Math.min(2, t >> 3)] + 12), wave: 'tri', gate: t > 2 && t < 20, ad: ad(2, 8), sr: sr(4, 8) }, off] })); }
+  shot('rg_thunder', 40, t => ({ v: [{ hz: 1800, wave: 'noise', gate: t < 30, ad: ad(0, 11), sr: sr(8, 10) }, { hz: expl(90, 28, t / 36), wave: 'pulse', pw: 2048, gate: t < 24, ad: ad(2, 11), sr: sr(8, 10) }, off], f: { cut: expl(3000, 120, t / 38), res: 10, route: 3, mode: 'lp', vol: 15 } }));
+  shot('rg_roar', 36, t => ({ v: [{ hz: expl(900, 60, t / 32), wave: 'saw', gate: t < 26, ad: ad(1, 10), sr: sr(10, 9) }, { hz: 2000, wave: 'noise', gate: t < 20, ad: ad(0, 10), sr: sr(6, 9) }, off], f: { cut: expl(4000, 300, t / 32), res: 12, route: 3, mode: 'lp', vol: 15 } }));
+  shot('rg_hum', 30, t => ({ v: [{ hz: 110, wave: 'saw', gate: t < 24, ad: ad(4, 8), sr: sr(10, 8) }, { hz: 111.5, wave: 'tri', gate: t < 24, ad: ad(4, 8), sr: sr(10, 8) }, off], f: { cut: 700, res: 5, route: 3, mode: 'lp', vol: 13 } }));
+  shot('rg_click', 6, t => ({ v: [{ hz: 2400, wave: 'pulse', pw: 300, gate: t < 1, ad: ad(0, 3), sr: sr(0, 2) }, off, off], f: { cut: 3000, res: 2, route: 1, mode: 'hp', vol: 12 } }));
+  shot('rg_reload', 18, t => ({ v: [{ hz: t < 8 ? 1400 : 900, wave: 'noise', gate: t < 2 || (t >= 8 && t < 10), ad: ad(0, 4), sr: sr(0, 3) }, off, off], f: { cut: 2400, res: 6, route: 1, mode: 'bp', vol: 13 } }));
+};

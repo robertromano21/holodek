@@ -350,6 +350,13 @@ function overlayScatter(P, scatter, rng) {
   }
 }
 
+// world1 GENRE_ARCH: genre building materials join the tables under NEW names only (existing entries never replaced).
+const GenreArch = (() => { try { return require('./genreArchitecture'); } catch { return null; } })();
+if (GenreArch) {
+  for (const [k, v] of Object.entries(GenreArch.MAT)) if (!MAT[k]) MAT[k] = v;
+  for (const [k, v] of Object.entries(GenreArch.WALL)) if (!WALL[k]) WALL[k] = v;
+  for (const [k, v] of Object.entries(GenreArch.FLOOR)) if (!FLOOR[k]) FLOOR[k] = v;
+}
 function upscale(small, ctx) {
   const S = ctx.canvas.width;
   ctx.imageSmoothingEnabled = false;
@@ -478,6 +485,12 @@ function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
   const cover = Array.isArray(opts.groundCover) ? opts.groundCover : [];
   if (kind === 'floor') { overlayGroundCover(P, cover, rng, colors); overlayScatter(P, opts.scatter, rng); }
   else { overlayWallCover(P, cover, rng); overlayDecals(P, opts.decals, rng); }
+  if (GenreArch && opts.genreArch) { // window / trim / horror taint for genre building styles
+    const a = opts.genreArch;
+    if (kind === 'wall' && a.window && GenreArch.WINDOW[a.window]) GenreArch.WINDOW[a.window](P, rng);
+    if (kind === 'wall' && a.trim && GenreArch.TRIM[a.trim]) GenreArch.TRIM[a.trim](P, colors);
+    if (a.taint) GenreArch.taint(P, rng, a.taint);
+  }
   upscale(small, ctx);
   return material;
 }

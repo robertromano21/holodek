@@ -30,7 +30,15 @@ function waveStats(bytes) {
 }
 
 function assemblyStats(text) {
-  const rows = new Map([...text.matchAll(/^(\w+):\s*\.byte\s+([^\r\n]+)/gm)].map(m => [m[1], m[2]]));
+  const rows = new Map(); let label;
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.split(';')[0].trim();
+    if (!line) continue;
+    const start = line.match(/^(\w+)(?::\s*|\s+)\.byte\s+(.+)$/i), continuation = line.match(/^\.byte\s+(.+)$/i);
+    if (start) { label = start[1]; rows.set(label, start[2]); }
+    else if (continuation && label) rows.set(label, rows.get(label) + ',' + continuation[1]);
+    else label = undefined;
+  }
   const bytes = row => [...row.matchAll(/\$([0-9a-f]{2})/gi)].map(m => parseInt(m[1], 16));
   const patterns = new Map();
   for (const [label, row] of rows) if (/^pat\d+$/.test(label)) {

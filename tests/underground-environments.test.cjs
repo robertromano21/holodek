@@ -82,7 +82,7 @@ test('atlas saves model-authored subterranean geography and supplies compatible 
   const $ = { user: async (parts, ...args) => { prompts += String.raw({ raw: parts }, ...args); },
     assistant: { generation: async options => { parameters = options.parameters; return { content: JSON.stringify(raw) }; } } };
   await C.prepareAtlas($, state);
-  assert.equal(parameters.regions[0].type.underground.maxLength, 500);
+  assert.equal(require('../retort/structuredSchema').toJSON(parameters).properties.regions.items.properties.underground.maxLength, 500);
   assert.match(prompts, /volcanic lava tubes/);
   assert.equal(JSON.parse(data)['0,0,0'].campaignAtlas.regions[2].underground, raw.regions[2].underground);
   const local = C.plan({ targetKey: '3,3,-1', template: 'mine', database: JSON.parse(data) });

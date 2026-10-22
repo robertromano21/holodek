@@ -112,3 +112,12 @@ test('3D-only item rims increase contrast and size without changing inventory pi
   }
   assert.equal(Items.worldHeight(2), .55); assert.ok(Items.worldHeight(12) > .8); assert.equal(Items.worldHeight(100), .9);
 });
+
+test('numeric and malformed tiles cannot crash hover, visible writings or pickup occlusion scans', () => {
+  for (const tile of [0, 1, true, {}, [], null]) {
+    const f = fixture(); f.dungeon.cells['3,4'].tile = tile;
+    assert.doesNotThrow(() => World.pick(f.dungeon, f.camera, f.player, .5, .6));
+    assert.doesNotThrow(() => World.visibleWritings(f.dungeon, f.camera, f.player));
+    assert.doesNotThrow(() => World.itemInView(f.dungeon, f.player, f.item, f.view));
+  }
+});

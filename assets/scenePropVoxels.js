@@ -2,6 +2,11 @@
   'use strict';
   const nodeMasonry = typeof module !== 'undefined' && module.exports ? require('./masonryPatterns') : null;
   const sculptures = typeof module !== 'undefined' && module.exports ? require('./sculptureForms') : root.SculptureForms;
+  // world1 CITY_PROPS: the city voxel kit registers its shapes (and 4 seeded variants of each) with this module.
+  const cityKit = typeof module !== 'undefined' && module.exports ? require('./cityKit') : root.CityKit;
+  // world1 GENRE_KITS: genre props/building pieces join the catalog the same way the city kit does (additive).
+  const genreKits = typeof module !== 'undefined' && module.exports ? require('./genreKits') : (root.HolodekFlags?.GENRE_KITS ? root.GenreKits : null);
+  const designCatalog = typeof module !== 'undefined' && module.exports ? require('./designCatalog') : root.DesignCatalog;
   const symbols = typeof module !== 'undefined' && module.exports ? require('./puzzleModules') : root.PuzzleModules;
   const iconography = typeof module !== 'undefined' && module.exports ? require('./shrineIconography') : root.ShrineIconography;
   const carvings = typeof module !== 'undefined' && module.exports ? require('./stoneCarvings') : root.StoneCarvings;
@@ -120,9 +125,18 @@
   for(const shape of sculptures.altarTypes)architecture[shape]={drawer:'altar',material:'stone',heightRatio:shape==='canopied_altar'||shape==='reredos_altar'?1:.6,baseWidth:.95};
   architecture.candelabra={drawer:'candelabra',material:'metal',heightRatio:.65,baseWidth:.65};
   architecture.portal_arch = { drawer: 'archway', material: 'crystal', heightRatio: 1, baseWidth: 1 };
+  // world1 EXIT_FRAMES: biome architecture that frames each journey exit (frame only; the opening stays passable).
+  for (const [name, material] of [['exit_gate', 'wood'], ['exit_portcullis', 'stone'], ['exit_grate', 'metal'], ['exit_arch', 'stone']]) {
+    architecture[name] = { drawer: 'archway', material, heightRatio: 1, baseWidth: 1 };
+    architecture[name + '_side'] = { drawer: 'archway', material, heightRatio: 1, baseWidth: 1 };
+  }
   for (const shape of ['slider_0','slider_1','slider_2','weight_0','weight_1','weight_2','chime_0','chime_1',
     ...['beacon','iris','statue','fountain','gate','mosaic','altar'].flatMap(s=>[s+'_open',s+'_closed'])])
     architecture['puzzle_'+shape] = { drawer:'altar',material:'stone',heightRatio:.4,baseWidth:.7 };
+  if (genreKits) for (const name of genreKits.SHAPES) architecture[name] = { drawer: 'genre', material: 'stone', heightRatio: 1, baseWidth: 1, genre: true, cotg: genreKits.COTG_TAGS.includes(name), emissive: genreKits.emissive(name) };
+  if (cityKit) for (const name of cityKit.SHAPES) for (const v of cityKit.variants(name)) architecture[`${name}__v${v}`] = { drawer: 'city', material: 'stone', heightRatio: 1, baseWidth: 1, city: true };
+  // world1 PYRAMIDS: stepped, smooth, ruined and terraced pyramids for wasteland features (added shapes only).
+  if (designCatalog) for (const name of designCatalog.PYRAMIDS) architecture[name] = { drawer: 'pyramid', material: 'stone', heightRatio: 1, baseWidth: 1, pyramid: true };
   const shapes = new Set([...treeShapes, ...Object.keys(vegetation), ...Object.keys(architecture), ...biomeShapes, 'exit_marker', 'tomb', 'furnace', 'arch', 'brazier', 'rubble', 'broken_masonry', 'fallen_arch', 'scree', 'pool', 'roots', 'altar', 'crystal', 'stump', 'stalagmite']);
   const puzzleGlyphs = {
     sun: '10101/01110/11111/01110/10101', moon: '00110/01100/11100/01100/00110',
@@ -156,6 +170,7 @@
   }
 
   function select(type, assembly, primitive) {
+    if (genreKits?.has(primitive?.shape)) return primitive.shape;
     const name = String(type || '').toLowerCase();
     for (const shape of biomeShapes) if (name.includes(shape)) return shape;
     for (const shape of Object.keys(vegetation)) if (name.includes(shape)) return shape;
@@ -203,6 +218,9 @@
   // Unit-volume shapes: the existing renderer applies world width and height once.
   function build(shape, size = 16, seed = 0, appearance = {}) {
     if (!shapes.has(shape)) return null;
+    if (cityKit?.has(shape) && architecture[shape]?.city) return cityKit.build(shape, size, seed, appearance);
+    if (genreKits?.has(shape) && architecture[shape]?.genre) return genreKits.build(shape, size, seed, appearance);
+    if (architecture[shape]?.pyramid) return designCatalog.pyramidVoxels(shape, size, seed);
     if (!Number.isInteger(size) || size < 8 || size > 64) throw new RangeError('Voxel size must be 8..64.');
     appearance ||= {};
     if (shape==='statue' || shape.startsWith('puzzle_statue')) {
@@ -221,7 +239,7 @@
       }
       return rotated;
     }
-    if (shape === 'pediment_side' || shape === 'timber_gate_side' || shape === 'grand_gate_side' || shape === 'patron_standard_side' || shape === 'patron_relief_side') {
+    if (/^exit_(gate|portcullis|grate|arch)_side$/.test(shape) || shape === 'pediment_side' || shape === 'timber_gate_side' || shape === 'grand_gate_side' || shape === 'patron_standard_side' || shape === 'patron_relief_side') {
       const source = build(shape.slice(0, -5), size, seed, appearance), rotated = new Uint8Array(source.length);
       for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         rotated[(size - 1 - y) + x * size + z * size * size] = source[x + y * size + z * size * size];
@@ -438,6 +456,14 @@
         const angle = i * Math.PI / 15, x = .5 + Math.cos(angle) * .41, z = .7 + Math.sin(angle) * .24;
         box(x - .065, .38, z - .055, x + .065, .62, z + .055);
       }
+    } else if (/^exit_(gate|portcullis|grate|arch)$/.test(shape)) {
+      // Two posts and a lintel across x; the middle .2-.8 stays open at walking height.
+      box(.0, .4, 0, .16, .6, .95); box(.84, .4, 0, 1, .6, .95);
+      if (shape === 'exit_arch') for (let i = 0; i < 14; i++) { const a = i * Math.PI / 13, x = .5 + Math.cos(a) * .4, z = .72 + Math.sin(a) * .22; box(x - .06, .4, z - .05, x + .06, .6, z + .05); }
+      else box(0, .4, .82, 1, .6, .98);
+      if (shape === 'exit_gate') { box(.04, .36, .98, .2, .64, 1); box(.8, .36, .98, .96, .64, 1); for (const x of [.0, .84]) box(x - .02, .62, 0, x + .18, .7, .55); }
+      if (shape === 'exit_portcullis') for (let x = .2; x < .8; x += .1) box(x, .46, .7, x + .03, .54, .82);
+      if (shape === 'exit_grate') { for (let x = .2; x < .8; x += .08) box(x, .47, .74, x + .025, .53, .82); box(.16, .47, .74, .84, .53, .77); }
     } else if (shape === 'exit_marker') {
       box(0.04, 0.04, 0, 0.18, 0.96, 0.6); box(0.82, 0.04, 0, 0.96, 0.96, 0.6);
       box(0.18, 0.04, 0, 0.82, 0.18, 0.6); box(0.18, 0.82, 0, 0.82, 0.96, 0.6);
@@ -1019,6 +1045,11 @@
   }
 
   function color(shape, x, y, z, normal, base, material, options = {}) {
+    if (cityKit?.has(shape) && architecture[shape]?.city) return cityKit.color(shape, x, y, z, normal, base, material, options);
+    if (genreKits?.has(shape) && architecture[shape]?.genre) return genreKits.color(shape, x, y, z, normal, base, material, options);
+    if (architecture[shape]?.pyramid) { const course = Math.floor(z * 24) % 2, joint = Math.floor((x + y) * 12 + Math.floor(z * 24) * .5) % 3 === 0;
+      const k = (normal[2] > .5 ? 1.08 : normal[0] + normal[1] > 0 ? .92 : .78) * (course ? 1 : .94) * (joint ? .85 : 1);
+      return [.78, .62, .4].map(v => Math.min(1, v * k)); }
     if (shape === 'patron_standard_side' || shape === 'patron_relief_side')
       return color(shape.slice(0, -5), y, 1 - x, z, [normal[1], -normal[0], normal[2]], base, material, options);
     const textures = options.textures !== false;
@@ -1148,6 +1179,10 @@
     } else if (scrubShapes.includes(shape)) hex = shape === 'ash_reeds' ? '#b9a97c' : h > 0.8 ? '#c7b38f' : shape === 'thorn_bush' ? '#79655b' : '#59654c';
     else if (shape === 'portal_arch') hex = h > .72 ? '#edb3ff' : h > .25 ? '#a548df' : '#63278b';
     else if (shape === 'exit_marker') hex = '#84d5ad';
+    else if (/^exit_gate/.test(shape)) hex = h > .8 ? '#6f4b2e' : '#8a6239';
+    else if (/^exit_grate/.test(shape)) hex = h > .7 ? '#4b4f55' : '#6f6a62';
+    else if (/^exit_portcullis/.test(shape)) hex = h > .68 ? '#3f4247' : '#8b857a';
+    else if (/^exit_arch/.test(shape)) hex = h > .7 ? '#c9bea6' : '#a59b86';
     if (treeShapes.includes(shape) || shape === 'stump' || shape === 'roots') {
       const foliage = !['dead_tree', 'bone_tree', 'charred_tree', 'stump', 'roots'].includes(shape) &&
         (z > 0.65 || shape === 'willow' && Math.hypot(x - 0.5, y - 0.5) > 0.27);

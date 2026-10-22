@@ -1,6 +1,24 @@
 'use strict';
 
-function appendOriginal($) {
+// holodek-1 only: minimal Grave Master rules (full lore + world guidance ~13k tokens do not fit its local context). Other models unchanged.
+const SHORT_GM = 'You are the Grave Master running an interactive fiction game. Write second-person present tense prose; never show the console or backend data. ' +
+  'The Current Game Console is the truth: describe the current room by name with its look, light, sounds, smells, objects and every listed exit; never invent exits. ' +
+  'Only characters listed as present may act or speak, each in a short distinct voice. Resolve player actions plausibly and consistently with the console; ' +
+  'items, gold, stats, combat and quests are tracked by the backend, so never invent or contradict them. Dark fantasy tone. Follow any later format instructions exactly.';
+// holodek-1 only, Children of the Grave play only: one compact setting/plot block (sent at most once per conversation).
+const SHORT_SETTING = '[CHILDREN-OF-THE-GRAVE] The player has died and begins at the Ruined Temple Entrance in Tartarus, an underworld plane of ash wastes under a yellowish sky, vast mountains, sandstorms, dark magics, ferocious monsters, dragons, angels and demons, populated by the souls of all who ever lived. ' +
+  'The long goal is to reach the Throne Room in Hades, recover Mortacia\'s Sepulchra and confront Arithus. The player plays as Mortacia, goddess of death; as Suzerain, a Knight of Atinus; or as a created character among the Children of the Grave with Mortacia as an NPC. ' +
+  'The engine controls coordinates, exits, inventory, combat and quest state; you only narrate and describe. [/CHILDREN-OF-THE-GRAVE]';
+const settingSeen = new WeakSet();
+function cotgPlay() { try { return require('./settingLayer').isCotGPlay() === true; } catch { return false; } }
+function settingOnce($) { // returns the block the first time per conversation object, else ''
+  if (!cotgPlay() || ($ && typeof $ === 'object' && settingSeen.has($))) return '';
+  if ($ && typeof $ === 'object') settingSeen.add($);
+  return '\n' + SHORT_SETTING;
+}
+function isHolodek1() { try { return require('./gameModels').snapshot().id === 'holodek-1'; } catch { return false; } }
+function appendOriginal($, { full = false } = {}) {
+  if (!full && isHolodek1()) { $.user`${SHORT_GM}${settingOnce($)}`; return; }
   $.user`${require('./underworldLore').GUIDANCE}`;
   $.user`Instructions for the Grave Master:
             
@@ -72,7 +90,15 @@ Backend Integration: Programmatic vs. Narrative Handling`;
 }
 
 function appendStory($, { roomName, activeTask = null, questUpdate = '', currentSituation = '',
-  questJustSeeded = false, updatedGameConsole = '', sharedState, parseNpcPartyNamesFromConsole }) {
+  questJustSeeded = false, updatedGameConsole = '', sharedState, parseNpcPartyNamesFromConsole, full = false }) {
+  if (!full && isHolodek1()) { // holodek-1 only: compact turn rules; relevant long sections are retrieved by holodekPromptRecall.
+    let task = activeTask, party = '';
+    try { if (!task && questJustSeeded) task = (sharedState.getCurrentTasks() || [])[sharedState.getCurrentTaskIndex()] || null; } catch {}
+    try { party = (parseNpcPartyNamesFromConsole(updatedGameConsole) || []).join(', '); } catch {}
+    let quest = ''; try { quest = questJustSeeded ? String(sharedState.getCurrentQuest() || '') : ''; } catch {}
+    $.user`Turn rules: Resolve my latest input first, then continue the scene in 1-3 short paragraphs. Never act, decide or type commands for me; wait for my next command. Only living characters shown in the console may act or speak, in quotes, each with their own motive and limited knowledge; party NPCs (${party || 'none'}) are allies, never foes. Do not invent NPCs, monsters, objects or exits; surface quest items through detail but never auto-grant them. Do not name the room.${quest ? ` Seed the quest "${quest}" now through an event or encounter, folding in the first task.` : ''} Active task: ${task ? task.type + ' - ' + task.desc : 'None'}. Quest updates: ${questUpdate || 'None'}.`;
+    return;
+  }
   $.user`${require('./underworldLore').GUIDANCE}`;
   try {
     const database = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
@@ -229,5 +255,7 @@ Write an interactive fiction adventure without using any *'s and let's play in C
   }
 }
 
-module.exports = { appendOriginal, appendStory };
+// holodek-1 only: retrieved long-prompt sections (see holodekPromptRecall.js).
+const injectRecall = ($, options) => require('./holodekPromptRecall').inject($, options);
+module.exports = { appendOriginal, appendStory, isHolodek1, SHORT_GM, SHORT_SETTING, settingOnce, cotgPlay, injectRecall };
 

@@ -548,6 +548,7 @@ function applySceneExteriors(dungeon, spec = {}, options = {}) {
     dungeon.sceneStructures ||= [];
     dungeon.sceneStructures.push(...structural.parts);
     occupied.push(accepted.footprint);
+    if (require('./worldFlags').on('INDOOR_EXTERIORS')) report.kitParts = (report.kitParts || 0) + biomeKit(dungeon, building, accepted);
     const forecourt = accepted.site.filter(p => p.v < 0);
     report.buildings.push({ ...building, footprint: accepted.footprint, perimeter: accepted.perimeter,
       walkableRingCells: accepted.ring.length, ringWidth: RING_WIDTH, attempts,
@@ -572,6 +573,47 @@ function applySceneExteriors(dungeon, spec = {}, options = {}) {
   report.placed = report.buildings.length;
   report.status = report.placed ? 'built' : 'skipped';
   return finish(report.placed ? 'committed-safe-destination-facades' : 'no-safe-destination-facade');
+}
+
+// world1 INDOOR_EXTERIORS: a biome-specific kit (colonnades, outbuildings, braziers, standards, paving) around the
+// facade of every indoor destination. Decorative, non-blocking, capped at 24 parts per building for performance.
+const KITS = {
+  temple: { rows: 'corinthian_column', accents: ['statue', 'candelabra'], outbuilding: 'pediment' },
+  basilica: { rows: 'ionic_column', accents: ['candelabra', 'statue'], outbuilding: 'pediment' },
+  rotunda: { rows: 'fluted_column', accents: ['statue'], outbuilding: 'pediment' },
+  castle: { rows: 'battlement', accents: ['patron_standard'], outbuilding: 'buttress' },
+  domus: { rows: 'timber_post', accents: ['candelabra'], outbuilding: 'pediment' },
+  bathhouse: { rows: 'doric_column', accents: ['candelabra'], outbuilding: 'pediment' },
+  default: { rows: 'doric_column', accents: ['candelabra'], outbuilding: 'buttress' }
+};
+function biomeKit(dungeon, building, accepted) {
+  const family = String(building.family || building.kind || building.name || '').toLowerCase();
+  const kit = KITS[Object.keys(KITS).find(k => family.includes(k))] || KITS.default;
+  const shapes = Voxels.architecture || {}, blocked = new Set([...[].concat(accepted.approach || []), ...[].concat(accepted.doorway || [])].map(p => `${p.x},${p.y}`));
+  const site = (accepted.site || []).filter(p => p.v < 0 && !p.wall && !p.tower && !p.throat && !blocked.has(`${p.x},${p.y}`) && !dungeon.cells[`${p.x},${p.y}`]?.navigationReserved);
+  if (!site.length) return 0;
+  const tileFor = shape => {
+    if (!shapes[shape]) return null;
+    const tile = `world1_kit_${shape}`;
+    dungeon.tiles[tile] ||= { url: dungeon.tiles.wall?.url, spriteSpec: { voxelShape: shape, material: shapes[shape].material || 'stone',
+      collisionBlocking: false, ...(building.palette ? { palette: building.palette } : {}), profile: 'flat', heightRatio: 1, baseWidth: 1, gridWidth: 1 } };
+    return tile;
+  };
+  const xs = site.map(p => p.x), ys = site.map(p => p.y), minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const floorAt = p => dungeon.cells[`${p.x},${p.y}`]?.floorHeight || 0, parts = [];
+  const push = (shape, p, h, role) => { const tile = tileFor(shape); if (!tile || parts.length >= 24) return;
+    parts.push({ tile, shape, role, position: { x: p.x + .1, y: p.y + .1, z: floorAt(p) }, size: { x: .8, y: .8, z: h }, world1Kit: true, exteriorDestination: building.targetKey }); };
+  // Colonnade: columns along the two long edges of the forecourt, every third cell.
+  for (const p of site) {
+    const edge = (p.x === minX || p.x === maxX) && (maxY - minY) >= (maxX - minX) || (p.y === minY || p.y === maxY) && (maxX - minX) > (maxY - minY);
+    if (edge && (p.x + p.y) % 3 === 0) push(kit.rows, p, 3, 'world1-colonnade');
+    dungeon.cells[`${p.x},${p.y}`].pathPaving = true;
+  }
+  // Accents and an outbuilding at the forecourt corners.
+  const corners = [[minX, minY], [maxX, minY], [minX, maxY], [maxX, maxY]].map(([x, y]) => site.find(p => p.x === x && p.y === y)).filter(Boolean);
+  corners.forEach((p, i) => push(i === 3 ? kit.outbuilding : kit.accents[i % kit.accents.length], p, i === 3 ? 2.5 : 1.6, 'world1-accent'));
+  dungeon.sceneStructures.push(...parts);
+  return parts.length;
 }
 
 function buildSceneExteriorSites(dungeon, spec = {}) {

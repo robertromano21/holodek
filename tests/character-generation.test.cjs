@@ -11,6 +11,7 @@ const Runtime = require('../retort/gameRetort');
 const Protocol = require('../retort/graveMasterProtocol');
 const { createModelService } = require('../retort/gameModels');
 const inhabitants = require('./fixtures/inhabitants.cjs');
+const { batchRows, slotIds } = require('./fixtures/inhabitant-batch.cjs');
 const source = fs.readFileSync(require.resolve('../retort/retortWithUserInput'), 'utf8').replace(/\r\n/g, '\n');
 const original = templateContent({ raw: [source.match(/\$\.user`(Instructions for the Grave Master:[\s\S]*?Backend Integration: Programmatic vs\. Narrative Handling)`;/)[1]] });
 const rules = { level: () => 1, random: min => min, sex: () => 'Female', xp: () => 0, equipment: async () => null };
@@ -20,7 +21,11 @@ const authored = name => ({ name, personality: 'Patient and curious.', voice: 'W
 function agent(reply) {
   const prompts = [], requests = [];
   return { prompts, requests, user: (parts, ...values) => prompts.push(templateContent(parts, ...values)),
-    assistant: { generation: async options => { requests.push(options); return { content: typeof reply === 'string' ? reply : JSON.stringify(reply) }; } } };
+    assistant: { generation: async options => {
+      requests.push(options);
+      const value = Array.isArray(reply?.inhabitants) && options.parameters?.inhabitants ? { ...reply, inhabitants: batchRows(reply.inhabitants, options) } : reply;
+      return { content: typeof value === 'string' ? value : JSON.stringify(value) };
+    } } };
 }
 
 test('party biography-writing prompt is identical to the pre-Luna source', () => {
@@ -33,6 +38,7 @@ test('actual Ruined Temple creation delegates to the regional generator, while p
   const start = source.indexOf('async function generateMonstersForRoomUsingGPT(');
   const code = source.slice(start, source.indexOf('async function generateRoomInhabitantPopulation(', start));
   const requests = [], sandbox = { updatedGameConsole: 'Coordinates: X: 0, Y: 0, Z: 0\nNPCs in Party: None',
+    StoryPrompts: { isHolodek1: () => false },
     generateRoomInhabitantPopulation: async (...args) => requests.push(args), console: { log() {}, error() {} } };
   vm.runInNewContext(code, sandbox);
   const $ = {};
@@ -81,7 +87,7 @@ for (const [label, mutate, expected] of [
 ]) test(`invalid inhabitant generation: ${label} raises a diagnostic error, never a replacement resident`, async () => {
   const a = agent({ inhabitants: mutate(inhabitants(1)) }); let rolls = 0;
   await assert.rejects(generateInhabitants(a, context, { ...rules, level: () => { rolls++; return 1; } }), expected);
-  assert.equal(a.requests.length, 1); assert.equal(rolls, 0, 'Validate complete cast before allocating stats or equipment.');
+  assert.equal(a.requests.length, 4, 'Initial attempt plus three corrections, never an unbounded retry.'); assert.equal(rolls, 0, 'Validate complete cast before allocating stats or equipment.');
 });
 
 test('malformed inhabitant JSON and API failures propagate rather than returning stock residents', async () => {
@@ -135,12 +141,13 @@ test('4.1 Mini and Luna send identical character-writing prompts and inputs for 
   for (const geoKey of ['0,0,0', '1,0,0']) {
     const captures = [];
     for (const id of ['gpt-4.1-mini', 'gpt-6-luna']) {
-      const requests = [], content = JSON.stringify({ inhabitants: inhabitants(geoKey === '0,0,0' ? 1 : 8).map(row => ({
+      const requests = [], rows = inhabitants(geoKey === '0,0,0' ? 1 : 8).map(row => ({
         ...row, allegiance: geoKey === '0,0,0' ? 'Friendly' : row.slot < 3 ? 'Neutral' : 'Hostile',
         encounterId: 'local-' + Math.floor(row.slot / 3), homeSite: 'commons'
-      })) });
+      }));
       const client = { chat: { completions: { create: async body => {
         requests.push(body);
+        const content = JSON.stringify({ inhabitants: batchRows(rows, body) });
         return (async function* () {
           yield { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'authored_cast', type: 'function', function: { name: 'answer', arguments: content } }] }, finish_reason: null }] };
           yield { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] };
@@ -156,9 +163,12 @@ test('4.1 Mini and Luna send identical character-writing prompts and inputs for 
         $.run = (work, params, options) => nestedRun(work, params, { ...options, shouldSaveToLog: false });
         return Authorship.runWithLore($, child => generateInhabitants(child, { ...context, geoKey }, rules));
       }), null, { shouldSaveToLog: false });
-      assert.equal(requests.length, 1); assert.equal(requests[0].model, id);
-      assert.equal(requests[0].tools[0].function.strict, true); assert.equal(requests[0].temperature, .85);
-      captures.push(requests[0].messages.filter(m => m.content === original || m.role === 'user').map(m => m.content));
+      assert.equal(requests.length, geoKey === '0,0,0' ? 1 : 2);
+      assert.deepEqual(requests.flatMap(slotIds), rows.map(row => row.slot));
+      for (const request of requests) {
+        assert.equal(request.model, id); assert.equal(request.tools[0].function.strict, true); assert.equal(request.temperature, .85);
+      }
+      captures.push(requests.map(request => request.messages.filter(m => m.content === original || m.role === 'user').map(m => m.content)));
     }
     assert.deepEqual(captures[0], captures[1], 'Only the model-specific backend role adapter may differ, never character instructions or world data.');
   }

@@ -96,7 +96,19 @@
         curve([.25,.8,.22],[.12,.72,.39],[.27,.7,.4],.018,.012);
         curve([.27,.7,.4],[.39,.74,.36],[.3,.78,.31],.012,.008);
       }
-      wings([.5,.52,.64],s.wings==='skeletal'||s.wings==='bone');
+      // world1: per-deity dragon variety (horns, crest, coils, scale ridges, wing span, raised or lowered head).
+      const v=s.dragonVariety;
+      if(v){
+        const h=[.57,.27,.87];
+        for(let i=0;i<(v.horns||0);i++)for(const side of[-1,1]){const k=i*.022,sweep=v.hornStyle==='swept'?.09:v.hornStyle==='curled'?.03:.05;
+          if(v.hornStyle==='curled')curve([h[0]+side*(.025+k),h[1]+.01,h[2]+.02],[h[0]+side*(.08+k),h[1]+.07,h[2]+.08],[h[0]+side*(.05+k),h[1]+.03,h[2]+.03],.011,.007);
+          else tube([h[0]+side*(.025+k),h[1]+.01,h[2]+.02],[h[0]+side*(.03+k+sweep*.4),h[1]+sweep,h[2]+.07+i*.02],.012,.006);}
+        for(let i=0;i<(v.crest||0);i++){const t=i/Math.max(1,v.crest-1),x=.5,y=.5+t*.35,z=.66-t*.4;tube([x,y,z],[x,y+.01,z+.035+(v.crestStyle==='frill'?.02:0)],.012,.004);}
+        for(let i=0;i<(v.coils||0);i++){const r=.08-i*.015;let prev;for(let j=0;j<=16;j++){const a=j*Math.PI/8,p=[.5+r*Math.cos(a),.82+i*.03,.18+r*Math.sin(a)*.6+i*.03];if(prev)tube(prev,p,.022-i*.003);prev=p;}}
+        if(v.ridges)for(let i=0;i<5;i++)for(const side of[-1,1])egg([.5+side*.07,.5+i*.02,.45+i*.04],[.012,.02,.01]);
+        if(v.pose==='rearing')tube([.5,.5,.6],[.5,.42,.75],.05,.04);
+      }
+      if(!v||v.wingSpan!=='folded')wings([.5,.52,.64],s.wings==='skeletal'||s.wings==='bone');
       egg([.552,.224,.885],[.012,.012,.009],0);egg([.605,.218,.885],[.012,.012,.009],0);
       // Wyvern anatomy: wings and two hind legs, never a second pair of arms.
       return out;

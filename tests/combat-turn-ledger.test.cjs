@@ -10,14 +10,14 @@ function fixture() {
   }
   const body = el('body'), ledger = el('aside'), dock = el('div'); nodes.set('combat-ledger', ledger);
   const window = { actionDiceState: { active: { kind: 'combat' } }, renderPartyIconDock() {} };
-  const document = { body, getElementById: id => nodes.get(id), createElement: el, addEventListener() {} };
+  const document = { body, getElementById: id => nodes.get(id), createElement: el, addEventListener() {}, querySelectorAll: () => [] };
   vm.runInNewContext(fs.readFileSync(require.resolve('../assets/combatTurnUi'), 'utf8'), { window, document,
     fetch: async (url, options) => { posts.push({ url, body: JSON.parse(options.body) }); return { ok: true, json: async () => ({}) }; } });
   const turn = { turnId: 'turn-1', actionId: 'combat-1', combatant: 'Hero', round: 1, targets: ['Dragon'], attackTargets: ['Dragon'],
     tactical: true, allowRetreat: true, initiative: [], movement: { remaining: 6, total: 6 },
     care: [{ label: 'Heal Hero', target: 'Hero' }], spells: [{ name: 'Bolt', target: 'Dragon', itemName: 'Wand', cost: 1, magic: 3 }] };
   const ui = window.CombatTurnUi; ui.receive(turn);
-  return { ui, turn, nodes, ledger, dock, el, posts, window };
+  return { ui, turn, nodes, ledger, dock, el, posts, window, body };
 }
 
 test('ledger contains no action buttons and Hold Position is rendered at the party dock', async () => {
@@ -50,6 +50,29 @@ test('lower-left Retreat Party submits the same turn-scoped retreat action', asy
   const f = fixture(); f.ui.renderDockControls(f.dock); f.nodes.get('combat-retreat-button').click();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.posts[0].body.action, 'retreat'); assert.equal(f.posts[0].body.turnId, 'turn-1');
+});
+
+test('spellbook casting in combat shows exact current targets and submits one turn-scoped spell', async () => {
+  const f = fixture(), spell = { caster: 'Hero', itemId: 'book', spellId: 'mend', target: 'Sella', name: 'Grave Mending', cost: 1, effect: 'heal' };
+  f.ui.receive({ ...f.turn, spells: [spell] }); f.ui.openSpells('Hero', 'mend');
+  const popup = f.body.children.find(n => n.className === 'popup-container combat-spell-targets');
+  const cast = popup.children.find(n => n.tag === 'button' && /^Grave Mending/.test(n.textContent)); assert.ok(cast);
+  assert.equal(f.posts.length, 0); cast.click(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.posts[0].url, '/submit-target2'); assert.equal(f.posts[0].body.action, 'cast');
+  assert.equal(f.posts[0].body.target, 'Sella'); assert.equal(f.posts[0].body.spellId, 'mend'); assert.equal(f.posts[0].body.turnId, 'turn-1');
+});
+
+test('combat spell chooser blocks other casters, stale turns and moving or paused actions', () => {
+  for (const mode of ['other', 'stale', 'moving', 'paused']) {
+    const f = fixture(), spell = { itemId: 'book', spellId: 'mend', target: 'Sella', name: 'Grave Mending', cost: 1, effect: 'heal' };
+    f.ui.receive({ ...f.turn, spells: [spell], movement: { ...f.turn.movement, busy: mode === 'moving' } });
+    if (mode === 'paused') f.window.gamePaused = true;
+    f.ui.openSpells(mode === 'other' ? 'Companion' : 'Hero', 'mend');
+    const popup = f.body.children.find(n => n.className === 'popup-container combat-spell-targets');
+    if (mode === 'stale') f.ui.receive({ ...f.turn, turnId: 'new' });
+    popup.children.filter(n => n.tag === 'button' && /^Grave Mending/.test(n.textContent)).forEach(n => n.click());
+    assert.equal(f.posts.length, 0, mode);
+  }
 });
 
 test('character popup has turn-scoped attacks and spells, without submitting on open, and rejects stale actions', async () => {

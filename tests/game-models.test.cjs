@@ -4,6 +4,7 @@ const { once } = require('node:events');
 const { Readable } = require('node:stream');
 const { Response } = require('node-fetch');
 const OpenAI = require('openai');
+process.env.HOLODEK_OLLAMA_URL = 'http://127.0.0.1:9/v1'; // these tests cover cloud models; never see a real local Ollama
 const { createModelService, catalog, install } = require('../retort/gameModels');
 const Transport = require('../retort/modelTransport');
 const { createRuntime } = require('../retort/gameRetort');
@@ -105,7 +106,7 @@ test('original routing is preserved and all models omit app token caps while kee
     const models = createModelService({ initial: row.id });
     const body = Transport.requestBody({ model: 'gpt-4.1-mini', maxTokens: 400, max_tokens: 900,
       max_completion_tokens: 1000, max_output_tokens: 1200, reasoning_effort: 'high' }, { models, maxTokens: 80 });
-    assert.equal(body.reasoning_effort, row.reasoningNone ? 'none' : undefined);
+    assert.equal(body.reasoning_effort, row.reasoningNone ? 'none' : row.reasoningEffort); // gpt-oss cannot disable reasoning; it runs at low
     for (const key of ['maxTokens', 'max_tokens', 'max_completion_tokens', 'max_output_tokens']) assert.equal(Object.hasOwn(body, key), false);
   }
 });

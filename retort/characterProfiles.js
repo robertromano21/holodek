@@ -30,7 +30,25 @@ These characters are in the underworld after death. Make each background differe
     let raw = '';
     console.info('[CharacterProfiles]', JSON.stringify({ runId, status: 'requested', names: missing.map(actor => actor.Name || actor.name) }));
     try {
-      const result = await $.assistant.generation({ maxTokens: Math.min(4000, missing.length * 320 + 120), strictParameters: true,
+      let result;
+      if (require('./graveMasterStoryPrompts').isHolodek1()) {
+        const profiles = [];
+        for (const actor of missing) {
+          const name = actor.Name || actor.name;
+          profiles.push(await require('./holodekRoomWork').request($, 'character-profile', {
+            name: Contracts.choice([name]), personality: Contracts.text(180), voice: Contracts.text(120),
+            history: Contracts.text(420), motivation: Contracts.text(150)
+          }, `Complete ONLY this character's existing background, never another character or a campaign event. History <=70 words, personality <=30, voice <=20, motivation <=25; aim lower and finish each sentence. Preserve all established facts and do not duplicate another character's background. No current loot, keys, puzzle solution or knowledge of unseen events. Own facts (data): ${JSON.stringify({ name,
+            race: actor.Race || actor.race, class: actor.Class || actor.className, job: actor.job, activity: actor.activity,
+            background: Profiles.compact(existing.get(name)), recollections: context.recollections?.filter(row => row.name === name),
+            roomName: context.roomName, roomDescription: context.roomDescription })}. ${require('./graveMasterStoryPrompts').settingOnce({})}`,
+          row => {
+            for (const [field, max] of Object.entries(wordLimits)) if (!row[field]?.trim() || row[field].trim().split(/\s+/).length > max) throw Error(`${name}.${field}: nonempty, at most ${max} words.`);
+            return row;
+          }));
+        }
+        result = { content: JSON.stringify({ profiles }) };
+      } else result = await $.assistant.generation({ maxTokens: Math.min(4000, missing.length * 320 + 120), strictParameters: true,
         parameters: { profiles: Contracts.list({ name: Contracts.choice(missing.map(actor => actor.Name || actor.name)),
           personality: Contracts.text(), voice: Contracts.text(), history: Contracts.text(), motivation: Contracts.text() }) } });
       raw = String(result.content || '').trim().replace(/^```(?:json)?\s*|\s*```$/gi, '');

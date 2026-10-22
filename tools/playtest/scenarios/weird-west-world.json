@@ -1,0 +1,63 @@
+{
+  "name": "weird-west-world",
+  "description": "Option 4 new-world flow: western (primary) + cosmic-horror, game prompt, master prompt accepted, additional instructions, then Start and an active play loop with a revolver, ammo and Luck.",
+  "genres": [
+    {
+      "genre": "western",
+      "weight": 2,
+      "primary": true
+    },
+    {
+      "genre": "cosmic-horror",
+      "weight": 1
+    }
+  ],
+  "prompt": "A dust-choked frontier town where the mine has broken into something older than the stars; the sheriff is missing and the church bell rings by itself at night.",
+  "instructions": "Keep ammo scarce and let the townsfolk hide secrets.",
+  "startOption": "3",
+  "loadout": [
+    {
+      "name": "Revolver",
+      "type": "weapon",
+      "attack": 1,
+      "damage": 2
+    },
+    {
+      "name": "bullets (12)",
+      "type": "ammo"
+    },
+    {
+      "name": "Lucky Silver Revolver",
+      "type": "weapon",
+      "attack": 1,
+      "damage": 3
+    }
+  ],
+  "encounter": {
+    "id": "enc-mine-thing",
+    "surprise": "never",
+    "monsters": [
+      {
+        "name": "Shaft Crawler",
+        "race": "Deep Thing",
+        "level": 1,
+        "hp": 8,
+        "ac": 10,
+        "attacks": [
+          {
+            "name": "Claw",
+            "damage": "1d4"
+          }
+        ],
+        "disposition": "Hostile"
+      }
+    ]
+  },
+  "create": [
+    "Wren Calloway",
+    "Female",
+    "1",
+    "8",
+    ""
+  ]
+}

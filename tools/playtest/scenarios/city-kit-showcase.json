@@ -1,0 +1,350 @@
+{
+ "name": "city voxel kit showcase (dev sandbox): one building at a time in front of the player",
+ "requires": "HOLODEK_DEV_SANDBOX=1",
+ "steps": [
+  {
+   "start": 2,
+   "click": [
+    "review-save-button",
+    "Save and Continue"
+   ]
+  },
+  {
+   "state": "showcase room"
+  },
+  {
+   "dev": {
+    "op": "snapshot",
+    "name": "before-showcase"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "fountain_tiered",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "sandstone"
+   }
+  },
+  {
+   "screenshot": "kit-01-fountain_tiered.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "aqueduct_arch",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "marble"
+   }
+  },
+  {
+   "screenshot": "kit-02-aqueduct_arch.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "city_gate",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "basalt"
+   }
+  },
+  {
+   "screenshot": "kit-03-city_gate.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "lighthouse",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "sandstone"
+   }
+  },
+  {
+   "screenshot": "kit-04-lighthouse.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "harbour_crane",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "marble"
+   }
+  },
+  {
+   "screenshot": "kit-05-harbour_crane.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "forum_portico",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "basalt"
+   }
+  },
+  {
+   "screenshot": "kit-06-forum_portico.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "guild_hall",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "sandstone"
+   }
+  },
+  {
+   "screenshot": "kit-07-guild_hall.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "market_stall",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "marble"
+   }
+  },
+  {
+   "screenshot": "kit-08-market_stall.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "public_baths",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "basalt"
+   }
+  },
+  {
+   "screenshot": "kit-09-public_baths.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "amphitheatre",
+    "x": "@px",
+    "y": "@py-4",
+    "size": {
+     "x": 3,
+     "y": 3,
+     "z": 3
+    },
+    "palette": "sandstone"
+   }
+  },
+  {
+   "screenshot": "kit-10-amphitheatre.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "pyramid_stepped",
+    "x": "@px",
+    "y": "@py-6",
+    "size": {
+     "x": 5,
+     "y": 5,
+     "z": 3.5
+    }
+   }
+  },
+  {
+   "screenshot": "kit-pyramid_stepped.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "pyramid_smooth",
+    "x": "@px",
+    "y": "@py-6",
+    "size": {
+     "x": 5,
+     "y": 5,
+     "z": 3.5
+    }
+   }
+  },
+  {
+   "screenshot": "kit-pyramid_smooth.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "place",
+    "id": "show",
+    "shape": "ziggurat_terraced",
+    "x": "@px",
+    "y": "@py-6",
+    "size": {
+     "x": 5,
+     "y": 5,
+     "z": 3.5
+    }
+   }
+  },
+  {
+   "screenshot": "kit-ziggurat_terraced.png"
+  },
+  {
+   "dev": {
+    "op": "remove",
+    "id": "show"
+   }
+  },
+  {
+   "dev": {
+    "op": "style",
+    "palette": "tartarus_noon",
+    "lighting": "golden_hour"
+   }
+  },
+  {
+   "screenshot": "kit-style-tartarus.png"
+  },
+  {
+   "dev": {
+    "op": "restore",
+    "name": "before-showcase"
+   }
+  },
+  {
+   "state": "after showcase"
+  }
+ ]
+}

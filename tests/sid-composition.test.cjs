@@ -11,6 +11,63 @@ const Composition = require('../retort/sidComposition');
 const Composer = require('../retort/roomMusicComposer');
 const { waveStats, assemblyStats } = require('../tools/analyze-room-music.cjs');
 const spec = Theory.planPromptSpec();
+
+test('music retries report the observed harmony, bar math and drumless transient errors together', () => {
+  const p = plan({ contrastProgression: 'plagal_hymn', contrastRhythm: [4,8,8,4,4,4],
+    extensions: { profile: 'reed_resonance', motion: 'breath', depth: .15, transients: 'soft' } });
+  const before = JSON.stringify(p);
+  assert.throws(() => Composition.validate(p), error => {
+    assert.match(error.message, /contrastProgression.*dorian_vamp/);
+    assert.match(error.message, /contrastRhythm.*totals 20/);
+    assert.match(error.message, /transients must be off/);
+    assert.ok(error.message.length < 1600); return true;
+  });
+  assert.equal(JSON.stringify(p), before);
+});
+
+test('new composition choices cannot express an incompatible harmony or an overfull rhythm', () => {
+  const Choices = require('../retort/sidCompositionChoices');
+  for (const value of Choices.harmony) {
+    const [scale, a, b] = value.split('/');
+    assert.ok(Theory.PROGRESSIONS[a].modes.includes(scale)); assert.ok(Theory.PROGRESSIONS[b].modes.includes(scale));
+  }
+  for (const value of Choices.orchestration(true)) {
+    const [texture, percussion, frame, transients] = value.split('/');
+    if (percussion === 'none') assert.equal(transients, 'off');
+    else { assert.equal(frame, 'framed'); assert.ok(!['drone','sparse'].includes(texture)); }
+  }
+  for (const seed of ['temple', 'wasteland', 'alien']) {
+    const contract = Choices.create(Composition.parameters, seed);
+    assert.deepEqual(contract.bars, Choices.rhythmChoices(seed));
+    assert.deepEqual([...new Set(contract.bars.map(r => r.split(',').length))], [5,6,7,8,9]);
+    for (const bar of contract.bars) assert.equal(bar.split(',').reduce((n, d) => n + 16 / Number(d), 0), 16);
+    assert.ok(!contract.parameters.scale); assert.ok(!contract.parameters.extensions.transients);
+    assert.equal(contract.parameters.themes[0].type.harmony.type, String);
+    assert.equal(contract.parameters.themes[0].type.motifRhythm.type, String);
+    let enumValues=0;
+    const count=value=>{if(!value||typeof value!=='object')return;if(Array.isArray(value.enum))enumValues+=value.enum.length;for(const v of Object.values(value))count(v);};
+    count(contract.parameters); assert.ok(enumValues <= 1000, 'Keep the complete schema within the structured-output enum budget.');
+  }
+  assert.notDeepEqual(Choices.rhythmChoices('temple'), Choices.rhythmChoices('wasteland'));
+});
+
+test('decoding enum choices preserves the authored notes, rejects invented tokens and leaves archives unchanged', () => {
+  const contract = require('../retort/sidCompositionChoices').create(Composition.parameters, 'test');
+  const p = plan(), before = JSON.stringify(p);
+  assert.deepEqual(contract.decode(p), p); assert.equal(JSON.stringify(p), before);
+  const bar = contract.bars.find(v => v.split(',').length === 6);
+  const wire = { ...p, harmony: 'dorian/dorian_rise/dorian_vamp', orchestration: 'counterpoint/none/framed/off',
+    motifRhythm: bar, answerRhythm: bar, contrastRhythm: bar,
+    extensions: { profile: 'reed_resonance', motion: 'breath', depth: .15 } };
+  for (const field of ['scale','progression','contrastProgression','texture','percussion','frameArp']) delete wire[field];
+  const decoded = contract.decode(wire);
+  assert.equal(decoded.scale, 'dorian'); assert.equal(decoded.extensions.transients, 'off');
+  assert.deepEqual(decoded.motifRhythm, bar.split(',').map(Number)); assert.deepEqual(decoded.motifContour, p.motifContour);
+  assert.equal(wire.motifRhythm, bar);
+  assert.throws(() => contract.decode({ ...wire, harmony: 'dorian/dorian_rise/plagal_hymn' }), /harmony/);
+  assert.throws(() => contract.decode({ ...wire, contrastRhythm: '4,8,8,4,4,4' }), /contrastRhythm/);
+  assert.throws(() => contract.decode({ ...wire, orchestration: 'counterpoint/none/framed/soft' }), /orchestration/);
+});
 test('portal and planar locations retain their own setting and require a multi-movement SID suite', () => {
   const state = { getRoomNameDatabase: () => JSON.stringify({ '701,800,920': { name: 'The Violet Interval',
     classification: { indoor: false, biome: 'wasteland' }, planarRealm: { name: 'Auralith', nature: 'A silent crystalline orchard.',
@@ -240,7 +297,7 @@ test('same accepted plan and seed are reproducible; genuinely different motifs p
 test('recent realized melodies cannot be repeated by changing only the proposed source contour', async () => {
   const signature=Composition.realizedMotifSignature(song());
   const recent=[{song:{composition:{acceptedPlan:{motifRhythm:[4],motifContour:[9]},realizedMotifSignature:signature}}}];
-  const $=fakeRetort(Array(3).fill(JSON.stringify(plan())));
+  const $=fakeRetort(Array(4).fill(JSON.stringify(plan())));
   await assert.rejects(Composition.generate($,{recent}),/After chord anchoring/);
 });
 

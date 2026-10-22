@@ -54,6 +54,7 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
   }
   app.get('/game/lifecycle', (req, res) => res.json({ running: !stopping, pid: processRef.pid, port,
     canQuit: localRequest(req), connectedWindows: windows.size, closeGraceMs: autoQuitDelayMs }));
+  let firstConnectAt = 0;
   app.get('/game/lifecycle/presence', (req, res) => {
     if (!localRequest(req)) return res.status(403).end();
     if (req.headers.origin) {
@@ -63,7 +64,7 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
     if (stopping || disposed) return res.status(503).end();
     if (windowCloseTimer) clearTimeout(windowCloseTimer);
     windowCloseTimer = null;
-    windows.add(res);
+    windows.add(res); firstConnectAt ||= Date.now();
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Accel-Buffering', 'no');
@@ -73,6 +74,8 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
     res.once('close', () => {
       clearInterval(heartbeat); windows.delete(res);
       if (stopping || disposed || windows.size || windowCloseTimer) return;
+      // Start-up grace (opt-in, HOLODEK_STARTUP_GRACE_MS; test servers only): page reloads/reconnects soon after the first window connects never shut the server down.
+      if (Date.now() - firstConnectAt < Number(process.env.HOLODEK_STARTUP_GRACE_MS || 0)) return;
       logger.info('[GameWindows]', JSON.stringify({ connected: 0, shutdownInMs: autoQuitDelayMs }));
       windowCloseTimer = setTimeout(() => {
         windowCloseTimer = null;

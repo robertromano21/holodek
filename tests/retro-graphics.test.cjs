@@ -11,7 +11,7 @@ function frame(width, height, colorAt) {
 }
 test('glazed conversion keeps sixteen colors, exact palette pixels and reusable frame buffers', () => {
   const converter = Retro.createConverter('c64_glazed'), { width, height } = converter;
-  assert.equal(width, 160); assert.equal(height, 200);
+  assert.equal(width, 320); assert.equal(height, 200);
   const input = frame(width, height, (x, y) => Retro.palette[(x + y) % 16]), before = Buffer.from(input);
   const result = converter.convert(input), oldData = result.data, oldIndices = result.indices;
   assert.deepEqual(result.data, input);
@@ -33,7 +33,7 @@ test('invalid modes are rejected instead of silently changing the requested look
 
 test('final glazing leaves gray floors and armor neutral rather than tinting the finished frame', () => {
   const converter = Retro.createConverter('c64_glazed'), { width, height } = converter;
-  assert.equal(width, 160); assert.equal(height, 200);
+  assert.equal(width, 320); assert.equal(height, 200);
   const input = frame(width, height, (x, y) => x < 80 ? [128, 128, 128] : Retro.palette[(y % 16)]);
   const before = Buffer.from(input), result = converter.convert(input), bytes = Buffer.from(result.data);
   const allowed = new Set(Retro.palette.map(c => c.join(',')));
@@ -90,7 +90,7 @@ test('one-click toggle starts off, never restores a saved mode and repaints paus
   assert.equal(h.counts().renders, 1);
   assert.equal(h.api.present(h.scene, host), true); assert.equal(host.children.length, 1);
   const output = host.children[0];
-  assert.equal(output.width, 160); assert.equal(output.height, 200); assert.equal(output.attrs['aria-hidden'], 'true');
+  assert.equal(output.width, 320); assert.equal(output.height, 200); assert.equal(output.attrs['aria-hidden'], 'true');
   assert.match(output.style.cssText, /pointer-events:none/);
   assert.equal(h.scene.width, 640); assert.equal(h.scene.height, 480);
   for (let i = 0; i < 5; i++) h.api.present(h.scene, host);
@@ -171,7 +171,7 @@ test('asset layers preserve source colors, transparent cutouts and sparse black 
 });
 
 test('glaze never repaints existing C64 artwork or black outlines', () => {
-  const input = frame(160, 200, (x, y) => Retro.palette[(x + y) % 16]);
+  const input = frame(320, 200, (x, y) => Retro.palette[(x + y) % 16]);
   assert.deepEqual(Buffer.from(Retro.createConverter('c64_glazed').convert(input).data), Buffer.from(input));
 });
 

@@ -31,9 +31,12 @@
 <script src="../assets/characterMotion3d.js"></script>
 <script src="../assets/renderSceneItems.js"></script>
 <script src="../assets/gameMenuUi.js"></script>
+<script src="../assets/retroDetails.js"></script>
 <script src="../assets/rendererWebGL.js"></script>
+<script src="../assets/graphicsSettings.js"></script>
+<script>window.probeGraphicsSettings=window.GraphicsSettings;window.GraphicsSettings=undefined;</script>
 <script>
-try {
+(async()=>{try {
   const renderer = window.webglDungeonRenderer;
   const initStarted = performance.now();
   renderer.canvas = document.getElementById('gpu');
@@ -362,6 +365,16 @@ try {
     glErrors: characterErrors.filter(error => error !== gl.NO_ERROR) };
   const characterMotionPass = characterMotion.idleTextures === 1 && characterMotion.idleImages === 1 &&
     characterMotion.walkFrames === 4 && characterMotion.walkImages > 4 && minimumVisible > 100 && !characterMotion.glErrors.length;
+  const vividSaved=window.RetroGraphics;window.RetroGraphics={fullbright:()=>true};
+  const vividBb=renderer._getCharacterBillboard(actor,0,0,5,0,0),vividFrames=[];
+  for(const intensity of[0,1]){
+    gl.clearColor(0,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+    renderer._drawCharacterBillboard({actorTex:vividBb.tex,drawLeft:53,drawRight:203,drawStartY:40,drawEndY:220,depth:.1,lightX:0,lightY:0,baseZ:0,worldHeight:1},256,256,{dirX:1,dirY:0,elevation:.6,intensity},0);
+    const pixels=new Uint8Array(256*256*4);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);vividFrames.push(pixels);
+  }
+  let vividColors=0,vividSame=true;for(let i=0;i<vividFrames[0].length;i+=4){if(vividFrames[0][i]>100||vividFrames[0][i+1]>100||vividFrames[0][i+2]>100)vividColors++;if(vividFrames[0][i]!==vividFrames[1][i]||vividFrames[0][i+1]!==vividFrames[1][i+1]||vividFrames[0][i+2]!==vividFrames[1][i+2])vividSame=false;}
+  const vividSpritesPass=vividSame&&vividColors>100&&gl.getError()===gl.NO_ERROR;
+  window.RetroGraphics=vividSaved;
   gl.useProgram(renderer.voxelProgram); gl.viewport(0,0,256,256); gl.enable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
   gl.depthMask(true); gl.depthFunc(gl.LEQUAL);
   const pu=renderer.voxelUniforms;
@@ -415,6 +428,13 @@ try {
   artImage.complete=true;artImage.naturalWidth=144;artImage.naturalHeight=96;
   const art={tile:'art-probe',axis:'x',surface:'wall',sign:-1,kind:'fresco',label:'The White Lady',motifs:['Mortacia','skeleton'],composition:'apotheosis',text:'Memory endures.'};
   const artMesh=renderer.getSurfaceArtMesh(art,{'art-probe':artImage});
+  const artModeSaved=window.RetroGraphics;window.RetroGraphics={fullbright:()=>true};
+  const retroArtMesh=renderer.getSurfaceArtMesh(art,{'art-probe':artImage});window.RetroGraphics=artModeSaved;
+  function artVertices(mesh){gl.bindBuffer(gl.ARRAY_BUFFER,mesh.vbo);const vertices=new Float32Array(gl.getBufferParameter(gl.ARRAY_BUFFER,gl.BUFFER_SIZE)/4);gl.getBufferSubData(gl.ARRAY_BUFFER,0,vertices);return vertices;}
+  const expectedRetroArt=createCanvas(144,96);SurfaceArt.paint(expectedRetroArt.getContext('2d'),createCanvas,art,{},[],{retro:true});
+  const expectedRetroMesh=SurfaceArt.mesh(expectedRetroArt.getContext('2d').getImageData(0,0,144,96),art.axis,art.surface,art.sign,art);
+  const expectedRetroVertices=new Float32Array(expectedRetroMesh.vertices),retroArtVertices=artVertices(retroArtMesh);
+  const artPigmentsPass=expectedRetroVertices.length===retroArtVertices.length&&expectedRetroVertices.every((v,i)=>v===retroArtVertices[i])&&retroArtMesh.lightingScope==='art';
   gl.bindBuffer(gl.ARRAY_BUFFER,artMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,artMesh.ibo);
   for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]]){
     gl.enableVertexAttribArray(attribute);gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
@@ -642,6 +662,14 @@ try {
     let sum=0;for(let i=0;i<characterPixels.length;i+=4)sum+=characterPixels[i]+characterPixels[i+1]+characterPixels[i+2];lightLevels.push(sum);
   }
   const artLightingPass=lightLevels[0]>0&&lightLevels[1]>lightLevels[0]*1.1&&gl.getError()===gl.NO_ERROR;
+  gl.bindBuffer(gl.ARRAY_BUFFER,retroArtMesh.vbo);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,retroArtMesh.ibo);
+  for(const[attribute,offset]of[[renderer.voxelAttribs.pos,0],[renderer.voxelAttribs.norm,12],[renderer.voxelAttribs.color,24]])gl.vertexAttribPointer(attribute,3,gl.FLOAT,false,36,offset);
+  gl.uniform1f(pu.unlit,3);const retroPaintFrames=[];
+  for(const on of[false,true]){gl.uniform1i(pu.torchCount,on?wallLamps.length:0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.drawElements(gl.TRIANGLES,retroArtMesh.count,gl.UNSIGNED_SHORT,0);const pixels=new Uint8Array(256*256*4);gl.readPixels(0,0,256,256,gl.RGBA,gl.UNSIGNED_BYTE,pixels);retroPaintFrames.push(pixels);}
+  let stablePigments=0,coloredPigments=0;const retroPaintEnergy=[0,0];
+  for(let i=0;i<retroPaintFrames[0].length;i+=4){const a=retroPaintFrames[0],b=retroPaintFrames[1],sa=a[i]+a[i+1]+a[i+2],sb=b[i]+b[i+1]+b[i+2];retroPaintEnergy[0]+=sa;retroPaintEnergy[1]+=sb;if(sa>50&&sb>50&&Math.max(a[i],a[i+1],a[i+2])-Math.min(a[i],a[i+1],a[i+2])>30){coloredPigments++;if([0,1,2].every(c=>Math.abs(a[i+c]/sa-b[i+c]/sb)<.025))stablePigments++;}}
+  const retroArtLightPass=coloredPigments>50&&stablePigments/coloredPigments>.98&&retroPaintEnergy[1]>retroPaintEnergy[0]&&gl.getError()===gl.NO_ERROR;
+  gl.uniform1f(pu.unlit,0);
   const stonePreview=new URLSearchParams(location.search).has('stonework-preview'),overfillPreview=new URLSearchParams(location.search).has('overfill'),
     artifactPreview=new URLSearchParams(location.search).has('artifact'),stoneLevels=artifactPreview?[1,3,3]:overfillPreview?[1,3,5]:[0,.5,1],
     stoneCards=[],stoneworkComparison=[];
@@ -779,15 +807,60 @@ try {
   const questWritingPass=writingMesh?.passes?.length===3&&writingMesh.passes.every(p=>p.count>0)&&writingError===gl.NO_ERROR&&
     JSON.stringify(writingRoom.cells)===writingCells&&JSON.stringify(writingRoom.lighting)===writingLighting;
   const questWriting={pass:questWritingPass,passes:writingMesh?.passes?.length,draws:renderer.lastFrameStats?.voxelDrawCalls,error:writingError};
+  // Exercise the Retro branch with real voxel draws, a torch halo and normal lighting.
+  const retroSaved=window.RetroGraphics,retroRoom=structuredClone(liveRoom);
+  retroRoom.geoKey='retro-trace-probe';retroRoom._geometryStamp='retro-trace-1';retroRoom.cells['3,1']={tile:'torch',torchFacing:'south',floorHeight:1,ceilHeight:6};
+  const retroBefore=JSON.stringify(retroRoom);window.currentDungeon=retroRoom;
+  window.playerPosX=3.2;window.playerPosY=3.2;window.playerAngle=Math.atan2(.3,1.3);window.playerZ=1.65;
+  window.RetroGraphics={fullbright:()=>true,environment:()=>({}),treasurePixels:p=>p,palettePixels:p=>p};
+  renderer.renderScene();const retroTraceError=gl.getError(),retroTraceDraws=renderer.lastFrameStats?.voxelDrawCalls;
+  const retroTracePass=retroTraceError===gl.NO_ERROR&&retroTraceDraws>0&&JSON.stringify(retroRoom)===retroBefore;
+  const floorEnergy=()=>{const px=new Uint8Array(256*96*4);gl.readPixels(0,0,256,96,gl.RGBA,gl.UNSIGNED_BYTE,px);let total=0;for(let i=0;i<px.length;i+=4)total+=px[i]+px[i+1]+px[i+2];return total;};
+  const retroFloorLit=floorEnergy(),darkRetroRoom=structuredClone(retroRoom);
+  darkRetroRoom.geoKey='retro-dark-probe';darkRetroRoom._geometryStamp='retro-dark-1';for(const cell of Object.values(darkRetroRoom.cells))if(cell.tile==='torch')cell.tile='wall';
+  window.currentDungeon=darkRetroRoom;renderer.renderScene();const retroFloorDark=floorEnergy();
+  const retroFloorLightingPass=retroFloorLit>retroFloorDark&&gl.getError()===gl.NO_ERROR;
+  window.currentDungeon=retroRoom;renderer.renderScene();
+  window.RetroGraphics=retroSaved;
   window.gamePaused=savedLiveFlags.paused;window.renderDungeonView=savedLiveFlags.render;
   window.ARCHITECTURAL_CARVINGS=savedLiveFlags.carvings;window.STONEWORK_SURFACE_CLOSURE=savedLiveFlags.closure;
+  const warmRoom=structuredClone(liveRoom);warmRoom.geoKey='warm-room-probe';warmRoom._geometryStamp='warm-room-probe-1';
+  const oldMeshes=renderer.voxelMeshes,warmBefore=JSON.stringify(warmRoom);
+  // The dump-DOM harness does not wait for browser idle callbacks after load.
+  const originalIdleCallback=window.requestIdleCallback;
+  window.requestIdleCallback=callback=>{callback({timeRemaining:()=>20});return 0;};
+  try { await renderer.prewarmAdjacentRoom(warmRoom,'warm-probe',()=>true); }
+  finally { window.requestIdleCallback=originalIdleCallback; }
+  const warmingKeptCurrentCache=renderer.voxelMeshes===oldMeshes,warmRecord=renderer._adjacentRooms?.get('warm-probe');
+  const warmedMesh=warmRecord?.meshes[liveTile];
+  const warmBuffersValid=!!warmedMesh&&(warmedMesh.passes||[warmedMesh]).every(p=>gl.isBuffer(p.vbo)&&gl.isBuffer(p.ibo));
+  renderer.renderScene();const oldRoomAfterWarmError=gl.getError();
+  window.currentDungeon=warmRoom;renderer.renderScene();
+  const roomWarmPass=warmingKeptCurrentCache&&warmBuffersValid&&oldRoomAfterWarmError===gl.NO_ERROR&&gl.getError()===gl.NO_ERROR&&
+    renderer.voxelMeshes[liveTile]===warmedMesh&&!renderer._adjacentRooms.has('warm-probe')&&JSON.stringify(warmRoom)===warmBefore;
+  const savedRetroForSettings=window.RetroGraphics;
+  window.RetroGraphics={status:()=>({mode:'modern'}),fullbright:()=>false,setMode:()=>{}};
+  window.GraphicsSettings=window.probeGraphicsSettings;window.webglDungeonRenderer=renderer;
+  const nativeModernWidth=renderer.canvas.width,nativeModernHeight=renderer.canvas.height;
+  window.GraphicsSettings.applyToRenderer(renderer);
+  let graphicsSettingsPass=true;const modernResolutionChecks=[];
+  for(const scale of [1,2,3,4]){
+    window.GraphicsSettings.setModern('engraved',{sharpness:scale});renderer.renderScene();
+    const pixels=new Uint8Array(renderer.canvas.width*renderer.canvas.height*4);gl.readPixels(0,0,renderer.canvas.width,renderer.canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,pixels);
+    const visible=pixels.some((v,i)=>i%4!==3&&v>10);
+    const ok=renderer.canvas.width===nativeModernWidth*scale&&renderer.canvas.height===nativeModernHeight*scale&&visible&&gl.getError()===gl.NO_ERROR;
+    modernResolutionChecks.push({scale,visible,pass:ok});graphicsSettingsPass=graphicsSettingsPass&&ok;
+  }
+  window.GraphicsSettings.setModern('classic',{sharpness:1});renderer.renderScene();
+  graphicsSettingsPass=graphicsSettingsPass&&renderer.canvas.width===nativeModernWidth&&renderer.canvas.height===nativeModernHeight&&renderer.canvas.style.filter===''&&gl.getError()===gl.NO_ERROR;
+  window.GraphicsSettings=undefined;window.RetroGraphics=savedRetroForSettings;
   gl.deleteTexture(emptyCells);
   document.getElementById('results').textContent = JSON.stringify({
     shadersCompiled: true,
     initializationMs, adapter, startupEvents: renderer.startupEvents,
     pass: results.every(result => result.gpuUploadByteMismatches === 0 && result.glError === gl.NO_ERROR) &&
-      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && itemGroundingPass && actorShadowOcclusionPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && wideArtPass && circleAspectPass && circularMosaicPass && architecturalCarvingPass && columnSolidityPass && stoneworkPalettePass && mechanismMotionPass && funeraryPass&&artRefinementPass&&artLightingPass&&stoneworkComparisonPass&&liveStoneworkPass&&negativeReliefPass&&combatRenderPass&&questWritingPass,
-      questWriting,
+      upperPixels === 0 && lowerPixels > 0 && nearClip.legacyUpperPixels > 0 && nearClip.glError === gl.NO_ERROR && paletteApplied && corbelPass && horizonPass && downhillPass && itemGroundingPass && actorShadowOcclusionPass && gatePass && characterMotionPass && puzzleMeshesPass && artPass && wideArtPass && circleAspectPass && circularMosaicPass && architecturalCarvingPass && columnSolidityPass && stoneworkPalettePass && mechanismMotionPass && funeraryPass&&artRefinementPass&&artLightingPass&&stoneworkComparisonPass&&liveStoneworkPass&&negativeReliefPass&&combatRenderPass&&questWritingPass&&retroTracePass&&retroFloorLightingPass&&vividSpritesPass&&artPigmentsPass&&retroArtLightPass&&roomWarmPass&&graphicsSettingsPass,
+      questWriting,roomWarmPass,graphicsSettingsPass,modernResolutionChecks,warmingKeptCurrentCache,warmBuffersValid,retroTracePass,vividSpritesPass,artPigmentsPass,retroArtLightPass,retroPaintEnergy,coloredPigments,stablePigments,retroFloorLightingPass,retroFloorLit,retroFloorDark,retroTraceError,retroTraceDraws,
       results, nearClip, voxelColors, paletteApplied, corbels, corbelPass, visibility, horizonPass, downhill, downhillPass, itemGrounding, itemGroundingPass, shadowSamples, actorShadowOcclusionPass, gates, gatePass, characterMotion, characterMotionPass, puzzleMeshes, puzzleMeshesPass,artPass,wideArtPass,circleAspectPass,circleMeasurements,circularMosaicPass,mosaicMeasurements,architecturalCarvingPass,architecturalCarvingMeshes,columnSolidity,columnSolidityPass,stoneworkPalettePass,artPixels,mechanismMotionPass,funeraryMeshes,funeraryPass,artRefinementPass,refinementMeshes,artLightingPass,lightLevels,stoneworkComparison,stoneworkComparisonPass,liveStoneworkPass,liveStoneworkFrames,livePixelChanges,liveRedraws,negativeRelief,negativeReliefPass,combatRenderPass,combatRenderFrames,combatBackgroundChanges
   });
   if(stonePreview||livePreview){
@@ -808,5 +881,6 @@ try {
 } catch (error) {
   document.getElementById('results').textContent = JSON.stringify({ error: error.stack });
 }
+})();
 </script>
 </html>

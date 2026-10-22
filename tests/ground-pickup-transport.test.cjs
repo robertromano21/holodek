@@ -94,6 +94,7 @@ test('real state-sync, balance lookup and pickup routes repair the visible blade
   assert.equal(sync.body.economyResult.passive, true);
   assert.ok(sync.body.economyResult.sceneObjects.some(o => o.name === f.blade.name));
   const balance = await f.post('/economy/view', f.observer); assert.equal(balance.status, 200);
+  assert.ok(balance.body.sceneObjects.some(o => o.name === f.blade.name && o.x === 4 && o.y === 5));
   const request = { ...f.observer, kind: 'take', item: f.blade.name, nonce: 'http-pickup:123', revision: balance.body.revision };
   const taken = await f.post('/economy/action', request);
   assert.equal(taken.status, 200, JSON.stringify(taken.body)); assert.match(taken.body.content, /You take shattered oath blade/);

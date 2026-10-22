@@ -39,6 +39,12 @@ test('automatic combat updates the essential original console/cache flow exactly
   assert.equal(f.log.length,1);assert.equal(f.calls.filter(row=>row[0]==='history').length,1);
   assert.equal(f.root.lastServerGameConsole,f.text);assert.equal(JSON.stringify(f.d),geometry);
 });
+
+test('completed combat replaces client-guessed loot positions with the server drop tile', async () => {
+  const f = fixture(), drop = { name: 'guard blade', x: 8, y: 6 };
+  await f.root.applyRealtimeCombatResult({ ...f.event, type: 'realtime_combat_result', sceneObjects: [drop] });
+  assert.deepEqual(f.d.sceneObjects, [drop]); assert.equal(f.d._geometryStamp, 'unchanged');
+});
 for(const changes of [{runId:'old'},{geoKey:'2,0,0'},{eventId:undefined},{updatedGameConsole:'Coordinates: X: 2, Y: 0, Z: 0'},
   {combatCharactersString:'invalid'},{combatCharactersString:'{}'}])test(`stale or malformed encounter results cannot update the current room: ${JSON.stringify(changes)}`,async()=>{
   const f=fixture();await f.root.applyRealtimeCombatResult({...f.event,...changes});assert.equal(f.calls.length,0);assert.equal(f.log.length,0);

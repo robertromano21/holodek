@@ -48,8 +48,8 @@ function mountWall({faces,map,dungeon,viewKeys},row,used,groups=new Map(),center
     if(used.has(face.key)||row.puzzleClue&&face.d>8)continue;
     const mural=(row.kind==='fresco'||row.kind==='mosaic')&&row.format!=='panel'&&!row.puzzleClue;
     const ratio=row.kind==='mosaic'?Mosaics.aspectRatio(row):row.kind==='fresco'?(row.aspectRatio||1.5):1.5;
-    const frieze=!!row.carvingStyle&&row.format==='mural'&&!row.puzzleClue;
-    const desired=frieze?(row.stoneworkRole==='skirting'?5:6):mural?Math.max(1,Math.min(8,Math.ceil((face.top-Math.max(face.z+.35,face.base+.08)-.12)*ratio+.2))):1;
+    const frieze=!!(row.carvingStyle||row.moldingStyle)&&row.format==='mural'&&!row.puzzleClue;
+    const desired=frieze?(['skirting','baseboard'].includes(row.stoneworkRole)?5:6):mural?Math.max(1,Math.min(8,Math.ceil((face.top-Math.max(face.z+.35,face.base+.08)-.12)*ratio+.2))):1;
     for(let span=desired;span>=1;span--){
       const start=face.along-Math.floor((span-1)/2),strip=[];
       for(let i=0;i<span;i++){
@@ -60,10 +60,10 @@ function mountWall({faces,map,dungeon,viewKeys},row,used,groups=new Map(),center
       if(strip.length!==span)continue;
       const ceiling=Math.min(...strip.map(f=>f.top))-.12;
       const floorZ=Math.max(...strip.map(f=>f.z)),cornice=frieze&&row.stoneworkRole==='cornice'&&ceiling-floorZ>=2.5;
-      const bottom=frieze?cornice?ceiling-.65:Math.max(...strip.map(f=>Math.max(f.z+(row.stoneworkRole==='skirting'?.18:.55),f.base+.08))):
+      const bottom=frieze?cornice?ceiling-.65:Math.max(...strip.map(f=>Math.max(f.z+(row.stoneworkRole==='baseboard'?.02:row.stoneworkRole==='skirting'?.18:.55),f.base+.08))):
         mural?Math.max(...strip.map(f=>Math.max(f.z+.35,f.base+.08))):face.z+.65;
-      const height=frieze?Math.min(row.stoneworkRole==='skirting'?.45:.65,ceiling-bottom):mural?Math.min(5.2,ceiling-bottom,(span-.2)/ratio):.6;
-      if(height<(frieze?.35:mural?.5:.6))continue;
+      const height=frieze?Math.min(row.stoneworkRole==='baseboard'?.3:row.stoneworkRole==='skirting'?.45:row.molding&&row.stoneworkRole==='cornice'?.4:.65,ceiling-bottom):mural?Math.min(5.2,ceiling-bottom,(span-.2)/ratio):.6;
+      if(height<(frieze?(row.stoneworkRole==='baseboard'||row.molding?.25:.35):mural?.5:.6))continue;
       const width=frieze?span-.2:mural?height*ratio:.8,offset=start+(span-width)/2;
       const plane=face.plane+(face.sign===1?1.01:-.01);
       const position={x:face.axis==='x'?plane:offset,y:face.axis==='y'?plane:offset,z:bottom};

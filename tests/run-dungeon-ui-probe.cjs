@@ -606,7 +606,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     const mapPanel = document.getElementById('exploration-map-popup');
     checks.mapFullyVisible = mapPanel.scrollHeight <= mapPanel.clientHeight + 1;
     if (innerWidth >= 1000) {
-      checks.mapBetweenSidePanels = map.left > combat.right && map.right < consoleBounds.left;
+      checks.mapUsesReadableCanvas = document.getElementById('exploration-map-canvas').getBoundingClientRect().width >= Math.min(300,innerHeight*.3);
     }
     const pixel = document.getElementById('exploration-map-canvas').getContext('2d').getImageData(320, 320, 1, 1).data;
     checks.mapPainted = pixel[0] > 8;
@@ -682,6 +682,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     d.sceneObjects = [{ ...stock[5], x: 38, y: 30 }, { name: 'hidden crown', x: 39, y: 30 }];
     DungeonExplorationMap.refresh();
     checks.mapListsDiscoveredItemsOnly = encounterSelect.textContent.includes('silver dagger') && !encounterSelect.textContent.includes('hidden crown');
+    checks.discoveredItemsHaveNumberedNames = [...encounterSelect.options].some(o=>/^1\. silver dagger$/.test(o.textContent));
     const iconPixel = mapContext.getImageData(385, 305, 1, 1).data;
     checks.mapDrawsDiscoveredItemIcon = iconPixel[0] !== 8 || iconPixel[1] !== 8;
     const itemHoverBounds = mapCanvas.getBoundingClientRect();
@@ -1208,7 +1209,7 @@ const journalPage=String.raw`<!doctype html><html><head><meta charset="utf-8"><s
 <button id="dungeon-inventory-shortcut"><img src="/assets/adventurers-pack.svg" alt=""></button>${journalMarkup}
 <script>
 window.dungeonRunId='journal-probe';window.gamePaused=true;const realFetch=window.fetch.bind(window),posts=[];
-let spellbookClicks=0;window.PartySpellbookUi={open(){spellbookClicks++;}};
+let spellbookClicks=0,quickcastClicks=0;window.PartySpellbookUi={open(){spellbookClicks++;},openQuick(){quickcastClicks++;}};
 window.fetch=async(url,options)=>{posts.push({url,body:JSON.parse(options.body)});return{ok:true,json:async()=>({runId:'journal-probe',step:1,quest:'The Water Debt',
 objective:{title:'Rescue the keeper',description:'Escort the keeper alive to Amber Spring Gardens.',requirements:'Actual arrival and faction resolution required.'},
 route:[{status:'Current',room:'Amber Spring Gardens',roomKey:'1,1,0',actor:'Senna'}],facts:[{title:'Burial record',text:'The keeper refused the levy.',room:'Crown Graves'}],
@@ -1229,9 +1230,43 @@ document.addEventListener('DOMContentLoaded',async()=>{
       checks['upsideDownL-'+zoom]=Math.abs(book.top-pack.top)<1&&book.right<pack.left&&book.bottom<=command.top&&book.left>=0&&pack.right<=innerWidth;
       checks['iconsUnchanged-'+zoom]=Math.abs(book.width-pack.width)<1&&Math.abs(book.height-pack.height)<1;
     }
-    document.getElementById('dungeon-spellbook-shortcut').click();checks.spellbookOpens=spellbookClicks===1;
+    const spellbook=document.getElementById('dungeon-spellbook-shortcut');
+    spellbook.click();await new Promise(resolve=>setTimeout(resolve,340));
+    checks.spellbookSingleTapQuickcasts=quickcastClicks===1&&spellbookClicks===0;
+    spellbook.click();spellbook.click();await new Promise(resolve=>setTimeout(resolve,340));
+    checks.spellbookDoubleTapFullBook=spellbookClicks===1&&quickcastClicks===1;
+    for(const id of ['dungeon-map-shortcut','dungeon-journal-shortcut','dungeon-spellbook-shortcut','dungeon-inventory-shortcut']) {
+      const image=document.querySelector('#'+id+' img');await image.decode();
+      checks['dockIconLoaded-'+id]=image.complete&&image.naturalWidth>0&&image.naturalHeight>0;
+    }
     checks.readOnly=posts.every(p=>p.url==='/journal/view'&&p.body.runId==='journal-probe');
     checks.draftPreserved=document.getElementById('chatuserinput').value==='unfinished draft';
+  }catch(error){errors.push(error.stack);}
+  await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
+});
+</script></body></html>`;
+const startupModelPage=String.raw`<!doctype html><html><head><meta charset="utf-8"><style>${css}</style><script src="/assets/modelSelectUi.js"></script></head><body><script>
+const realFetch=window.fetch.bind(window),requests=[],checks={},errors=[];
+localStorage.setItem('holodek.gameModel','grok-4');
+window.fetch=async(url,options={})=>{
+  requests.push({url,method:options.method||'GET'});
+  if(url!=='/game-models'||options.method==='POST')throw Error('Unexpected request in read-only model chooser probe: '+url);
+  return {ok:true,json:async()=>({current:{id:'grok-4',revision:5},all:[
+    {id:'grok-4',name:'Grok',provider:'xai',status:'ready'},
+    {id:'gpt-6-luna',name:'Luna',provider:'openai',status:'ready'},
+    {id:'groq-test',name:'Groq test',provider:'groq',status:'ready'},
+    {id:'holodek-1',name:'PC model',provider:'local',status:'ready'}]})};
+};
+document.addEventListener('DOMContentLoaded',async()=>{
+  try{
+    for(let i=0;i<100&&!document.querySelector('#model-select-screen input:checked');i++)await new Promise(resolve=>setTimeout(resolve,10));
+    const dialog=document.getElementById('model-select-screen'),checked=dialog.querySelector('input:checked');
+    checks.newGameDefaultsLunaDespiteSavedGrok=checked?.value==='gpt-6-luna'&&localStorage.getItem('holodek.gameModel')==='grok-4';
+    const groups=Array.from(dialog.querySelectorAll('fieldset')).filter(group=>group.querySelector('input')).map(group=>group.querySelector('legend').textContent);
+    checks.providerOrdering=groups.join('|')==='Grok (xAI)|OpenAI|Groq · Open-weight models';
+    checks.pcModelHidden=!dialog.querySelector('input[value="holodek-1"]');
+    checks.noCredentialOrModelWrites=requests.length===1&&requests[0].url==='/game-models'&&requests[0].method==='GET'&&!document.getElementById('provider-key-prompt');
+    checks.modal=dialog.open&&dialog.matches(':modal');
   }catch(error){errors.push(error.stack);}
   await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
 });
@@ -1433,7 +1468,7 @@ window.addEventListener('DOMContentLoaded',async()=>{
   await realFetch('/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pass:Object.values(checks).every(Boolean)&&!errors.length,checks,errors})});
 });
 </script></body></html>`;
-for (const html of [page,journalPage,tacticalPage,modelPage,fontsPage,artPage])for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) if (script.trim()) new vm.Script(script);
+for (const html of [page,journalPage,tacticalPage,modelPage,startupModelPage,fontsPage,artPage])for (const [, script] of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) if (script.trim()) new vm.Script(script);
 
 (async () => {
   let receiveReport;
@@ -1448,7 +1483,7 @@ for (const html of [page,journalPage,tacticalPage,modelPage,fontsPage,artPage])f
       });
       return;
     }
-    if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(process.argv.includes('--art-only')?artPage:process.argv.includes('--fonts-only')?fontsPage:process.argv.includes('--model-only')?modelPage:process.argv.includes('--tactical-only')?tacticalPage:process.argv.includes('--journal-only')?journalPage:page); return; }
+    if (request.url === '/') { response.setHeader('Content-Type', 'text/html'); response.end(process.argv.includes('--startup-model-only')?startupModelPage:process.argv.includes('--art-only')?artPage:process.argv.includes('--fonts-only')?fontsPage:process.argv.includes('--model-only')?modelPage:process.argv.includes('--tactical-only')?tacticalPage:process.argv.includes('--journal-only')?journalPage:page); return; }
     if (/^\/assets\/fonts\/(PixelifySans|PressStart2P)\.ttf$/.test(request.url)) {
       response.setHeader('Content-Type','font/ttf'); response.end(fs.readFileSync(path.join(root,request.url.slice(1)))); return;
     }
@@ -1458,7 +1493,7 @@ for (const html of [page,journalPage,tacticalPage,modelPage,fontsPage,artPage])f
     if (request.url==='/assets/children-of-the-grave-logo.png') { response.setHeader('Content-Type','image/png');response.end(fs.readFileSync(path.join(root,request.url.slice(1))));return; }
     if (['/assets/adventurers-map.svg', '/assets/adventurers-pack.svg','/assets/adventurers-journal.svg','/assets/adventurers-spellbook.svg'].includes(request.url)) { response.setHeader('Content-Type', 'image/svg+xml'); response.end(fs.readFileSync(path.join(root, request.url.slice(1)))); return; }
     const name = /^\/assets\/(\w+)\.js$/.exec(request.url)?.[1];
-    if (!scripts.includes(name) && !artDependencies.includes(name) && !['partyRecovery','rendererWebGPU','objectDiscovery','adventureJournalUi','combatTacticalUi','partySpellbookUi'].includes(name)) { response.writeHead(404); response.end(); return; }
+    if (!scripts.includes(name) && !artDependencies.includes(name) && !['partyRecovery','rendererWebGPU','objectDiscovery','adventureJournalUi','combatTacticalUi','partySpellbookUi','modelSelectUi'].includes(name)) { response.writeHead(404); response.end(); return; }
     response.setHeader('Content-Type', 'application/javascript'); response.end(fs.readFileSync(path.join(root, 'assets', name + '.js')));
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));

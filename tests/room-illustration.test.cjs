@@ -57,7 +57,7 @@ test('Grave Master receives saved identity, enum tools and physical constraints,
   const s = state(); s.db()['0,0,0'].solution = 'hidden secret'; s.db()['0,0,0'].inhabitants = { actors: { unseen: 'spy' } };
   const target = Service.context(s, '0,0,0'), prompts = [];
   const $ = { user: text => { prompts.push(text); }, assistant: { generation: async options => {
-    assert.equal(options.strictParameters, true); assert.deepEqual(options.parameters.layers[0].type.kind.enum, Art.kinds);
+    assert.equal(options.strictParameters, true); assert.deepEqual(options.parameters.layers[0].type.kind.enum, Art.allKinds || Art.kinds); // world1 ART_CATALOG appends kinds; equals Art.kinds when the flag is off
     return { content: JSON.stringify(F.temple()) };
   } } };
   assert.deepEqual(await Service.generate($, target), F.temple());

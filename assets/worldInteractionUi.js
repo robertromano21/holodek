@@ -38,7 +38,7 @@
       const renderedFloor = camera.floorHeightAt?.(x, y);
       const f = Number.isFinite(renderedFloor) ? renderedFloor : c.floorHeight || 0;
       if (z < f || c.roof && z >= c.roof.height) return false;
-      const solid = c.tile === 'wall' || c.tile === 'torch' || c.tile === 'door' && !c.door?.isOpen || c.tile?.startsWith('custom_') || c.tile === 'pillar';
+      const solid = c.tile === 'wall' || c.tile === 'torch' || c.tile === 'door' && !c.door?.isOpen || typeof c.tile === 'string' && c.tile.startsWith('custom_') || c.tile === 'pillar';
       const height = c.structureHeight ?? Math.max(.5, (c.ceilHeight ?? f + 2) - f);
       if (solid && z >= f && z <= f + height) return false;
     }
@@ -63,6 +63,14 @@
       result.push({type:'art',key:art.key,x,y,width:Math.max(s.x,s.y),height:s.z,label:art.label,enabled:near,
         box:{...p,sx:Math.max(.03,s.x),sy:Math.max(.03,s.y),sz:Math.max(.03,s.z)},
         command:'examine',detail:near?art.description:'',art,hint:near?'':'Walk closer to examine'});
+    }
+    // world1 LIBRARY_BOOKS: each shelf book is its own small hit box (same ray-pick path as murals).
+    if (root.HolodekFlags?.LIBRARY_BOOKS && root.LibraryBooks) for (const book of root.LibraryBooks.books(dungeon)) {
+      const p = book.position, s = book.size, bx = p.x + s.x / 2, by = p.y + s.y / 2, distance = Math.hypot(bx - player.x, by - player.y);
+      if (distance > 6) continue;
+      const known = root.getReadableItemMetadata?.(book.name);
+      result.push({ type: 'book', key: book.id, x: bx, y: by, width: Math.max(s.x, s.y), height: s.z, box: { ...p, sx: Math.max(.03, s.x), sy: Math.max(.03, s.y), sz: s.z },
+        label: known?.title || 'Unread tome', book, enabled: distance <= 2.5, command: 'read ' + book.name, hint: 'Walk closer to read' });
     }
     for (const f of e?.fixtures || []) {
       const [x, y] = f.key.split(',').map(Number), i = e.definition.controls.findIndex(c => c.id === f.id);
@@ -96,7 +104,7 @@
       const props = [];
       for (let dy = -18; dy <= 18; dy++) for (let dx = -18; dx <= 18; dx++) {
         const key = `${x + dx},${y + dy}`, cell = dungeon.cells[key];
-        if (!cell || cell.puzzleFixture || !(cell.tile === 'pillar' || cell.tile?.startsWith('custom_'))) continue;
+        if (!cell || cell.puzzleFixture || !(cell.tile === 'pillar' || typeof cell.tile === 'string' && cell.tile.startsWith('custom_'))) continue;
         const tile = dungeon.tiles?.[cell.tile], spec = tile?.spriteSpec || {};
         const placed = dungeon.sceneLandmarks?.find(p => p.x === x + dx && p.y === y + dy);
         const label = placed?.label || tile?.landmark?.label || placed?.type || tile?.landmark?.type || spec.voxelShape || (cell.tile === 'pillar' ? 'Pillar' : 'Stonework');
@@ -149,9 +157,9 @@
       const low=Math.max(0,Math.ceil((0-b.top)/(b.bottom-b.top)*p.h));
       const high=Math.min(p.h-1,Math.floor((1-b.top)/(b.bottom-b.top)*p.h));
       let seen=false;
-      for(let y=low;y<=high&&!seen;y+=Math.max(1,Math.floor((high-low+1)/8))){
+      for(let y=low;y<=high&&!seen;y+=target.type==='item'?1:Math.max(1,Math.floor((high-low+1)/8))){
         const opaque=[];for(let x=0;x<p.w;x++)if(p.data[(y*p.w+x)*4+3]>=128)opaque.push(x);
-        for(const x of [opaque[0],opaque[Math.floor(opaque.length/2)],opaque[opaque.length-1]]){
+        for(const x of target.type==='item'?opaque:[opaque[0],opaque[Math.floor(opaque.length/2)],opaque[opaque.length-1]]){
           if(x===undefined)continue;
           const v=b.top+(y+.5)/p.h*(b.bottom-b.top);
           const u=b.left+(x+.5)/p.w*(b.right-b.left)+(b.upperShift||0)*(1-(y+.5)/p.h);
@@ -199,7 +207,7 @@
     return visibleBillboards(dungeon, { ...c, billboards:[target] }, 'item').length > 0;
   }
   function readBlocked() {
-    return busy || root.GameCommandGate?.busy() || root.gamePaused || document.hidden || root._characterStartupPending || root._combatCommandPending ||
+    return busy || root.PlayerControls?.blocked?.() || root.GameCommandGate?.busy() || root.gamePaused || document.hidden || root._characterStartupPending || root._combatCommandPending ||
       root.actionDiceState?.active || root._combatRoundActiveUntil > Date.now();
   }
   function interactionBlocked() {
@@ -254,6 +262,7 @@
       if(await root.QuestSceneUi?.open(target.label,{silent:true}))return;
       await requestRead(target.label);return;
     }
+    if(target.type==='book'){ busy=true; clear(); try { await root.BookReaderUi?.open(target.book.name); } finally { busy=false; } return; }
     if(target.type==='art'){
       if (root.ArtViewerUi?.surface(target.art)) { clear(); return; }
       root.DungeonActionNotices?.receive?.({id:'art:'+Date.now(),runId:root.dungeonRunId,geoKey:frame.dungeon.geoKey,
@@ -261,6 +270,7 @@
       return;
     }
     if (target.type === 'item') {
+      if (root.ItemInteractionUi?.prompt) { root.ItemInteractionUi.prompt(target.label); return; }
       [...document.querySelectorAll('#phaser-container .clickable-object')].find(e =>
         e.getAttribute('data-object')?.trim().toLowerCase() === target.label.toLowerCase())?.click();
       addReadAction(document.getElementById('take-button')?.closest('.popup-container'), target.label);
@@ -277,7 +287,8 @@
     const input=document.getElementById('chatuserinput');
     if(readBlocked()||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
     busy=true;input.value='read '+String(name).trim();clear();
-    try{await root.chatbotprocessinput();if(root.getReadableItemMetadata?.(name)?.questHooks?.length)root.QuestSceneUi?.open(null,{silent:true});return true;}
+    try{await root.chatbotprocessinput();if(root.getReadableItemMetadata?.(name)?.questHooks?.length)root.QuestSceneUi?.open(null,{silent:true});
+      if(root.HolodekFlags?.LIBRARY_BOOKS&&root.getReadableItemMetadata?.(name)?.bookLore)root.BookReaderUi?.render(name,0);return true;}
     catch(error){console.error('[ReadableItem]',error);return false;}
     finally{busy=false;}
   }
@@ -285,6 +296,8 @@
     const wanted=String(name||'').trim().toLowerCase();
     const find=dungeon=>dungeon?.readables?.find(r=>String(r.name||'').trim().toLowerCase()===wanted);
     const record=root.getReadableItemMetadata?.(name)||find(root.currentDungeon)||find(frame?.dungeon);
+    // world1 LIBRARY_BOOKS: any book-like item is readable; its contents are generated on first open.
+    if(root.HolodekFlags?.LIBRARY_BOOKS&&(record?.bookLore||root.LibraryBooks?.isBookName(name)))return true;
     return !!root.ReadableItems?.hasContent(record);
   }
   function addReadAction(popup,name){

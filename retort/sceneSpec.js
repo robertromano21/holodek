@@ -477,6 +477,12 @@ function buildSceneSpec(input = {}) {
 
   // Landmarks from description and room name (not from the item list).
   const landmarks = detectLandmarks(full);
+  // world1 LIBRARY_BOOKS: the Ruined Temple Entrance keeps a few weathered, toppled shelves of temple records (sparse; most tomes lost).
+  if (roomName === 'Ruined Temple Entrance' && require('./worldFlags').on('LIBRARY_BOOKS') && !landmarks.some(l => l.type === 'bookshelf'))
+    landmarks.push({ type: 'bookshelf', label: 'toppled temple bookshelf', count: 3, condition: ['broken', 'ancient'], mentions: 1, libraryScale: 'ruin' });
+  // Vast city libraries: many shelves (books stay lazy: only clicked/browsed tomes are generated).
+  if (require('./worldFlags').on('LIBRARY_BOOKS') && /\b(library|archive|athenaeum|scriptorium)\b/i.test(roomName)) {
+    const shelf = landmarks.find(l => l.type === 'bookshelf'); if (shelf) shelf.count = Math.max(shelf.count || 1, 6); else landmarks.push({ type: 'bookshelf', label: 'library bookcase', count: 6, condition: [], mentions: 1 }); }
 
   // Props = every Objects in Room entry, one placed prop each.
   const magicOf = {};

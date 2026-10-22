@@ -28,7 +28,7 @@ test('suitable newly generated rooms receive persistent additional documents eve
   let calls=0;
   const agent={user(){},assistant:{generation:async()=>{calls++;return{content:'invalid'};}}};
   const definition=await generateDesign(agent,context);
-  assert.equal(calls,2);assert.equal(definition.readables.length,2);
+  assert.equal(calls,4);assert.equal(definition.readables.length,2);
   const room={objects:[{name:'iron sword',type:'weapon',properties:{damage_modifier:3}}]};
   const text=R.spawn(definition,room,'Objects in Room: iron sword\nObjects in Room Properties: {name: "iron sword", type: "weapon", damage_modifier: 3}');
   assert.equal(room.objects.length,3);assert.match(text,/iron sword, chronicle/);

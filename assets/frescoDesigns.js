@@ -39,7 +39,8 @@
       const defaults=People.defaults(person),deity=Icons.name(subject),classFigure=!!person.className||!!People.hero(subject);
       return{subject,pose:f.pose,facing:f.facing||'front',attribute:f.attribute|| (People.hero(subject)?'sword':deity?Icons.pantheon[deity].attribute:defaults.attribute),
         robe:f.robe||(classFigure?'class':'pleated'),head:f.head||(classFigure?'class':'bare'),...person,
-        ...(f.anatomy?{anatomy:f.anatomy}:{}),...(f.proportions?{proportions:f.proportions}:{})};
+        ...(f.anatomy?{anatomy:f.anatomy}:{}),...(f.proportions?{proportions:f.proportions}:{}),
+        ...['name','role','story'].reduce((o,k)=>typeof f[k]==='string'&&f[k].trim()?{...o,[k]:f[k].trim().slice(0,k==='story'?240:60)}:o,{})};
     });
     return{style,scene,figures};
   }

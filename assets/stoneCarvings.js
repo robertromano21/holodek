@@ -1,6 +1,8 @@
-(function(root,factory){const api=factory(typeof module==='object'&&module.exports?require('./shrineIconography'):root.ShrineIconography);
+(function(root,factory){const node=typeof module==='object'&&module.exports;
+  const api=factory(node?require('./shrineIconography'):root.ShrineIconography,node?require('./designCatalog'):root.DesignCatalog,
+    name=>node?require('../retort/worldFlags').on(name):root.HolodekFlags?.[name]===true);
   if(typeof module==='object'&&module.exports)module.exports=api;else root.StoneCarvings=api;
-})(typeof window==='undefined'?globalThis:window,function(Icons){
+})(typeof window==='undefined'?globalThis:window,function(Icons,Catalog,flag){
   'use strict';
   const styles=['acanthus','guilloche','egg_dart','vine_scroll','dragon_knot','ossuary_lattice','rosette','palmette',
     'wave_chain','winged_medallion','runic_lintel','heraldic_beasts','star_vault','interlace',
@@ -14,8 +16,16 @@
     ribbed_vault:'panel',barrel_vault_shell:'panel',pointed_vault_shell:'panel',groin_vault_shell:'panel',
     fan_vault_shell:'panel',pendentive_transition:'panel',flying_buttress:'panel',
     battlement:'panel',arrow_slit:'panel',obelisk:'panel',stone_tablet:'panel',gravestone:'panel',chest_tomb:'panel',sarcophagus:'panel'};
+  // world1 ORNAMENT_FIELDS / MOLDINGS: APPEND interlocking ornament, borders, roles and voxel surrounds. Existing entries are unchanged.
+  const fields=!!Catalog&&flag('ORNAMENT_FIELDS'),moldings=!!Catalog&&flag('MOLDINGS');
+  const roles=['skirting','dado','cornice',...(moldings?Catalog.ROLES:[])];
+  // Exported styles/borders stay exactly as before; the LLM toolbox and validator accept the appended union.
+  const ornamentStyles=fields?Catalog.ORNAMENTS.filter(n=>!styles.includes(n)):[],allStyles=[...styles,...ornamentStyles];
+  // Gate surrounds: carved only on request, kept out of the exported voxel lists so existing shapes behave as before.
+  const surroundShapes=moldings?['exit_arch','exit_arch_side']:[];
   const voxelShapes=Object.keys(voxelRegions);
   function voxelDescriptor(value,shape){
+    if(surroundShapes.includes(shape))return value&&value.version===1&&value.region==='panel'&&Catalog.VOXEL_PATTERNS.includes(value.pattern)?{version:1,region:'panel',pattern:value.pattern}:null;
     if(!value||value.version!==1||!voxelShapes.includes(shape)||!voxelPatterns.includes(value.pattern))return null;
     const region=voxelRegions[shape];
     if(value.region!==region)return null;
@@ -26,6 +36,7 @@
     if(spec.puzzleFace||spec.inscription||spec.stoneCarving===false||
       ['metal','gold','ice','crystal','bone'].includes(spec.material))return null;
     const shape=spec.voxelShape||(/pillar|column/i.test(spec.type||tileName)?'pillar':null);
+    if(surroundShapes.includes(shape))return spec.stoneCarving?voxelDescriptor(spec.stoneCarving,shape):null;
     if(!voxelShapes.includes(shape))return null;
     if(spec.stoneCarving)return voxelDescriptor(spec.stoneCarving,shape);
     let seed=2166136261;for(const ch of String(shape+':'+(spec.voxelSeed||0)))seed=Math.imul(seed^ch.charCodeAt(0),16777619)>>>0;
@@ -67,6 +78,7 @@
         const t=(u*4)%1,x=t-.5,y=v-.5;
         return Math.abs(Math.abs(x)*1.4+Math.abs(y)*.7-.31)<.055||Math.abs(v-.5)<.06;
       }
+      if(Catalog&&Catalog.VOXEL_PATTERNS.includes(carving.pattern))return Catalog.voxelInk(carving.pattern,u,v);
       return Math.abs(v-.5-.25*Math.sin(u*Math.PI*6))<.065||Math.abs(v-.5+.25*Math.sin(u*Math.PI*6))<.065;
     };
     const depth=Math.max(1,Math.floor(size*.025)),axes=['base','panel'].includes(carving.region)?[0,1]:[1];
@@ -231,13 +243,16 @@
     return near(x%1-.5,.06)||near(v-.25,.035)||near(v-.75,.035);
   }
   function validate(raw){
-    if(raw.carvingStyle!==undefined&&!styles.includes(raw.carvingStyle)||raw.carvingBorder!==undefined&&!borders.includes(raw.carvingBorder)||
+    if(raw.carvingStyle!==undefined&&!allStyles.includes(raw.carvingStyle)||raw.carvingBorder!==undefined&&!borders.includes(raw.carvingBorder)||
       raw.carvingDepth!==undefined&&!['incised','raised'].includes(raw.carvingDepth)||
-      raw.stoneworkRole!==undefined&&!['skirting','dado','cornice'].includes(raw.stoneworkRole))throw Error('Invalid stonework carving.');
+      raw.stoneworkRole!==undefined&&!roles.includes(raw.stoneworkRole))throw Error('Invalid stonework carving.');
     return{...(raw.carvingStyle?{carvingStyle:raw.carvingStyle}:{}),...(raw.carvingBorder?{carvingBorder:raw.carvingBorder}:{}),
-      ...(raw.carvingDepth?{carvingDepth:raw.carvingDepth}:{}),...(raw.stoneworkRole?{stoneworkRole:raw.stoneworkRole}:{})};
+      ...(raw.carvingDepth?{carvingDepth:raw.carvingDepth}:{}),...(raw.stoneworkRole?{stoneworkRole:raw.stoneworkRole}:{}),
+      // Optional world1 picks fall back safely: an off-catalog value is dropped, never fatal.
+      ...(fields&&Catalog.ORNAMENTS.includes(raw.ornamentSecond)?{ornamentSecond:raw.ornamentSecond}:{}),...(fields&&Catalog.WEAVES.includes(raw.ornamentWeave)?{ornamentWeave:raw.ornamentWeave}:{})};
   }
   function paint(c,art,pal,ink){
+    if(Catalog&&(fields&&Catalog.ORNAMENTS.includes(art.carvingStyle)||moldings&&Catalog.ROLES.includes(art.stoneworkRole))){Catalog.paintBand(c,art,pal);return;}
     const light=pal.highlight||'#e4d7b6',dark=pal.shadow||'#55483a',trim=pal.secondary||'#b9a180';
     const glyph=ink;ink=(name,x,y,size,color)=>{glyph(name,x+.6,y+.6,size,dark);glyph(name,x,y,size,color);};
     const shape=(draw,fill=false)=>{c.beginPath();draw();c.strokeStyle=dark;c.lineWidth=2.2;c.stroke();c.strokeStyle=light;c.lineWidth=.8;c.stroke();if(fill){c.fillStyle=trim;c.fill();}};
@@ -345,12 +360,12 @@
     return families[tradition]?[...families[tradition],...additions[tradition]]:[...styles];
   }
   function modules(art){
-    if(!art.carvingStyle||art.puzzleClue||art.surface!=='wall'||art.format!=='mural')return[art];
+    if(!(art.carvingStyle||art.moldingStyle)||art.puzzleClue||art.surface!=='wall'||art.format!=='mural')return[art];
     const along=art.axis==='x'?'y':'x',width=art.size[along],height=art.size.z;
     const count=Math.max(1,Math.min(8,Math.round(width/(height*1.5)))),step=width/count;
     return Array.from({length:count},(_,i)=>({...art,position:{...art.position,[along]:art.position[along]+i*step},
       size:{...art.size,[along]:step},segmentRole:count===1?'panel':i===0?'start':i===count-1?'end':'middle'}));
   }
-  return{styles,borders,ink,validate,paint,mesh,forTradition,modules,palette,voxelPatterns,voxelShapes,voxelRegions,voxelDescriptor,resolveVoxelDescriptor,carveVoxels,ridgeMesh,
-    toolbox:()=>({carvingStyle:styles,carvingBorder:borders,carvingDepth:['incised','raised'],stoneworkRole:['skirting','dado','cornice']})};
+  return{styles,ornamentStyles,allStyles,borders,ink,validate,paint,mesh,forTradition,modules,palette,voxelPatterns,voxelShapes,voxelRegions,voxelDescriptor,resolveVoxelDescriptor,carveVoxels,ridgeMesh,
+    toolbox:()=>({carvingStyle:allStyles,carvingBorder:borders,carvingDepth:['incised','raised'],stoneworkRole:roles,...(fields?{ornamentWeave:Catalog.WEAVES}:{})})};
 });

@@ -131,7 +131,7 @@
       const message = { ...row, geoKey: event.geoKey, source: event.source || 'dialogue-event' };
       const actor = ctx?.actors.find(a => a.name === row.speaker);
       const logged = message.source === 'retort-response' && row.kind === 'turn';
-      if (!ctx?.dungeon || event.geoKey !== ctx.dungeon.geoKey || !logged && (!actor || I.roomKey(actor.mazeRoomKey) !== event.geoKey)) {
+      if (!ctx?.dungeon || event.geoKey !== ctx.dungeon.geoKey || (!logged || row.requiresNearby) && (!actor || I.roomKey(actor.mazeRoomKey) !== event.geoKey)) {
         if (!event.retry) {
           pendingDialogue.push({ event: { ...event, dialogue: [row], retry: true }, expires: Date.now() + 30000 });
           if (pendingDialogue.length > 8) pendingDialogue.shift();
@@ -140,7 +140,8 @@
         continue;
       }
       const reach = speechCheck(actor, ctx);
-      if ((row.kind || 'turn') !== 'turn' && !reach.canSpeak && !conversational(message, actor, ctx)) { subtitleReport('skipped', message, reach); continue; }
+      if ((row.requiresNearby || (row.kind || 'turn') !== 'turn') && !reach.canSpeak &&
+          (row.requiresNearby || !conversational(message, actor, ctx))) { subtitleReport('skipped', message, reach); continue; }
       const key = `${event.geoKey}|${row.speaker}|${row.line}`;
       if (seen.has(key) || queue.some(queued => queued.key === key)) {
         subtitleReport('duplicate', message, { reason: 'already-queued-or-displayed' }); continue;
@@ -197,7 +198,9 @@
       known.attribution === 'labelled' && known.speaker !== row.speaker &&
       (known.line.includes(row.line) || row.line.includes(known.line))));
     const rows = I.mergeAttributedSpeech(explicit, attributed);
-    receiveDialogue({ ...event, source: 'retort-response', dialogue: rows.map(row => ({ ...row, kind: 'turn' })) });
+    const requiresNearby = explicit.some(row => row.requiresNearby === true);
+    receiveDialogue({ ...event, source: 'retort-response', dialogue: rows.map(row => ({ ...row, kind: 'turn',
+      ...(requiresNearby ? { requiresNearby: true } : {}) })) });
   }
   function flushPendingDialogue(ctx) {
     for (let i = 0; i < pendingDialogue.length;) {
@@ -226,7 +229,8 @@
     if (active || !queue.length) return;
     const row = queue.shift(), actor = ctx.actors.find(a => a.name === row.speaker);
     const reach = speechCheck(actor, ctx);
-    if (row.geoKey !== ctx.dungeon.geoKey || (row.kind !== 'turn' && !reach.canSpeak && !conversational(row, actor, ctx))) { // replies to the player always play
+    if (row.geoKey !== ctx.dungeon.geoKey || ((row.requiresNearby || row.kind !== 'turn') && !reach.canSpeak &&
+        (row.requiresNearby || !conversational(row, actor, ctx)))) {
       subtitleReport('skipped', row, { ...reach, reason: row.geoKey !== ctx.dungeon.geoKey ? 'wrong-room' : reach.reason }); return;
     }
     if (row.kind !== 'turn' && I.speechRepeats(row.line, I.recentSpeech(speechHistory(row), Date.now()))) {
@@ -391,8 +395,9 @@
         .finally(() => { if (epoch === timeline) autonomyPending = false; });
     }
     const p = population();
-    const threat = ctx.actors.find(a => a.type === 'monster' && I.allegiance(a) === 'Hostile' && actorVisible(a, ctx, 3.2) &&
-      p?.groups.find(g => g.id === a.encounterId)?.status === 'discovered');
+    // world1: a group that won surprise charges from farther away and starts combat on its own.
+    const threat = ctx.actors.find(a => { const g = a.type === 'monster' && I.allegiance(a) === 'Hostile' && p?.groups.find(x => x.id === a.encounterId);
+      return g && g.status === 'discovered' && actorVisible(a, ctx, g.ambush?.party && !g.ambushSpent ? 8 : 3.2); });
     if (threat && Date.now() >= (p?.retreatUntil || 0) && now - lastTick > 6000 && !document.querySelector('.popup-container')) {
       lastTick = now;
       root.beginEncounterCombat?.(threat.name);

@@ -86,6 +86,17 @@ test('combat health does not revive a completed encounter or a previous action',
   f.window.applyLiveCombatHealth({ ...f.event, actionId: 'other' }); assert.equal(f.calls.length, 0);
 });
 
+test('live combat death projects exact ground loot coordinates before rendering, without changing the combat lock', () => {
+  const f = fixture(), item = { name: 'fallen guard blade', x: 7, y: 8 };
+  const before = JSON.stringify(f.window.actionDiceState);
+  f.window.applyLiveCombatHealth({ ...f.event, sceneObjects: [item] });
+  assert.deepEqual(f.dungeon.sceneObjects, [item]);
+  assert.equal(JSON.stringify(f.window.actionDiceState), before);
+  assert.equal(f.dungeon._geometryStamp, 'fixed');
+  f.window.applyLiveCombatHealth({ ...f.event, revision: 0, sceneObjects: [] });
+  assert.deepEqual(f.dungeon.sceneObjects, [item], 'An older health event cannot erase loot');
+});
+
 test('the SSE path sends and handles health, including a reconnect snapshot before further rolls', () => {
   const server = fs.readFileSync('server.js', 'utf8');
   const start = server.indexOf("app.get('/combat-updates2'");

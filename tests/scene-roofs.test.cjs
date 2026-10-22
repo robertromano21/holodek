@@ -399,6 +399,10 @@ test('legacy shaders retain lighting and clipping apart from explicit height tra
     const start = source.indexOf(`const ${name} = `);
     const end = name === 'voxelVs' ? source.indexOf(';', source.indexOf('].join', start)) + 1 : source.indexOf('`;', start) + 2;
     let program = source.slice(start, end);
+    // Strip only the new retro paint calls before checking the unchanged Modern shader.
+    program = program.replace('if (u_fullbright > 0.5) col = retroTrace(col, vec3(u_camPos + rayDir * nextDist, worldZ), normal);', 'if (u_fullbright > 0.5) col = tex.rgb;')
+      .replace('if (u_fullbright > 0.5) finalCol = retroTrace(finalCol, exactWorldPos, wallNormalTorch);', 'if (u_fullbright > 0.5) finalCol = tex.rgb;')
+      .replace('    if (u_fullbright > 0.5) floorCol = retroTrace(floorCol, hitPos, normal);\n', '');
     if (name === 'fsSource') {
       assert.match(program, /if \(wallHit\) break;/);
       assert.match(program, /fCurrDist >= wallDist \|\| \(sideHit && fCurrDist >= sideDistClosest\)/);
@@ -411,7 +415,7 @@ test('legacy shaders retain lighting and clipping apart from explicit height tra
         .replace('float horizon = u_resolution.y * (0.5 + u_viewShift);', 'float horizon = u_resolution.y * 0.5;');
       // Remove only explicitly opt-in Retro branches; keep the Modern shader byte-pinned.
       program = program.replace(/^uniform float u_(?:fullbright|retroWasteland);\n/gm, '')
-        .replace('  // Retro art carries its own shade bands: no animated lighting or shadow rays.\n  if (u_fullbright > 0.5) return 0.0;\n', '')
+        .replace('  // Retro traces the same shadow-tested room illumination as Modern.\n', '')
         .replace(/^[ \t]*if \(u_fullbright > 0.5\) (?:col|finalCol) = tex.rgb;\n/gm, '')
         .replace(/^    if \(u_fullbright > 0.5\) \{[\s\S]*?^    }\n/m, '');
     } else if (name === 'voxelVs') {
@@ -421,7 +425,7 @@ test('legacy shaders retain lighting and clipping apart from explicit height tra
         .replace("        'uniform float u_retroInk;',\n", '')
         .replace(/^        '  if \(u_retroInk > 0.5\) \{',[\s\S]*?^        '  }',\n/m, '');
     } else {
-      program = program.replace(/^uniform float u_retro(?:Surface|Ink);\n/gm, '')
+      program = program.replace('if (u_unlit > 0.5 && u_unlit < 1.5)', 'if (u_unlit > 0.5)').replace('  if (u_unlit > 1.5 && u_unlit < 2.5) col = retroTrace(col, v_worldPos, N);\n', '').replace('  if (u_unlit > 2.5) col = clamp(v_color * clamp(dot(ramp, vec3(0.299, 0.587, 0.114)) + torchLight * 0.12, 0.65, 1.05), 0.0, 1.0);\n', '').replace('  // Ordinary unlit artwork retains its original behavior. Retro voxels continue\n  // through the same light accumulation, occlusion and material ramp as Modern.', '  // Debug: prove the \"slits\" are lighting (normal discontinuities) not holes.').replace('  // Trace the finished Modern lighting; never illuminate a shadow independently.\n', '').replace(/^uniform float u_retro(?:Surface|Ink);\n/gm, '')
         .replace('  if (u_retroInk > 0.5) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }\n', '')
         .replace(/^    vec3 paint = v_color;[\s\S]*?^    outColor = vec4\(paint, 1.0\);/m, '    outColor = vec4(v_color, 1.0);');
     }

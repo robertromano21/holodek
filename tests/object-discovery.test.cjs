@@ -35,3 +35,5 @@ test('objects must have visible opaque pixels in front of the camera, with no wa
   d.cells['3,4']={tile:'wall',ceilHeight:3};assert.equal(World.visibleBillboards(d,c,'item').length,0);
   d.cells['3,4'].tile='floor';target.screen.left=1.2;target.screen.right=1.4;assert.equal(World.visibleBillboards(d,c,'item').length,0);
 });
+
+test('thin opaque sprite rows remain selectable at every approach orientation',()=>{for(const angle of [0,Math.PI/2,Math.PI,Math.PI*1.5]){const d={cells:{},tiles:{}};for(let y=0;y<10;y++)for(let x=0;x<10;x++)d.cells[x+','+y]={tile:'floor'};const pixels={w:4,h:32,data:new Uint8Array(4*32*4)};pixels.data[(1*4+1)*4+3]=255;const c={x:4.5,y:4.5,eyeZ:.65,dirX:Math.cos(angle),dirY:Math.sin(angle),planeScale:.577,verticalScale:1.73};const target={type:'item',key:'6,4',label:'thin key',distance:1,pixels,screen:{left:.4,right:.6,top:.4,bottom:.6}};c.billboards=[target];assert.equal(World.visibleBillboards(d,c,'item').length,1);}});

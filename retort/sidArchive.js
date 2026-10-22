@@ -1,7 +1,9 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),{createHash}=require('node:crypto'),{spawnSync}=require('node:child_process');
 const Extended=require('./sid10582'),Format=require('./sidExportFormat');
-const ROOT=path.resolve(__dirname,'..'),DIRECTORY=path.join(ROOT,'.retort-data/music-archive');
+const ROOT=path.resolve(__dirname,'..'),PUBLIC_DIRECTORY=path.join(ROOT,'.retort-data/music-archive');
+const thread=require('node:worker_threads'),buildId=thread.isMainThread?null:thread.workerData?.job?.id;
+const DIRECTORY=buildId&&/^[a-f0-9-]{36}$/.test(buildId)?path.join(ROOT,'.retort-data/room-build',buildId,'music-archive'):PUBLIC_DIRECTORY;
 const digest=value=>createHash('sha256').update(value).digest('hex');
 function workerBundle(){
   const analyzer=fs.readFileSync(path.join(ROOT,'tools/analyze-sid-reference.cjs'),'utf8');
@@ -66,9 +68,25 @@ function record(song,context={},directory=DIRECTORY){
   console.info('[SidArchive]',JSON.stringify({id,title:song.title,variants:['8580','10582'],seconds}));
   return{id,directory:dir,manifest};
 }
+function adopt(song,buildId){
+  if(!thread.isMainThread||!/^[a-f0-9-]{36}$/.test(buildId))throw Error('Invalid background music identity.');
+  const id=song?.archive?.id;
+  if(!/^[a-z0-9-]{1,80}-[a-f0-9]{16}$/.test(id||''))throw Error('Invalid background archive.');
+  const from=path.join(ROOT,'.retort-data/room-build',buildId,'music-archive',id),to=path.join(PUBLIC_DIRECTORY,id);
+  const source=fs.existsSync(to)?to:from,manifest=JSON.parse(fs.readFileSync(path.join(source,'manifest.json'),'utf8'));
+  const {archive,...stored}=song;
+  if(manifest.version!==2||manifest.id!==id||manifest.scoreHash!==digest(JSON.stringify(stored)))throw Error('Background music score checksum mismatch.');
+  for(const file of ['8580.sid','10582.sid'])if(digest(fs.readFileSync(path.join(source,file)))!==manifest.checksums[file])throw Error('Background SID checksum mismatch.');
+  fs.mkdirSync(PUBLIC_DIRECTORY,{recursive:true});
+  if(source===from)fs.renameSync(from,to);
+  const catalogFile=path.join(PUBLIC_DIRECTORY,'catalog.json');
+  const catalog=fs.existsSync(catalogFile)?JSON.parse(fs.readFileSync(catalogFile,'utf8')):[];
+  atomic(catalogFile,[{id,title:manifest.title,createdAt:manifest.createdAt},...catalog.filter(row=>row.id!==id)]);
+  return manifest;
+}
 function install(app,express){installTool();fs.mkdirSync(DIRECTORY,{recursive:true});
   app.get('/music/sid-worker.js',(req,res)=>res.type('application/javascript').send(workerBundle()));
   app.get('/sid-to-wav.html',(req,res)=>res.sendFile(path.join(ROOT,'sid-to-wav.html')));
   app.get('/music-archive/sid-to-wav.html',(req,res)=>res.redirect('/sid-to-wav.html'));
   app.use('/music-archive',express.static(DIRECTORY,{dotfiles:'deny',index:false,fallthrough:false}));}
-module.exports={DIRECTORY,record,installTool,workerBundle,install};
+module.exports={DIRECTORY,record,adopt,installTool,workerBundle,install};

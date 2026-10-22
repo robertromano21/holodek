@@ -106,6 +106,31 @@
     chooser.appendChild(select); chooser.appendChild(confirm); chooser.appendChild(cancel); dock.appendChild(chooser);
   }
   function notice(message) { error = message; render(); }
+  function openSpells(caster, spellId) {
+    document.querySelectorAll('.combat-spell-targets').forEach(p => p.remove());
+    const current = prompt, box = document.createElement('section');
+    box.className = 'popup-container combat-spell-targets'; box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', 'Choose a spell target');
+    const heading = document.createElement('p'); heading.textContent = 'Choose a spell target'; box.appendChild(heading);
+    const choices = current?.combatant === caster ? (current.spells || []).filter(s => s.spellId === spellId) : [];
+    if (!choices.length) {
+      const message = document.createElement('p');
+      message.textContent = current?.combatant === caster ? 'No valid targets in this room and clear sight for this spell.' : 'Wait for ' + caster + "'s turn to cast.";
+      box.appendChild(message);
+    }
+    for (const choice of choices) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'popup-button';
+      b.textContent = choice.name + ' on ' + choice.target + ` (${choice.cost} Magic)`;
+      b.disabled = !!(submitting || current.movement?.busy || root.gamePaused || root.actionDiceState?.paused);
+      b.addEventListener('click', () => {
+        if (prompt?.turnId !== current.turnId) { box.remove(); notice('That turn has changed. Choose a spell again.'); return; }
+        submit('cast', choice.target, choice); box.remove();
+      }); box.appendChild(b);
+    }
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'popup-button'; cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => box.remove()); box.appendChild(cancel); document.body.appendChild(box);
+    root.CombatCharacterUi?.positionActions(box); return true;
+  }
   async function submit(action, target, spell) {
     const current = prompt;
     if (!current || submitting || current.movement?.busy || root.gamePaused || root.actionDiceState?.paused) return;
@@ -126,6 +151,6 @@
     if (incoming?.turnId !== prompt?.turnId) { error = ''; submitting = false; targeting = false; }
     prompt = incoming; render(); root.renderPartyIconDock?.();
   }
-  root.CombatTurnUi = { receive, submit, notice, addCharacterActions, renderDockControls };
+  root.CombatTurnUi = { receive, submit, notice, addCharacterActions, openSpells, renderDockControls };
   document.addEventListener('DOMContentLoaded', render, { once: true });
 })(window);

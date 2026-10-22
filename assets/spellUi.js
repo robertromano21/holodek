@@ -26,7 +26,7 @@
     const h = document.createElement('h2'); h.textContent = title; box.appendChild(h); document.body.appendChild(box); return box;
   }
   function line(box, text, tag = 'p') { const p = document.createElement(tag); p.textContent = text; box.appendChild(p); return p; }
-  const explanation = spell => `${spell.description} Range: ${spell.range} tile${spell.range === 1 ? '' : 's'}.`;
+  const explanation = spell => `${spell.description} Requires clear line of sight in the same room; no distance limit.`;
   function button(box, label, action, disabled = false) {
     const b = document.createElement('button'); b.type = 'button'; b.className = 'popup-button'; b.textContent = label; b.disabled = disabled;
     b.addEventListener('click', action); box.appendChild(b); return b;
@@ -51,11 +51,28 @@
     if (data.spellResult) await root.applyRealtimeCombatResult?.(data.spellResult);
     return { data, origin };
   }
-  async function open(casterName, scrollName) {
+  async function open(casterName, scrollName, filter) {
     if (blocked()) return false; pending = true;
     try {
-      const { data, origin } = await load(casterName), box = popup(scrollName ? 'Scribe ' + scrollName : 'Spells and Magic');
+      const { data, origin } = await load(casterName), box = popup(filter?.target ? 'Magic for ' + filter.target : scrollName ? 'Scribe ' + scrollName : 'Spells and Magic');
       line(box, 'Casting uses one initiative action. Ordinary equipment turns to ash at zero Magic. Campaign artifacts recharge after five turns.');
+      if (filter) {
+        let count = 0;
+        for (const caster of data.casters) for (const choice of caster.choices || []) {
+          if (filter.target && key(choice.target) !== key(filter.target) || filter.spellId && choice.spellId !== filter.spellId ||
+              filter.supportOnly && !['heal', 'ward'].includes(choice.effect)) continue;
+          const item = caster.items.find(i => i.id === choice.itemId), spell = item?.spells.find(s => s.id === choice.spellId);
+          line(box, `${caster.name}: ${choice.name} (${choice.cost} Magic; ${choice.magic} left). ${spell ? explanation(spell) : choice.description || ''}`);
+          button(box, `${choice.name} on ${choice.target} by ${caster.name}` + (choice.destroysItem ? ' [consumes item]' : ''), () => {
+            if (choice.destroysItem && root.confirm && !root.confirm('This cast destroys ' + choice.itemName + '. Continue?')) return;
+            perform('/spells/cast', choice, origin, false);
+          });
+          count++;
+        }
+        if (!count) line(box, 'No valid casts right now. Healing needs an injured living ally in the same room and clear sight, a prepared spell (or equipped magic item), and enough Magic.');
+        button(box, 'All Spells', () => open(casterName));
+        button(box, 'Close', close); return true;
+      }
       for (const caster of data.casters) {
         line(box, caster.name, 'h3');
         for (const item of caster.items) {
@@ -105,6 +122,20 @@
     } catch (error) { notice(error.message); return false; }
     finally { pending = false; root.GameCommandGate?.end(); }
   }
+  function openForTarget(target) {
+    if (root.actionDiceState?.active?.kind === 'combat') return root.CombatCharacterUi?.open({ name: target });
+    return open(null, null, { target, supportOnly: true });
+  }
+  function openSpell(caster, spellId) {
+    if (root.actionDiceState?.active?.kind === 'combat') return root.CombatTurnUi?.openSpells(caster, spellId);
+    return open(caster, null, { spellId });
+  }
+  function addTargetAction(box, name) {
+    const actor = (root.combatCharacters || []).find(a => a.name === name);
+    if (!box || !actor || !['pc', 'npc'].includes(actor.type) || actor.state === 'Dead' || box.querySelector('[data-target-magic]')) return;
+    const b = button(box, 'Heal / Magic', () => openForTarget(name)); b.dataset.targetMagic = name;
+    return b;
+  }
   function addItemAction(box, name) {
     const props = root.InventoryUi?.parseProperties(root.latestUpdatedData?.inventoryProperties || '') || [];
     const item = props.find(p => key(p.name) === key(name));
@@ -132,6 +163,6 @@
     finally { pending = false; root.GameCommandGate?.end(); }
     return true;
   }
-  root.SpellUi = { open, addItemAction, handleCommand, equipmentChanged: close, hydrate: text => root.applySpellEquipment?.(text) };
+  root.SpellUi = { open, openForTarget, openSpell, addTargetAction, addItemAction, handleCommand, equipmentChanged: close, hydrate: text => root.applySpellEquipment?.(text) };
   document.addEventListener('keydown', event => { if (event.key === 'Escape' && !pending) close(); });
 })(window);

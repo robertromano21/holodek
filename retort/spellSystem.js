@@ -83,10 +83,12 @@ function synchronize(state) {
   state.setRoomNameDatabase(JSON.stringify(db)); state.setUpdatedGameConsole(next);
   return { changed, pool, db };
 }
-async function developRecipes($, state) {
-  const db = dbOf(state), pool = book(db, state), text = state.getUpdatedGameConsole(), key = I.roomKey(field(text, 'Coordinates'));
+async function developRecipes($, state, { constructionKey } = {}) {
+  const db = dbOf(state), text = state.getUpdatedGameConsole(), key = I.roomKey(field(text, 'Coordinates'));
+  if (constructionKey && constructionKey !== key) throw Error('Spell flavor construction coordinate mismatch.');
+  const pool = constructionKey ? { runId: state.getDungeonRunId(), recipes: { ...(db['0,0,0']?.spellSystem?.recipes || {}), ...(db[key].authoredSpellRecipes || {}) } } : book(db, state);
   const candidates = [...(db[key]?.objects || []), ...Inventory.parseProperties(field(text, 'Monsters Equipped Properties')),
-    ...Inventory.parseProperties(field(text, 'Inventory Properties')), ...metadata(text)].filter(Rules.eligible);
+    ...(!constructionKey ? [...Inventory.parseProperties(field(text, 'Inventory Properties')), ...metadata(text)] : [])].filter(Rules.eligible);
   const pending = [...new Map(candidates.filter(o => !pool.recipes[Rules.key(o.name)]).map(o => [Rules.key(o.name), o])).values()].slice(0, 16);
   if (!pending.length) return;
   let rows = [];
@@ -119,7 +121,7 @@ async function developRecipes($, state) {
       } });
     rows = result.value || [];
   if (state.getDungeonRunId() !== pool.runId) return;
-  const latest = dbOf(state), saved = book(latest, state);
+  const latest = dbOf(state), saved = constructionKey ? { recipes: latest[key].authoredSpellRecipes ||= {} } : book(latest, state);
   for (const item of pending) if (!saved.recipes[Rules.key(item.name)]) {
     const matches = Array.isArray(rows) ? rows.filter(r => r?.name === item.name) : [];
     if (matches.length !== 1) Diagnostics.report('spell-flavor', { status: 'fallback', runId: pool.runId, geoKey: key,
@@ -127,6 +129,18 @@ async function developRecipes($, state) {
     saved.recipes[Rules.key(item.name)] = { capacity: Number(item.magic), spells: Rules.decorate(Rules.recipe(item), matches.length === 1 ? matches[0].spells : []) };
   }
   state.setRoomNameDatabase(JSON.stringify(latest));
+}
+function adoptRoomRecipes(db, key, state) {
+  const recipes = db[key]?.authoredSpellRecipes;
+  if (!recipes) return;
+  const pool = book(db, state), room = db[key];
+  const items = [...(room.objects || []), ...Object.values(room.inhabitants?.actors || {}).flatMap(a => a.inventory || []),
+    ...Inventory.parseProperties(room.monsters?.equippedProperties || '')].filter(Rules.eligible);
+  for (const item of items) {
+    const id = Rules.key(item.name), recipe = recipes[id];
+    if (!recipe || pool.recipes[id] || recipe.capacity !== Number(item.magic)) continue;
+    pool.recipes[id] = { capacity: Number(item.magic), spells: Rules.decorate(Rules.recipe(item), recipe.spells || []) };
+  }
 }
 function advance(state) {
   const db = dbOf(state), pool = book(db, state); pool.clock++;
@@ -178,7 +192,7 @@ function context(state, input, options = {}) {
   const actors = allActors(text), target = actors.find(a => a.name === input.target && (I.canAct(a) || spell.effect === 'heal' && I.isDown(a)));
   const a = roster.find(a => a.name === caster.name), t = roster.find(a => a.name === target?.name);
   const from = Reach.position(a, geoKey), to = Reach.position(t, geoKey);
-  if (!target || !dungeon || !from || !to || Math.hypot(from.x - to.x, from.y - to.y) > spell.range || !Reach.lineClear(dungeon, from, to)) throw Error('Choose a living target in spell range with a clear line of sight.');
+  if (!target || !dungeon || !from || !to || !Reach.lineClear(dungeon, from, to)) throw Error('Choose a living target in the same room with a clear line of sight.');
   const friendly = ['heal', 'ward'].includes(spell.effect);
   const team = a => ['pc', 'npc'].includes(a.type) ? 'Friendly' : I.allegiance(a);
   if (friendly ? team(target) !== team(caster) : team(target) === team(caster) || !options.monster && I.allegiance(target) !== 'Hostile') throw Error(friendly ? 'Choose a living ally.' : 'Choose an enemy.');
@@ -420,5 +434,5 @@ function aiChoice(state, caster, targets) {
       return p && q && Math.hypot(p.x - q.x, p.y - q.y) <= 2;
     })()))) || choicesNow.find(c => c.effect === 'ward' && !pool.effects.some(e => e.target === c.target && e.kind === 'ward' && e.expires > pool.clock && e.remaining > 0));
 }
-module.exports = { Rules, field, write, party, allActors, changeActor, stat, book, metadata, synchronize, developRecipes, advance, view, context, choices, cast, rollPlan, survivalPlan, absorb, penalty, turned, consumeTurn, preserve, artifact,
+module.exports = { Rules, field, write, party, allActors, changeActor, stat, book, metadata, synchronize, developRecipes, adoptRoomRecipes, advance, view, context, choices, cast, rollPlan, survivalPlan, absorb, penalty, turned, consumeTurn, preserve, artifact,
   queue, takeOpening, clearOpening, aiChoice };

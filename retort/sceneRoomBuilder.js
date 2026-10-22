@@ -114,13 +114,19 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   const surfaceSeed = dungeon.generation?.seed || spec.generation?.seed || spec.textHash || geoKey;
   const surfaceAppearance = undergroundProfile ? { undergroundProfile } : {};
   const defaultMaterial = undergroundProfile === 'lava_tube' ? 'obsidian' : undergroundProfile === 'ice_cave' ? 'ice' : 'stone';
-  const floorMat = undergroundProfile === 'lava_tube' ? 'obsidian' : spec.floorStyleMaterial || spec.floorMaterial || (undergroundProfile ? defaultMaterial : null);
+  let floorMat = undergroundProfile === 'lava_tube' ? 'obsidian' : spec.floorStyleMaterial || spec.floorMaterial || (undergroundProfile ? defaultMaterial : null);
   const wallText = String(spec.source?.description || '').split(/[.;!?]/)
     .filter(s => /wall|masonry|brickwork|facade/i.test(s)).join(' ');
-  const wallMat = Masonry.fromDescription(wallText) || spec.wallStyleMaterial || spec.wallMaterial || (undergroundProfile ? defaultMaterial : null);
-  const roof = roofStyle(spec);
+  let wallMat = Masonry.fromDescription(wallText) || spec.wallStyleMaterial || spec.wallMaterial || (undergroundProfile ? defaultMaterial : null);
+  // world1 GENRE_ARCH: homebrew genre building style picks the materials (new texture names; CotG/fantasy -> null, unchanged).
+  let arch = null;
+  try { arch = require('./genreLayer').archFor({ name: spec.roomName || spec.source?.roomName || dungeon.sceneSpec?.roomName || '', roomKey: dungeon.generation?.roomKey || spec.generation?.roomKey || geoKey, seed: surfaceSeed, planarRealm: spec.worldContext?.planarRealm || dungeon.planarRealm, genreKit: dungeon.genreKit, city:spec.city }); } catch (e) { report.archError = e.message; }
+  if (arch && !undergroundProfile) { floorMat = arch.floor || floorMat; wallMat = arch.wall || wallMat; dungeon.genreArch = arch; report.arch = { genre: arch.genre, zone: arch.zone, wall: arch.wall, floor: arch.floor, door: arch.door, window: arch.window, trim: arch.trim, shape: arch.shape, horror: arch.horror, corrupt: arch.corrupt }; }
+  else if (arch) { dungeon.genreArch = { ...arch, wall: null, floor: null }; }
+  const archOpts = dungeon.genreArch ? { window: dungeon.genreArch.window || null, trim: dungeon.genreArch.trim || null, taint: dungeon.genreArch.taint || 0 } : null;
+  const roof = roofStyle(spec) || (dungeon.genreArch?.ceiling && !undergroundProfile ? (dungeon.genreArch.ceiling === 'wood' ? 'timber' : 'stone') : null);
   if (roof) {
-    const material = roof === 'timber' ? 'wood' : (wallMat || 'stone');
+    const material = dungeon.genreArch?.ceiling && !undergroundProfile ? dungeon.genreArch.ceiling : roof === 'timber' ? 'wood' : (wallMat || 'stone');
     const r = librarySprite({ kind: 'ceiling', undersideVersion: 3, material, style: roof, palette: pal, seed: surfaceSeed }, `scene_ceiling_${material}`,
       ctx => drawRoofSurface(ctx, createCanvas, { material, palette: pal, style: roof, seed: surfaceSeed }));
     dungeon.tiles.ceiling = { url: r.url };
@@ -132,8 +138,9 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const floorPalette = dungeon.visualStyle?.floorPalette || { primary: pal.floorPrimary || pal.primary, secondary: pal.floorSecondary || pal.secondary, highlight: pal.highlight, shadow: pal.shadow };
     const style = dungeon.visualStyle?.floor || {};
     const scatter = spec.scatter || [];
-    const r = librarySprite({ kind: 'floor', appearanceVersion: 2, ...surfaceAppearance, material, cover, palette: floorPalette, scatter, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_floor_${material}`,
-      ctx => drawSceneSurface(ctx, createCanvas, 'floor', { ...surfaceAppearance, material, palette: floorPalette, groundCover: cover, scatter, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
+    const fArch = archOpts ? { taint: archOpts.taint } : null;
+    const r = librarySprite({ kind: 'floor', appearanceVersion: 2, ...surfaceAppearance, material, cover, palette: floorPalette, scatter, style, seed: surfaceSeed, ps: spec.paletteStrength || 0, ...(fArch ? { arch: fArch } : {}) }, `scene_floor_${material}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'floor', { ...surfaceAppearance, material, palette: floorPalette, groundCover: cover, scatter, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength, genreArch: fArch }));
     dungeon.tiles.floor = { ...(dungeon.tiles.floor || {}), url: r.url };
     report.textures.push({ tile: 'floor', material, ...surfaceAppearance, pattern: style.pattern || null, seed: surfaceSeed, cover, reused: r.reused });
   }
@@ -141,12 +148,19 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const wallCover = cover.filter(c => ['water', 'moss', 'ash', 'blood', 'cobweb', 'snow', 'ice'].includes(c));
     const decals = spec.decals || [];
     const style = dungeon.visualStyle?.wall || {};
-    const r = librarySprite({ kind: 'wall', appearanceVersion: 2, ...surfaceAppearance, material: wallMat, cover: wallCover, palette: pal, decals, style, seed: surfaceSeed, ps: spec.paletteStrength || 0 }, `scene_wall_${wallMat}`,
-      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { ...surfaceAppearance, material: wallMat, palette: pal, groundCover: wallCover, decals, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength }));
+    const r = librarySprite({ kind: 'wall', appearanceVersion: 2, ...surfaceAppearance, material: wallMat, cover: wallCover, palette: pal, decals, style, seed: surfaceSeed, ps: spec.paletteStrength || 0, ...(archOpts ? { arch: archOpts } : {}) }, `scene_wall_${wallMat}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { ...surfaceAppearance, material: wallMat, palette: pal, groundCover: wallCover, decals, style, seed: surfaceSeed, paletteStrength: spec.paletteStrength, genreArch: archOpts }));
     dungeon.tiles.wall = { ...(dungeon.tiles.wall || {}), url: r.url };
     report.textures.push({ tile: 'wall', material: wallMat, ...surfaceAppearance, cover: wallCover, reused: r.reused });
   }
 
+  if (dungeon.genreArch?.door && hasMaterial('wall', dungeon.genreArch.door)) { // genre door (new texture; the door tile's other fields are kept)
+    const material = dungeon.genreArch.door, dArch = archOpts ? { taint: archOpts.taint } : null;
+    const r = librarySprite({ kind: 'door', material, palette: pal, seed: surfaceSeed, ...(dArch ? { arch: dArch } : {}) }, `scene_door_${material}`,
+      ctx => drawSceneSurface(ctx, createCanvas, 'wall', { material, palette: pal, seed: surfaceSeed, paletteStrength: .2, genreArch: dArch }));
+    dungeon.tiles.door = { ...(dungeon.tiles.door || {}), url: r.url };
+    report.textures.push({ tile: 'door', material, reused: r.reused });
+  }
   // Landmarks: make sure each spec landmark has a custom tile, then draw it.
   const tiles = Array.isArray(customTiles) ? customTiles : (dungeon.customTiles = []);
   const lightColor = spec.lighting && spec.lighting.color;
@@ -180,9 +194,14 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const assembly = (tile.sceneLandmark && tile.sceneLandmark.assembly) || (prim && prim.assembly) || null;
     const descriptor = { kind: 'landmark', drawer, material, condition: condition.slice().sort(), light: lightColor || null, accent: pal.highlight || null, prim: prim || null, assembly,sculpture,
       ...(lm.inscription?{inscriptionMotif:lm.inscription.motif}: {}), ...(lm.shrine?{shrine:lm.shrine}: {}) };
-    const r = librarySprite(descriptor, `custom_${assembly ? 'asm_' + assembly.kit + '_' + assembly.state : (prim ? 'prim_' + prim.shape : drawer)}`, ctx => drawLandmarkSprite(ctx, createCanvas, prim ? tile.type : drawer, {
-      material: material || undefined, condition, light: lightColor, accent: drawer === 'portal' || drawer === 'obelisk' ? lightColor : undefined, seed: drawer, prim: prim || undefined, assembly: assembly || undefined,inscription:lm.inscription,shrine:lm.shrine
-    }));
+    const r = librarySprite(descriptor, `custom_${assembly ? 'asm_' + assembly.kit + '_' + assembly.state : (prim ? 'prim_' + prim.shape : drawer)}`, ctx => {
+      if (require('./worldFlags').on('ARCHITECTURE_EXPANSION') && require('../assets/genreExpansion').has(shape)) {
+        require('../assets/genreExpansion').paint(ctx,shape,0,0,OUT_SIZE,OUT_SIZE); return;
+      }
+      drawLandmarkSprite(ctx, createCanvas, prim ? tile.type : drawer, {
+        material: material || undefined, condition, light: lightColor, accent: drawer === 'portal' || drawer === 'obelisk' ? lightColor : undefined, seed: drawer, prim: prim || undefined, assembly: assembly || undefined,inscription:lm.inscription,shrine:lm.shrine
+      });
+    });
     const sculpted = shape==='statue' ? librarySprite({...descriptor,sculptureVersion:4},'custom_effigy',ctx=>{
       ctx.fillStyle=pal.secondary||'#b6a58c';ctx.fillRect(OUT_SIZE*.25,OUT_SIZE*.89,OUT_SIZE*.5,OUT_SIZE*.08);
       SculptureForms.paintFigure(ctx,sculpture,pal,{x:0,y:0,width:OUT_SIZE,height:OUT_SIZE*.9});
@@ -207,6 +226,7 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     report.landmarks.push({ tile: name, drawer, material, condition, voxelShape: dungeon.tiles[name].spriteSpec.voxelShape || null, reused: r.reused });
   });
   dungeon.customTiles = tiles;
+  try { report.genre = require('./genreLayer').decorate(dungeon, { name: spec.roomName || spec.source?.roomName, planarRealm: spec.worldContext?.planarRealm || dungeon.planarRealm, genreKit: dungeon.genreKit }, { geoKey })?.genre || null; } catch (e) { report.genreError = e.message; }
   return report;
 }
 
@@ -572,7 +592,7 @@ function applySurfaceArt(dungeon,spec) {
     }
     if(!mount)continue;
     const glyphs=spec.puzzleMechanism?.glyphs || [],palette=row.kind==='fresco'||row.kind==='mosaic'&&row.style?SurfaceArt.frescoPalette(row):dungeon.visualStyle?.palette || spec.palette || {};
-    if(row.carvingStyle&&!row.puzzleClue)mount.size[mount.surface==='floor'?'z':mount.axis]=.08;
+    if((row.carvingStyle||row.moldingStyle)&&!row.puzzleClue)mount.size[mount.surface==='floor'?'z':mount.axis]=.08;
     const r=librarySprite({kind:'surface-art',artVersion:row.kind==='mosaic'&&!row.puzzleClue?10:9,art:row,palette,glyphs},'scene_art',ctx=>SurfaceArt.paint(ctx,createCanvas,row,palette,glyphs));
     const tile=`surface_art_${hash(r.url)}`;dungeon.tiles[tile]={url:r.url};
     placed.push({...row,...mount,tile,description:row.puzzleClue?require('../assets/physicalPuzzles').clue(spec.puzzleMechanism):row.description});
@@ -580,6 +600,16 @@ function applySurfaceArt(dungeon,spec) {
   }
   dungeon.surfaceArt=placed;
   dungeon.artLamps=placed.flatMap(art=>ArtPresentation.plan(art,dungeon));
+  // world1 MOLDINGS: mounted after (never instead of) the authored art, with the same wall-safety rules.
+  const moldings=[];
+  for(const row of SurfaceArt.moldings?.(art,{room:spec.roomName||spec.source?.roomName||''})||[]){
+    const mount=mountWall(walls,row,used,groups,centers);if(!mount)continue;
+    const palette=dungeon.visualStyle?.palette||spec.palette||{};mount.size[mount.axis]=.08;
+    const r=librarySprite({kind:'surface-art',artVersion:9,art:row,palette,glyphs:[]},'scene_art',ctx=>SurfaceArt.paint(ctx,createCanvas,row,palette,[]));
+    const tile=`surface_art_${hash(r.url)}`;dungeon.tiles[tile]={url:r.url};
+    moldings.push({...row,...mount,tile});for(const key of mount.keys||[mount.key])used.add(key);
+  }
+  if(moldings.length)dungeon.moldingArt=moldings;
   return {status:'built',count:placed.length,requested:art.length,frescoes:placed.filter(a=>a.kind==='fresco').length,
     murals:placed.filter(a=>a.kind==='fresco'&&Math.max(a.size.x,a.size.y)>1).length};
 }
@@ -592,7 +622,7 @@ function rebuildSceneGraphics(dungeon, geoKey) {
     visualStyle: dungeon.visualStyle, generation: dungeon.generation }));
   applySceneGraphics(drawing, spec, { geoKey, customTiles: drawing.customTiles });
   for (const [name, tile] of Object.entries(drawing.tiles)) if (dungeon.tiles[name]) dungeon.tiles[name].url = tile.url;
-  for (const art of dungeon.surfaceArt || []) {
+  for (const art of [...(dungeon.surfaceArt || []), ...(dungeon.moldingArt || [])]) {
     const glyphs = spec.puzzleMechanism?.glyphs || [];
     const palette = art.kind === 'fresco' || art.kind === 'mosaic' && art.style ? SurfaceArt.frescoPalette(art) : dungeon.visualStyle?.palette || spec.palette || {};
     const r = librarySprite({ kind: 'restored-art', version: 1, art, palette, glyphs }, 'scene_art', ctx => SurfaceArt.paint(ctx, createCanvas, art, palette, glyphs));

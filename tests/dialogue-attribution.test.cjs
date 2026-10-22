@@ -9,6 +9,27 @@ const prose = 'Nyssara\u2019s ethereal gaze sharpens, her voice a low murmur, \u
 const expected = [{ speaker: 'Nyssara', line: 'The path ahead is fraught with shadows.' },
   { speaker: 'Voranyx', line: 'Each step we take risks stirring old betrayals.' }];
 
+test('the Wind Ledger Flats reply recovers Dorrik and Pellin speech when the model omits backend labels', () => {
+  const names = ['Dorrik Slatehymn', 'Pellin Reedcup'];
+  const lines = [
+    'I\u2019ve spent years trying to keep names from slipping out of stone. But a straight marker can still carry a crooked account. I won\u2019t call this one honest until I know whose hand made it.',
+    'People ask for a fair tally as if fairness were another line to scratch down. It isn\u2019t. You have to leave room for the one who arrives thirsty\u2014and still reckon with whoever comes after.'
+  ];
+  const narrative = `The wind shifts across the ash furrows.\n\nDorrik Slatehymn steadies the weather-worn marker with one hand, then gives its uneven lettering a rueful look. \u201c${lines[0]}\u201d\n\nPellin Reedcup checks the cover on her clay cup. \u201c${lines[1]}\u201d`;
+  const raw = narrative + ' [[CHARACTER_DIALOGUE]]' + JSON.stringify({ spoken: names.map(speaker => ({ speaker })), replies: [] }) + '[[/CHARACTER_DIALOGUE]]';
+  const result = I.extractDialogue(raw, names, { audibleNames: names,
+    responsePolicy: { directed: true, responders: names, reactors: [] } });
+  assert.equal(result.content, narrative);
+  assert.deepEqual(result.dialogue.map(row => ({ speaker: row.speaker, line: row.line })), names.map((speaker, i) => ({ speaker, line: lines[i] })));
+});
+
+test('new action cues do not turn inscriptions or quoted writing into character speech', () => {
+  for (const verb of ['steadies', 'checks']) {
+    const raw = `Dorrik Slatehymn ${verb} the plaque. The inscription reads, "Remember the forgotten."`;
+    assert.deepEqual(I.extractAttributedSpeech(raw, ['Dorrik Slatehymn']), []);
+  }
+});
+
 test('regular narration attributes the actual session style of possessive gaze/voice quotes', () => {
   assert.deepEqual(I.extractAttributedSpeech(prose, ['Nyssara', 'Voranyx']), expected);
 });

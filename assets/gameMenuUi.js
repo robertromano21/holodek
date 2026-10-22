@@ -29,9 +29,9 @@
     const button=document.getElementById('stonework-fill-toggle');if(!button)return;
     button.textContent='Stonework Relief: '+Math.round(root.STONEWORK_SURFACE_CLOSURE*100)+'%';
   }
-  function setStoneworkClosure(value){
+  function setStoneworkClosure(value,{persist=true}={}){
     root.STONEWORK_SURFACE_CLOSURE=Number.isFinite(value)?Math.max(0,Math.min(5,value)):3;
-    try{root.localStorage.setItem(stoneworkClosureKey,String(root.STONEWORK_SURFACE_CLOSURE));}catch{}
+    if(persist)try{root.localStorage.setItem(stoneworkClosureKey,String(root.STONEWORK_SURFACE_CLOSURE));}catch{}
     updateStoneworkClosureButton();
     refreshStonework();
     return root.STONEWORK_SURFACE_CLOSURE;

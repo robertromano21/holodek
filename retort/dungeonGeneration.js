@@ -35,7 +35,8 @@ function prepare(spec, classification, runId) {
   // Text hashes describe the prose; campaign seeds describe this playthrough's geometry.
   spec.generation = { version: VERSION, runId: String(runId || ''), roomKey,
     seed: `dungeon-v${VERSION}:${runId || ''}:${roomKey}`,
-    requestedSize: classification?.size ?? null, gridSize: gridSize(classification) };
+    requestedSize: classification?.size ?? null, gridSize: require('./templeComplex').gridSize(classification, gridSize(classification)),
+    ...(require('./templeComplex').marked(classification) ? { templeComplex: true } : {}) };
   return spec.generation;
 }
 

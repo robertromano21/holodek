@@ -1,4 +1,5 @@
 'use strict';
+const Market = require('./market');
 const { randomUUID } = require('node:crypto');
 const R = require('../assets/economyRules');
 const Gear = require('../assets/equipmentRules');
@@ -102,7 +103,7 @@ function stock(kind, level = 1) {
     { name: 'pilgrims cuirass', type: 'armor', attack_modifier: 0, damage_modifier: 0, ac: 2, magic: 0, quantity: 1 },
     { name: 'wellkeepers shield', type: 'shield', attack_modifier: 0, damage_modifier: 0, ac: 1, magic: 0, quantity: 1 }];
 }
-function seedRoom(db, geoKey, population, seed = '', consoleText = '') {
+function seedRoom(db, geoKey, population, seed = '', consoleText = '', { deferCommunity = false } = {}) {
   const room = db[geoKey]; if (!room || room.economySeeded) return;
   room.economySeeded = true;
   const partyLevel = Math.max(1, ...[...I.parseSheets(consoleText, 'PC'), ...I.parseSheets(consoleText, 'NPCs in Party')].map(a => SpellRules.casterLevel(a.className, a.level)));
@@ -119,8 +120,8 @@ function seedRoom(db, geoKey, population, seed = '', consoleText = '') {
     }
   }
   const n = R.hash(`${seed}:${geoKey}:services`), setting = room.campaignSetting;
-  const kind = Campaign.hostileTemple(setting, room.name) ? null : /temple|basilica|sanctuary|shrine|chapel/i.test(room.name) ? 'temple' :
-    ['market', 'inn', 'guildhall'].includes(setting?.siteKind) || n % 7 === 0 ? 'shop' : n % 17 === 0 ? 'temple' : null;
+  const kind = Campaign.hostileTemple(setting, room.name) ? null : require('./cityCompletion').serviceKind(room) || (/temple|basilica|sanctuary|shrine|chapel/i.test(room.name) ? 'temple' :
+    ['market', 'inn', 'guildhall'].includes(setting?.siteKind) || n % 7 === 0 ? 'shop' : n % 17 === 0 ? 'temple' : null);
   const operator = actors.find((a, index) => index > 0 && a.allegiance === 'Neutral');
   if (geoKey !== '0,0,0' && kind && operator) {
     const id = `service:${geoKey}:${kind}`;
@@ -153,8 +154,15 @@ function seedRoom(db, geoKey, population, seed = '', consoleText = '') {
       kind: 'scroll', title: scroll.name, chapters: [{ title: 'Spell Formula', text: SpellRules.templates[scroll.spell_scroll].description +
         `\nMagic: ${scroll.magic}. That is the exact casting cost. ` + SpellRules.scroll(scroll.spell_scroll)?.description }] });
   }
+  if (room.services && Object.values(room.services).some(x => x.kind === 'shop')) Market.seed(room, geoKey, seed);
+  require('./tradeRoutes').connect(db,geoKey);
+  if (deferCommunity) room.pendingCommunityActivation = { version: 1 };
+  else activateRoom(db, geoKey, population, seed, consoleText);
+}
+function activateRoom(db, geoKey, population, seed, consoleText) {
   seedMission(db, geoKey, population, seed);
   Divinity.seedRoom(db, geoKey, population, seed, consoleText);
+  delete db[geoKey].pendingCommunityActivation;
 }
 function seedMission(db, geoKey, population, seed) {
   const room = db[geoKey], setting = room.campaignSetting;
@@ -351,14 +359,15 @@ function view(state, actorName) {
     if (!service && !missions.length && !deity) throw Error('This resident has no shop, temple or local contract.');
     const storedProperties = propertiesOf(ctx.text);
     return { silver: ctx.book.silver, revision: ctx.book.revision, service: service ? { ...service,
-      stock: service.stock.filter(i => i.quantity > 0).map(i => ({ ...i, price: R.price(i) })) } : null,
+      stock: service.stock.filter(i => i.quantity > 0).map(i => ({ ...i, price: Market.price(ctx.room, i, R.price(i)) })) } : null,
+      market: Market.view(ctx.room),
       divine: deity ? { name: deity.name, domain: deity.domain, interest: resident.motivation,
         visits: ctx.db['0,0,0']?.divineCourt?.actors?.[deity.name]?.visits || 1,
         completedCommissions: ctx.db['0,0,0']?.divineCourt?.actors?.[deity.name]?.completedCommissions || [],
         possessions: (resident.inventory || []).map(o => ({ name: o.name, type: o.type, magic: o.magic || 0 })) } : null,
       missions, sceneObjects: ctx.dungeon?.sceneObjects, saleItems: Inventory.inventoryItems(namesOf(ctx.text), storedProperties)
         .filter(i => !protectedItem(state, ctx.db, storedProperties.find(p => R.key(p.name) === R.key(i.name)) || i))
-        .map(i => ({ ...i, salePrice: Math.max(1, Math.floor(R.price(i) / 2)) })),
+        .map(i => ({ ...i, salePrice: Market.salePrice(ctx.room, i, R.price(i)) })),
       party: [...I.parseSheets(ctx.text, 'PC'), ...I.parseSheets(ctx.text, 'NPCs in Party')].map(a => ({ name: a.name, hp: a.hp, state: I.state(a),
         maxHp: a.maxHp, healPrice: Math.ceil(Math.max(0, a.maxHp - a.hp) / R.PRICES.healingHP), resurrectPrice: R.resurrectionPrice(a.level) })) };
   } catch (error) { return { error: error.message }; }
@@ -389,7 +398,8 @@ function action(state, service, input) {
     } else if (input.kind === 'buy') {
       const item = business.stock.find(i => R.key(i.name) === R.key(input.item) && i.quantity > 0);
       if (!item) throw Error('That item is out of stock.');
-      amount = -R.price(item); if (book.silver + amount < 0) throw Error('Not enough silver pieces.');
+      amount = -Market.price(room, item, R.price(item)); if (book.silver + amount < 0) throw Error('Not enough silver pieces.');
+      Market.trade(room, 'buy', item);
       const copy = { ...item }; delete copy.quantity;
       text = addItem(text, copy); item.quantity--; business.till -= amount;
       content = `You buy ${item.name} from ${input.actor} for ${-amount} silver pieces.`;
@@ -397,7 +407,8 @@ function action(state, service, input) {
       if (business.kind !== 'shop') throw Error('Temples do not buy equipment.');
       const item = propertiesOf(text).find(i => R.key(i.name) === R.key(input.item));
       if (!item || protectedItem(state, db, item)) throw Error('Quest items, keys and artifacts cannot be sold.');
-      amount = Math.max(1, Math.floor(R.price(item) / 2));
+      amount = Market.salePrice(room, item, R.price(item));
+      Market.trade(room, 'sell', item);
       if (business.till < amount) throw Error('The merchant has insufficient silver to buy that item.');
       if (business.stock.length >= 100 && !business.stock.some(i => R.key(i.name) === R.key(item.name))) throw Error('The shop cannot store more stock.');
       text = removeItem(text, item.name); business.till -= amount;
@@ -480,6 +491,7 @@ function action(state, service, input) {
         .find(m => m.id === input.missionId && m.patron === input.actor);
       if (!mission || ![mission.recipient, mission.patron].includes(input.actor) || mission.status !== 'offered') throw Error('That local contract is unavailable.');
       mission.status = 'accepted'; content = `Local contract accepted: ${mission.description}`;
+      if (mission.source === 'world1-room-arc') { const line = require('./roomCast').onAccepted(db, mission); if (line) content += ` ${line}`; }
     } else throw Error('Unsupported economy action.');
     book.silver += amount; book.revision++;
     const receipt = { id: randomUUID(), nonce: input.nonce, kind: input.kind, amount, roomKey: geoKey, actor: input.actor,
@@ -487,6 +499,7 @@ function action(state, service, input) {
       at: Date.now(), content, source: 'engine-economy-v1' };
     book.receipts.push(receipt); if (book.receipts.length > 2048) book.receipts.shift();
     if (business) business.revision++;
+    if (['buy','sell'].includes(input.kind)) require('./tradeRoutes').balance(db,geoKey);
     commit(state, db, text);
     if (['drink', 'heal', 'resurrect'].includes(input.kind) && db['0,0,0']?.combatLife) require('./combatLife').commit(state, db, text);
     if (ctx.dungeon && ctx.player) Objects.sync(ctx.dungeon, syncGround(text, room), { player: ctx.player });
@@ -581,7 +594,7 @@ function preserve(oldJSON, incomingJSON, options = {}) {
     .filter(m => m.type === 'raid').map(m => m.sourceRoomKey));
   const fields = ['economy', 'services', 'minorMissions', 'economySeeded', 'groundInventoryVersion', 'campaignSetting', 'campaignAtlas', 'itemTransfers', 'divineCourt', 'divineVisitChecked', 'templeSuppression', 'spellSystem', 'questFailures',
     'factionMemory', 'adventureJournal', 'regionalAdventure', 'regionalAdventureAttempt', 'regionalSite', 'questStories', 'questScenes', 'combatLife',
-    'fortifiedSite', 'fortifiedFloor', 'fortifiedApproaches', 'fortifiedSiteScan', 'villagePlan', 'villageBuilding', 'villageScan', 'planarRealm', 'portalScan'];
+    'fortifiedSite', 'fortifiedFloor', 'fortifiedApproaches', 'fortifiedSiteScan', 'villagePlan', 'villageBuilding', 'villageScan', 'planarRealm', 'portalScan', 'cityRoom', 'citySites', 'market'];
   for (const [key, room] of Object.entries(next)) {
     if (!room || typeof room !== 'object') continue;
     if (!options.trustedNewFields) {
@@ -594,11 +607,13 @@ function preserve(oldJSON, incomingJSON, options = {}) {
   }
   for (const [key, room] of Object.entries(old)) {
     if (!room) continue;
-    if (!next[key] && (key === '0,0,0' || room.villagePlan || room.villageBuilding || room.planarRealm || room.exits?.portal || room.fortifiedFloor || room.fortifiedApproaches || room.groundInventoryVersion === 1 || room.services || room.minorMissions || room.templeSuppression || room.regionalSite || room.questStories || raidRooms.has(key) || room.objects?.some(o => o.currency_kind || o.minor_mission_id) ||
+    if (!next[key] && (key === '0,0,0' || room.cityRoom || room.citySites || room.villagePlan || room.villageBuilding || room.planarRealm || room.exits?.portal || room.fortifiedFloor || room.fortifiedApproaches || room.groundInventoryVersion === 1 || room.services || room.minorMissions || room.templeSuppression || room.regionalSite || room.questStories || raidRooms.has(key) || room.objects?.some(o => o.currency_kind || o.minor_mission_id) ||
         Object.values(room.inhabitants?.actors || {}).some(a => a.deityId))) next[key] = room;
     if (!next[key]) continue;
     for (const field of fields)
       if (room[field] !== undefined) next[key][field] = room[field];
+    if(room.cityRoom&&!options.trustedNewFields)for(const field of ['name','exits','environmentIntent','indoor','isIndoor','isOutdoor','classification','complexId'])next[key][field]=room[field];
+    if(room.citySites&&!options.trustedNewFields){next[key].exits||={};const direction=room.citySites.gateDirection;if(direction)next[key].exits[direction]=room.exits[direction];}
     if (room.regionalSite) {
       for (const field of ['name', 'exits', 'environmentIntent', 'campaignSetting', 'indoor']) next[key][field] = room[field];
     }
@@ -704,5 +719,5 @@ function preserveInventory(oldText, incomingText, databaseJSON = '{}') {
   return inventoryText(incomingText, names, props);
 }
 function roomKeyFromText(text) { return I.roomKey(field(text, 'Coordinates')); }
-module.exports = { start, project, seedRoom, corpseDrops, refresh, view, action, preserve, preserveInventory, field, write, syncGround, registerGround, protectedItem,
+module.exports = { start, project, seedRoom, activateRoom, corpseDrops, refresh, view, action, preserve, preserveInventory, field, write, syncGround, registerGround, protectedItem,
   validateDivineRoster: Divinity.validateRoster };

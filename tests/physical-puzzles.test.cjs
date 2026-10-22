@@ -146,8 +146,8 @@ test('one generated metadata response supplies both description and solution; ma
   const result=await generateDesign(agent, context);
   assert.equal(result.kind, expected.kind);assert.deepEqual(result.controls,expected.controls);assert.equal(result.readables.length,4);assert.equal(calls, 1);
   agent.assistant.generation = async () => { calls++; return { content: '{broken' }; };
-  assert.ok((await generateDesign(agent, context)).id); assert.equal(calls, 3);
-  assert.ok(prompts.some(s => s.includes('rejected')));
+  assert.ok((await generateDesign(agent, context)).id); assert.equal(calls, 5);
+  assert.ok(prompts.some(s => /rejected|failed validation/.test(s)));
   assert.match(designPrompt(context), /retryable/); assert.match(P.HINT_POLICY, /Never volunteer the solution/);
 });
 test('mouse picking selects the actual reachable control, not sky, a remote apparatus or a prop behind a wall', () => {

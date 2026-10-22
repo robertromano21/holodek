@@ -30,7 +30,7 @@
     try {
       const canvas = root.document.createElement('canvas'); canvas.width = canvas.height = 24;
       canvas.className = 'ui-pixel-icon'; canvas.setAttribute('aria-hidden', 'true');
-      const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0, 24, 24);
+      const ctx = canvas.getContext('2d'); ctx.imageSmoothingEnabled = false; ctx.drawImage(img, 0, 0, 24, 24);
       const image = ctx.getImageData(0, 0, 24, 24); pixels(image.data); ctx.putImageData(image, 0, 0);
       button.appendChild(canvas); button.classList.add('ui-pixel-icon-ready');
     } catch (error) {

@@ -1,4 +1,8 @@
 # Logs
+*.bak
+*.bak-*
+*.bak.*
+
 logs
 *.log
 npm-debug.log*
@@ -12,6 +16,10 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Runtime data
 .retort-data/
+# Private website connection settings and locally generated SSH keys live here.
+/website-ai.private.json
+/website-ai.local.json
+/.env.local
 /sid/
 pids
 *.pid
@@ -76,6 +84,9 @@ web_modules/
 
 # dotenv environment variable files
 .env
+.env.*
+!.env.example
+!.env.sample
 .env.development.local
 .env.test.local
 .env.production.local
@@ -133,3 +144,23 @@ dist
 
 # Piper voice model for SID speech (downloaded, ~114 MB; see docs/SID-VOICE-RESEARCH.md)
 models/
+world1-test.key
+world1-run/
+playtest-run/
+data/recent-world-names.json
+
+keys/
+*.pem
+*.p12
+*.pfx
+**/identity_ed25519
+**/identity_rsa
+
+# Local AI-assistant dev bridge (not game content).
+# Status notes, diffs and helper scripts shared between a developer's coding assistants.
+# Never ignore game content, tests, or tools/playtest here.
+grokbot-share/
+.agent-bridge/
+agent-share/
+*.agent-status.md
+dev-bridge/

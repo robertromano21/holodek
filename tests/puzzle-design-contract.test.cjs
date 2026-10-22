@@ -71,10 +71,10 @@ test('invalid decorative metadata receives field-specific feedback on the existi
   assert.match(a.prompts[1], /description is required.*motifs is required/);
 });
 
-test('unrepaired model output still uses the verified solvable fallback after exactly two attempts', async t => {
+test('unrepaired model output uses the verified solvable fallback after the initial attempt plus three retries', async t => {
   const reports = []; t.mock.method(console, 'warn', (...args) => reports.push(args));
   const a = agent([{ kind: 'not_a_supported_mechanism' }]), result = await generateDesign(a, context);
-  assert.equal(a.calls.length, 2); assert.equal(result.title, P.fallback(context.seed, context.roomName).title);
+  assert.equal(a.calls.length, 4); assert.equal(result.title, P.fallback(context.seed, context.roomName).title);
   assert.ok(P.findSolution(result)); assert.ok(result.controls.length >= 2);
   assert.ok(reports.some(([tag, json]) => tag === '[PuzzleDesign]' && JSON.parse(json).source === 'validated-fallback'));
 });

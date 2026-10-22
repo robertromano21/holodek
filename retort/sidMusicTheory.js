@@ -206,6 +206,14 @@ function buildLead(ctx) {
       const raw = m;
       if (strong) m = nearestPc(m, chordPcs);
       else if (!allowed.includes(((m%12)+12)%12)) m = nearestPc(m, allowed);
+      // Keep an authored turning point on the outward chord tone instead of ironing out its peak/trough.
+      if (ctx.preserveContourExtrema && strong && i > 0 && i < contour.length - 1) {
+        const peak = contour[i] > contour[i-1] && contour[i] > contour[i+1];
+        const trough = contour[i] < contour[i-1] && contour[i] < contour[i+1];
+        const dir = peak && m < raw ? 1 : trough && m > raw ? -1 : 0;
+        if (dir) { let candidate = raw; while (!chordPcs.includes(((candidate%12)+12)%12)) candidate += dir;
+          if (candidate >= LO && candidate <= HI && Math.abs(candidate-raw) <= 3) m = candidate; }
+      }
       m = inRange(m, LO, HI);
       // keep the motif's contour: if snapping flattened a step into a repeated note, move to the
       // next chord/scale tone in the intended direction
@@ -450,7 +458,7 @@ function buildCycle(p, r, prog, opts = {}) {
       cadences[end]={endPc:chords[end].root};
     }
     const lead=buildLead({compositionVersion:3,phraseCells:cells.map(c=>source[c]||null),cadences,quoteIndex:-1,
-      leitmotif:p.leitmotif,r,key:p.key,scale:p.scale,barsChords:chords,motifR:p.motifRhythm,motifC:p.motifContour,
+      leitmotif:p.leitmotif,preserveContourExtrema:p.preserveContourExtrema,r,key:p.key,scale:p.scale,barsChords:chords,motifR:p.motifRhythm,motifC:p.motifContour,
       answerR:p.answerRhythm,answerC:p.answerContour,bR:p.contrastRhythm,bC:p.contrastContour,
       seqStep:opts.seqStep??p.sequenceStep,startHigh:!!opts.startHigh});
     return{chords,lead:toBars(lead)};

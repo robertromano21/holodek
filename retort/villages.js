@@ -20,8 +20,10 @@ function candidates(database, sourceKey, input = {}) {
   const source = database[sourceKey], c = Routes.coordinates(sourceKey);
   if (!c || sourceKey === '0,0,0' || !fresh(source) || source.villagePlan || source.villageScan) return null;
   const inside = Routes.indoor(source), template = source.environmentIntent?.template;
+  // world1 MARKET_ECONOMY: caverns host the same settlements as the surface; any natural cave template of moderate size qualifies.
+  const caveSize = require('./worldFlags').on('MARKET_ECONOMY') && require('./undergroundEnvironments').isUndergroundTemplate(template) && !/crypt|catacomb/.test(String(template)) ? 96 : 128;
   const cavern = inside === true && (template === 'cavern_village' || source.classification?.biome === 'cave') &&
-    (template === 'cavern_village' || Number(source.classification?.size) >= 128);
+    (template === 'cavern_village' || Number(source.classification?.size) >= caveSize);
   if (inside !== false && !cavern) return null;
   const protectedSet = Fortified.protectedKeys(database, input);
   if (protectedSet.has(sourceKey)) return null;
@@ -98,6 +100,8 @@ If village:true, choose a community name (not a rename of this location), histor
 ${planned.cavern ? 'This is a VAST enclosed cavern, much larger than any building: a 192-cell chamber with high solid rock ceiling, settlement streets below it, no sky or surface courtyard. Buildings must fit below the cave roof.' : 'This is an outdoor insert within the actual terrain, with open lanes and continuing wilderness routes, not a single indoor hall.'}
 Only supplied unused directions can become building entrances. Preserve all existing routes, names, locks, quest targets and actors. No new quests, items, money, gods, rewards or completed siege events. Return the requested structured fields. For village:false use empty text fields and buildings:[].`;
   const result = await Contracts.request($, { component: 'village-plan', context: { geoKey: sourceKey }, maxTokens: 1800,
+    localWork: { brief: `Choose a story-appropriate village, not a compulsory settlement. Saved source: ${JSON.stringify({ name: source.name, region: require('./holodekRoomWork').region(source.campaignSetting) })}. Allowed building sites: ${JSON.stringify(planned.sites)}. Author neutral residents' needs and varied pressures, not new actors or quest events. Buildings must use available directions and templates; preserve every existing route, lock and bound quest. For village:false return empty descriptive strings and no buildings.`,
+      arrays: { buildings: { count: (_root, prior) => prior.village === false ? 0 : undefined, min: 0, max: planned.sites.length, batch: 1 } } },
     parameters: { village: Boolean, name: { type: String, maxLength: 80 }, history: { type: String, maxLength: 400 },
       sustenance: { type: String, maxLength: 240 }, pressure: { type: String, maxLength: 240 }, population: { type: String, maxLength: 400 },
       buildings: Contracts.list({ direction: Contracts.choice(planned.sites.map(s => s.direction)), template: Contracts.choice(BUILDINGS),

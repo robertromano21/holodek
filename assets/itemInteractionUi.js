@@ -25,7 +25,29 @@
     return (items || []).filter(item => item?.name && (!(item.geoKey ?? item.roomKey) || (item.geoKey ?? item.roomKey) === dungeon.geoKey) && reachable(dungeon, player, item, radius))
       .sort((a, b) => Math.hypot(a.x + 0.5 - player.x, a.y + 0.5 - player.y) - Math.hypot(b.x + 0.5 - player.x, b.y + 0.5 - player.y))[0] || null;
   }
-  let room = null, prompted = null;
+  let room = null, prompted = null, pending = false;
+  async function take(name) {
+    if (pending || !root.CommerceUi?.handleCommand) return false;
+    pending = true;
+    try { return await root.CommerceUi.handleCommand('take ' + name); }
+    finally { pending = false; }
+  }
+  function prompt(name) {
+    if (root.ObjectDiscovery && !root.ObjectDiscovery.isVisible(root.currentDungeon || room, name)) return false;
+    const link = [...document.querySelectorAll('#phaser-container .clickable-object')]
+      .find(link => String(link.getAttribute('data-object')).trim().toLowerCase() === name.trim().toLowerCase());
+    if (link) { link.click(); return true; }
+    if (!root.CommerceUi?.handleCommand) return false;
+    document.querySelector('.popup-container[data-dungeon-item]')?.remove();
+    const popup = document.createElement('div'); popup.className = 'popup-container'; popup.dataset.dungeonItem = name;
+    popup.setAttribute('role','dialog'); popup.setAttribute('aria-label','Take ' + name);
+    const text = document.createElement('p'); text.textContent = 'Take ' + name + '?'; popup.appendChild(text);
+    for (const label of ['Take','Cancel']) {
+      const button = document.createElement('button'); button.type = 'button'; button.className='popup-button'; button.textContent=label;
+      button.addEventListener('click',()=>{popup.remove();if(label==='Take')take(name);}); popup.appendChild(button);
+    }
+    root.WorldInteractionUi?.addReadAction(popup,name); document.body.appendChild(popup); return true;
+  }
   function update(dungeon, items, player) {
     if (!dungeon) return;
     const allItems = items || [];
@@ -38,17 +60,16 @@
       prompted = null; document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove();
     }
     if(root.ObjectDiscovery)items=allItems.filter(item=>root.ObjectDiscovery.isVisible(dungeon,item.name));
-    if (document.hidden || root.GameCommandGate?.busy() || root.InventoryUi?.isOpen() || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
+    if (pending || root.PlayerControls?.blocked?.() || root.gamePaused || root._gameOver || document.hidden || root.GameCommandGate?.busy() || root.InventoryUi?.isOpen() || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
         root._combatRoundActiveUntil > Date.now() || document.activeElement?.id === 'chatuserinput' || document.querySelector('.popup-container')) return;
-    const near = nearby(dungeon, items, player);
+    const automatic = root.PlayerControls?.autoTake() === true;
+    const near = nearby(dungeon, items, player, PROXIMITY_RANGE);
     if (!near || itemKey(near) === prompted) return;
-    const link = [...document.querySelectorAll('#phaser-container .clickable-object')]
-      .find(link => String(link.getAttribute('data-object')).trim().toLowerCase() === near.name.trim().toLowerCase());
-    if (!link) return;
-    link.click();
+    if (automatic) { prompted = itemKey(near); take(near.name); return; }
+    if (!prompt(near.name)) return;
     const popup = document.querySelector('.popup-container[data-dungeon-item]');
     if (popup) { popup.dataset.dungeonItemProximity = 'true'; prompted = itemKey(near); }
   }
   function reset() { room = prompted = null; if (typeof document !== 'undefined') document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove(); }
-  return { TAKE_RANGE, PROXIMITY_RANGE, nearby, reachable, update, reset };
+  return { isTaking: () => pending, TAKE_RANGE, PROXIMITY_RANGE, nearby, reachable, update, reset, take, prompt };
 });

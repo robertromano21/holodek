@@ -1,0 +1,15 @@
+{
+  "name": "full-pass: new game, temple, console exit lock, walk to wasteland, return, quick travel, third room, books",
+  "steps": [
+    { "start": 2, "click": ["review-save-button", "Save and Continue"] },
+    { "state": "temple 0,0,0 after new game" }, { "screenshot": "shot-temple.png" },
+    { "command": "north" },
+    { "walk": "north" }, { "screenshot": "shot-wasteland.png" },
+    { "command": "south" },
+    { "command": "north" },
+    { "walkNext": { "avoid": ["south", "portal"] } }, { "screenshot": "shot-room3.png" },
+    { "command": "look" },
+    { "book": true },
+    { "state": "final" }
+  ]
+}
