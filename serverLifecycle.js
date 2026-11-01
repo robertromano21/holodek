@@ -6,7 +6,7 @@ function localRequest(req) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address) && ['localhost', '127.0.0.1', '[::1]', '::1'].includes(req.hostname);
 }
 function install(app, { state, dice, isBusy = () => false, beforeClose = () => {}, flush = () => {},
-  port = 3000, host, processRef = process, timeoutMs = 3000, autoQuitDelayMs = 10000, logger = console } = {}) {
+  port = 3000, host, processRef = process, timeoutMs = 5000, autoQuitDelayMs = 10000, logger = console, ownership } = {}) {
   const server = http.createServer(app), sockets = new Set();
   const windows = new Set();
   let stopping = false, shutdownPromise, windowCloseTimer = null, disposed = false;
@@ -19,6 +19,7 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
     logger.info('[ServerShutdown]', JSON.stringify({ reason, pid: processRef.pid, port }));
     shutdownPromise = new Promise(resolve => {
       let finished = false, flushing = false;
+      const cleanup = Promise.resolve().then(beforeClose).catch(error => logger.error('[ServerShutdown]', error.message));
       const deadline = setTimeout(() => finish(), timeoutMs);
       function finish() {
         if (finished) return; finished = true; clearTimeout(deadline);
@@ -29,12 +30,12 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
         if (flushing || finished) return; flushing = true;
         for (const socket of sockets) socket.destroy();
         // Keep the deadline armed even if a logging worker never flushes.
-        Promise.resolve().then(flush).catch(error => logger.error('[ServerShutdown]', error.message)).finally(finish);
+        cleanup.then(flush).catch(error => logger.error('[ServerShutdown]', error.message)).finally(finish);
       }
       // Stop accepting requests before draining streams. SSE and workers must
       // not keep a Windows/PM2 child alive after its owner requested shutdown.
       server.close(drain);
-      try { state?.setGamePaused(true); dice?.setPaused(true); beforeClose(); }
+      try { state?.setGamePaused(true); dice?.setPaused(true); }
       catch (error) { logger.error('[ServerShutdown]', error.message); }
       server.closeIdleConnections?.();
       server.closeAllConnections?.();
@@ -53,7 +54,8 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
     processRef.removeListener('message', onMessage);
   }
   app.get('/game/lifecycle', (req, res) => res.json({ running: !stopping, pid: processRef.pid, port,
-    canQuit: localRequest(req), connectedWindows: windows.size, closeGraceMs: autoQuitDelayMs }));
+    canQuit: localRequest(req), connectedWindows: windows.size, closeGraceMs: autoQuitDelayMs,
+    ...(ownership ? { processOwnership: ownership.mode } : {}) }));
   let firstConnectAt = 0;
   app.get('/game/lifecycle/presence', (req, res) => {
     if (!localRequest(req)) return res.status(403).end();
@@ -74,13 +76,14 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
     res.once('close', () => {
       clearInterval(heartbeat); windows.delete(res);
       if (stopping || disposed || windows.size || windowCloseTimer) return;
-      // Start-up grace (opt-in, HOLODEK_STARTUP_GRACE_MS; test servers only): page reloads/reconnects soon after the first window connects never shut the server down.
-      if (Date.now() - firstConnectAt < Number(process.env.HOLODEK_STARTUP_GRACE_MS || 0)) return;
-      logger.info('[GameWindows]', JSON.stringify({ connected: 0, shutdownInMs: autoQuitDelayMs }));
+      // A startup grace delays cleanup; it must never suppress the only close event.
+      const startupRemaining = Math.max(0, Number(process.env.HOLODEK_STARTUP_GRACE_MS || 0) - (Date.now() - firstConnectAt));
+      const shutdownInMs = Math.max(autoQuitDelayMs, Number.isFinite(startupRemaining) ? startupRemaining : 0);
+      logger.info('[GameWindows]', JSON.stringify({ connected: 0, shutdownInMs }));
       windowCloseTimer = setTimeout(() => {
         windowCloseTimer = null;
         if (!windows.size && !stopping && !disposed) shutdown('last-game-window-closed');
-      }, autoQuitDelayMs);
+      }, shutdownInMs);
       windowCloseTimer.unref?.();
     });
   });
@@ -91,6 +94,8 @@ function install(app, { state, dice, isBusy = () => false, beforeClose = () => {
       catch { return res.status(403).json({ error: 'Quit from the game window.' }); }
     }
     if (req.body?.confirm !== true || req.body?.runId !== state?.getDungeonRunId()) return res.status(409).json({ error: 'The adventure changed. Reopen Quit Game.' });
+    if (req.body.expectedPid !== undefined && req.body.expectedPid !== processRef.pid || req.body.requireNoWindows === true && windows.size)
+      return res.status(409).json({ error: 'The game process or its windows changed. Nothing was closed.' });
     if (stopping) return res.status(409).json({ error: 'The server is already stopping.' });
     if (isBusy() || dice?.active || state?.isCharacterGenerationInProgress?.()) return res.status(409).json({ error: 'Finish the current command, character creation or combat round before quitting.' });
     // Send confirmation before closing its connection. Pausing immediately

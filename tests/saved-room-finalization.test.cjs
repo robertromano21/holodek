@@ -12,6 +12,7 @@ function harness() {
   const calls = { roofs: 0, exits: 0, diagnostics: [], stages: [] };
   const context = {
     console: quiet, JSON,
+    require: require('node:module').createRequire(require.resolve('../retort/retortWithUserInput')),
     applySceneRoofs(dungeon, spec) { calls.roofs++; return applySceneRoofs(dungeon, spec); },
     DungeonExits: { install(dungeon) { calls.exits++; return DungeonExits.install(dungeon); } },
     buildEnvironment: () => ({ version: 1 }),

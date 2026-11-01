@@ -11,19 +11,21 @@ const blank = process.argv.includes('--blank');
 const preview = process.argv.includes('--puzzle-preview');
 const overfillPreview = process.argv.includes('--stonework-overfill-preview');
 const livePreview = process.argv.includes('--stonework-live-preview');
+const stairPreview = process.argv.includes('--city-stair-preview');
 const artifactPreview = process.argv.includes('--stonework-artifact-preview');
 const stonePreview = process.argv.includes('--stonework-preview') || overfillPreview || artifactPreview;
-const probeUrl=pathToFileURL(path.join(__dirname,'dungeon-gpu-probe.html'));
+const probeUrl=pathToFileURL(stairPreview?path.join(__dirname,'../.retort-data/stair-opening-fix/probe.html'):path.join(__dirname,'dungeon-gpu-probe.html'));
 if (preview) probeUrl.search='puzzle-preview=1';
 if (stonePreview) probeUrl.search=overfillPreview?'stonework-preview=1&overfill=1':'stonework-preview=1';
 if (artifactPreview) probeUrl.search='stonework-preview=1&artifact=1';
 if (livePreview) probeUrl.search='stonework-live-preview=1';
 const args = ['--headless=new', '--no-first-run', '--enable-logging=stderr', `--user-data-dir=${profile}`, '--dump-dom',
   blank ? 'about:blank' : probeUrl.href];
-if (preview || stonePreview || livePreview) {
+if (preview || stonePreview || livePreview || stairPreview) {
   const directory=path.join(__dirname,'../logs/probes'); fs.mkdirSync(directory,{recursive:true});
-  args.unshift(stonePreview||livePreview?'--window-size=1400,1100':'--window-size=1400,850','--screenshot='+path.join(directory,artifactPreview?'stonework-cornice-artifact-comparison.png':livePreview?'stonework-live-renderer-comparison.png':overfillPreview?'stonework-ridge-comparison.png':stonePreview?'stonework-fill-comparison.png':'puzzle-voxels.png'));
+  args.unshift(stairPreview?'--window-size=1380,1400':stonePreview||livePreview?'--window-size=1400,1100':'--window-size=1400,850','--screenshot='+path.join(directory,stairPreview?'city-stair-ceilings.png':artifactPreview?'stonework-cornice-artifact-comparison.png':livePreview?'stonework-live-renderer-comparison.png':overfillPreview?'stonework-ridge-comparison.png':stonePreview?'stonework-fill-comparison.png':'puzzle-voxels.png'));
 }
+if(stairPreview)args.unshift('--allow-file-access-from-files','--virtual-time-budget=12000');
 if (process.env.GPU_PROBE_SOFTWARE === '1' || process.argv.includes('--software')) args.unshift('--disable-gpu', '--use-angle=swiftshader', '--enable-unsafe-swiftshader');
 const started = Date.now();
 console.log('Starting isolated GPU probe:', browser);

@@ -48,6 +48,7 @@
     await root.prepareEconomyState?.(); const origin = observer();
     const data = await post('/spells/view', { ...origin, caster });
     if (!sameRoom(origin)) throw Error('The room or game changed.');
+    root.worldAbilitySystem = data.abilitySystem || null;
     if (data.spellResult) await root.applyRealtimeCombatResult?.(data.spellResult);
     return { data, origin };
   }
@@ -71,7 +72,7 @@
         }
         if (!count) line(box, 'No valid casts right now. Healing needs an injured living ally in the same room and clear sight, a prepared spell (or equipped magic item), and enough Magic.');
         button(box, 'All Spells', () => open(casterName));
-        button(box, 'Close', close); return true;
+        button(box, 'Close', close); root.AbilityLanguage?.apply(box, data.abilitySystem); return true;
       }
       for (const caster of data.casters) {
         line(box, caster.name, 'h3');
@@ -93,7 +94,7 @@
             if (picks.length) button(box, 'Prepare Spells', () => perform('/spells/prepare', { kind: 'prepare', caster: caster.name, revision: data.revision,
               spellIds: picks.filter(p => p.checked && !p.disabled).map(p => p.value) }, origin, true), item.bookRequired && !item.bookPresent);
             if (item.bookRequired) for (const scroll of data.scrolls.filter(s => (!scrollName || key(s.name) === key(scrollName)) && !item.known.includes(s.spell_scroll))) {
-              if (!root.SpellRules.canLearn(item.className, scroll.spell_scroll)) {
+              if (!root.SpellRules.canLearn(item.rulesClass || item.className, scroll.spell_scroll)) {
                 if (scrollName) line(box, `${scroll.name} is a ${root.SpellRules.templates[scroll.spell_scroll].tradition} formula, not ${item.tradition}. It can still be equipped and cast once.`);
                 continue;
               }
@@ -118,7 +119,7 @@
         }
         if (!caster.items.length) line(box, 'No charged equipment or class spells. Equip a magical item or spell scroll first.');
       }
-      button(box, 'Close', close); return true;
+      button(box, 'Close', close); root.AbilityLanguage?.apply(box, data.abilitySystem); return true;
     } catch (error) { notice(error.message); return false; }
     finally { pending = false; root.GameCommandGate?.end(); }
   }
@@ -132,8 +133,9 @@
   }
   function addTargetAction(box, name) {
     const actor = (root.combatCharacters || []).find(a => a.name === name);
-    if (!box || !actor || !['pc', 'npc'].includes(actor.type) || actor.state === 'Dead' || box.querySelector('[data-target-magic]')) return;
-    const b = button(box, 'Heal / Magic', () => openForTarget(name)); b.dataset.targetMagic = name;
+    if (!box || !actor || /^dead$/i.test(actor.state || actor.State || actor.status || '') || actor.discoveryState === 'pending' ||
+        root.isDungeonActorPresent && !root.isDungeonActorPresent(actor) || box.querySelector('[data-target-magic]')) return;
+    const b = button(box, root.AbilityLanguage?.text('Heal / Magic', root.worldAbilitySystem) || 'Heal / Magic', () => openForTarget(name)); b.dataset.targetMagic = name;
     return b;
   }
   function addItemAction(box, name) {
@@ -147,6 +149,7 @@
     return b;
   }
   async function handleCommand(text) {
+    text = root.AbilityLanguage?.command(text, root.worldAbilitySystem) || text;
     if (!/^\s*(cast|scribe|prepare\s+spells)\b/i.test(text)) return false;
     const match = root.SpellRules.command(text);
     if (!match) { await open(); return true; }

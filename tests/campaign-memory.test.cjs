@@ -157,11 +157,21 @@ test('pending and legacy template biographies are not archived as truth, and old
   assert.equal(C.context(f.state, 'Zharok', f.text()).profiles[0].background.history, profile.history);
   assert.deepEqual(C.rememberProfiles(f.state, [{ ...profile, history: 'A different life.' }]), [], 'A real authored biography stays stable.');
 });
-test('chatbotprocessinput preserves its baseline except travel, camera, lock feedback and view-checked economy commands', () => {
+test('chatbotprocessinput preserves its baseline except travel, camera, recovery, conversation attention, lock feedback and view-checked economy commands', () => {
   const source = fs.readFileSync('assets/game.js', 'utf8'), start = source.indexOf('async function chatbotprocessinput(');
   const end = start + 1 + source.slice(start + 1).search(/^(?:async )?function /m);
-  const body = source.slice(start, end).replace('let validDirection = window.CommandIntent.travelDirection(userInput);',
+  const body = source.slice(start, end)
+    .replace(/^  if\(!completedStartResult&&userInput\)window\.DungeonLife\?\.playerResponded\?\.\(\);\r?\n\r?\n/m, '')
+    .replace(/^  const endedRunMenu = window\.GameOverStartUi\?\.active\(\);\r?\n  if \(endedRunMenu && !window\.GameOverStartUi\.allowCommand\([^\r\n]*\r?\n    creating: isCharacterCreationInProgress\(\), completed: !!textin\?\.completedStartResult }\)\) return;\r?\n/m, '')
+    .replace('if (!endedRunMenu && (window._deathSceneActive || window._playerUnconscious))', 'if (window._deathSceneActive || window._playerUnconscious)')
+    .replace('if (!endedRunMenu && window._gameOver)', 'if (window._gameOver)')
+    .replace('if (!endedRunMenu && window.gamePaused)', 'if (window.gamePaused)')
+    .replace('let validDirection = window.CommandIntent.travelDirection(userInput);',
     'let validDirection = validDirections.find(direction => userWords.includes(direction));')
+    .replace(/^  const cityPassage = textin\?\.cityPassage;\r?\n  if \(cityPassage &&[\s\S]*?throw Error\('The building passage is stale\.'\);\r?\n/m, '')
+    .replace("cityPassage ? `Enter ${cityPassage.name}` : ", '')
+    .replace(/^  if \(cityPassage\) validDirection = null;\r?\n/m, '')
+    .replace(/^if \(cityPassage\) \{[\s\S]*?^}\r?\n\r?\n/m, '')
     .replace(/^    const target=\/\^\\s\*attack.*\r?\n    if\(target\)window\.faceDungeonCombatTarget\?\.\(target\);\r?\n/m,'')
     .replace(/^          refreshConsoleExitStatus\(\);\r?\n/m, '')
     .replace(/^  const divineRefusal = window\.PantheonCharacters\?\.recruitmentRefusal[^\r\n]*\r?\n  if \(!completedStartResult && divineRefusal\)[^\r\n]*\r?\n/m, '')
@@ -170,12 +180,48 @@ test('chatbotprocessinput preserves its baseline except travel, camera, lock fee
     .replace(/^  if \(!completedStartResult && userInput && await window\.SpellUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
     .replace(/^  if \(!completedStartResult && window\.CombatCharacterUi\?\.confirmAttackCommand\(userInput\) === false\) return false;\r?\n/m, '')
     .replace(/^  if \(window\._gameOver\)[^\r\n]*\r?\n/m, '')
+    .replace(/^  if \(window\._deathSceneActive \|\| window\._playerUnconscious\)[^\r\n]*\r?\n/m, '')
     .replace(/^([ \t]*)displayLocalCommandResult\(chatLog, chatHistory, userInput, msg\);/gm, (_, indent) => [
       'updateChatLog(`<br><b>${msg}</b><br>`);',
       'chatLog.innerHTML = chatHistory + "<br><br><b> > </b>" + userInput +',
       '  "<br><br><b></b>" + msg.replace(/\\n/g, "<br>");', 'scrollToBottom();'
     ].map(line => indent + line).join(source.includes('\r\n') ? '\r\n' : '\n'))
     .replace('unlock door with <keyname>', 'unlock door with &lt;keyname&gt;');
-  assert.equal(require('node:crypto').createHash('sha256').update(body.replace(/if \(window\.DEBUG_LOGS\) (?=console\.log\()/g, '')).digest('hex'),
-    '77e3c1828a00dbe7611de17788e2797754289e5371f9aa86933c819598c98153');
+  // The normalized handler matches the reconciled committed baseline, independent of checkout line endings.
+  assert.equal(require('node:crypto').createHash('sha256').update(body.replace(/if \(window\.DEBUG_LOGS\) (?=console\.log\()/g, '').replace(/\r\n/g, '\n')).digest('hex'),
+    '2959bbd25e5fca3079f836b0a29b8017fda2ca140a10ef2710fff30910f9a226');
+});
+
+test('unconscious and death-scene guards reject commands before the normal command path', async () => {
+  const source = fs.readFileSync('assets/game.js', 'utf8'), start = source.indexOf('async function chatbotprocessinput(');
+  const end = source.indexOf('  const completedStartResult =', start);
+  assert.ok(start >= 0 && end > start);
+  for (const flag of ['_deathSceneActive', '_playerUnconscious', null]) {
+    const messages = [], context = { window: flag ? { [flag]: true } : {}, updateChatLog: text => messages.push(text) };
+    vm.runInNewContext(source.slice(start, end) + '\nreturn true;\n}', context);
+    assert.equal(await context.chatbotprocessinput('cast a spell'), flag ? undefined : true);
+    if (flag) assert.match(messages[0], /cannot act while unconscious or between lives/);
+    else assert.equal(messages.length, 0);
+  }
+});
+
+test('full biographies reach semantic ranking and late details stay private to their owner', async () => {
+  const f = fixture(), history = 'She restored records and taught the apprentices careful penmanship. '.repeat(500) + 'Her secret mentor was Mirabel Cobalt.';
+  const profile = Profiles.create({ name: 'Zharok', personality: 'Patient.', voice: 'Warm.', history, motivation: 'Teach.' });
+  assert.equal(profile.history, history);
+  C.rememberProfiles(f.state, [profile]);
+  const saved = C.exportRecords(f.state);
+  assert.equal(saved.find(row => row.profile).profile.history, history);
+  assert.ok(saved.some(row => row.text.includes('Mirabel Cobalt')));
+  let candidates = [];
+  await C.prepare(f.state, 'Mirabel Cobalt', { semantic: { rank: async (query, rows) => {
+    candidates = rows; return new Map(rows.map(row => [row.id, row.text.includes('Mirabel Cobalt') ? .99 : 0]));
+  } } });
+  assert.ok(candidates.some(row => row.kind === 'biography' && row.text.includes('Mirabel Cobalt')));
+  assert.ok(candidates.filter(row => row.kind === 'biography').every(row => row.witnesses.length === 1 && row.witnesses[0] === 'Zharok'));
+  const recalled = C.context(f.state, 'Mirabel Cobalt', f.text());
+  assert.match(JSON.stringify(recalled.profiles), /Mirabel Cobalt/);
+  assert.ok(JSON.stringify(recalled).length <= M.MAX_CONTEXT);
+  const index = M.createIndex('run', saved);
+  assert.deepEqual(index.search('Mirabel Cobalt', { owner: 'Far Guard' }), []);
 });

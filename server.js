@@ -1,4 +1,6 @@
+const processOwner = require('./gameProcessOwner').install();
 const serverLog = require('./serverLogger').installServerLogger();
+console.info('[GameProcesses]', JSON.stringify(processOwner));
 // world1 expansion (each feature behind its own flag; see retort/worldFlags.js).
 const Surprise = require('./retort/surprise');
 const WorldFlags = require('./retort/worldFlags');
@@ -44,10 +46,18 @@ const roomDatabaseReceiver = createRoomDatabaseReceiver();
 // Middleware
 app.use(createGameJsonParser());
 app.use(cors());
+app.use((req,res,next)=>{
+  const token=require('./retort/hostLocalFloors').token(sharedState);
+  res.set('X-Holodek-Floor',token);
+  const guarded=/^\/(?:processInput7|room-population\/|city\/|economy\/action|quest-scenes?\/|spell|combat|exits\/traversed|quest\/objective)/.test(req.path);
+  if(req.method==='POST'&&guarded&&(sharedState.getActiveCityFloor()||req.get('X-Holodek-Floor'))&&req.get('X-Holodek-Floor')!==token)
+    return res.status(409).json({error:'This request belongs to a previous building floor. Refresh the game window.'});
+  next();
+});
 require('./retort/roomIllustration').install(app, sharedState);
 require('./retort/gameModels').install(app);
 require('./retort/websiteAi').install(app, { onChange: () => require('./retort/gameModels').invalidate() });
-require('./retort/roomPrefetchRoutes').install(app, sharedState);
+require('./retort/roomPrefetchRoutes').install(app, sharedState, { isBusy: () => inputTaskInFlight });
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
 require('./retort/audioPalette').install(app, sharedState); // same-score SID variants; effects rendered off-thread
 require('./retort/sidArchive').install(app, express);
@@ -56,7 +66,8 @@ const SidMode = require('./retort/sidMode');
 app.get('/sid-mode', (req, res) => res.json({ mode: SidMode.get() }));
 app.get('/world1-flags', (req, res) => res.json({ ...WorldFlags.snapshot(), ...(require('./retort/devSandbox').enabled(port) ? { DEV_SANDBOX: true } : {}), ...(require('./retort/campaignBuilderRoutes').enabled(port) ? { CAMPAIGN_BUILDER: true } : { CAMPAIGN_BUILDER: false }), GM_NAME: (() => { try { return require('./retort/settingLayer').gmName(); } catch { return 'Grave Master'; } })(),
   HOMEBREW_ACTIVE: (() => { try { return WorldFlags.on('HOMEBREW') && !!require('./retort/settingLayer').current(); } catch { return false; } })(),
-  RESOURCE_NAME: (() => { try { const b = require('./retort/settingLayer').current(); return b ? (b.resourceName || 'Luck') : 'Magic'; } catch { return 'Magic'; } })() }));
+  RESOURCE_NAME: (() => { try { const b = require('./retort/settingLayer').current(); return b ? (b.resourceName || 'Luck') : 'Magic'; } catch { return 'Magic'; } })(),
+  CURRENCY: require('./assets/currencyLanguage').forWorld(require('./retort/settingLayer').current()) }));
 // world1 RANGED_COMBAT: ammo readouts for the party's equipped ranged weapons (separate from the Magic/Tech/Luck stat).
 app.get('/ranged/readouts', (req, res) => { try { if (!WorldFlags.on('RANGED_COMBAT')) return res.json({ rows: [] }); const sharedState = require('./sharedState'), Spells = require('./retort/spellSystem');
   const actors = Spells.allActors(sharedState.getUpdatedGameConsole() || '').filter(a => a.type !== 'monster').map(a => ({ name: a.name, equipped: require('./assets/dungeonInhabitants').parseEquipment(a.lines?.[9] || '') || {} }));
@@ -64,7 +75,7 @@ app.get('/ranged/readouts', (req, res) => { try { if (!WorldFlags.on('RANGED_COM
 // Playtest-only live room editor (HOLODEK_DEV_SANDBOX=1 on a test port; never on 3000).
 require('./retort/devSandbox').install(app, express, port);
 // Campaign Builder (CAMPAIGN_BUILDER flag, test servers only; never on 3000).
-require('./retort/campaignBuilderRoutes').install(app, express, port, sharedState, { busy: () => typeof inputTaskInFlight !== 'undefined' && inputTaskInFlight });
+require('./retort/campaignBuilderRoutes').install(app, express, port, sharedState, { broadcast, busy: () => typeof inputTaskInFlight !== 'undefined' && inputTaskInFlight });
 // world1 FOOT_EXITS / QUEST_LOCAL: exits walked on foot and local quest spots reached are saved in the room database.
 const World1Db = { read: () => JSON.parse(sharedState.getRoomNameDatabase() || '{}'), write: db => { const text = JSON.stringify(db); sharedState.setRoomNameDatabase(text); return text; } };
 app.post('/exits/traversed', express.json({ limit: '2kb' }), (req, res) => {
@@ -123,7 +134,7 @@ app.get('/combat-updates2', (req, res) => {
         }
     };
     clients.push(client);
-    client.send({ type: 'dungeonRun', runId: sharedState.getDungeonRunId() });
+    client.send({ type: 'dungeonRun', runId: sharedState.getDungeonRunId(),floorToken:require('./retort/hostLocalFloors').token(sharedState),floorContext:sharedState.getActiveCityFloor() });
     client.send({ type: 'campaign_memory', runId: sharedState.getDungeonRunId(), records: CampaignMemory.exportRecords(sharedState).slice(-128) });
     client.send(actionDice.snapshot());
     client.send({ type: 'game_pause', paused: sharedState.getGamePaused(), runId: sharedState.getDungeonRunId() });
@@ -147,13 +158,29 @@ app.get('/combat-updates2', (req, res) => {
 
 // Function to broadcast to all connected clients
 function broadcast(data) {
+    if(data&&typeof data==='object')data={...data,floorToken:require('./retort/hostLocalFloors').token(sharedState),floorContext:sharedState.getActiveCityFloor()};
     if (data && data.type === 'character_dialogue') SidVoice.prefetch(data.dialogue);
     if (data.type === 'dungeonLoaded' && data.dungeon) {
         console.info('[DungeonDelivered]', JSON.stringify(summarizeDungeon(data.dungeon)));
     }
     clients.forEach(client => client.send(data));
+    try { QuestScenes.onDialogue(sharedState,data,broadcast); }
+    catch(error) { console.warn('[QuestNotice]',error.message); }
 }
 sharedState.emitter.on('combat_life', status => broadcast({ type: 'life_status', ...status }));
+sharedState.emitter.on('combat_life_action', notice => {
+  console.info('[CombatLifeAction]', JSON.stringify(notice));
+  const safe = notice.message.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+  broadcast({ type: 'combat_log', log: safe });
+  require('./assets/actionFeedback').publish(broadcast, sharedState, notice);
+});
+sharedState.emitter.on('game_action_notice', notice => {
+  if (typeof notice?.message !== 'string' || typeof notice.title !== 'string') return;
+  console.info('[GameActionNotice]', JSON.stringify(notice));
+  const safe = notice.message.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
+  broadcast({ type: 'combat_log', log: safe });
+  require('./assets/actionFeedback').publish(broadcast, sharedState, notice);
+});
 require('./retort/campaignPlanningLog').watch(sharedState);
 
 app.post('/debug/dungeon-rendering', (req, res) => {
@@ -305,12 +332,30 @@ app.post('/combat/move', async (req, res) => {
   try { res.json(await actionDice.moveCombatant(req.body || {})); }
   catch (error) { res.status(409).json({ error: error.message }); }
 });
+app.post('/combat/equipment', (req, res) => {
+  if (!actionDice.changeEquipment) return res.status(409).json({ error: 'Wait for your turn before changing equipment.' });
+  try {
+    const result = actionDice.changeEquipment(req.body || {});
+    const event = { ...result, type: 'economy_result', eventId: require('node:crypto').randomUUID(), runId: sharedState.getDungeonRunId(),
+      geoKey: req.body.geoKey, updatedGameConsole: sharedState.getUpdatedGameConsole(), roomNameDatabaseString: sharedState.getRoomNameDatabase(),
+      combatCharactersString: sharedState.getCombatCharactersString(), population: sharedState.getRoomPopulation(req.body.geoKey) };
+    broadcast(event); res.json(event);
+  } catch (error) { res.status(409).json({ error: error.message }); }
+});
 
 const tasks = new Map();  // { taskId: { status: 'processing', result: null } }
 const startupTasks = require('./retort/startupTasks').create({ tasks, scope: () => ({
   model: require('./retort/gameModels').current().id, world: require('./retort/settingLayer').current()
 }) });
 let inputTaskInFlight = false;
+function finishPendingRespawn() {
+  if (inputTaskInFlight || actionDice.active || !CombatLife.status(sharedState).pendingRespawn) return;
+  try {
+    const event = require('./retort/playerRespawn').complete(sharedState);
+    if (event) { broadcast(event); broadcast({ type: 'life_status', ...CombatLife.status(sharedState) }); }
+  } catch (error) { console.error('[PlayerRespawn]', error.message); }
+}
+app.use((req, res, next) => { res.once('finish', () => setImmediate(finishPendingRespawn)); next(); });
 
 // Isolated exhibits use the production builder/renderer but never touch campaign state.
 const environmentLabCache = new Map();
@@ -378,7 +423,7 @@ app.post('/spellbook/view', (req, res) => {
 });
 app.post('/quest-scenes/view', (req,res) => {
   const ready=prepareQuestScene(req); if(ready.error)return res.status(ready.status).json({error:ready.error});
-  const result=QuestScenes.view(sharedState,req.body.actor);
+  const result=QuestScenes.view(sharedState,req.body.actor,broadcast);
   if(result.error)return res.status(409).json(result);
   res.json(result);
 });
@@ -386,7 +431,7 @@ app.post('/quest-scenes/choose', (req,res) => {
   const ready=prepareQuestScene(req); if(ready.error)return res.status(ready.status).json({error:ready.error});
   inputTaskInFlight=true;
   try {
-    const result=QuestScenes.choose(sharedState,populationService,req.body);
+    const result=QuestScenes.choose(sharedState,populationService,req.body,broadcast);
     if(result.error)return res.status(result.status||409).json({error:result.error});
     const coords=sharedState.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`;
     const event={...result,type:'quest_scene_result',eventId:require('node:crypto').randomUUID(),runId:sharedState.getDungeonRunId(),geoKey,
@@ -462,7 +507,7 @@ app.post('/spells/cast', async (req, res) => {
 app.post('/combat/care/view', (req, res) => {
   const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
   const care = SpellSystem.party(sharedState.getUpdatedGameConsole()).flatMap(a => CombatLife.careChoices(sharedState, a.name).map(c => ({ ...c, actor: a.name })));
-  res.json({ care });
+  res.json({ care, injuries: CombatLife.status(sharedState).injuries });
 });
 app.post('/secret-doors/action', (req, res) => {
   const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
@@ -484,7 +529,7 @@ app.post('/secret-doors/action', (req, res) => {
 app.post('/combat/wait', (req, res) => {
   const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
   const result = CombatLife.wait(sharedState, req.body); if (result.error) return res.status(409).json(result);
-  if (!result.duplicate) SpellSystem.advance(sharedState);
+  if (!result.duplicate) { SpellSystem.advance(sharedState); CombatLife.settle(sharedState); }
   const event = spellStateEvent(req.body.geoKey, result); broadcast(event); res.json(event);
 });
 app.post('/combat/care', (req, res) => {
@@ -497,25 +542,39 @@ app.post('/combat/care', (req, res) => {
     const event = spellStateEvent(req.body.geoKey, result); broadcast(event); res.json(event);
   } finally { inputTaskInFlight = false; }
 });
-app.post('/economy/view', (req, res) => {
-  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+app.post('/economy/view', async (req, res) => {
+  const ready = prepareQuestScene(req); if (ready.error) {
+    console.warn('[CommerceRejected]', JSON.stringify({ route: 'view', geoKey: req.body?.geoKey, reason: ready.error }));
+    return res.status(ready.status).json({ error: ready.error });
+  }
   try {
     const update = Economy.refresh(sharedState);
     const book = Economy.project(sharedState);
-    const result = req.body.actor ? Economy.view(sharedState, req.body.actor) : { silver: book.silver, revision: book.revision };
-    if (result.error) return res.status(409).json(result);
+    let result = req.body.actor ? Economy.view(sharedState, req.body.actor, req.body.counterId) : { silver: book.silver, revision: book.revision };
+    if (result.error) { console.warn('[CommerceRejected]', JSON.stringify({ route: 'view', geoKey: req.body.geoKey, actor: req.body.actor, reason: result.error })); return res.status(409).json(result); }
+    if (result.service && Economy.needsStock(result.service)) {
+      const runtime = require('./graveMasterProtocol').runtimeFor(sharedState);
+      await runtime.run(runtime.retort($ => Economy.prepareStocks($, sharedState, req.body.geoKey, { serviceId: result.service.id })));
+      const current = prepareQuestScene(req); if (current.error) return res.status(current.status).json({ error: current.error });
+      result = Economy.view(sharedState, req.body.actor, req.body.counterId);
+      if (result.error) return res.status(409).json(result);
+    }
     res.json({ ...result, sceneObjects: sharedState.getRoomDungeonForSimulation(sharedState.getLastCoords())?.sceneObjects,
       ...(update.changed ? { economyResult: economyStateEvent(req.body.geoKey, update) } : {}) });
-  } catch (error) { console.warn('[Economy]', error.message); res.status(503).json({ error: 'The economy records could not be read.' }); }
+  } catch (error) { console.warn('[Economy]', error.message); res.status(503).json({ error: 'The shop stock could not be authored or read. No substitute catalog was installed. Try opening services again.' }); }
 });
 app.post('/economy/action', (req, res) => {
-  const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
+  const ready = prepareQuestScene(req); if (ready.error) {
+    console.warn('[CommerceRejected]', JSON.stringify({ route: 'action', kind: req.body?.kind, geoKey: req.body?.geoKey, reason: ready.error }));
+    return res.status(ready.status).json({ error: ready.error });
+  }
   inputTaskInFlight = true;
   try {
     const result = Economy.action(sharedState, populationService, req.body);
     if (result.error) {
       if (req.body.kind === 'take') console.warn('[PickupRejected]', JSON.stringify({ geoKey: req.body.geoKey,
         item: req.body.item, player: req.body.player, reason: result.error }));
+      else console.warn('[CommerceRejected]', JSON.stringify({ route: 'action', kind: req.body.kind, geoKey: req.body.geoKey, actor: req.body.actor, item: req.body.item, reason: result.error }));
       return res.status(409).json(result);
     }
     if (['equip', 'unequip'].includes(req.body.kind) && typeof SpellSystem !== 'undefined') SpellSystem.synchronize(sharedState);
@@ -531,6 +590,13 @@ app.post('/room-population/visit', async (req, res) => {
   if (inputTaskInFlight || actionDice.active || npcAutonomyTickInFlight) return res.status(409).json({ error: 'The current action is resolving.' });
   let result = populationService.visit({ ...req.body, deferIntroductions: true });
   if (result.error) return res.status(result.status).json({ error: result.error });
+  let cityStream=null;
+  try {
+    cityStream=require('./retort/cityStreaming').advance(sharedState,req.body,{finalize:finalizeRoomDungeon});
+    if(cityStream)broadcast(cityStream);
+  } catch(error) { console.warn('[CityStream]',error.message); }
+  let crowd=null;
+  try {crowd=require('./retort/cityCrowds').synchronize(sharedState,req.body);}catch(error){console.warn('[CityCrowd]',error.message);}
   // The existing visit has already validated the observer, run and room. Additional generation owns the same action lock.
   inputTaskInFlight = true;
   try {
@@ -555,7 +621,76 @@ app.post('/room-population/visit', async (req, res) => {
     broadcast({ type: 'campaign_memory', runId: sharedState.getDungeonRunId(), records: CampaignMemory.exportRecords(sharedState).slice(-32) });
   } else if (result.dialogue.length) broadcast({ type: 'character_dialogue', dialogue: result.dialogue,
     geoKey: req.body.geoKey, runId: sharedState.getDungeonRunId() });
-  res.json(result);
+  res.json({...result,...(cityStream?{cityStream}:{}),...(crowd?{crowd}:{})});
+});
+
+app.post('/city/buildings/prepare',async(req,res)=>{
+  if(inputTaskInFlight||actionDice.active||npcAutonomyTickInFlight||sharedState.getGamePaused())return res.status(409).json({error:'The current action is resolving or the game is paused.'});
+  if(CombatLife.status(sharedState).gameOver)return res.status(409).json({error:'This adventure has ended.'});
+  inputTaskInFlight=true;
+  try{
+    const result=await require('./retort/cityInteriors').prepare(sharedState,{...req.body,floorToken:req.get('X-Holodek-Floor')},
+      {describe:require('./retort/cityFloorTravel').authorContent});
+    roomDatabaseReceiver.reset();broadcast(result);
+    console.info('[CityInterior]',JSON.stringify({geoKey:result.geoKey,buildingId:result.buildingId,targetKey:result.targetKey}));
+    res.json(result);
+  }catch(error){res.status(409).json({error:error.message});}finally{inputTaskInFlight=false;}
+});
+
+app.post('/city/buildings/travel',async(req,res)=>{
+  if(inputTaskInFlight||actionDice.active||npcAutonomyTickInFlight||sharedState.getGamePaused())return res.status(409).json({error:'Finish the current action first.'});
+  if(CombatLife.status(sharedState).gameOver)return res.status(409).json({error:'This adventure has ended.'});
+  inputTaskInFlight=true;
+  try{
+    const result=await require('./retort/cityCirculation').travel(sharedState,{...req.body,floorToken:req.get('X-Holodek-Floor')},
+      {describe:require('./retort/cityFloorTravel').authorContent});
+    roomDatabaseReceiver.reset();broadcast(result);
+    console.info('[CityCirculation]',JSON.stringify({geoKey:result.geoKey,targetKey:result.targetKey,controlId:result.controlId,direction:result.direction}));
+    res.json(result);
+  }catch(error){res.status(409).json({error:error.message});}finally{inputTaskInFlight=false;}
+});
+
+app.post('/city/commissions/request',async(req,res)=>{
+  const ready=prepareQuestScene(req);if(ready.error)return res.status(ready.status).json({error:ready.error});
+  inputTaskInFlight=true;
+  try{
+    const result=await require('./retort/cityCommissions').request(sharedState,populationService,req.body,
+      {isCurrent:()=>!actionDice.active&&!sharedState.getGamePaused()});
+    const event={...result,type:'economy_result',passive:true,eventId:require('node:crypto').randomUUID(),runId:sharedState.getDungeonRunId(),geoKey:req.body.geoKey,
+      updatedGameConsole:sharedState.getUpdatedGameConsole(),roomNameDatabaseString:sharedState.getRoomNameDatabase(),
+      combatCharactersString:sharedState.getCombatCharactersString(),population:sharedState.getRoomPopulation(req.body.geoKey)};
+    broadcast(event);res.json(event);
+  }catch(error){res.status(409).json({error:error.message});}finally{inputTaskInFlight=false;}
+});
+
+app.post('/city/services/counter',(req,res)=>{
+  const ready=prepareQuestScene(req);if(ready.error)return res.status(ready.status).json({error:ready.error});
+  try{res.json(require('./retort/serviceCounters').resolve(sharedState,req.body));}
+  catch(error){res.status(409).json({error:error.message});}
+});
+
+app.post('/city/services/encounter',async(req,res)=>{
+  const ready=prepareQuestScene(req);if(ready.error)return res.status(ready.status).json({error:ready.error});
+  inputTaskInFlight=true;
+  try{
+    const result=await require('./retort/serviceEncounters').accept(sharedState,populationService,req.body,
+      {visit:ready,isCurrent:()=>!actionDice.active&&!sharedState.getGamePaused()});
+    const event={...result,type:'economy_result',passive:true,eventId:require('node:crypto').randomUUID(),runId:sharedState.getDungeonRunId(),geoKey:req.body.geoKey,
+      updatedGameConsole:sharedState.getUpdatedGameConsole(),roomNameDatabaseString:sharedState.getRoomNameDatabase(),combatCharactersString:sharedState.getCombatCharactersString()};
+    if(result.story)broadcast({type:'encounter_story',...result.story});
+    broadcast(event);res.json(event);
+  }catch(error){res.status(409).json({error:error.message});}finally{inputTaskInFlight=false;}
+});
+
+app.post('/city/residents/meet',async(req,res)=>{
+  const ready=prepareQuestScene(req);if(ready.error)return res.status(ready.status).json({error:ready.error});
+  inputTaskInFlight=true;
+  try{
+    const result=await require('./retort/cityCrowds').meet(sharedState,populationService,req.body,{isCurrent:()=>!actionDice.active&&!sharedState.getGamePaused()});
+    const event={...result,type:'economy_result',passive:true,eventId:require('node:crypto').randomUUID(),runId:sharedState.getDungeonRunId(),geoKey:req.body.geoKey,
+      updatedGameConsole:sharedState.getUpdatedGameConsole(),roomNameDatabaseString:sharedState.getRoomNameDatabase(),combatCharactersString:sharedState.getCombatCharactersString()};
+    broadcast(event);res.json(event);
+  }catch(error){res.status(409).json({error:error.message});}finally{inputTaskInFlight=false;}
 });
 
 app.post('/room-population/engage', async (req, res) => {
@@ -615,6 +750,8 @@ app.post('/processInput7', async (req, res) => {
   // Pickup is mechanical and view-validated by /economy/action, never adjudicated by narration.
   if (/^\s*(?:take|pick\s+up|collect)\b/i.test(req.body?.userInput || ''))
     return res.status(409).json({ error: 'Take only objects currently shown in Objects in Room. Refresh the page to use the current pickup controls.' });
+  if (/^\s*(?:buy|purchase|sell|trade|shop)\b/i.test(req.body?.userInput || ''))
+    return res.status(409).json({ error: 'Trading uses verified stock and prices. Refresh the page, then use Trade or buy [item] from [name].' });
   if (/^\s*(?:cast|scribe|prepare\s+spells)\b/i.test(req.body?.userInput || ''))
     return res.status(409).json({ error: 'Use Spells or the scroll Scribe option; spell effects are engine-verified, not narrated.' });
   // If we're still in the character generation / review phase, don't let the main Retort flow
@@ -713,6 +850,8 @@ app.post('/startGameWithCharacter', async (req, res) => {
   if (!req.body?.character || typeof req.body.character !== 'object' || Array.isArray(req.body.character))
     return res.status(400).json({ error: 'Missing starting character.' });
   try {
+    // A finalized character after permanent game over starts a new run, not the old startup receipt.
+    if (!inputTaskInFlight && CombatLife.status(sharedState).gameOver) startupTasks.clear();
     const existing = startupTasks.find(req.body, sharedState.getDungeonRunId());
     if (existing) return res.status(202).json({ taskId: existing.taskId, joined: true });
   } catch (error) { return res.status(409).json({ error: error.message }); }
@@ -776,18 +915,20 @@ app.post('/startGameWithCharacter', async (req, res) => {
       // so they appear in the "game console" (above the prompt) using the original methodology.
       // Seed the updatedGameConsole with the PC stats so the main console display (and the LLM prompt)
       // includes them above the prompt, exactly as the last-known-good 1/2 path in chatbotprocessinput did.
-      const initialWorld = buildInitialWorldConsole(req.body.initialState);
+      const startupSetting = typeof require === 'function' && WorldFlags.on('HOMEBREW') ? require('./retort/settingLayer').current() : null;
+      const initialWorld = buildInitialWorldConsole(req.body.initialState, startupSetting);
       { const Setting = typeof require === 'function' ? require('./retort/settingLayer') : null, b = Setting && WorldFlags.on('HOMEBREW') ? Setting.current() : null;
         if (b) { // world1 HOMEBREW: the first room comes from the world's bible, never the Children of the Grave Ruined Temple Entrance.
           const room = Setting.firstRoom(b), db = JSON.parse(initialWorld.roomNameDatabaseString); const cell = db['0,0,0'] ||= {};
           Object.assign(cell, { name: room.name, description: room.description, setting: b }); delete cell.complexId;
           Setting.applyStartRoom(cell,b);
           initialWorld.roomNameDatabaseString = JSON.stringify(db);
-          initialWorld.console = initialWorld.console.replace(/^Room Name:.*$/m, `Room Name: ${room.name}`).replace(/^Room Description:.*$/m, `Room Description: ${room.description}`);
+          initialWorld.console = initialWorld.console.replace(/^Room Name:.*$/m, `Room Name: ${room.name}`).replace(/^Room Description:.*$/m, `Room Description: None`);
           console.log(`[Server] Homebrew start: ${b.name} -> first room "${room.name}"`); } }
       sharedState.setRoomNameDatabase(initialWorld.roomNameDatabaseString);
       sharedState.setPersonalNarrative('');
       sharedState.setUpdatedGameConsole(buildInitialGameConsole(initialWorld.console, characterData, partyNpcData));
+      if (typeof require === 'function') await require('./retort/genreAbilities').ensure(sharedState);
       Economy.start(sharedState, characterData, partyNpcData);
       tasks.get(taskId).phase = 'party-profiles';
       const profiles = typeof generatePartyCharacterProfiles === 'function' ? await startupTasks.track(taskId,
@@ -1159,7 +1300,7 @@ app.get('/get-room-dungeon', (req, res) => {
   const busy = inputTaskInFlight || npcAutonomyTickInFlight || actionDice.active || [...tasks.values()].some(t => t.status === 'processing');
   const dungeon = busy ? sharedState.getRoomDungeon({ x, y, z }) :
     require('./retort/porticoUpgrade').prepareRoom(sharedState, `${x},${y},${z}`, { finalize: finalizeRoomDungeon });
-  res.json({ dungeon: dungeon || null });
+  res.json({ dungeon: dungeon || null,floorToken:require('./retort/hostLocalFloors').token(sharedState),floorContext:sharedState.getActiveCityFloor() });
 });
 
 // DISABLED: the 45s "space weather" / dungeon sim reports (runNpcAutonomyTick + broadcast) were causing Objects in Room to respawn after equipping/taking items (despite guards in retort).
@@ -1199,9 +1340,18 @@ require('./saveGames').install(app, { state: sharedState,
     return audio; }
 });
 
-const lifecycle = require('./serverLifecycle').install(app, { port, state: sharedState, dice: actionDice,
+const lifecycle = require('./serverLifecycle').install(app, { port, state: sharedState, dice: actionDice, ownership: processOwner,
   isBusy: () => inputTaskInFlight || npcAutonomyTickInFlight || [...tasks.values()].some(t => t.status === 'processing'),
-  beforeClose: () => { for (const client of clients.slice()) client.res.end(); },
+  beforeClose: async () => {
+    for (const client of clients.slice()) client.res.end();
+    const cleanup = await Promise.allSettled([
+      require('./retort/roomBuildQueue').close(sharedState), require('./retort/websiteAi').service().close(),
+      require('./retort/pcModelHost').close(), SidVoice.close(),
+      require('./retort/audioPalette').close(), require('./retort/memorySemantic').close()
+    ]);
+    for (const result of cleanup) if (result.status === 'rejected') console.error('[ServerShutdown]', result.reason?.message);
+    console.info('[GameProcesses]', JSON.stringify({ phase: 'work-cancelled', ownerPid: process.pid }));
+  },
   flush: () => serverLog?.close()
 });
 lifecycle.listen();

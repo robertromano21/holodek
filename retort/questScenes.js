@@ -5,6 +5,7 @@ const Inventory = require('../assets/inventoryUi');
 const Readables = require('../assets/readableItems');
 const Pantheon = require('../assets/pantheonCharacters');
 const Factions = require('./factionMemory');
+const Defeats = require('./questDefeatEvidence');
 const { prepare: prepareRead } = require('./readableActions');
 const { isReservedBossKeyName } = require('./bossGate');
 const Q = () => require('./questProgress');
@@ -26,9 +27,9 @@ function compile(task, database, currentRoom, options = {}) {
   if(contract.checks.some(c=>['unsupported_requirement','invalid_requirement'].includes(c.evidence.reason))||
       !Q().verifiedTaskCompletion(task,{checks:contract.checks.map(c=>({...c,passed:true}))}))return task;
   const bindings = Q().deliveryBindings(task), first = task.requiredElements?.[0];
-  const roomKey = bindings[0]?.coords || I.roomKey(first?.placement) || I.roomKey(currentRoom), room = database[roomKey];
+  const roomKey = task.researchReturn?.roomKey||bindings[0]?.coords || I.roomKey(first?.placement) || I.roomKey(currentRoom), room = database[roomKey];
   if (!room?.name) return task;
-  const actors = residents(room), contact = actors.find(a => a.name === bindings[0]?.recipient) ||
+  const actors = residents(room), contact = actors.find(a => a.name === (task.researchReturn?.actor||bindings[0]?.recipient)) ||
     actors.find(a => room.inhabitants?.actors?.[a.name]?.deityId && I.allegiance(a,room.monsters?.state) === 'Neutral') ||
     actors.find(a => I.allegiance(a,room.monsters?.state) !== 'Hostile');
   const documents = (room.readables || []).filter(r => r.chapters?.[0]?.text?.trim() && room.objects?.some(o => key(o.name) === key(r.name)));
@@ -107,7 +108,7 @@ function valid(story,database) {
     if (!s || !room?.name || !['dialogue','read','objective','encounter','complete',...(story.family==='regional-v1'?['escort']:[])].includes(s.kind)) return false;
     const reserved = name => story.family==='regional-v1' && room.regionalSite?.storyId===story.id && room.regionalSite.actors.some(a=>a.name===name);
     if (s.actor && s.kind!=='escort' && !residents(room).some(a=>a.name===s.actor) && !reserved(s.actor)) return false;
-    if (s.kind==='read' && ![...(room.readables||[]),...(room.inscriptions||[])].some(r=>r.id===s.readableId&&r.name===s.name&&r.chapters?.[0]?.text?.trim())) return false;
+    if (s.kind==='read' && ![...(room.readables||[]),...(room.inscriptions||[])].some(r=>r.id===s.readableId&&r.name===s.name&&r.chapters?.[(s.chapter||1)-1]?.text?.trim())) return false;
     if (s.kind==='encounter' && (!s.targets?.length || s.targets.some(name=>!residents(room).some(a=>a.name===name&&I.allegiance(a,room.monsters?.state)==='Hostile') &&
       !(reserved(name)&&room.regionalSite.actors.some(a=>a.name===name&&a.allegiance==='Hostile'))))) return false;
     if(s.options!==undefined&&(!Array.isArray(s.options)||s.options.some(o=>!o||typeof o.id!=='string'||typeof o.label!=='string')))return false;
@@ -121,6 +122,7 @@ function valid(story,database) {
   return check('hook') && visited.size===nodes.size;
 }
 function runtime(task,database,create=false) {
+  database=require('./hostLocalFloors').forTask(database,task);
   const home = database[task?.story?.hook.roomKey]; if (!home) return null;
   if (!home.questScenes && create) home.questScenes = {};
   let record = home.questScenes?.[task.story.id];
@@ -140,7 +142,7 @@ function isComplete(task,database) {
     if (h.to!==expected || h.evidence?.kind!==s.kind) return false;
     if(s.kind==='read') {
       const doc=[...(database[s.roomKey]?.readables||[]),...(database[s.roomKey]?.inscriptions||[])].find(r=>r.id===s.readableId);
-      if(!Readables.hasContent(doc)||h.evidence.readableId!==doc.id||h.evidence.contentHash!==I.hash(doc.chapters[0].text))return false;
+      if(!Readables.hasContent(doc)||h.evidence.readableId!==doc.id||(h.evidence.chapter||1)!==(s.chapter||1)||h.evidence.contentHash!==I.hash(doc.chapters[(s.chapter||1)-1]?.text))return false;
     }
     if(s.kind==='objective'&&(!h.evidence.checks?.length||h.evidence.checks.some(c=>c.passed!==true)))return false;
     if(s.kind==='encounter'&&!encounterResolved(s,database))return false;
@@ -172,7 +174,9 @@ function active(state) {
 function encounterResolved(stage,database) {
   return stage.targets.every(name=> {
     const original=database[stage.roomKey]?.inhabitants?.actors?.[name];
-    if(stage.defeatOnly&&original)return original.status==='dead'&&Number.isFinite(original.hp)&&original.hp<=0;
+    if(Defeats.evidence(database,stage.roomKey,name))return true;
+    if(stage.defeatOnly&&original)return Number.isFinite(original.hp)&&original.hp<=0&&
+      (original.status==='dead'||I.isDown(original));
     if(original?.status==='recruited')return true;
     const sheets=Object.values(database).flatMap(roomSheets).filter(s=>s.name===name);
     return sheets.length>0 && sheets.every(s=>s.hp<=0);
@@ -232,11 +236,11 @@ function describe(task,database) {
     (encounter?` Required encounter: ${encounter.text}`:'')+
     ` Finish with ${conclusion} in ${database[resolution.roomKey]?.name} (${resolution.roomKey}); explicit resolution is required.`;
 }
-function context(state,a,actorName) {
-  const coords=state.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`,s=a.task.story.stages.find(s=>s.id===a.record.stage);
+function context(state,a,actorName,stage=null) {
+  const coords=state.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`,s=stage||a.task.story.stages.find(s=>s.id===a.record.stage);
   const text=state.getUpdatedGameConsole(),dungeon=state.getRoomDungeonForSimulation?.(coords)||state.getRoomDungeon?.(coords);
   const roster=JSON.parse(state.getCombatCharactersString()||'[]'),pc=roster.find(a=>a.type==='pc'&&(a.hp??1)>0);
-  if(I.roomKey(field(text,'Coordinates'))!==geoKey||s.roomKey!==geoKey||!pc)return {error:'Travel to the named scene room first.'};
+  if(I.roomKey(field(text,'Coordinates'))!==geoKey||!require('./hostLocalFloors').matches(a.database,s.roomKey,geoKey,a.task)||!pc)return {error:'Travel to the named scene room first.'};
   const delegated=s.actor&&Q().deliveryBindings(a.task).find(b=>b.recipient===s.actor&&b.coords===geoKey);
   let name=delegated?Q().deliveryRecipient(a.task,a.database,delegated).name:s.actor;
   const dead=!delegated && s.actor && (a.database[geoKey]?.inhabitants?.actors?.[s.actor]?.status==='dead'||
@@ -255,9 +259,49 @@ function context(state,a,actorName) {
   }
   return {s,coords,geoKey,text,dungeon,roster,pc,actor,record:actor&&pop?.actors?.[actor.name],population:pop,dead,writingName};
 }
-function view(state,actorName) {
+function onEncounter(state,actorName,broadcast) {
+  if(typeof broadcast!=='function'||!actorName)return false;
+  const task=state.getCurrentTasks?.()?.[state.getCurrentTaskIndex?.()||0];
+  if(!task?.story||task.seedNoticeId||task.status==='Completed')return false;
+  const a=active(state),s=a?.task.story.stages.find(s=>s.id===a.record.stage);
+  if(s?.id!=='hook'||s.kind!=='dialogue')return false;
+  const c=context(state,a,actorName);
+  if(c.error||c.dead||!c.actor||c.record?.discoveryState==='pending')return false;
+  return require('./questSeedingNotice').publish(state,a.task,broadcast);
+}
+function onDialogue(state,event,broadcast) {
+  if(!['character_dialogue','encounter_story'].includes(event?.type)||!Array.isArray(event.dialogue))return false;
+  const coords=state.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`;
+  if(event.runId!==state.getDungeonRunId()||event.geoKey!==geoKey||
+    event.floorToken&&event.floorToken!==require('./hostLocalFloors').token(state))return false;
+  const task=state.getCurrentTasks?.()?.[state.getCurrentTaskIndex?.()||0];
+  if(!task?.story||task.seedNoticeId||task.status==='Completed')return false;
+  const pc=JSON.parse(state.getCombatCharactersString()||'[]').find(a=>a.type==='pc');
+  for(const row of event.dialogue) {
+    if(typeof row.line!=='string'||!row.line.trim()||row.recipient&&key(row.recipient)!=='pc'&&key(row.recipient)!==key(pc?.name))continue;
+    if(onEncounter(state,row.speaker,broadcast))return true;
+  }
+  return false;
+}
+function view(state,actorName,broadcast) {
   const a=refresh(state);if(!a)return {error:'No staged quest is active.'};
-  const c=context(state,a,actorName);if(c.error)return c;
+  const c=context(state,a,actorName);
+  if(c.error) {
+    const known=new Set(['hook',a.record.stage,...(a.record.history||[]).flatMap(h=>[h.from,h.to])]);
+    let inquiryError=null;
+    for(const stage of a.task.story.stages) {
+      if(!actorName||!stage.actor||!known.has(stage.id))continue;
+      const binding=Q().deliveryBindings(a.task).find(b=>b.recipient===stage.actor&&b.coords===stage.roomKey);
+      const name=binding?Q().deliveryRecipient(a.task,a.database,binding).name:stage.actor;
+      if(key(name)!==key(actorName))continue;
+      const contact=context(state,a,actorName,stage);if(contact.error){inquiryError=contact;continue;}
+      const current=a.task.story.stages.find(s=>s.id===a.record.stage);
+      return {scene:{storyId:a.task.story.id,title:a.task.story.title,stageId:current.id,revision:a.record.revision,
+        roomKey:contact.geoKey,actor:contact.actor?.name||null,inquiry:true,
+        text:'The quest is still in progress.\n'+current.text,options:[],description:describe(a.task,a.database)}};
+    }
+    return inquiryError||c;
+  }
   const s=c.s, options=(s.kind==='read'?[]:s.options||[]).filter(o=> {
     if(!['receive','recruit'].includes(o.action))return true;
     if(c.dead||!c.actor||c.actor.type==='npc'||I.allegiance(c.actor)==='Hostile')return false;
@@ -272,26 +316,33 @@ function view(state,actorName) {
   if(s.kind==='read')options.push({id:'read',label:'Read '+s.name,action:'read'});
   if(s.kind==='encounter')for(const name of s.targets)if(c.roster.some(a=>a.name===name&&a.hp>0&&a.type==='monster'))
     options.push({id:'attack:'+name,label:'Attack '+name,action:'attack',target:name});
+  // Only an explicitly opened, validated conversation delivers the hook; ordinary view/poll calls stay silent.
+  if(s.kind==='dialogue')onEncounter(state,c.actor?.name,broadcast);
   return {scene:{storyId:a.task.story.id,title:a.task.story.title,stageId:s.id,revision:a.record.revision,
     roomKey:s.roomKey,actor:c.actor?.name||null,text:c.dead?`${s.actor} has died. The surviving ${c.writingName} records the remaining obligation.`:
       s.actor&&c.actor&&s.actor!==c.actor.name?s.text.replace(s.actor+':',c.actor.name+':')+'\nActing for '+s.actor+'.':s.text,
     options,description:describe(a.task,a.database)}};
 }
-function onRead(state,plan) {
+function onRead(state,plan,broadcast) {
   if(!plan?.allowed||plan.inspect)return;
   const a=active(state);if(!a)return;
   const s=a.task.story.stages.find(s=>s.id===a.record.stage);
   if(s?.id==='hook'&&s.kind==='dialogue'&&a.task.story.fallback.readableId===plan.record.id&&s.roomKey===plan.sourceKey) {
     const c=context(state,a);
     if(!c.error&&c.dead) {
+      require('./questSeedingNotice').publish(state,a.task,broadcast);
       transition(a.record,s,s.options[0].next,s.options[0].id,{source:'engine-interaction-v1',readableId:plan.record.id});
       state.setRoomNameDatabase(JSON.stringify(a.database));refresh(state);
     }
     return;
   }
   if(s?.kind!=='read'||s.readableId!==plan.record.id||s.roomKey!==plan.sourceKey)return;
-  if(plan.chapter!==1)return;
-  transition(a.record,s,s.options[0].next,s.options[0].id,{readableId:plan.record.id,contentHash:I.hash(plan.record.chapters[0].text)});
+  if(plan.chapter!==(s.chapter||1))return;
+  if(s.id==='hook') {
+    if(context(state,a).error)return;
+    require('./questSeedingNotice').publish(state,a.task,broadcast);
+  }
+  transition(a.record,s,s.options[0].next,s.options[0].id,{readableId:plan.record.id,chapter:plan.chapter,contentHash:I.hash(plan.record.chapters[plan.chapter-1].text)});
   state.setRoomNameDatabase(JSON.stringify(a.database));refresh(state);
 }
 function inventoryWrite(text,items,properties) {
@@ -318,9 +369,10 @@ function recruitmentGuard(state,input) {
   const binding=contact&&Q().deliveryBindings(a.task).find(b=>b.recipient===contact);
   const name=binding?Q().deliveryRecipient(a.task,a.database,binding).name:contact;
   if(!name||key(match[1])!==key(name)&&!key(name).startsWith(key(match[1])+' '))return null;
+  if(a.record.stage==='resolution')return {actionOnly:true,content:`The quest is ready for its final choice. Open ${name}'s Quest Conversation and choose whether they join the party or travel separately. No additional defeat or handoff is required by this stage.`};
   return {actionOnly:true,content:`${name}'s invitation is part of the quest bargain. Fulfill the listed objective, then use Quest Conversation to choose whether they join. This preserves the pending handoff and other obligations.`};
 }
-function choose(state,service,request) {
+function choose(state,service,request,broadcast) {
   if(state.getGamePaused?.())return {error:'Resume the game before choosing.',status:409};
   const a=active(state);if(!a)return {error:'No staged quest is active.',status:409};
   const coords=state.getLastCoords(),geoKey=`${coords.x},${coords.y},${coords.z}`;
@@ -336,12 +388,13 @@ function choose(state,service,request) {
     return {...result,updatedGameConsole:state.getUpdatedGameConsole()};
   }
   if(option.action==='read') {
-    const plan=prepareRead({input:'read '+c.s.name,consoleText:c.text,database:a.database,dungeon:c.dungeon,actor:c.pc,geoKey});
+    const plan=prepareRead({input:`read chapter ${c.s.chapter||1} of `+c.s.name,consoleText:c.text,database:a.database,dungeon:c.dungeon,actor:c.pc,geoKey});
     if(!plan?.allowed)return {error:plan?.message||'The writing cannot be read.',status:409};
-    onRead(state,plan);return {content:plan.message,actionOnly:true};
+    require('./bookResearch').record(state,plan);onRead(state,plan,broadcast);return {content:plan.message,actionOnly:true};
   }
   if(option.action==='attack')return {command:'attack '+option.target,actionOnly:true};
   if(c.s.id==='resolution'&&!goal(a.task,a.database,c.text))return {error:'The bound objective is no longer satisfied. Restore its listed requirements first.',status:409};
+  onEncounter(state,c.actor?.name,broadcast);
   const items=field(c.text,'Inventory').split(',').map(s=>s.trim()).filter(s=>s&&!/^(none|empty)$/i.test(s));
   const properties=Inventory.parseProperties(field(c.text,'Inventory Properties'));
   let text=c.text, content=c.s.text;
@@ -386,8 +439,9 @@ function choose(state,service,request) {
     state.setLastQuestUpdate?.('Task completed: '+a.task.desc);
     text=write(state.getUpdatedGameConsole(),'Quest Progress',`Step ${index+1}/3: Completed; verified objective and story resolution. ${a.task.desc}`);
     text=Q().writeQuestRequirements(text,a.task,a.database);state.setUpdatedGameConsole(text);
+    require('./completionFeedback').task(state,a.task,index);
     content+='\nQuest step completed by verified actions.';
   } else refresh(state);
   return {content,actionOnly:true,population:c.population};
 }
-module.exports={compile,valid,runtime,isComplete,describe,refresh,view,choose,onRead,recruitmentGuard};
+module.exports={compile,valid,runtime,isComplete,describe,refresh,view,choose,onRead,onEncounter,onDialogue,recruitmentGuard};

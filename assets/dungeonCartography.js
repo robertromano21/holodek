@@ -160,7 +160,9 @@
       const geoKey = dungeon?.geoKey;
       if (!runId || !geoKey || dungeon._meta?.runId && dungeon._meta.runId !== runId ||
           !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 512 || height > 512) return null;
-      const key = `${runId}:${geoKey}`;
+      const layer=dungeon.sceneSpec?.city?.architecture;
+      const suffix=layer?.hostKey===geoKey&&layer.buildingId&&Number.isInteger(layer.floor)?`:building:${layer.buildingId}:floor:${layer.floor}`:'';
+      const key = `${runId}:${geoKey}${suffix}`;
       let state = rooms.get(key);
       if (state && (state.width !== width || state.height !== height)) { rooms.delete(key); state = null; }
       if (state) { rooms.delete(key); rooms.set(key, state); return state; }

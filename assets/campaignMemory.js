@@ -55,14 +55,14 @@
     if (raw.excerpted === true) record.excerpted = true;
     if (raw.profile && typeof raw.profile === 'object') record.profile = {
       personality: clean(raw.profile.personality, 220), voice: clean(raw.profile.voice, 140),
-      history: clean(raw.profile.history, 600), motivation: clean(raw.profile.motivation, 180) };
+      history: clean(raw.profile.history, Infinity), motivation: clean(raw.profile.motivation, Infinity) };
     record.id = clean(raw.id, 160) || `memory-${hash(JSON.stringify(record))}`;
     return record;
   }
-  function chunks(value) {
-    const text = clean(value, 24000), result = [];
+  function chunks(value, { complete = false } = {}) {
+    const text = clean(value, complete ? Infinity : 24000), result = [];
     let remaining = text;
-    while (remaining && result.length < 32) {
+    while (remaining && (complete || result.length < 32)) {
       let end = Math.min(MAX_TEXT, remaining.length);
       if (end < remaining.length) {
         const boundary = [...remaining.slice(0, end).matchAll(/[.!?](?:["']?)(?:\s|$)|\n\s*\n/g)].at(-1);

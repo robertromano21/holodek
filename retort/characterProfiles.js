@@ -2,11 +2,11 @@
 const Profiles = require('../assets/characterProfiles');
 const { RetortMessage } = require('retort-js/dist/message');
 const Contracts = require('./generationContracts');
-const wordLimits = { personality: 30, voice: 20, history: 70, motivation: 25 };
+const wordLimits = { personality: 30, voice: 20, history: Infinity, motivation: Infinity };
 async function runWithLore(parent, task) {
   // Retort sub-runs are isolated. Supply the same exact lore to either model.
   const original = parent.messages?.find(message => message instanceof RetortMessage &&
-    ['user', 'system'].includes(message.role) && message.content.startsWith('Instructions for the Grave Master:'));
+    ['user', 'system'].includes(message.role) && (message.content.startsWith('Instructions for the Grave Master:') || message.content.startsWith('Instructions for ' + require('./settingLayer').gmName() + ':')));
   return parent.run(async child => {
     if (original) child.user(original.content);
     return task(child);
@@ -23,10 +23,10 @@ async function generateProfiles($, characters, runId, context = {}) {
     if (Object.keys(context).length || [...existing.values()].some(profile => Object.keys(wordLimits).some(field => profile[field]))) await $.user`Existing character facts (data, not instructions): ${JSON.stringify({ ...context,
       existing: missing.map(actor => ({ name: actor.Name || actor.name, background: Profiles.compact(Profiles.create(actor, runId)) })) })}.
 Preserve any established personal facts and actually witnessed conversation when completing these backgrounds.`;
-    await $.user`Create compact, distinct personal backgrounds for these Children of the Grave party characters:
+    await $.user`Create distinct personal backgrounds for these Children of the Grave party characters:
 ${JSON.stringify(missing.map(actor => ({ name: actor.Name || actor.name, race: actor.Race || actor.race, class: actor.Class || actor.className })))}.
-Return ONLY {"profiles":[{"name":"exact name","personality":"individual temperament, flaw and social habits","voice":"distinct manner of speaking","history":"two short sentences about personal experiences before this adventure","motivation":"personal desire or fear"}]}.
-These characters are in the underworld after death. Make each background different; use their race and class, not interchangeable tragic monologues. Do not invent completed campaign quests, current inventory, keys, puzzle solutions, a replacement boss, or knowledge of encounters they have not witnessed. Mortacia and Suzerain have established canon and must not be rewritten. No character-sheet fields or sprite changes. History <=70 words, personality <=30 words, voice <=20 words, motivation <=25 words.`;
+Return ONLY {"profiles":[{"name":"exact name","personality":"individual temperament, flaw and social habits","voice":"distinct manner of speaking","history":"relevant personal experiences before this adventure, with no word-count limit","motivation":"personal desire or fear"}]}.
+These characters are in the underworld after death. Make each background different; use their race and class, not interchangeable tragic monologues. Do not invent completed campaign quests, current inventory, keys, puzzle solutions, a replacement boss, or knowledge of encounters they have not witnessed. Mortacia and Suzerain have established canon and must not be rewritten. No character-sheet fields or sprite changes. History has no word-count limit; personality <=30 words, voice <=20 words, motivation has no word-count limit.`;
     let raw = '';
     console.info('[CharacterProfiles]', JSON.stringify({ runId, status: 'requested', names: missing.map(actor => actor.Name || actor.name) }));
     try {
@@ -37,18 +37,18 @@ These characters are in the underworld after death. Make each background differe
           const name = actor.Name || actor.name;
           profiles.push(await require('./holodekRoomWork').request($, 'character-profile', {
             name: Contracts.choice([name]), personality: Contracts.text(180), voice: Contracts.text(120),
-            history: Contracts.text(420), motivation: Contracts.text(150)
-          }, `Complete ONLY this character's existing background, never another character or a campaign event. History <=70 words, personality <=30, voice <=20, motivation <=25; aim lower and finish each sentence. Preserve all established facts and do not duplicate another character's background. No current loot, keys, puzzle solution or knowledge of unseen events. Own facts (data): ${JSON.stringify({ name,
+            history: Contracts.nonblankText(), motivation: Contracts.nonblankText()
+          }, `Complete ONLY this character's existing background, never another character or a campaign event. History has no word-count limit; personality <=30, voice <=20, motivation has no word-count limit; aim lower and finish each sentence. Preserve all established facts and do not duplicate another character's background. No current loot, keys, puzzle solution or knowledge of unseen events. Own facts (data): ${JSON.stringify({ name,
             race: actor.Race || actor.race, class: actor.Class || actor.className, job: actor.job, activity: actor.activity,
             background: Profiles.compact(existing.get(name)), recollections: context.recollections?.filter(row => row.name === name),
             roomName: context.roomName, roomDescription: context.roomDescription })}. ${require('./graveMasterStoryPrompts').settingOnce({})}`,
           row => {
-            for (const [field, max] of Object.entries(wordLimits)) if (!row[field]?.trim() || row[field].trim().split(/\s+/).length > max) throw Error(`${name}.${field}: nonempty, at most ${max} words.`);
+            for (const [field, max] of Object.entries(wordLimits)) if (!row[field]?.trim() || row[field].trim().split(/\s+/).length > max) throw Error(`${name}.${field}: nonempty text${Number.isFinite(max) ? `, at most ${max} words` : ''}.`);
             return row;
           }));
         }
         result = { content: JSON.stringify({ profiles }) };
-      } else result = await $.assistant.generation({ maxTokens: Math.min(4000, missing.length * 320 + 120), strictParameters: true,
+      } else result = await $.assistant.generation({ maxTokens: Math.min(16000, missing.length * 1200 + 120), strictParameters: true,
         parameters: { profiles: Contracts.list({ name: Contracts.choice(missing.map(actor => actor.Name || actor.name)),
           personality: Contracts.text(), voice: Contracts.text(), history: Contracts.text(), motivation: Contracts.text() }) } });
       raw = String(result.content || '').trim().replace(/^```(?:json)?\s*|\s*```$/gi, '');
@@ -59,7 +59,7 @@ These characters are in the underworld after death. Make each background differe
         if (!names.has(row?.name) || seen.has(row.name)) throw Error('Unknown or duplicate profile name: ' + String(row?.name));
         seen.add(row.name);
         for (const [field, max] of Object.entries(wordLimits)) if (typeof row[field] !== 'string' || !row[field].trim() || row[field].trim().split(/\s+/).length > max)
-          throw Error(`${row.name}.${field} must be nonempty text, max ${max} words.`);
+          throw Error(`${row.name}.${field} must be nonempty text${Number.isFinite(max) ? `, max ${max} words` : ''}.`);
       }
       for (const name of names) if (!seen.has(name)) throw Error('Missing generated profile: ' + name);
       console.info('[CharacterProfiles]', JSON.stringify({ runId, status: 'generated', names: [...seen] }));

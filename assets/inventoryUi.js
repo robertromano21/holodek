@@ -76,7 +76,10 @@
 
   let panel, groups, detail, equip, read, open = false, selected = null, dragged = null, replacement = null;
   let items = [], state = {}, signature = '';
-  function busy() { return !!(root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active); }
+  function busy() {
+    if (root.actionDiceState?.active?.kind === 'combat') return !root.CombatTurnUi?.canChangeEquipment?.();
+    return !!(root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active);
+  }
   function party() {
     return typeof root.getPartyInfoEntries === 'function' ? root.getPartyInfoEntries() : [];
   }
@@ -113,7 +116,7 @@
 
   function showItemActions(item) {
     selectItem(item.name);
-    if (busy() || root.GameCommandGate?.busy() || root.gamePaused) return;
+    if (busy() || root.GameCommandGate?.busy() && !root.CombatTurnUi?.canChangeEquipment?.() || root.gamePaused) return;
     inventoryLink(item.name)?.click();
     const popup = document.getElementById('equip-button')?.closest('.popup-container');
     if (!popup) return;
@@ -126,7 +129,8 @@
     panel.querySelector('.inventory-header')?.after(popup);
     panel.scrollTop = 0;
     for (const id of ['drop-button', 'equip-button']) popup.querySelector('#' + id)?.addEventListener('click', event => {
-      if (busy() || root.GameCommandGate?.busy() || root.gamePaused || id === 'drop-button' && document.getElementById('chatuserinput')?.value.trim()) {
+      if (busy() || root.GameCommandGate?.busy() && !root.CombatTurnUi?.canChangeEquipment?.() || root.gamePaused ||
+          id === 'drop-button' && (root.actionDiceState?.active || document.getElementById('chatuserinput')?.value.trim())) {
         event.preventDefault(); event.stopImmediatePropagation(); return;
       }
       toggle(false);
@@ -136,6 +140,17 @@
 
   function requestEquip(name, targetName) {
     if (busy()) { message('Finish the current action before equipping.'); return false; }
+    if (root.actionDiceState?.active?.kind === 'combat') {
+      const item = items.find(item => item.id === key(name)); if (!item) return false;
+      const actor = targetName || root.CombatTurnUi.equipmentActor();
+      const oldName = occupiedSlot(actor, item.type);
+      if (oldName && !root.confirm?.(`Replace ${oldName} with ${item.name} for ${actor}?`)) return false;
+      (async () => {
+        if (oldName && !await root.CombatTurnUi.equipment('unequip', oldName, actor)) return;
+        if (await root.CombatTurnUi.equipment('equip', item.name, actor)) toggle(false);
+      })();
+      return true;
+    }
     const item = items.find(item => item.id === key(name)), link = item && inventoryLink(item.name);
     if (item && root.CommerceUi?.drinkable(item.name)) return !!root.CommerceUi?.drink(item.name, targetName);
     const target = targetName == null ? null : party().find(entry => key(identity(entry.label)) === key(identity(targetName)));

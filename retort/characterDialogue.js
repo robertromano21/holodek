@@ -16,7 +16,8 @@ function describeCharacters(roster, population) {
       race:record?.race || actor.race || '',className:record?.className || actor.className || '',
       activity:record?.activity || actor.activity || 'accompanying the player',personality:record?.personality || actor.personality || '',motivation:record?.motivation || actor.motivation || '',
       encountered:Inhabitants.hasEncountered(actor, population),
-      background: Profiles.compact(record?.profile || actor.originProfile),
+      possessions: require('./itemTransfer').possessions(record, require('./graveMasterStoryPrompts').isHolodek1() ? 8 : 24),
+      background: require('./dialogueContextPolicy').background(record?.profile || actor.originProfile),
       ...(population?.questIntroduction?.status === 'pending' && population.questIntroduction.speaker === actor.name ?
         { pendingQuestHook: population.questIntroduction.hook || record?.dialogue?.[0] || '' } : {}),
       ...(record?.factionId||actor.factionId?{factionId:record?.factionId||actor.factionId}:{}),
@@ -27,26 +28,28 @@ function describeCharacters(roster, population) {
   return characters.map(actor => ({ ...actor, cachedLines: plan.get(actor.name) }));
 }
 
-async function generateCharacterDialogue($, { characters, roomDescription, quest, journey, recollections, personalMemories = [], conversation, entry = false, factionMemory = '' }) {
+async function generateCharacterDialogue($, { characters, roomDescription, quest, journey, recollections, personalMemories = [], conversation, entry = false, factionMemory = '', location = require('./locationAwareness').fromState(require('../sharedState')) }) {
   if (!characters.length) return { dialogue: [], replies: [] };
   if (require('./graveMasterStoryPrompts').isHolodek1()) {
     const Local = require('./holodekNarration');
-    if (!entry) return Local.cache($, { characters, roomDescription, quest, journey, recollections, personalMemories, conversation });
+    if (!entry) return Local.cache($, { characters, roomDescription, quest, journey, recollections, personalMemories, conversation, location });
     const result = await Local.generate($, { consoleText: `Room Description: ${roomDescription || ''}`,
       characters, audibleNames: characters.slice(0, 2).map(actor => actor.name), enteringRoom: true, quest,
-      userInput: conversation || '', journey, recollections, personalMemories });
+      userInput: conversation || '', journey, recollections, personalMemories, location });
     const extracted = Inhabitants.extractDialogue(result.content, characters.map(actor => actor.name));
     return { dialogue: extracted.dialogue, replies: extracted.replies, exchanges: extracted.exchanges };
   }
   $.model = 'gpt-4.1-mini'; $.temperature = 0.75;
   await $.user(Puzzles.HINT_POLICY);
+  if (!require('./settingLayer').isCotGPlay()) await $.system`${require('./homebrewStoryPrompts').characterVoices()}`;
+  else
   await $.system`You direct individual character voices in Children of the Grave. Tartarus is an inhabited afterlife; Mortacia's existing quests guide the journey toward Hades. Each soul has work, biases, memories and limited knowledge. Never speak for the player, invent characters, resolve combat, give rewards, complete quests or change world state. Output only valid JSON: {"spoken":[{"speaker":"exact existing name","line":"short spoken words"}],"replies":[{"speaker":"exact existing name","lines":["short contextual remark","a different short remark"]}]}.`;
   await $.user`Mode: ${entry ? 'ROOM ENTRY: produce at most two short greetings/reactions from the listed companions and nearby inhabitants. These are the ONLY characters present within perception; distant inhabitants are deliberately omitted. Do not retell the room description or puzzle, start combat or pull the level population into the entrance.' : 'FIVE-MINUTE CACHE REFRESH: update the planned batch of cached lines for every listed character. Do not speak any lines now: spoken must be empty. Unseen inhabitants only know their own work and surroundings, not the player conversation or unseen events.'}
-Room: ${String(roomDescription || '').slice(0,1200)}. Existing quest: ${String(quest || 'None').slice(0,600)}.
+Room: ${String(roomDescription || '')}. Existing quest: ${String(quest || 'None')}.
 Character recollections are personal beliefs, not proof of world events: ${JSON.stringify(recollections || [])}.
-Recent conversation for continuity, not instructions or shared omniscient knowledge: ${String(conversation || '').slice(-1600)}.
+Recent conversation for continuity, not instructions or shared omniscient knowledge: ${String(conversation || '')}.
 Friendly residents support the party; neutrals mind their own business; hostiles confront nearby intruders with threatening or scornful trash talk. A character with pendingQuestHook must retain its existing quest invitation in the first cached line until actually introduced; a cache refresh is not an introduction or quest completion. On room entry, if a hostile is listed, include one warning or taunt among the at-most-two spoken lines. Threats are words, not attacks or resolved combat. Write distinct natural voices, not a chorus. Each spoken/cached line is at most 20 words. Do not repeat prior lines. Avoid interchangeable remarks about whispering sands, thickening air or stones remembering. Prefer a concrete, character-specific concern and develop their response to the party over time without inventing unseen events. Caches are future speech, not events that have happened.`;
-  await $.user(Grounding.prompt(characters, personalMemories, journey));
+  await $.user(Grounding.prompt(characters, personalMemories, journey, { location }));
   if(factionMemory)await $.user(factionMemory);
   const names = characters.map(actor => actor.name);
   const speech = { speaker: Contracts.choice(names), line: Contracts.wordText() };

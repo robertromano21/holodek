@@ -9,7 +9,10 @@ const waitFor = async condition => { for (let n = 0; n < 100 && !condition(); n+
 function stampFunction(file, endMarker) {
   const source = fs.readFileSync(path.join(root, file), 'utf8'), begin = source.indexOf('function computeDungeonGeometryStamp(');
   assert.ok(begin >= 0);
-  return vm.runInNewContext('(' + source.slice(begin, source.indexOf(endMarker, begin)).trim() + ')');
+  return vm.runInNewContext('(' + source.slice(begin, source.indexOf(endMarker, begin)).trim() + ')', {
+    window:{DungeonGeometryStamp:require(path.join(root,'assets/dungeonGeometryStamp'))},
+    require:require('node:module').createRequire(path.join(root,file))
+  });
 }
 const serverStamp = stampFunction('retort/retortWithUserInput.js', 'function finalizeRoomDungeon(');
 const browserStamp = stampFunction('assets/game.js', 'function ensureDungeonGeometryStamp(');
@@ -22,6 +25,24 @@ function geometry() {
   surfaceArt: [{ kind: 'mosaic', id: 'floor-art', x: 4, y: 4 }] };
 }
 test.afterEach(() => A._reset());
+
+test('an early displayed room retries after entry work, rather than consuming its acknowledgement or cancelling new builds', () => {
+  let busy = true, count = 0; const endpoints = {};
+  const state = { getDungeonRunId: () => 'run', getLastCoords: () => ({ x: 0, y: 0, z: 0 }),
+    getRoomDungeonForSimulation: () => ({ _geometryStamp: 'built' }),
+    getRoomNameDatabase: () => JSON.stringify({ '0,0,0': { name: 'Hall', description: 'An authored hall.' } }) };
+  Routes.install({ post: (url, fn) => { endpoints[url] = fn; } }, state, { isBusy: () => busy,
+    website: { backgroundEnabled: () => true, view: () => ({ revision: 1 }) }, models: { withSnapshot: fn => fn() },
+    adjacent: { _reset() {}, queueNeighbors: () => { count++; return []; } } });
+  function request(geometryStamp = 'built') {
+    let status = 200, result; endpoints['/room-displayed']({ body: { runId: 'run', geoKey: '0,0,0', geometryStamp } },
+      { status(code) { status = code; return this; }, json(value) { result = value; } }); return { status, result };
+  }
+  assert.equal(request().result.code, 'PREFETCH_BUSY'); assert.equal(count, 0);
+  busy = false; assert.equal(request('wrong').status, 409); assert.equal(count, 0);
+  assert.equal(request().status, 200); assert.equal(count, 1);
+  assert.equal(request().result.duplicate, true); assert.equal(count, 1);
+});
 
 test('browser and server use identical geometry stamps for roofs, supports, structures, artwork and doors', () => {
   for (const dungeon of [null, {}, { cells: {}, layout: {} }, geometry(), { ...geometry(), sceneStructures: [], surfaceArt: [] }])

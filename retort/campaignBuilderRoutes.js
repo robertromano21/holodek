@@ -18,6 +18,17 @@ function install(app, express, port, sharedState, { broadcast = () => {}, busy =
   app.get('/builder/state', wrap(req => { const d = db(), key = req.query.key || cur();
     return { key, current: cur(), room: d[key] || null, modes: B.roomModes(d), rooms: Object.keys(d), setting: d['0,0,0']?.setting || null, world: d['0,0,0']?.builderWorld || null,
       worlds: fs.readdirSync(DIR).filter(f => f.endsWith('.json')).map(f => f.slice(0, -5)), objectTypes: B.OBJECT_TYPES, tiles: B.TILES }; }));
+  app.post('/builder/resident/inventory/drop', guard, json, wrap(req => {
+    const address = req.socket?.remoteAddress;
+    if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address)) throw Error('Resident inventory edits are local only.');
+    const result = require('./residentInventoryEdit').drop(sharedState, req.body);
+    broadcast({ type: 'economy_result', passive: true, eventId: require('node:crypto').randomUUID(),
+      runId: sharedState.getDungeonRunId(), geoKey: cur(), content: '',
+      updatedGameConsole: sharedState.getUpdatedGameConsole(), roomNameDatabaseString: sharedState.getRoomNameDatabase(),
+      population: sharedState.getRoomPopulation(cur()), sceneObjects: sharedState.getRoomDungeonForSimulation(coordsOf(cur()))?.sceneObjects });
+    console.info('[BuilderResidentInventoryEdit]', JSON.stringify(result));
+    return result;
+  }));
   app.post('/builder/object', guard, json, wrap(req => { const { key = cur(), object, position, toInventory } = req.body || {};
     if (toInventory) { const o = B.object(object); sharedState.setUpdatedGameConsole(B.giveToParty(sharedState.getUpdatedGameConsole() || '', o.name));
       const d = db(); (d['0,0,0'] ||= {}).builderInventory = [...(d['0,0,0'].builderInventory || []), o]; setDb(d); return { ok: true, inventory: true, object: o }; }
@@ -52,7 +63,7 @@ function install(app, express, port, sharedState, { broadcast = () => {}, busy =
   app.post('/builder/snapshot', json, wrap(() => { const file = path.join(SNAP, `snap-${Date.now()}.json`);
     fs.writeFileSync(file, JSON.stringify({ at: new Date().toISOString(), key: cur(), console: sharedState.getUpdatedGameConsole(), db: sharedState.getRoomNameDatabase(), dungeon: sharedState.getRoomDungeon(coordsOf(cur())) }));
     return { ok: true, file: path.basename(file), key: cur() }; }));
-  // Homebrew setting bible from a seed; mock-friendly (one contract call, local fallback).
+  // Production authoring always uses the model; offline fixtures require an explicit test option.
   app.post('/builder/instructions/expand', guard, json, async (req, res) => { try { const d = db(), b = d['0,0,0']?.settingDraft || d['0,0,0']?.setting || {};
     const ins = await Setting.expandInstructions(req.body.instructions, b, { runner: Setting.defaultRunner }); if (d['0,0,0']?.settingDraft) { d['0,0,0'].settingDraft.instructions = ins; setDb(d); } res.json({ ok: true, instructions: ins }); } catch (e) { res.status(400).json({ error: e.message }); } });
   // Test mode (walk, Test encounter now, test-play): the GM persona is 'Holodek'.
@@ -63,22 +74,31 @@ function install(app, express, port, sharedState, { broadcast = () => {}, busy =
   const progress = { stage: null, stages: [], error: null, at: 0 }, stage = (name, error = null) => { Object.assign(progress, { stage: name, error, at: Date.now() }); if (name && !progress.stages.includes(name)) progress.stages.push(name); console.info('[BuilderProgress]', JSON.stringify({ stage: name, error })); };
   app.get('/builder/progress', (req, res) => res.json({ ok: true, ...progress }));
   const draft = async body => { progress.stages = []; stage('setting bible'); const prompt = String(body.prompt || '').slice(0, 2000), seed = String(body.seed || prompt || 'a new world').slice(0, 200);
-    const bible = await Setting.generate(seed, { runner: Setting.defaultRunner, picked: body.genres || null });
+    const History=require('./worldAuthoringHistory'),recentWorlds=History.read();
+    const bible = await Setting.generate(seed, { runner: Setting.defaultRunner, picked: body.genres || null, prompt, instructions:body.instructions,recentWorlds });
     bible.gamePrompt = prompt;
+    bible.instructions={verbatim:String(body.instructions||'').slice(0,3000)};
     return Setting.withDraft(bible, async () => { // draft calls are translated and linted as this world, never as Children of the Grave
-      stage('master prompt'); const master = await Setting.generateMaster(bible, prompt, { runner: Setting.defaultRunner }); bible.masterDraft = master.text; bible.gmName = master.gmName;
+      stage('master prompt'); const master = await Setting.generateMaster(bible, prompt, { runner: Setting.defaultRunner,recentWorlds }); bible.masterDraft = master.text; bible.gmName = master.gmName;
       stage('world roster'); Object.assign(bible, await Setting.generateRoster(bible, { runner: Setting.defaultRunner })); // classes + races, cached in the world file
       stage('additional instructions'); const ins = await Setting.expandInstructions(body.instructions, bible, { runner: Setting.defaultRunner }); bible.instructions = ins;
-      stage('ready for review'); return { bible, master, ins }; }); };
+      History.remember(bible);stage('ready for review'); return { bible, master, ins }; }); };
   app.post('/builder/setting', guard, json, async (req, res) => { try { const { bible, master, ins } = await draft(req.body || {});
     const d = db(); (d['0,0,0'] ||= {}).settingDraft = bible; setDb(d); res.json({ ok: true, bible, master: master.text, gmName: master.gmName, instructions: ins, sections: master.sections, leaks: [...B.lintGenerated(bible), ...master.leaks] }); } catch (e) { stage(progress.stage, e.message); console.error('[BuilderProgress] ERROR', e.message); res.status(400).json({ error: e.message, stage: progress.stage }); } });
   app.post('/builder/setting/start', guard, json, wrap(req => { const d = db(), b = d['0,0,0']?.settingDraft || d['0,0,0']?.setting; if (!b) throw Error('Build a setting first.');
+    if(!b.classes||!b.races)throw Error('This older draft has no authored character roster. Build the setting again to author its races and classes before starting; no stock roster has been substituted.');
+    if(req.body.genres){
+      const selected=Setting.normalizePicked(req.body.genres),saved=Setting.normalizePicked(b.genreWeights||b.genres);
+      const signature=rows=>JSON.stringify((rows||[]).map(r=>[r.genre,Math.round(r.weight*1000)]).sort((a,b)=>a[0].localeCompare(b[0])));
+      if(selected&&signature(selected)!==signature(saved))throw Error('The selected genres changed after this world was authored. Build the setting again so its architecture, peoples and classes match before starting.');
+    }
+    Object.assign(b,Setting.validateRoster(b));
     if (typeof req.body.expanded === 'string' && b.instructions) b.instructions.expanded = req.body.expanded.slice(0, 4000);
-    Setting.setMaster(b, Setting.withInstructions(req.body.master || b.masterDraft, b.instructions)); if (req.body.gmName && /^[A-Za-z][\w' -]{2,39}$/.test(req.body.gmName)) b.gmName = req.body.gmName; Setting.setTestMode(false); if (req.body.genres) { const g = Setting.normalizePicked(req.body.genres); if (g) { b.genres = g.map(x => x.genre); b.genreWeights = g; b.genresPicked = true; } }
+    if(req.body.gmName&&!Setting.validGmName(req.body.gmName))throw Error('The GM name and optional title must contain 3-80 characters of name text.');
+    Setting.setMaster(b, Setting.withInstructions(req.body.master || b.masterDraft, b.instructions)); if (req.body.gmName) b.gmName = req.body.gmName; Setting.setTestMode(false); if (req.body.genres) { const g = Setting.normalizePicked(req.body.genres); if (g) { b.genres = g.map(x => x.genre); b.genreWeights = g; b.genresPicked = true; } }
     b.party = req.body.party !== false; b.mainCharacter = String(req.body.mainCharacter || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     B.setPlayerText('mainCharacter', b.mainCharacter); // player-provided: never filtered or renamed, even if it uses a Children of the Grave name
     if (b.mainCharacter || !b.party) Setting.setMaster(b, String(b.masterPrompt || '').replace(/\n## Main character[\s\S]*$/, '') + `\n## Main character\n${b.mainCharacter ? 'The player chose this main character (authoritative): ' + b.mainCharacter : 'The player will create the main character.'}\nParty: ${b.party ? 'the player travels with companions from this world.' : 'the player travels solo; do not add companions.'}`);
-    if (!b.classes || !b.races) Object.assign(b, Setting.localRoster(b)); // worlds drafted before rosters existed
     d['0,0,0'].setting = b; delete d['0,0,0'].settingDraft; setDb(d); Setting.setActive(b); Setting.rememberNames(b);
     return { ok: true, name: b.name, gmName: b.gmName, genres: b.genreWeights, resourceName: b.resourceName, classes: b.classes, races: b.races, firstRoom: Setting.firstRoom(b).name, party: b.party, mainCharacter: b.mainCharacter, active: !!Setting.current() }; }));
   // Prefab texture library (existing generators only) and non-destructive per-room overrides.

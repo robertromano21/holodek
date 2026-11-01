@@ -12,8 +12,9 @@ function fixture(t, { complete = async () => answer, mutate, model = 'holodek-1'
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const nativeRequire = createRequire(require.resolve('../retort/websiteAi')), module = { exports: {} }, calls = [], replies = [];
   const source = fs.readFileSync(require.resolve('../retort/websiteAi'), 'utf8');
+  let diskEngineHash = engineHash, engineBuilds = 0;
   const fakeRequire = name => name === './pcModelHost' ? { complete: async (...args) => { calls.push(args); return complete(...args); } } :
-    name === './websiteEngineBundle' ? { build: () => ({ hash:engineHash }) } :
+    name === './websiteEngineBundle' ? { build: () => { engineBuilds++; return { hash: diskEngineHash }; } } :
     name === './gameModels' ? { profile: () => ({ id: model, local: model === 'holodek-1' ? 'ollama' : undefined }) } :
     name === './worldFlags' ? { snapshot: () => ({ CITY_COMPLETE: true }) } : nativeRequire(name);
   vm.runInThisContext('(function(require,module,exports,__dirname,process){' + source + '\n})', { filename: 'websiteAi-bridge-test.js' })
@@ -33,6 +34,7 @@ function fixture(t, { complete = async () => answer, mutate, model = 'holodek-1'
       pool:[0,1,2].map(slot=>({slot,node:process.version,bundleHash,engineHash:staleEngine&&slot===2?'d'.repeat(64):engineHash})) } });
     if (packet.operation === 'pc-model-response') { replies.push(packet); release(packet); return JSON.stringify({ value: { accepted: true } }); }
     assert.equal(packet.operation, 'room-stage');
+    assert.equal(packet.engineHash, engineHash);
     assert.equal(Object.hasOwn(packet, 'credential'), false);
     const payload = Wire.unpack(packet.payload);
     assert.equal(payload.job.model, model);
@@ -46,7 +48,8 @@ function fixture(t, { complete = async () => answer, mutate, model = 'holodek-1'
     options.onLine(JSON.stringify({ type: 'done' })); return '';
   };
   const service = W.createService({ directory, run, env: { OPENAI_API_KEY: 'not-sent-to-local-model' } });
-  return { calls, replies, service, connect: () => service.connect(config), start: async () => {
+  return { calls, replies, service, connect: () => service.connect(config),
+    editEngine: () => { diskEngineHash = 'e'.repeat(64); }, get engineBuilds() { return engineBuilds; }, start: async () => {
     await service.connect(config);
     const checkpoints = [];
     await service.runRoomStage({ model, stage: 'art' }, {}, { onCheckpoint: value => checkpoints.push(value), background: false });
@@ -64,6 +67,17 @@ test('a mixed helper release rejects before dispatch, without purchasing inferen
   const f=fixture(t,{staleEngine:true});
   await assert.rejects(f.start(), e=>e.code==='ROOM_ENGINE_MISMATCH'&&e.recoverable===false);
   assert.equal(f.calls.length,0);assert.equal(f.replies.length,0);
+});
+
+test('pending local edits cannot invalidate the running release between room stages or after a status refresh', async t => {
+  const f = fixture(t); await f.connect(); f.editEngine();
+  for (let stage = 0; stage < 2; stage++) {
+    if (stage) await f.service.status();
+    await f.service.runRoomStage({ model: 'holodek-1', stage: 'art' }, {}, { onCheckpoint() {} });
+  }
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.engineBuilds, 1, 'Pin one engine snapshot, rather than hashing the mutable worktree per request');
+  assert.equal(f.service.view().release.engineHash, engineHash);
 });
 test('PC inference failure rejects the remote stage explicitly rather than substituting a website or cloud model', async t => {
   const f = fixture(t, { complete: async () => { throw Error('Local holodek-1 is unavailable.'); } });

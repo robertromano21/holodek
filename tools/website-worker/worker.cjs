@@ -343,14 +343,20 @@ function startServer({ port = 0, maxActive = 2, maxBackground = maxActive, runti
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), packet.operation === 'room-stage' ? 1200000 : 600000);
     res.on('close', () => { if (!res.writableFinished) controller.abort(); });
-    let release, job, pcSession, pcModelSession;
+    let release, job, pcSession, pcModelSession, heartbeat;
     try {
       if (packet.operation === 'room-stage') {
         if (packet.pcModel !== undefined && packet.pcModel !== 'holodek-1') throw Error('Unsupported PC room model.');
         if (packet.engineHash !== engineHash()) throw Error('Room engine version mismatch; reconnect Website AI.');
         consume(packet.lease, 'room', packet.background === true);
-        release = await acquireCompute(packet.background === true, controller.signal);
         res.setHeader('Content-Type', 'application/x-ndjson'); res.flushHeaders();
+        // Keep the SSH proxy writing even during a long/queued model request, so
+        // channel closure promptly aborts only this room stage, not shared peers.
+        heartbeat = setInterval(() => {
+          if (!res.destroyed && !controller.signal.aborted) res.write('{"type":"heartbeat"}\n');
+        }, 1000);
+        heartbeat.unref?.();
+        release = await acquireCompute(packet.background === true, controller.signal);
         const send = message => new Promise((resolve, reject) => {
           if (res.destroyed || controller.signal.aborted) return reject(Error('Room stream cancelled.'));
           const line = JSON.stringify(message) + '\n';
@@ -394,6 +400,7 @@ function startServer({ port = 0, maxActive = 2, maxBackground = maxActive, runti
       reply(400, { error: e.message });
     }
     finally {
+      clearInterval(heartbeat);
       if (pcSession) closePcSession(pcSession.id);
       pcModelSession?.controllers.delete(controller);
       if (job) {

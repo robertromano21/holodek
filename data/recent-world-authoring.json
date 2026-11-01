@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "worlds": [
+    {
+      "worldSeed": "e7e5471862ff",
+      "name": "The Brass Covenant",
+      "start": "Veyra",
+      "gmName": "Merren Voss, Keeper of the Unsealed Ledger"
+    },
+    {
+      "worldSeed": "4575211c29fb",
+      "name": "The Silt Choir",
+      "start": "Marn Vey",
+      "gmName": "Sera Venn, Keeper of the Flood Ledger"
+    },
+    {
+      "worldSeed": "14d4175ba77b",
+      "name": "The Quiet Loom",
+      "start": "Kestrel",
+      "gmName": "Vey Sable, Kestrel Civic Cartographer"
+    },
+    {
+      "worldSeed": "190ab9d98618",
+      "name": "Nacreth Beneath the Signal",
+      "start": "Nacreth",
+      "gmName": "Ilyra Venn, Keeper of the Blue Interval"
+    },
+    {
+      "worldSeed": "ad69b13531bb",
+      "name": "The Quiet Meridian",
+      "start": "Veyr",
+      "gmName": "Sable Venn, Keeper of the Quiet Meridian"
+    },
+    {
+      "worldSeed": "59fe0166d256",
+      "name": "The Lattice Below",
+      "start": "Veyra Quay",
+      "gmName": "Mira Venn, Keeper of the Quiet Record"
+    },
+    {
+      "worldSeed": "c77359f5beed",
+      "name": "The Glass Meridian",
+      "start": "Khelt Vey",
+      "gmName": "Veyra Senn, Meridian Storywright"
+    },
+    {
+      "worldSeed": "4d34a840566c",
+      "name": "The Glass Undertow",
+      "start": "Nacre-Vey",
+      "gmName": "Veyra Silt, Keeper of the Flood Ledger"
+    },
+    {
+      "worldSeed": "c43634770dd6",
+      "name": "Veyr Under Glass",
+      "start": "Veyr Basin",
+      "gmName": "Orra Kest, Basin Storywright"
+    },
+    {
+      "worldSeed": "fe93dad7134f",
+      "name": "Veyra Under Glass",
+      "start": "Nacre Reach",
+      "gmName": "Ilyra Quell, Cartographer of Uncertain Skies"
+    },
+    {
+      "worldSeed": "ae5b8128622e",
+      "name": "The City That Listens",
+      "start": "Sereh",
+      "gmName": "Tavi Nderu, Keeper of the Civic Margins"
+    },
+    {
+      "worldSeed": "540e6a6690b1",
+      "name": "The City of Falling Hours",
+      "start": "Halvek",
+      "gmName": "Eshani Daro, Keeper of the Basin Ledger"
+    },
+    {
+      "worldSeed": "cfbbfc6d7c1f",
+      "name": "The Salt Circuit",
+      "start": "Ketu Quay",
+      "gmName": "Nadira Kelm, Basin Witness"
+    },
+    {
+      "worldSeed": "71a3840b4a0c",
+      "name": "City of the Drowned Signal",
+      "start": "Morrowglass",
+      "gmName": "Laleh Vaziri, Basin Witness"
+    },
+    {
+      "worldSeed": "5d7b105e5f41",
+      "name": "The Siltglass Compact",
+      "start": "Lattice Ward",
+      "gmName": "Mara Venn, Keeper of the Siltglass Record"
+    },
+    {
+      "worldSeed": "d7e9441d7c10",
+      "name": "The Quiet Ledger",
+      "start": "Veyra",
+      "gmName": "Ilyan Voss, Keeper of the Quiet Ledger"
+    },
+    {
+      "worldSeed": "50c82f4405f6",
+      "name": "The City Beneath the Quiet",
+      "start": "Veyruun",
+      "gmName": "Sela Venn, Keeper of the Quiet Ledger"
+    },
+    {
+      "worldSeed": "6967312e21c8",
+      "name": "Veyra Under Glass",
+      "start": "Veyra",
+      "gmName": "Mara Venn, Keeper of the Quiet Ledger"
+    },
+    {
+      "worldSeed": "9679e308b189",
+      "name": "The Glass Meridian",
+      "start": "Nacre",
+      "gmName": "Serein Vale, Meridian Chronicler"
+    }
+  ]
+}

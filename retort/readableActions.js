@@ -33,7 +33,7 @@ function prepare({input,consoleText,database,dungeon,actor,geoKey}){
     if(sourceKey!==geoKey||!fixed&&!shelfKey&&!floorNames.includes(R.key(record.name))||!p||!q||length>2.5||!lineClear(dungeon,p,target))
       return{allowed:false,message:fixed?'Walk closer to that inscription.':'Walk closer to that document, or take it before reading it elsewhere.'};
   }
-  if(action.chapter!==null&&(!Number.isSafeInteger(action.chapter)||action.chapter<1||action.chapter>record.chapters.length))
+  if(!record.bookLore?.pending&&action.chapter!==null&&(!Number.isSafeInteger(action.chapter)||action.chapter<1||action.chapter>record.chapters.length))
     return{allowed:false,message:`This ${record.kind} has ${record.chapters.length} chapters. No new chapter was invented.`};
   // world1 LIBRARY_BOOKS: opening a lore book without a chapter shows its cover and table of contents.
   if(lore&&action.chapter===null)action={...action,inspect:true};

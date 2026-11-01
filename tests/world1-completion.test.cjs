@@ -89,7 +89,7 @@ test('city completion adds district population, markets and routes without rerol
   const room=rooms[0];room.inhabitants={actors:{Remembered:{hp:0,status:'dead'}}};const old=JSON.stringify(room.inhabitants);
   assert.equal(C.install(db,'0,3,0',{seed:'different'}).status,'already-installed');assert.equal(JSON.stringify(room.inhabitants),old);
 });
-test('new cities relocate their private layer instead of linking through an unrelated saved room',()=>{
+test('new cities choose another adjacent gate instead of linking through an unrelated saved street',()=>{
   const p=C.plan({city,seed:'collision'}),blocked=p.rooms[4].key,db={'0,3,0':{name:'Aster',environmentIntent:{citySite:city},exits:{}},[blocked]:{name:'Protected',exits:{},description:'Keep'}};
   const before=JSON.stringify(db[blocked]);const result=C.install(db,'0,3,0',{seed:'collision'});assert.equal(result.status,'installed');assert.equal(JSON.stringify(db[blocked]),before);
   const installed=Object.entries(db).filter(([,r])=>r.cityRoom);assert.ok(installed.every(([,r])=>r.cityRoom.routes.every(e=>db[e.to])));
@@ -100,8 +100,8 @@ test('entering city streets or interiors does not recursively install a second c
   for(const [key,room]of Object.entries(db))if(room.cityRoom)C.install(db,key,{seed:'again'});
   assert.equal(Object.keys(db).length,count);
 });
-test('private city coordinates fit the database bounds even near a remote planar edge',()=>{
-  const p=C.plan({city,genre:'underwater',anchorKey:'1000,1000,1000'});assert.deepEqual(C.validate(p),[]);
+test('legacy private city coordinates fit the database bounds even near a remote planar edge',()=>{
+  const p=C.plan({city,genre:'underwater',anchorKey:'1000,1000,1000',coordinateMode:'legacy-layers'});assert.deepEqual(C.validate(p),[]);
   assert.ok(p.rooms.every(r=>r.key.split(',').every(n=>Math.abs(Number(n))<=1000)));
 });
 test('browser synchronization preserves city exits, identity and authoritative market pressure',()=>{
@@ -113,13 +113,20 @@ test('browser synchronization preserves city exits, identity and authoritative m
   assert.deepEqual(merged[member].exits,db[member].exits);assert.deepEqual(merged[market].market,db[market].market);
   assert.ok(merged[db['0,3,0'].citySites.gateKey]);
 });
-test('city dressing uses genre building geometry and does not alter movement cells',()=>{
+test('city dressing uses native walk-in geometry and preserves the safe arrival tile',()=>{
+  try{
   for(const genre of ['western','sci-fi','underwater','solarpunk']){
-    S.setActive(S.validateBible(S.localBible(genre,[genre],'city')));const d=floor(),before=JSON.stringify(d.cells);
+    S.setActive(S.validateBible(S.localBible(genre,[genre],'city')));const d=floor(128,128),before=JSON.stringify(d.cells['32,32']);
     assert.equal(Scenery.apply(d,{city:{genre,district:'residential'}},city).status,'built');
-    assert.ok(d.sceneStructures.some(p=>p.shape===`x_${genre}_house`),genre);assert.equal(JSON.stringify(d.cells),before);
+    assert.ok(d.cityBlocks.buildings.length>0,genre);assert.ok(d.sceneStructures.some(p=>p.shape===`g_${genre}_roof_panel`),genre);
+    assert.equal(JSON.stringify(d.cells['32,32']),before);
   }
-  S.setActive(null);
+  }finally{S.setActive(null);}
+});
+test('legacy city dressing remains cell-identical with architecture expansion disabled',()=>{
+  const prior=process.env.HOLODEK_ARCHITECTURE_EXPANSION;process.env.HOLODEK_ARCHITECTURE_EXPANSION='0';
+  try{const d=floor(),before=JSON.stringify(d.cells);Scenery.apply(d,{city:{}},city);assert.equal(d.cityBlocks,undefined);assert.equal(JSON.stringify(d.cells),before);}
+  finally{process.env.HOLODEK_ARCHITECTURE_EXPANSION=prior;}
 });
 test('cavern-to-surface trade follows real open routes and propagates demand without manufacturing inventory',()=>{
   const db={'0,0,0':{classification:{biome:'cave'},exits:{up:{status:'open',targetCoordinates:'0,0,1'}}},'0,0,1':{classification:{biome:'city'},exits:{down:{status:'open',targetCoordinates:'0,0,0'}}}};
@@ -223,11 +230,12 @@ test('world context carries authoritative district tiles and actual building des
     const [x,y,z]=key.split(',').map(Number),spec={coords:{x,y,z},source:{},exits:Object.keys(db[key].exits)};
     require('../retort/worldContext').attachSceneWorldContext(spec,db,{getCurrentTasks:()=>[]},'');
     assert.equal(spec.city.genre,'western');assert.ok(spec.city.tiles.wall);assert.ok(spec.city.routes.length);
-    const d=floor();d.geoKey=key;d.roomExits={markers:spec.city.routes.map((r,i)=>({direction:r.direction,x:4+i*4,y:4,floor:0}))};
-    const before=JSON.stringify(d.cells);Scenery.apply(d,spec,city);
+    const d=floor(160,160);d.geoKey=key;d.roomExits={markers:spec.city.routes.map((r,i)=>({direction:r.direction,x:4+i*4,y:4,floor:0}))};
+    const start=JSON.stringify(d.cells['32,32']);Scenery.apply(d,spec,city);
     const entrances=d.sceneStructures.filter(p=>p.role==='city-building-entrance');assert.equal(entrances.length,spec.city.routes.length);
     assert.ok(entrances.every(p=>p.shape==='x_western_gate'&&db[p.targetCoordinates]?.name===p.label));
-    assert.equal(JSON.stringify(d.cells),before);
+    assert.equal(JSON.stringify(d.cells['32,32']),start);
+    assert.ok(d.cityBuildingEntrances.length>0);for(const e of d.cityBuildingEntrances)assert.ok(db[e.targetCoordinates]?.cityRoom);
   }finally{S.setActive(null);}
 });
 
@@ -241,7 +249,7 @@ test('Mode 4 never silently substitutes offline content after live failure, even
       await assert.rejects(S.generateMaster(b,'frontier',{runner}),/Master prompt creation failed/);
       await assert.rejects(S.expandInstructions('Keep the railway closed.',b,{runner}),/Instruction expansion failed/);
     }
-    assert.equal((await S.generate('frontier',{picked:['western']})).kind,'homebrew');
+    assert.equal((await S.generate('frontier',{picked:['western'],offline:true})).kind,'homebrew');
   }finally{process.env.HOLODEK_GENRE_EXPANSION=previous;}
 });
 

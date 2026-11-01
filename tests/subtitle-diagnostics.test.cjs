@@ -215,7 +215,7 @@ test('Vaelis waits through earlier speakers and her complete reply reaches the s
 test('waiting speakers are released when the listener leaves, the speaker dies, or the room changes', () => {
   for (const change of [f => { f.ctx.player.x = 20; }, f => { f.waiting.hp = 0; }, f => { f.ctx.dungeon.geoKey = '2,0,0'; }]) {
     const f = fixture(); f.waiting = { ...f.actor, name: 'Vaelis Thorne' }; f.ctx.actors.push(f.waiting);
-    f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [...f.event.dialogue, { speaker: f.waiting.name, line: 'I will answer next.', kind: 'canned' }] });
+    f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [...f.event.dialogue, { speaker: f.waiting.name, line: 'I will answer next.', kind: 'canned', attention: 'addressing' }] });
     assert.equal(f.root.DungeonLife.isWaitingToSpeak(f.waiting.name), true);
     change(f); assert.equal(f.root.DungeonLife.isWaitingToSpeak(f.waiting.name), false);
     f.advance(20000); f.root.DungeonLife.tick();

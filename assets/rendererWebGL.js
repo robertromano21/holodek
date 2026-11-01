@@ -1,5 +1,13 @@
 (function () {
   const seamPad = (typeof window !== 'undefined' && Number.isFinite(window.VOXEL_SEAM_PAD)) ? window.VOXEL_SEAM_PAD : 0.08;
+  function* nearbyRenderableCells(dungeon, x, y, radius) {
+    const indexed = window.DungeonPerformance?.query(dungeon, x, y, radius);
+    if (indexed) { yield* indexed; return; }
+    for (let dx = -radius; dx <= radius; dx++) for (let dy = -radius; dy <= radius; dy++) {
+      const wx = x + dx, wy = y + dy;
+      yield [wx, wy, dungeon.cells?.[`${wx},${wy}`]];
+    }
+  }
   function formatShaderSource(source) {
     return String(source)
       .split('\n')
@@ -192,6 +200,8 @@
       return img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0;
     });
     if (!keys.length) return null;
+    // Surface indices occupy one cell byte; reserve low atlas slots even in prop-heavy cities.
+    keys.sort((a,b)=>Number(/^city_(?:(road|sidewalk|interior|park)_surface$|wall_surface_)/.test(b))-Number(/^city_(?:(road|sidewalk|interior|park)_surface$|wall_surface_)/.test(a)));
 
     let maxW = 1;
     let maxH = 1;
@@ -495,6 +505,7 @@
           window.ensureKnownSpritesInCombatList(list);
         } catch (e) {}
       }
+      list.push(...(window.CityCrowdUi?.actors(window.currentDungeon,{x:window.playerPosX,y:window.playerPosY})||[]));
       const roomKey = this._getCurrentRoomKey();
       return list.filter((entry) => (
         entry
@@ -505,7 +516,8 @@
         && this._getActorWorldSpec(entry).kind !== 'placeholder' // trait spec still pending: nothing in 3D
         && Number.isFinite(entry.mazeX)
         && Number.isFinite(entry.mazeY)
-        && (!entry.mazeRoomKey || entry.mazeRoomKey === roomKey)
+        && (!entry.mazeRoomKey || (window.DungeonInhabitants?.roomKey?.(entry.mazeRoomKey) || entry.mazeRoomKey) ===
+          (window.DungeonInhabitants?.roomKey?.(roomKey) || roomKey))
       ));
     },
 
@@ -670,6 +682,32 @@
       };
     },
 
+    clearCitySkylineMeshes() {
+      for(const record of this.citySkylineMeshes?.values()||[])for(const pass of record.passes){this.gl.deleteBuffer(pass.vbo);this.gl.deleteBuffer(pass.ibo);}
+      this.citySkylineMeshes=new Map();
+    },
+
+    getCitySkylineMesh(batch) {
+      this.citySkylineMeshes ||= new Map();
+      const old=this.citySkylineMeshes.get(batch.id);if(old?.key===batch.key){this.citySkylineMeshes.delete(batch.id);this.citySkylineMeshes.set(batch.id,old);return old;}
+      if(old)for(const pass of old.passes){this.gl.deleteBuffer(pass.vbo);this.gl.deleteBuffer(pass.ibo);}
+      const passes=batch.meshes.map(mesh=>this._createCharacterGpuMeshRecord(mesh,[1,1,1],[1,1,1],[1,1,1],{unlit:1}));
+      const record={key:batch.key,passes,torchLimit:0,lightingScope:'skyline',skylineGlow:batch.id.startsWith('glow:')};
+      this.citySkylineMeshes.set(batch.id,record);
+      return record;
+    },
+
+    pruneCitySkylineMeshes(active=new Set()) {
+      // A wide view can need more than 96 batches. Never evict buffers still used by this frame.
+      const limit=Math.max(96,active.size);
+      for(const [id,record]of this.citySkylineMeshes||[]){
+        if(this.citySkylineMeshes.size<=limit)break;
+        if(active.has(id))continue;
+        for(const pass of record.passes){this.gl.deleteBuffer(pass.vbo);this.gl.deleteBuffer(pass.ibo);}
+        this.citySkylineMeshes.delete(id);
+      }
+    },
+
     getSurfaceArtMesh(art,textures,dungeon) {
       const img=textures[art.tile];
       if(!window.SurfaceArt||!isTextureReady(img))return null;
@@ -705,9 +743,9 @@
     getArtLampMesh(lamp,flame=false){
       if(!window.ArtPresentation)return null;
       this.surfaceArtMeshes ||= new Map();
-      const key=`art-lamp:${lamp.mount||'wall'}:${lamp.axis}:${lamp.sign}:${flame}`;
+      const key=`art-lamp:${lamp.mount||'wall'}:${lamp.axis}:${lamp.sign}:${flame}:${lamp.electric?1:0}`;
       if(this.surfaceArtMeshes.has(key))return this.surfaceArtMeshes.get(key);
-      const mesh=window.ArtPresentation.mesh(flame,lamp.axis,lamp.sign,lamp.mount);
+      const mesh=window.ArtPresentation.mesh(flame,lamp.axis,lamp.sign,lamp.mount,lamp.electric);
       const record=this._createCharacterGpuMeshRecord(mesh,[.25,.25,.25],[1,1,1],[1,1,1],{unlit:flame?1:0,toonSteps:5});
       record.lightingScope='art';
       this.surfaceArtMeshes.set(key,record);return record;
@@ -968,7 +1006,7 @@
       const stoneCarving=window.ARCHITECTURAL_CARVINGS===false||opts.carveArchitecture===false?null:window.StoneCarvings?.resolveVoxelDescriptor(spec,tileName);
       const rawSculpture=spec?.sculpture||spec?.puzzleFace?.sculpture||(['statue','puzzle_statue'].includes(shape)?{}:undefined);
       const sculpture=window.SculptureForms?.visualSpec(rawSculpture,window.ARCHITECTURAL_CARVINGS!==false,tileName)||rawSculpture;
-      const shaped = shape && window.ScenePropVoxels?.build(shape, size, spec.voxelSeed || 0, {...spec.puzzleFace,sculpture,shrine:spec.shrine,stoneCarving});
+      const shaped = shape && window.ScenePropVoxels?.build(shape, size, spec.voxelSeed || 0, {...spec.puzzleFace,sculpture,shrine:spec.shrine,stoneCarving,cityFootprint:spec.cityFootprint,cityArchitecture:spec.cityArchitecture,cityArcade:spec.cityArcade});
       if (shaped) return shaped;
       const voxels = new Uint8Array(size * size * size);
       const setVoxel = (x, y, z) => {
@@ -1507,7 +1545,7 @@
       const sculpture=window.SculptureForms?.visualSpec(rawSculpture,window.ARCHITECTURAL_CARVINGS!==false,tileName)||rawSculpture;
       const carvedStatue=sculpture?.workmanship==='carved',ornamentedInscription=!!spec.inscription&&(!!spec.inscription.carvingStyle||spec.voxelShape==='obelisk'),
         voxelResolution=carvedStatue||geometricCarving?64:engravedPlaque?32:ornamentedInscription?24:16;
-      const debugKey = `${meshRev}|appearance:10|size:${voxelResolution}|stonework:${JSON.stringify(geometricCarving||null)}|closure:${stoneClosure}|sculpture:${JSON.stringify(sculpture||null)}|face:${JSON.stringify(spec.puzzleFace || null)}|script:${engraving?.key||'none'}|solid:${debugSolid ? 1 : 0}|textures:${voxelTextures ? 1 : 0}`;
+      const debugKey = `${meshRev}|appearance:10|city:${JSON.stringify([spec.cityFootprint,spec.cityArchitecture,spec.cityArcade,spec.palette])}|size:${voxelResolution}|stonework:${JSON.stringify(geometricCarving||null)}|closure:${stoneClosure}|sculpture:${JSON.stringify(sculpture||null)}|face:${JSON.stringify(spec.puzzleFace || null)}|script:${engraving?.key||'none'}|solid:${debugSolid ? 1 : 0}|textures:${voxelTextures ? 1 : 0}`;
 
       const cached = this.voxelMeshes[tileName];
       if (cached && cached._debugKey === debugKey) return cached;
@@ -1523,7 +1561,7 @@
       const material = (spec.voxelShape && spec.material) || tileMeta?.procedure?.material || spec.material || null;
       const palette = dungeon.visualStyle?.palette || {};
       const materialPalette = this.getMaterialPalette(material, palette);
-      const matPalette = window.ScenePropVoxels?.usesRoomPalette?.(spec.voxelShape) && window.VoxelMaterials?.tintPalette ?
+      const matPalette = spec.cityFootprint ? {...materialPalette,...spec.palette} : window.ScenePropVoxels?.usesRoomPalette?.(spec.voxelShape) && window.VoxelMaterials?.tintPalette ?
         window.VoxelMaterials.tintPalette(materialPalette, palette, material, spec.palette) :
         { ...materialPalette, ...(spec.palette || {}) };
 
@@ -1600,7 +1638,9 @@
       const colorFn = (x, y, z, normal) => {
         // Debug: prove the "slits" are lighting, not holes (shader will optionally bypass lighting too)
         if (debugSolid) return [1.0, 0.0, 1.0];
-        if (spec.voxelShape && window.ScenePropVoxels?.color) {
+        if(spec.cityArchitecture&&window.CityArchitectureStyles)return window.CityArchitectureStyles.color(spec.cityArchitecture,
+          x/voxelResolution,y/voxelResolution,z/voxelResolution,normal,spec.palette);
+        if (spec.voxelShape && !spec.cityFootprint && window.ScenePropVoxels?.color) {
           const color=window.ScenePropVoxels.color(spec.voxelShape, x / voxelResolution, y / voxelResolution, z / voxelResolution, normal, primary, material,
             { textures: voxelTextures, palette: shapePalette, puzzleFace: spec.puzzleFace,sculpture:spec.sculpture,shrine:spec.shrine,inscription:spec.inscription,cityKit:spec.cityKit });
           if(!carvedStatue)return color;
@@ -1994,6 +2034,7 @@
         console.warn('WebGL2 not available, falling back to canvas renderer.');
         return false;
       }
+      if(this.gl===gl)this.clearCitySkylineMeshes();else this.citySkylineMeshes=new Map();
       this.gl = gl;
       this.reportStartupStage('context-ready');
       gl.enable(gl.DEPTH_TEST);
@@ -2052,12 +2093,14 @@ uniform int u_torchCount;
 uniform vec3 u_torchPos[${MAX_TORCH_LIGHTS}];
 uniform float u_torchRadius[${MAX_TORCH_LIGHTS}];
 uniform float u_torchIntensity[${MAX_TORCH_LIGHTS}];
+uniform vec3 u_torchColor[${MAX_TORCH_LIGHTS}];
 uniform float u_torchRadiusScale;
 
 const int MAX_STEPS = 400;
 const int MAX_TORCH = ${MAX_TORCH_LIGHTS};
 const float TORCH_FALLOFF = 0.45;
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
+vec3 torchChromatic;
 // Per-surface torch tuning knobs (1.0 = default).
 const float TORCH_WALL_BOOST = 1.3;
 const float TORCH_SIDE_BOOST = 1.1;
@@ -2601,6 +2644,7 @@ float accumulateTorchLit(
 ) {
   bool surfaceIsFloor = (abs(surfaceNormal2D.x) < 0.1 && abs(surfaceNormal2D.y) < 0.1);
   float total = 0.0;
+  torchChromatic = vec3(0.0);
   shadowBlend = 0.0;
   float primaryStrength = -1.0;
   float primaryShadow = 0.0;
@@ -2665,7 +2709,9 @@ float accumulateTorchLit(
     if (dirLen > 1e-4) {
       dirSum2D += (dir2d / dirLen) * rawStrength;
     }
-    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
+    float contribution = (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
+    total += contribution;
+    torchChromatic += u_torchColor[i] * contribution;
   }
   float combinedShadow = 1.0 - shadowStack;
   shadowBlend = surfaceIsFloor ? max(primaryShadow, combinedShadow) : primaryShadow;
@@ -2681,6 +2727,7 @@ float accumulateTorchLit(
     primaryDir2D = normalize(u_lightDir);
     primaryStrengthOut = 0.0;
   }
+  torchChromatic = total > 0.0001 ? torchChromatic / total : TORCH_COLOR;
   return total;
 }
 
@@ -2787,6 +2834,12 @@ void main() {
           float fracU = fract(wallX);
 
           vec4 tex = texture(u_floorTex, vec2(fracU, fracV));
+          vec4 stepCell = currH > nextH ? currCell : nextCell;
+          int stepSurface = int(stepCell.r * 255.0 + 0.5) - 1;
+          if (stepSurface >= 0) {
+            vec2 stepUV = (vec2(float(stepSurface % u_atlasCols), float(stepSurface / u_atlasCols)) + vec2(fracU, fracV)) / vec2(float(u_atlasCols), float(u_atlasRows));
+            tex = texture(u_wallAtlas, stepUV);
+          }
 
           vec3 normal = sideDistX < sideDistY
             ? vec3(-float(stepX), 0.0, 0.0)
@@ -2821,7 +2874,7 @@ void main() {
           float torchLight = litSide * TORCH_LIGHT_SCALE;
           float base = shade;
           float warmShift = 0.75 + 0.45 * torchLight;
-          vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
+          vec3 torchAdd = torchChromatic * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
           float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
           keyShadow *= smoothstep(0.06, 0.28, torchLight);
           keyShadow *= viewShadowFade(nextDist);
@@ -2937,7 +2990,7 @@ void main() {
         float torchLight = litWall * TORCH_LIGHT_SCALE;
         float base = rowShade;
         float warmShift = 0.75 + 0.45 * torchLight;
-        vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
+        vec3 torchAdd = torchChromatic * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
 
         float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
         keyShadow *= smoothstep(0.06, 0.28, torchLight);
@@ -3018,6 +3071,12 @@ void main() {
     vec3 hitPos = vec3(u_camPos + rayDir * floorDist, floorH);
     vec2 frac = fract(hitPos.xy);
     vec4 tex = texture(u_floorTex, frac);
+    vec4 floorCell = fetchCell(int(floor(hitPos.x)), int(floor(hitPos.y)));
+    int surfaceId = int(floorCell.r * 255.0 + 0.5) - 1;
+    if (surfaceId >= 0 && floorCell.a < 0.999) {
+      vec2 surfaceUV = (vec2(float(surfaceId % u_atlasCols), float(surfaceId / u_atlasCols)) + frac) / vec2(float(u_atlasCols), float(u_atlasRows));
+      tex = texture(u_wallAtlas, surfaceUV);
+    }
 
     vec3 normal = vec3(0.0, 0.0, 1.0);
     float shadowBlend = 0.0;
@@ -3045,7 +3104,7 @@ void main() {
     float torchLight = litFloor * TORCH_LIGHT_SCALE;
     float base = shade;
     float warmShift = 0.75 + 0.45 * torchLight;
-    vec3 torchAdd = TORCH_COLOR * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
+    vec3 torchAdd = torchChromatic * vec3(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
     float keyShadow = clamp(shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
     float lightPresence = smoothstep(0.65, 1.5, primaryStrength);
     float shadowFade = smoothstep(0.5, 1.2, torchLight);
@@ -3207,6 +3266,8 @@ void main() {
         'uniform vec3 u_torchPos[' + MAX_TORCH_LIGHTS + '];',
         'uniform float u_torchRadius[' + MAX_TORCH_LIGHTS + '];',
         'uniform float u_torchIntensity[' + MAX_TORCH_LIGHTS + '];',
+        'uniform vec3 u_torchColor[' + MAX_TORCH_LIGHTS + '];',
+        'uniform float u_emissive;',
         'out vec4 outColor;',
         'float torchLightFalloff(float normDist) {',
         '  float body = exp(-1.35 * normDist * normDist);',
@@ -3241,6 +3302,7 @@ void main() {
         '  }',
         '  if (u_fullbright > 1.5) { outColor = vec4(tex.rgb,tex.a) * u_tint; gl_FragDepth = v_depth; return; }',
         '  if (u_fullbright > 0.5) { vec3 p = vec3(u_spritePos.xy, u_spritePos.z + (1.0-v_uv.y)*u_spriteHeight); outColor = vec4(retroPaint(tex.rgb, p + vec3(v_uv.x*0.8,0.0,0.0), vec3(0.0,0.0,1.0)),tex.a) * u_tint; gl_FragDepth = v_depth; return; }',
+        '  if (u_emissive > 0.5 && max(tex.r,max(tex.g,tex.b)) > 0.65) { outColor=tex*u_tint; gl_FragDepth=v_depth; return; }',
         '  vec3 normal = vec3(0.0, 0.0, 1.0);',
         '  if (u_profile > 0.5) {',
         '    float nx = (v_uv.x - 0.5) * 2.0;',
@@ -3257,6 +3319,7 @@ void main() {
         '  vec3 worldPos = vec3(u_spritePos.xy, u_spritePos.z + vFrac * u_spriteHeight);',
         '  const float TORCH_SPRITE_BOOST = 1.3;',
         '  float torchLit = 0.0;',
+        '  vec3 torchChroma = vec3(0.0);',
         '  for (int i = 0; i < ' + MAX_TORCH_LIGHTS + '; i++) {',
         '    if (i >= u_torchCount) break;',
         '    vec3 toL = u_torchPos[i] - worldPos;',
@@ -3269,11 +3332,12 @@ void main() {
         '    float normDist = dist / max(lightRadius, 1e-4);',
         '    float atten = torchLightFalloff(normDist) * u_torchIntensity[i];',
         '    const float TORCH_AMBIENT = 0.35;',
-        '    torchLit += (TORCH_AMBIENT + ndotlTorch * (1.0 - TORCH_AMBIENT)) * atten;',
+        '    float contribution = (TORCH_AMBIENT + ndotlTorch * (1.0 - TORCH_AMBIENT)) * atten;',
+        '    torchLit += contribution; torchChroma += u_torchColor[i] * contribution;',
         '  }',
+        '  vec3 torchColor = torchLit > 0.0001 ? torchChroma/torchLit : vec3(1.0,190.0/255.0,130.0/255.0);',
         '  torchLit *= TORCH_SPRITE_BOOST;',
         '  if (u_alphaCut > 0.4) torchLit *= 0.6; // character billboards: gentler torch gain (keeps materials readable)',
-        '  vec3 torchColor = vec3(1.0, 190.0/255.0, 130.0/255.0);',
         '  float distanceShade = max(0.3, 1.0 - v_depth * u_depthShadeScale);',
         '  float torchLight = torchLit * 0.6;',
         '  vec3 col = (tex.rgb * (shade + torchLight) + torchColor * torchLit * 0.35) * distanceShade;',
@@ -3306,12 +3370,16 @@ void main() {
         'uniform vec3 u_modelPos;',
         'uniform vec3 u_modelScale;',
         'uniform float u_retroInk;',
+        'uniform float u_skylineGlow;',
+        'out vec2 v_skylineUV;',
+        'out float v_skylineCore;',
         'out vec3 v_color;',
         'out vec3 v_normal;',
         'out vec3 v_worldPos;',
         'out float v_depth;',
         'void main() {',
         '  vec3 worldPos = u_modelPos + a_pos * u_modelScale;',
+        '  v_skylineUV = vec2(0.0); v_skylineCore = 1.0;',
         '  v_worldPos = worldPos;',
         '  v_color = a_color;',
         '  v_normal = normalize(a_norm);',
@@ -3324,6 +3392,24 @@ void main() {
         '  float clipY = (worldPos.z - u_eyeZ) * (2.0 * u_focalLength / u_resolution.y) - 2.0 * u_viewShift * transformY;',
         '  const float nearPlane = 0.02;',
         '  gl_Position = vec4(transformX, clipY, transformY - 2.0 * nearPlane, transformY);',
+        '  if (u_skylineGlow > 0.5) {',
+        '    vec3 center = u_modelPos + a_norm * u_modelScale;',
+        '    vec2 delta = center.xy - u_camPos;',
+        '    float cx = invDet * (u_camDir.y * delta.x - u_camDir.x * delta.y);',
+        '    float cy = invDet * (-u_plane.y * delta.x + u_plane.x * delta.y);',
+        '    if (cy > nearPlane && transformY > nearPlane) {',
+        '      vec2 anchor = vec2(cx, (center.z-u_eyeZ)*(2.0*u_focalLength/u_resolution.y)-2.0*u_viewShift*cy)/cy;',
+        '      vec2 offset = gl_Position.xy/gl_Position.w - anchor;',
+        '      float pixels = max(abs(offset.x)*u_resolution.x,abs(offset.y)*u_resolution.y)*0.5;',
+        '      if (pixels > 0.00001) {',
+        '        float corePixels = max(pixels,0.65);',
+        '        float haloPixels = corePixels + min(2.0,corePixels*0.75+0.65);',
+        '        gl_Position.xy = (anchor + offset*(haloPixels/pixels))*gl_Position.w;',
+        '        v_skylineUV = sign(offset); v_skylineCore = corePixels/haloPixels;',
+        '        v_color *= clamp(pixels/0.65,0.35,1.0);',
+        '      }',
+        '    }',
+        '  }',
         '  if (u_retroInk > 0.5) {',
         '    vec2 corner = vec2((gl_InstanceID & 1) == 0 ? -1.0 : 1.0, gl_InstanceID < 2 ? -1.0 : 1.0);',
         '    gl_Position.xy += corner * 1.5 / u_resolution * gl_Position.w;',
@@ -3339,6 +3425,8 @@ precision highp int;
 in vec3 v_worldPos;
 in vec3 v_normal;
 in vec3 v_color;
+in vec2 v_skylineUV;
+in float v_skylineCore;
 
 out vec4 outColor;
 
@@ -3368,6 +3456,7 @@ uniform vec3 u_toneHighlight;
 
 // 0.0 => normal lighting, 1.0 => output v_color (debug)
 uniform float u_unlit;
+uniform float u_skylineGlow;
 
 // Controls how "posterized" the voxel lighting is. Higher = smoother.
 uniform float u_toonSteps;
@@ -3376,6 +3465,7 @@ uniform int u_torchCount;
 uniform vec3 u_torchPos[${MAX_TORCH_LIGHTS}];
 uniform float u_torchRadius[${MAX_TORCH_LIGHTS}];
 uniform float u_torchIntensity[${MAX_TORCH_LIGHTS}];
+uniform vec3 u_torchColor[${MAX_TORCH_LIGHTS}];
 uniform float u_torchRadiusScale;
 uniform sampler2D u_cells;
 uniform ivec2 u_gridSize;
@@ -3383,6 +3473,7 @@ uniform int u_flipY;
 
 const int MAX_TORCH = ${MAX_TORCH_LIGHTS};
 const vec3 TORCH_COLOR = vec3(1.0, 190.0 / 255.0, 130.0 / 255.0);
+vec3 torchChromatic;
 const float TORCH_FALLOFF = 0.6;
 const int SHADOW_DDA_STEPS = 64;
 const float SHADOW_RADIUS_SCALE = 1.6;
@@ -3502,6 +3593,7 @@ float torchShadowFactor(vec2 hitXY, vec2 torchPos, float rad) {
 // Half-Lambert torch lighting so attached walls / sides still receive light
 float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out float dirStrength) {
   float total = 0.0;
+  torchChromatic = vec3(0.0);
   float ndotlSum = 0.0;
   float sumStrength = 0.0;
   const float TORCH_AMBIENT = 0.35;
@@ -3525,12 +3617,15 @@ float accumulateTorchLit(vec3 worldPos, vec3 normal, out float dirWeight, out fl
       ? 0.0
       : (1.0 - clamp(shadowFactor * SHADOW_DARKEN, 0.0, SHADOW_DARKEN));
     float atten = rawStrength * shadowMul;
-    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
+    float contribution = (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;
+    total += contribution;
+    torchChromatic += u_torchColor[i] * contribution;
     sumStrength += rawStrength;
     ndotlSum += max(0.0, ndotl_raw) * rawStrength;
   }
   dirStrength = sumStrength;
   dirWeight = (sumStrength > 1e-4) ? (ndotlSum / sumStrength) : 0.0;
+  torchChromatic = total > 0.0001 ? torchChromatic / total : TORCH_COLOR;
   return total;
 }
 
@@ -3545,6 +3640,12 @@ void main() {
   // through the same light accumulation, occlusion and material ramp as Modern.
   if (u_unlit > 0.5 && u_unlit < 1.5) {
     vec3 paint = v_color;
+    if(u_skylineGlow>0.5){
+      float radius=max(abs(v_skylineUV.x),abs(v_skylineUV.y));
+      float halo=1.0-smoothstep(v_skylineCore*0.7,1.0,radius);
+      float core=1.0-smoothstep(v_skylineCore*0.65,v_skylineCore,radius);
+      outColor=vec4(paint,clamp(core+halo*0.28,0.0,1.0));return;
+    }
     outColor = vec4(paint, 1.0);
     return;
   }
@@ -3556,6 +3657,8 @@ void main() {
   float dirStrength = 0.0;
   float torch = accumulateTorchLit(v_worldPos, N, dirWeight, dirStrength);
   float torchLight = torch * u_torchLightScale;
+  // Opaque albedo has finite exposure, even when many city lamps overlap.
+  torchLight = 1.5 * (1.0 - exp(-max(0.0, torchLight) / 1.5));
   float ndotl = clamp(dirWeight, 0.0, 1.0);
   float baseLight = 0.15 + ndotl * u_lightIntensity * max(0.2, clamp(dirStrength, 0.0, 1.0));
 
@@ -3574,7 +3677,7 @@ void main() {
   float hi1 = saturate(smoothstep(0.35, 1.2, tMix) * highlightBoost);
   float hi2 = saturate(smoothstep(1.0, 2.0, tMix) * highlightBoost);
   ramp = mix(ramp, u_toneHighlight, hi1);
-  ramp = mix(ramp, u_toneHighlight * TORCH_COLOR, hi2);
+  ramp = mix(ramp, u_toneHighlight * torchChromatic, hi2);
 
   /*
   // Posterize light gently (controls "banding" on low-poly cylinders)
@@ -3597,14 +3700,15 @@ void main() {
   vec3 col = v_color * ramp;
 
   // Additive torch splash so it affects both shadowed and lit sides.
-  vec3 torchTint = mix(v_color, vec3(1.0), 0.4) * TORCH_COLOR;
+  vec3 torchTint = v_color * torchChromatic;
   float torchMix = saturate(torchLight * 0.5);
   col = mix(col, torchTint, torchMix);
-  col += TORCH_COLOR * torchLight * 0.12;
+  col += (vec3(1.0) - col) * torchChromatic * torchLight * 0.04;
   col = clamp(col, 0.0, 1.0);
 
   // Trace the finished Modern lighting; never illuminate a shadow independently.
-  if (u_unlit > 2.5) col = clamp(v_color * clamp(dot(ramp, vec3(0.299, 0.587, 0.114)) + torchLight * 0.12, 0.65, 1.05), 0.0, 1.0);
+  if (u_unlit > 2.5 && u_unlit < 3.5) col = clamp(v_color * clamp(dot(ramp, vec3(0.299, 0.587, 0.114)) + torchLight * 0.12, 0.65, 1.05), 0.0, 1.0);
+  if (u_unlit > 3.5 && max(v_color.r,max(v_color.g,v_color.b)) > 0.65) col = v_color;
   if (u_unlit > 1.5 && u_unlit < 2.5) col = retroTrace(col, v_worldPos, N);
   outColor = vec4(col, 1.0);
 }`;
@@ -3642,7 +3746,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         torchCount: gl.getUniformLocation(this.spriteProgram, 'u_torchCount'),
         torchPos: gl.getUniformLocation(this.spriteProgram, 'u_torchPos[0]'),
         torchRadius: gl.getUniformLocation(this.spriteProgram, 'u_torchRadius[0]'),
-        torchIntensity: gl.getUniformLocation(this.spriteProgram, 'u_torchIntensity[0]')
+        torchIntensity: gl.getUniformLocation(this.spriteProgram, 'u_torchIntensity[0]'),
+        torchColor: gl.getUniformLocation(this.spriteProgram, 'u_torchColor[0]'),
+        emissive: gl.getUniformLocation(this.spriteProgram, 'u_emissive')
       };
       this.spriteBuffer = gl.createBuffer();
 
@@ -3682,12 +3788,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           torchPos: gl.getUniformLocation(this.voxelProgram, 'u_torchPos[0]'),
           torchRadius: gl.getUniformLocation(this.voxelProgram, 'u_torchRadius[0]'),
           torchIntensity: gl.getUniformLocation(this.voxelProgram, 'u_torchIntensity[0]'),
+          torchColor: gl.getUniformLocation(this.voxelProgram, 'u_torchColor[0]'),
           toneShadow: gl.getUniformLocation(this.voxelProgram, 'u_toneShadow'),
           toneMid: gl.getUniformLocation(this.voxelProgram, 'u_toneMid'),
           toneHighlight: gl.getUniformLocation(this.voxelProgram, 'u_toneHighlight'),
           unlit: gl.getUniformLocation(this.voxelProgram, 'u_unlit'),
           retroSurface: gl.getUniformLocation(this.voxelProgram, 'u_retroSurface'),
           retroInk: gl.getUniformLocation(this.voxelProgram, 'u_retroInk'),
+          skylineGlow: gl.getUniformLocation(this.voxelProgram, 'u_skylineGlow'),
           toonSteps: gl.getUniformLocation(this.voxelProgram, 'u_toonSteps'),
         };
       } else {
@@ -3714,7 +3822,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const groundKind = window.RetroGraphics.environment(dungeon).wasteland ? 'wasteland' : 'surface';
         textures = Object.fromEntries(Object.entries(textures).map(([name, image]) => [name,
           name === 'torch' || name === 'pillar' || name.startsWith('custom_') ? image :
-            window.RetroGraphics.prepareImage(image, name === 'floor' ? groundKind : /ceiling|roof/.test(name) ? 'ceiling' : 'wall', dungeon.tiles?.[name]?.spriteSpec?.material || 'stone')]));
+            window.RetroGraphics.prepareImage(image, dungeon.tiles?.[name]?.surfaceOnly?'surface':name === 'floor' ? groundKind : /ceiling|roof/.test(name) ? 'ceiling' : 'wall', dungeon.tiles?.[name]?.spriteSpec?.material || 'stone')]));
         for (const name of ['wall', 'floor']) if (!isTextureReady(textures[name]) && window.RetroGraphics.makeSurface) {
           textures[name] = window.RetroGraphics.makeSurface(name === 'floor' && groundKind === 'wasteland' ? groundKind : name, dungeon.visualStyle?.palette,
             dungeon.tiles?.[name]?.spriteSpec?.material);
@@ -3745,6 +3853,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const geometryChanged = this.dungeonGeometryStamp !== geometryStamp;
       const needsVoxelReset = (dungeonObjectChanged || geometryChanged || this.dungeonKey !== key || this.voxelPaletteKey !== paletteKey);
       if (needsVoxelReset) {
+        const skylineIdentity=key+':'+(dungeon.generation?.runId||window.dungeonRunId||'');
+        if(this.citySkylineIdentity!==skylineIdentity){this.clearCitySkylineMeshes();this.citySkylineIdentity=skylineIdentity;}
         for(const record of Object.values(this.voxelMeshes))for(const part of record.passes||[record]){
           this.gl.deleteBuffer(part.vbo);this.gl.deleteBuffer(part.ibo);
         }
@@ -3857,7 +3967,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             || hasVoxelSpec;
 
           // Torch uses wall art. Doors can also fall back to wall art if you don't have a door atlas entry.
-          const tileName = (tile === 'torch' || tile === 'door') ? 'wall' : tile;
+          const tileName = cell.wallSurface || ((tile === 'torch' || tile === 'door') ? 'wall' : tile);
 
           const tileId = isSolid
             ? (this.atlasInfo.map[tileName] ?? wallDefault)
@@ -3869,7 +3979,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const fh = Math.max(0, Math.min(255, Math.round(((floorH - minH) / range) * 255)));
           const ch = Math.max(0, Math.min(255, Math.round(((ceilH  - minH) / range) * 255)));
 
-          data[idx]     = tileId;
+          const surfaceId=this.atlasInfo.map[cell.floorSurface];
+          // Passable cells use their otherwise unused R byte for an optional floor-atlas index + 1.
+          data[idx]     = isSolid?tileId:Number.isInteger(surfaceId)&&surfaceId<254?surfaceId+1:0;
           data[idx + 1] = fh;
           data[idx + 2] = ch;
           let obstacleRadius = 0;
@@ -4441,8 +4553,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const minFloor = Number.isFinite(this.minFloor) ? this.minFloor : 0;
 
       const FOV = Math.PI / 3;
-      const retroAspect=window.RetroGraphics?.fullbright?.()&&container.clientWidth>0&&container.clientHeight>0?container.clientWidth/container.clientHeight:1;
-      const planeScale = Math.tan(FOV / 2) * retroAspect;
+      // Projection follows displayed pixels, not the low-resolution buffer or graphics palette.
+      const displayAspect = container.clientWidth > 0 && container.clientHeight > 0
+        ? container.clientWidth / container.clientHeight : width / height;
+      const planeScale = Math.tan(FOV / 2) * displayAspect;
       const planeX = -dirY * planeScale;
       const planeY = dirX * planeScale;
       const focalLength = height / (2 * Math.tan(FOV / 2));
@@ -4592,6 +4706,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const VIS_RADIUS = Math.max(10, Math.min(18, Math.floor(maxDim / 10)));
       const VOXEL_VIS_RADIUS = Math.max(VIS_RADIUS, 64);
       const TORCH_VIS_RADIUS = VOXEL_VIS_RADIUS;
+      // Shared by light collection and sprite mounting; match the Canvas pass in game.js.
+      const TORCH_WORLD_HEIGHT = 1.3;
+      const TORCH_WIDTH_RATIO = 0.6;
+      const TORCH_FLAME_RATIO = 0.4;
+      const TORCH_ANCHOR_RATIO = 0.78;
       const TORCH_MOUNT_HEIGHT = 0.45;
       const TORCH_MOUNT_RATIO = 0.55;
       const torchMountZ = cell => {
@@ -4710,6 +4829,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const makeTorchUniformData = () => ({
         count: 0,
         posArr: new Float32Array(MAX_TORCH_LIGHTS * 3),
+        colorArr: new Float32Array(MAX_TORCH_LIGHTS * 3),
         radiusArr: new Float32Array(MAX_TORCH_LIGHTS),
         intensityArr: new Float32Array(MAX_TORCH_LIGHTS)
       });
@@ -4724,6 +4844,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           out.posArr[bi + 2] = t.z;
           out.radiusArr[i] = t.radius;
           out.intensityArr[i] = t.intensity;
+          out.colorArr.set(window.GenreLights?.rgb(t) || [1,190/255,130/255], bi);
         }
         return out;
       };
@@ -4737,14 +4858,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const selected = this.getCachedTorchLights(torchFrame, targetX, targetY, radiusScale, hasLineOfSight, torchCacheStats);
         return packTorchUniforms(selected, occludedTorchUniformData, true);
       };
-      for (let dx = -TORCH_VIS_RADIUS; dx <= TORCH_VIS_RADIUS; dx++) {
-        for (let dy = -TORCH_VIS_RADIUS; dy <= TORCH_VIS_RADIUS; dy++) {
-          const wx = playerX + dx;
-          const wy = playerY + dy;
-          const cell = dungeon.cells?.[`${wx},${wy}`];
+      for (const [wx, wy, cell] of nearbyRenderableCells(dungeon, playerX, playerY, TORCH_VIS_RADIUS)) {
           if (!cell)continue;
           if(cell.tile!=='torch'){
             const spec=dungeon.tiles[cell.tile]?.spriteSpec,sites=window.ScenePropVoxels?.candleSites(spec?.voxelShape,spec?.shrine)||[];
+            const emitter=window.HolodekFlags?.GENRE_LIGHTS && window.GenreLights?.emission(spec);
+            if(emitter){
+              const base=cell.floorHeight||0,height=cell.structureHeight??Math.max(.5,((cell.ceilHeight??base+2)-base)*(spec.heightRatio||1));
+              const light=window.GenreLights.light(emitter.type,wx+.5,wy+.5,base+height*emitter.z,.3,now,TORCH_LIGHT_RADIUS_FLOOR);
+              light.dist2=(light.x-camX)**2+(light.y-camY)**2;torchLights.push(light);
+            }
             if(sites.length){
               const width=spec.baseWidth||.7,base=cell.floorHeight||0,height=cell.structureHeight??Math.max(.5,((cell.ceilHeight??base+2)-base)*(spec.heightRatio||1));
               for(const site of sites){const x=wx+.5+(site.x-.5)*width,y=wy+.5+(site.y-.5)*width;
@@ -4759,6 +4882,13 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
           const torchZ = torchMountZ(cell);
           const seed = ((wx * 928371 + wy * 1237) % 1000) / 1000;
+          const fixtureType = dungeon.tiles?.torch?.lightType;
+          if (fixtureType && window.GenreLights) {
+            const light = window.GenreLights.light(fixtureType, worldX, worldY, torchZ + (TORCH_ANCHOR_RATIO - .5) * TORCH_WORLD_HEIGHT, seed, now, TORCH_LIGHT_RADIUS_FLOOR);
+            light.dist2 = (worldX - camX) ** 2 + (worldY - camY) ** 2;
+            torchLights.push(light);
+            continue;
+          }
           const flicker = torchFlicker(seed, now);
 
           const dxl = worldX - camX;
@@ -4771,11 +4901,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             intensity: Math.max(0.25, Math.min(1.15, flicker)),
             dist2: dxl * dxl + dyl * dyl
           });
-        }
       }
       // world1 GENRE_LIGHTS: extra light types join the same torch list (same falloff, shadows, occlusion, cache).
       if (window.HolodekFlags?.GENRE_LIGHTS && window.GenreLights) {
         const GL = window.GenreLights, near = l => Math.abs(l.x - playerX) <= TORCH_VIS_RADIUS && Math.abs(l.y - playerY) <= TORCH_VIS_RADIUS;
+        for (const source of dungeon.sceneStructures || []) {
+          const emitter=GL.emission(dungeon.tiles?.[source.tile]?.spriteSpec),pos=source.position,size=source.size;
+          if(!emitter||!pos||!size||!near(pos))continue;
+          const r=GL.light(emitter.type,pos.x+size.x*.5,pos.y+size.y*.5,pos.z+size.z*emitter.z,.3,now,TORCH_LIGHT_RADIUS_FLOOR);
+          r.dist2=(r.x-camX)**2+(r.y-camY)**2;torchLights.push(r);
+        }
         for (const l of dungeon.genreLights || []) { if (!near(l)) continue; const c = dungeon.cells?.[`${Math.floor(l.x)},${Math.floor(l.y)}`], z = (c?.floorHeight || 0) + (l.z ?? 1.4);
           const r = GL.light(l.type, l.x, l.y, z, ((l.x * 31 + l.y * 17) % 100) / 100, now, TORCH_LIGHT_RADIUS_FLOOR, torchFlicker); r.dist2 = (r.x - camX) ** 2 + (r.y - camY) ** 2; torchLights.push(r); }
       }
@@ -4851,7 +4986,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       gl.uniform1f(this.uniformLocations.lightIntensity, lighting.intensity);
       if (this.uniformLocations.fullbright) gl.uniform1f(this.uniformLocations.fullbright, fullbright ? 1 : 0);
       const outdoorDepthFar = 1000000.0;
-      const outdoorDepthFarDepth = 300.0;
+      const outdoorDepthFarDepth = window.CitySkyline?.depthRange(dungeon) || 300.0;
       const depthFar = isOutdoor ? outdoorDepthFar : 60.0;
       const depthFarDepth = isOutdoor ? outdoorDepthFarDepth : 60.0;
       const depthShadeScale = depthFarDepth / 10.0;
@@ -4903,6 +5038,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.uniform3fv(this.uniformLocations.torchColor, colorArr);
         gl.uniform1fv(this.uniformLocations.torchRadius, torchUniformData.radiusArr);
         gl.uniform1fv(this.uniformLocations.torchIntensity, torchUniformData.intensityArr);
+        gl.uniform3fv(this.uniformLocations.torchColor, torchUniformData.colorArr);
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.cellTex);
@@ -5004,19 +5140,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       };
       const SPRITE_WORLD_HEIGHT = 1.8;
       const SPRITE_WIDTH_RATIO = 0.7;
-      // Keep these in sync with the (better) canvas sprite pass values in game.js
-      const TORCH_WORLD_HEIGHT = 1.3;
-      const TORCH_WIDTH_RATIO = 0.6;
-      const TORCH_FLAME_RATIO = 0.4;
-      const TORCH_ANCHOR_RATIO = 0.78;
-      for (let dx = -VOXEL_VIS_RADIUS; dx <= VOXEL_VIS_RADIUS; dx++) {
-        for (let dy = -VOXEL_VIS_RADIUS; dy <= VOXEL_VIS_RADIUS; dy++) {
-          const wx = playerX + dx;
-          const wy = playerY + dy;
-          const cell = dungeon.cells?.[`${wx},${wy}`];
+      for (const [wx, wy, cell] of nearbyRenderableCells(dungeon, playerX, playerY, VOXEL_VIS_RADIUS)) {
           if (!cell || !cell.tile) continue;
           const tileName = cell.tile;
           const isTorch = tileName === 'torch';
+          const fixtureType = isTorch && dungeon.tiles?.torch?.lightType;
           const hasSpriteSpec = !!(dungeon.tiles && dungeon.tiles[tileName]?.spriteSpec);
           const isCustom = tileName === 'pillar'
             || (tileName.startsWith && tileName.startsWith('custom_'))
@@ -5175,7 +5303,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           const depthBias = isTorch ? TORCH_SPRITE_DEPTH_BIAS : 0.0;
 
           sprites.push({
-            type: isTorch ? 'torch' : 'custom',
+            type: isTorch && !fixtureType ? 'torch' : 'custom',
+            fixtureType,
+            emissive: !!fixtureType || !!window.GenreLights?.emission(dungeon.tiles?.[tileName]?.spriteSpec),
             texName: tileName,
             texImg,
             lightX,
@@ -5209,8 +5339,9 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             const profile = meta?.profile || (tileName === 'pillar' ? 'cylinder' : 'flat');
             const isProfiled = profile === 'cylinder' || profile === 'slab';
             const baseDepthAmount = typeof meta?.depth === 'number' ? meta.depth : 0.65;
-            const flicker = isTorch ? torchFlicker(flickerSeed, now) : 1.0;
+            const flicker = isTorch && !fixtureType ? torchFlicker(flickerSeed, now) : 1.0;
             webgpuOverlaySprites.push({
+              emissive: !!fixtureType || !!window.GenreLights?.emission(dungeon.tiles?.[tileName]?.spriteSpec),
               texName: tileName,
               texImg,
               drawLeft,
@@ -5228,13 +5359,13 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               depthAmount: isTorch ? 0.0 : baseDepthAmount,
               spriteVFlip: (tileName === 'pillar' || (tileName && tileName.startsWith('custom_'))) ? 1.0 : 0.0,
               depthShadeScale: isTorch ? 0.0 : depthShadeScale,
-              tintR: isTorch ? flicker * 1.1 : 1.0,
-              tintG: isTorch ? flicker * 0.98 : 1.0,
-              tintB: isTorch ? flicker * 0.85 : 1.0,
+              tintR: isTorch && !fixtureType ? flicker * 1.1 : 1.0,
+              tintG: isTorch && !fixtureType ? flicker * 0.98 : 1.0,
+              tintB: isTorch && !fixtureType ? flicker * 0.85 : 1.0,
               tintA: 1.0
             });
           }
-          if (isTorch) {
+          if (isTorch && !fixtureType) {
             const flicker = torchFlicker(flickerSeed, now);
             const rawHeight = Math.max(1, rawDrawEndY - rawDrawStartY);
             const glowRadius = Math.max(4, Math.floor(rawHeight * (0.55 + 0.2 * flicker)));
@@ -5278,7 +5409,6 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               drawEndY - insetY
             );
           }
-        }
       }
       // Character actors: Doom-style billboards (approved procedural sprites) + soft ground blob shadow.
       // Views: front / threeQuarter / side / back by camera yaw (mirrors for left/right). No voxel extrusion.
@@ -5411,10 +5541,15 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           screen: { left: left / width, right: (left + screenH) / width, top: (bottomY - screenH) / height, bottom: bottomY / height } });
       }
       voxelCamera.billboards = interactiveBillboards;
-      window.WorldInteractionUi?.updateFrame(dungeon, voxelCamera, this.canvas, { x: playerWorldX, y: playerWorldY });
+      // Exterior dressing is render-only; discovery and actions must keep the saved room's identity.
+      window.WorldInteractionUi?.updateFrame(window.currentDungeon, voxelCamera, this.canvas, { x: playerWorldX, y: playerWorldY });
       // Match the column scan range, using whole footprints so large roofs do not pop early.
       // These parts reuse the voxel pass but never become floor collision obstacles.
+      this._citySkylineLod ||= {};
+      const citySkyline=window.CitySkyline?.collect(dungeon,{x:playerWorldX,y:playerWorldY},this._citySkylineLod,
+        {visible:bounds=>this.isVoxelBoxVisible(bounds.position,bounds.size,voxelCamera)});
       for (const part of dungeon.sceneStructures || []) {
+        if(citySkyline?.replaced.has(part))continue;
         const p = part.position, s = part.size;
         if (!p || !s || ![p.x, p.y, p.z, s.x, s.y, s.z].every(Number.isFinite) ||
             s.x <= 0 || s.y <= 0 || s.z <= 0) continue;
@@ -5425,6 +5560,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const mesh = this.getVoxelMesh(part.tile, dungeon);
         if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: p, modelScale: s,
           retroSurface: this._retroSurfaceKind(part.tile, dungeon.tiles?.[part.tile]?.spriteSpec, part.role || '') });
+      }
+      for(const batch of citySkyline?.batches||[]){
+        const {position,size}=batch.bounds;if(!this.isVoxelBoxVisible(position,size,voxelCamera))continue;
+        voxelInstances.push({tileName:'city-skyline:'+batch.id,mesh:this.getCitySkylineMesh(batch),modelPos:position,modelScale:size});
       }
       for (const part of window.SecretDoorsUi?.parts(dungeon) || []) {
         const mesh = this.getVoxelMesh(part.tile, dungeon);
@@ -5456,6 +5595,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         }
       }
       voxelInstances.length = visibleVoxelCount;
+      // Emissive facade halos follow opaque bodies, retain depth testing, and never write depth.
+      voxelInstances.sort((a,b)=>Number(!!a.mesh.skylineGlow)-Number(!!b.mesh.skylineGlow));
       if (startupFrame) this.reportStartupStage('voxel-instances-ready');
       webgpuOverlaySprites.sort((a, b) => b.depth - a.depth);
       webgpuTorchFlameSprites.sort((a, b) => b.depth - a.depth);
@@ -5527,7 +5668,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             const centerX = inst.lightAnchor?.x ?? inst.modelPos.x + inst.modelScale.x * 0.5;
             const centerY = inst.lightAnchor?.y ?? inst.modelPos.y + inst.modelScale.y * 0.5;
             const getInstanceLights=inst.mesh.lightingScope==='art'?getArtTorchUniformData:getTorchUniformData;
-            const torchData = getInstanceLights(centerX, centerY, inst.mesh.torchRadiusScale ?? torchRadiusVoxelScaleClamped);
+            const torchData = inst.mesh.torchLimit===0 ? {count:0} : getInstanceLights(centerX, centerY, inst.mesh.torchRadiusScale ?? torchRadiusVoxelScaleClamped);
             const voxelTorchCount = driveVoxelTorchFromWebGPU
               ? Math.min(torchData.count, voxelGlTorchFallbackMax, inst.mesh.torchLimit ?? MAX_TORCH_LIGHTS)
               : Math.min(torchData.count, inst.mesh.torchLimit ?? MAX_TORCH_LIGHTS);
@@ -5536,10 +5677,12 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               gl.uniform3fv(this.voxelUniforms.torchPos, torchData.posArr.subarray(0, voxelTorchCount * 3));
               gl.uniform1fv(this.voxelUniforms.torchRadius, torchData.radiusArr.subarray(0, voxelTorchCount));
               gl.uniform1fv(this.voxelUniforms.torchIntensity, torchData.intensityArr.subarray(0, voxelTorchCount));
+              gl.uniform3fv(this.voxelUniforms.torchColor, torchData.colorArr.subarray(0, voxelTorchCount * 3));
             }
           }
           const passes = inst.mesh.passes || [inst.mesh];
           for (const pass of passes) {
+            if(this.voxelUniforms.skylineGlow)gl.uniform1f(this.voxelUniforms.skylineGlow,inst.mesh.skylineGlow?1:0);
             if (this.voxelUniforms.torchRadiusScale) {
               gl.uniform1f(this.voxelUniforms.torchRadiusScale, pass.torchRadiusScale ?? torchRadiusVoxelScaleClamped);
             }
@@ -5562,6 +5705,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               gl.depthMask(true);
             }
             gl.depthFunc(gl.LEQUAL);
+            if(inst.mesh.skylineGlow){gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);gl.depthMask(false);}
             if (this.voxelUniforms.toneShadow) {
               const shadow = pass.toneShadow || [0.2, 0.2, 0.2];
               const mid = pass.toneMid || [0.5, 0.5, 0.5];
@@ -5571,7 +5715,8 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               gl.uniform3f(this.voxelUniforms.toneHighlight, high[0], high[1], high[2]);
             }
             if (this.voxelUniforms.unlit) {
-              gl.uniform1f(this.voxelUniforms.unlit, fullbright ? (inst.mesh.lightingScope==='art' ? (pass.unlit ? 1.0 : 3.0) : 2.0) : pass.unlit ? 1.0 : 0.0);
+              const luminous=!!window.GenreLights?.emission(dungeon.tiles?.[inst.tileName]?.spriteSpec);
+              gl.uniform1f(this.voxelUniforms.unlit, inst.mesh.lightingScope==='skyline' ? 1.0 : fullbright ? (inst.mesh.lightingScope==='art' ? (pass.unlit ? 1.0 : 3.0) : 2.0) : luminous ? 4.0 : pass.unlit ? 1.0 : 0.0);
             }
             if (this.voxelUniforms.toonSteps) {
               gl.uniform1f(this.voxelUniforms.toonSteps, Number.isFinite(pass.toonSteps) ? pass.toonSteps : 3.0);
@@ -5582,7 +5727,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             }
             gl.uniform3f(this.voxelUniforms.modelPos, inst.modelPos.x, inst.modelPos.y, inst.modelPos.z);
             gl.uniform3f(this.voxelUniforms.modelScale, inst.modelScale.x, inst.modelScale.y, inst.modelScale.z);
-            if (fullbright && inst.tileName && inst.mesh.lightingScope !== 'art' && !pass.depthOnly && this.voxelUniforms.retroInk) {
+            if (fullbright && inst.tileName && inst.mesh.lightingScope !== 'art' && inst.mesh.lightingScope !== 'skyline' && !pass.depthOnly && this.voxelUniforms.retroInk) {
               // Dilate the real mesh in screen space, with depth testing but no depth
               // writes. The unchanged fill covers its interior; openings stay open.
               gl.uniform1f(this.voxelUniforms.retroInk, 1);
@@ -5593,8 +5738,10 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
               retroOutlineDrawCalls++;
             }
             gl.drawElements(gl.TRIANGLES, pass.count, gl.UNSIGNED_SHORT, 0);
+            if(inst.mesh.skylineGlow){gl.disable(gl.BLEND);gl.depthMask(true);}
             voxelDrawCalls++;
             voxelIndices += pass.count;
+            if(this.voxelUniforms.skylineGlow)gl.uniform1f(this.voxelUniforms.skylineGlow,0);
             if (pass.depthOnly || pass.depthTestOnly) {
               gl.colorMask(true, true, true, true);
               gl.depthMask(true);
@@ -5605,6 +5752,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         if (wasCull) gl.enable(gl.CULL_FACE); else gl.disable(gl.CULL_FACE);
       }
 
+      this.pruneCitySkylineMeshes(new Set((citySkyline?.batches||[]).map(batch=>batch.id)));
       const voxelsSubmittedAt = performance.now();
       // Sort by distance (farthest first for correct blending)
       sprites.sort((a, b) => b.depth - a.depth);
@@ -5650,6 +5798,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         return t * t * (3 - 2 * t);
       };
       for (const spr of sprites) {
+        if (this.spriteUniforms.emissive) gl.uniform1f(this.spriteUniforms.emissive, spr.emissive ? 1 : 0);
         if (fullbright && spr.type === 'actorShadow') continue;
         if (this.spriteUniforms.haloMode) {
           gl.uniform1f(this.spriteUniforms.haloMode, 0.0);
@@ -5677,6 +5826,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             gl.uniform3fv(this.spriteUniforms.torchPos, torchData.posArr);
             gl.uniform1fv(this.spriteUniforms.torchRadius, torchData.radiusArr);
             gl.uniform1fv(this.spriteUniforms.torchIntensity, torchData.intensityArr);
+            gl.uniform3fv(this.spriteUniforms.torchColor, torchData.colorArr);
           }
         }
         if (spr.type === 'actorShadow') {
@@ -5791,12 +5941,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         }
 
-        if (spr.type !== 'torch') continue;
+        if (spr.type !== 'torch' && !spr.fixtureType) continue;
 
-        const flicker = torchFlicker(spr.flickerSeed, now);
+        const fixture=window.GenreLights?.TYPES[spr.fixtureType];
+        const haloColor=fixture ? window.GenreLights.rgb({color:fixture.color}) : [1,.9,.7];
+        const flicker = fixture ? fixture.curve(spr.flickerSeed,now/1000) : torchFlicker(spr.flickerSeed, now);
         // Use the same flame sizing math as the canvas pass so it doesn't look huge at distance.
         const rawHeight = Math.max(1, spr.rawDrawEndY - spr.rawDrawStartY);
-        const flameCenterY = spr.rawDrawStartY + rawHeight * TORCH_FLAME_RATIO;
+        const flameCenterY = spr.rawDrawStartY + rawHeight * (fixture ? .5 : TORCH_FLAME_RATIO);
         const flameH = Math.max(3, Math.floor(rawHeight * (0.22 + 0.1 * flicker)));
         const flameW = Math.max(2, Math.floor(flameH * 0.55));
         const flameLeft = Math.floor(spr.screenX - flameW / 2);
@@ -5806,7 +5958,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const flameTop = flameBottom - flameH;
 
         if (driveHaloFlameFromWebGPU) {
-          if (flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
+          if (!fixture && flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
             const flameDepth = Math.max(0.0, spr.depth - TORCH_FLAME_DEPTH_BIAS);
             webgpuTorchFlameVerts.push(
               (flameLeft / width) * 2 - 1, 1 - (flameBottom / height) * 2, 0, 1, flameDepth, 1.0, 0.94, 0.78, 0.85 + 0.15 * flicker,
@@ -5898,7 +6050,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
                 };
                 const foldPos = getFoldSide(1);
                 const foldNeg = getFoldSide(-1);
-                const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - TORCH_FLAME_RATIO) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
+                const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - (fixture ? .5 : TORCH_FLAME_RATIO)) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
                 const c = projectWorldPoint(faceCenterX, faceCenterY, haloCenterZ);
                 haloDepthSpan = 0.0;
                 haloCapMin = 0.0;
@@ -6066,16 +6218,16 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
             if (haloVerts) {
               const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
-              appendTorchFxMesh(webgpuTorchHaloVerts, haloVerts, 1.0, 0.9, 0.7, glowAlpha, haloVertexCount);
+              appendTorchFxMesh(webgpuTorchHaloVerts, haloVerts, ...haloColor, glowAlpha, haloVertexCount);
               for (const foldMesh of haloFoldMeshes) {
-                appendTorchFxMesh(webgpuTorchHaloVerts, foldMesh.verts, 1.0, 0.9, 0.7, glowAlpha, foldMesh.count);
+                appendTorchFxMesh(webgpuTorchHaloVerts, foldMesh.verts, ...haloColor, glowAlpha, foldMesh.count);
               }
             }
           }
           continue;
         }
 
-        if (flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
+        if (!fixture && flameRight >= 0 && flameLeft < width && flameBottom >= 0 && flameTop < height) {
           const flameDepth = Math.max(0.0, spr.depth - TORCH_FLAME_DEPTH_BIAS);
           const flameVerts = new Float32Array([
             (flameLeft / width) * 2 - 1, 1 - (flameBottom / height) * 2, 0, 1, flameDepth,
@@ -6187,7 +6339,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             };
             const foldPos = getFoldSide(1);
             const foldNeg = getFoldSide(-1);
-            const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - TORCH_FLAME_RATIO) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
+            const haloCenterZ = spr.baseZ + (TORCH_ANCHOR_RATIO - (fixture ? .5 : TORCH_FLAME_RATIO)) * Math.max(0.1, spr.worldHeight || TORCH_WORLD_HEIGHT);
             const c = projectWorldPoint(faceCenterX, faceCenterY, haloCenterZ);
             // Wall halos should remain flat to the wall plane.
             haloDepthSpan = 0.0;
@@ -6392,7 +6544,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
             gl.depthMask(false);
             gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
             const glowAlpha = Math.min(0.6, 0.22 + 0.25 * flicker);
-            gl.uniform4f(this.spriteUniforms.tint, 1.0, 0.9, 0.7, glowAlpha);
+            gl.uniform4f(this.spriteUniforms.tint, ...haloColor, glowAlpha);
             gl.drawArrays(haloDrawMode, 0, haloVertexCount);
             for (const foldMesh of haloFoldMeshes) {
               gl.bufferData(gl.ARRAY_BUFFER, foldMesh.verts, gl.STREAM_DRAW);
@@ -6525,6 +6677,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         collectionMs: Number((voxelStartedAt - resourcesReadyAt).toFixed(2)),
         voxelSubmitMs: Number((voxelsSubmittedAt - voxelStartedAt).toFixed(2)),
         voxelInstances: voxelInstances.length, culledVoxels, voxelDrawCalls, voxelTriangles: voxelIndices / 3, retroOutlineDrawCalls,
+        citySkyline: citySkyline?.stats || null,
         retroBillboards: fullbright ? sprites.filter(sprite => sprite.type === 'custom').length : 0,
         stonework: { enabled: window.ARCHITECTURAL_CARVINGS !== false, percent: (window.STONEWORK_SURFACE_CLOSURE ?? 3) * 100,
           compatibleVisible: voxelInstances.filter(inst=>/\|closure:[\d.]+\|/.test(inst.mesh._debugKey||'')).length,

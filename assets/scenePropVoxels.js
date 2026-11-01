@@ -10,6 +10,8 @@
   const symbols = typeof module !== 'undefined' && module.exports ? require('./puzzleModules') : root.PuzzleModules;
   const iconography = typeof module !== 'undefined' && module.exports ? require('./shrineIconography') : root.ShrineIconography;
   const carvings = typeof module !== 'undefined' && module.exports ? require('./stoneCarvings') : root.StoneCarvings;
+  const cityFootprints=typeof module!=='undefined'&&module.exports?require('./cityBuildingFootprints'):root.CityBuildingFootprints;
+  const cityArchitecture=typeof module!=='undefined'&&module.exports?require('./cityArchitectureStyles'):root.CityArchitectureStyles;
   const treeShapes = ['dead_tree', 'oak', 'pine', 'willow', 'cypress', 'mushroom_tree', 'bone_tree', 'charred_tree'];
   const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
   const deadTrees = ['pale_hollow_tree', 'split_snag', 'wind_bent_tree', 'dead_willow', 'skeletal_pine', 'twisted_yew', 'rootbound_tree'];
@@ -218,7 +220,15 @@
   // Unit-volume shapes: the existing renderer applies world width and height once.
   function build(shape, size = 16, seed = 0, appearance = {}) {
     if (!shapes.has(shape)) return null;
-    if (cityKit?.has(shape) && architecture[shape]?.city) return cityKit.build(shape, size, seed, appearance);
+    if(appearance?.cityFootprint?.version===1&&genreKits?.has(shape)&&/^a_.*_urban_skyline$/.test(shape))return appearance.cityArchitecture?
+      cityArchitecture.build(appearance.cityFootprint,appearance.cityArchitecture,size):cityFootprints.build(appearance.cityFootprint,size);
+    if (cityKit?.has(shape) && architecture[shape]?.city) {
+      const original=cityKit.build(shape,size,seed,appearance);
+      if(appearance.cityArcade?.axis!=='y')return original;
+      const rotated=new Uint8Array(original.length);
+      for(let z=0;z<size;z++)for(let y=0;y<size;y++)for(let x=0;x<size;x++)rotated[x+y*size+z*size*size]=original[y+x*size+z*size*size];
+      return rotated;
+    }
     if (genreKits?.has(shape) && architecture[shape]?.genre) return genreKits.build(shape, size, seed, appearance);
     if (architecture[shape]?.pyramid) return designCatalog.pyramidVoxels(shape, size, seed);
     if (!Number.isInteger(size) || size < 8 || size > 64) throw new RangeError('Voxel size must be 8..64.');
@@ -637,12 +647,12 @@
       }
     } else if (shape === 'dome_shell' || shape === 'entablature_ring') {
       for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-        const r = Math.hypot((x + 0.5) / size - 0.5, (y + 0.5) / size - 0.5) / 0.5;
+        const r = Math.hypot((x + .5) / size - .5, (y + .5) / size - .5) / .5;
         if (r > 1) continue;
         if (shape === 'entablature_ring') {
           if (r > 0.82) box(x / size, y / size, 0, (x + 1) / size, (y + 1) / size, 1);
         } else {
-          const h = Math.sqrt(Math.max(0, 1 - r * r));
+          const h = cityKit?.domeProfile ? cityKit.domeProfile((x+.5)/size,(y+.5)/size).height : Math.sqrt(Math.max(0,1-r*r));
           if (r < 0.13) continue; // Oculus remains open to Tartarus's sky.
           box(x / size, y / size, r > 0.85 ? 0 : Math.max(0, h - 0.14), (x + 1) / size, (y + 1) / size, h);
         }

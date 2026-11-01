@@ -1,0 +1,44 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Genre Fixture Renderer Check</title>
+<div id="dungeon-popup" style="display:block"><div id="dungeon-container"></div></div><pre id="results">Loading</pre>
+<script>window.HolodekFlags={GENRE_KITS:true,GENRE_LIGHTS:true,GENRE_EXPANSION:true,ARCHITECTURE_EXPANSION:true};</script>
+<script src="/assets/masonryPatterns.js"></script><script src="/assets/voxelMaterials.js"></script>
+<script src="/assets/designCatalog.js"></script><script src="/assets/genreFixtures.js"></script>
+<script src="/assets/genreFurnishings.js"></script><script src="/assets/architectureDesigns.js"></script>
+<script src="/assets/genreExpansion.js"></script><script src="/assets/genreKits.js"></script>
+<script src="/assets/genreLights.js"></script><script src="/assets/scenePropVoxels.js"></script>
+<script src="/assets/rendererWebGL.js"></script>
+<script>
+(async()=>{let result;try{
+  const r=webglDungeonRenderer,texture=color=>{const c=document.createElement('canvas');c.width=c.height=32;c.getContext('2d').fillStyle=color;c.getContext('2d').fillRect(0,0,32,32);c.complete=true;c.naturalWidth=c.naturalHeight=32;return c;};
+  window.WEBGPU_VOXEL_PREWARM=false;
+  const fixture=texture('#000000');fixture.getContext('2d').clearRect(0,0,32,32);GenreKits.paint(fixture.getContext('2d'),'l_sci-fi_1',0,0,32,32);
+  const d={geoKey:'0,0,0',_geometryStamp:'fixture-probe',layout:{width:14,height:12},start:{x:7,y:5},cells:{},classification:{indoor:true},lighting:{intensity:.1},
+    tiles:{floor:{},wall:{},ceiling:{},torch:{lightType:'fixture_sci-fi_1',spriteSpec:{voxelShape:'l_sci-fi_1',profile:'flat'}}}};
+  for(let y=0;y<12;y++)for(let x=0;x<14;x++)d.cells[`${x},${y}`]={tile:!x||!y||x===13||y===11?'wall':'floor',floorHeight:0,ceilHeight:3};
+  d.cells['7,0'].tile='torch';d.cells['7,0'].torchFacing='S';
+  window.currentDungeon=d;window.dungeonTextures={wall:texture('#646464'),floor:texture('#505050'),ceiling:texture('#3c3c3c'),torch:fixture};
+  window.dungeonTexturesMeta={torch:d.tiles.torch.spriteSpec};window.playerPosX=7.5;window.playerPosY=4.5;window.playerDungeonX=7;window.playerDungeonY=4;window.playerAngle=-Math.PI/2;window.playerZ=1.55;
+  if(!r.init(document.getElementById('dungeon-container')))throw Error('Production shader compilation failed');
+  r.canvas.width=320;r.canvas.height=240;const gl=r.gl,light=GenreLights.light;
+  const capture=(lit,blocked=false)=>{
+    GenreLights.light=(...a)=>({...light(...a),intensity:lit?light(...a).intensity:0});
+    if(blocked)for(let x=1;x<13;x++)d.cells[`${x},2`]={tile:'wall',floorHeight:0,ceilHeight:3};
+    d._geometryStamp='fixture-'+lit+'-'+blocked;r.renderScene();
+    const p=new Uint8Array(320*240*4);gl.readPixels(0,0,320,240,gl.RGBA,gl.UNSIGNED_BYTE,p);
+    let floor=[0,0,0],bright=0;
+    for(let y=0;y<240;y++)for(let x=0;x<320;x++){const i=(x+y*320)*4;
+      if(y<55)for(let c=0;c<3;c++)floor[c]+=p[i+c];
+      if(p[i+1]>180&&p[i+1]>p[i]*1.1)bright++;
+    }
+    return {floor,bright,error:gl.getError(),png:r.canvas.toDataURL()};
+  };
+  const dark=capture(false),lit=capture(true),blocked=capture(true,true);GenreLights.light=light;
+  const energy=a=>a.floor.reduce((x,y)=>x+y,0),gain=lit.floor.map((v,i)=>v-dark.floor[i]);
+  const emissive=dark.bright>5,colored=gain[1]>gain[0]*1.03,illumination=energy(lit)>energy(dark)*1.04,occluded=energy(blocked)<energy(lit)*.95;
+  result={pass:emissive&&colored&&illumination&&occluded&&![dark,lit,blocked].some(a=>a.error),emissive,colored,illumination,occluded,gain,
+    dark:{...dark,png:undefined},lit:{...lit,png:undefined},blocked:{...blocked,png:undefined},png:lit.png};
+}catch(e){result={pass:false,error:e.stack};}
+document.getElementById('results').textContent=JSON.stringify({...result,png:undefined});
+await fetch('/report',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(result)});
+})();
+</script></html>

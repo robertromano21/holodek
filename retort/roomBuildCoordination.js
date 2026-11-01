@@ -22,6 +22,22 @@ function createRegistry(runId) {
     // Preflight is side-effect free. Publish reservations only after the entire artifact commits.
     return () => { for (const key of keys) owners.set(key, { id: job.id, destination: job.key, kind: key === job.key ? 'destination' : 'topology' }); };
   }
+  function releaseFrontier(job) {
+    if (leases.get(job.id) !== job) throw Error('PC room lease is no longer active.');
+    for (const [key, owner] of owners) if (owner.id === job.id && key !== job.key) owners.delete(key);
+  }
+  function plan(job, database) {
+    const protectedKeys = new Set([...owners].filter(([, owner]) => owner.id !== job.id).map(([key]) => key));
+    const room = database[job.key], before = JSON.stringify(room);
+    require('./roomBuildTopology').prepare(database, job.key, { seed: job.runId, protectedKeys });
+    if (!room.backgroundTopology?.runId && !room.visited && !room.populationComplete && !room.preparedBuild && room.backgroundTopology)
+      room.backgroundTopology.runId = runId;
+    const writable = [job.key, ...Object.values(room.exits || {}).map(exit => exit.targetCoordinates).filter(key => {
+      const other = database[key];
+      return /^-?\d+,-?\d+,-?\d+$/.test(key || '') && !protectedKeys.has(key) && key !== '0,0,0' && !other;
+    })];
+    return { changed: before !== JSON.stringify(room), publish: reserve(job, [...new Set(writable)]) };
+  }
   function describe(job, jobs, database) {
     const assigned = new Map([...leases.values()].map(other => [other.key, other]));
     for (const [key, other] of jobs) assigned.set(key, other);
@@ -32,12 +48,12 @@ function createRegistry(runId) {
       writeSet: [...owners].filter(([, owner]) => owner.id === job.id).map(([key]) => key),
       sharedProposals: ['topology', 'crossGameHistory:append'],
       otherConstructedRoomsReadOnly: true,
-      readOnly: [...relevant].filter(key => key !== job.key && (database[key]?.visited || database[key]?.populationComplete || database[key]?.preparedBuild || database[key]?.builder?.mode === 'hand')),
+      readOnly: [...relevant].filter(key => key !== job.key && (database[key]?.name || database[key]?.visited || database[key]?.populationComplete || database[key]?.preparedBuild || database[key]?.builder?.mode === 'hand')),
       assignments: [...assigned.values()].filter(other => !other.finished || relevant.has(other.key)).map(other => ({ destination: other.key, owner: other.id,
         phase: other.phase, stage: other.stage, ready: other.stage === 'complete', attempt: other.attempt })),
-      reservations: [...owners].filter(([key]) => relevant.has(key)).map(([key, owner]) => ({ key, ...owner })) });
+      reservations: [...owners].map(([key, owner]) => ({ key, ...owner })) });
   }
-  return { assign, reserve, release, describe };
+  return { assign, reserve, release, describe, plan, releaseFrontier };
 }
 const registries = new WeakMap();
 function registryFor(state) {

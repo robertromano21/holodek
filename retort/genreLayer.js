@@ -2,12 +2,33 @@
 // world1 GENRE_KITS / GENRE_LIGHTS server side: stamps each built room with its resolved genre and light set.
 // Setting-aware: Children of the Grave (no active homebrew bible) stays fantasy-family, including portal rooms;
 // homebrew and Campaign Builder worlds may use any genre, including through portals (realm.genre).
-// Additive only: existing tiles, torches, portal palette/arch/crystal features are kept; genre data rides alongside.
+// Canonical worlds keep their fixtures; homebrew worlds use their own genre's light sources.
 const Flags = require('./worldFlags');
 const Kits = require('../assets/genreKits');
 const Lights = require('../assets/genreLights');
+const Fixtures = require('../assets/genreFixtures');
 const hash = s => { let h = 2166136261; for (const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
 function activeSetting() { try { return require('./settingLayer').current() || null; } catch { return null; } }
+function fixtures(dungeon, room = {}, { setting = activeSetting() } = {}) {
+  if (!dungeon || !Flags.on('GENRE_LIGHTS')) return { changed: 0 };
+  const kit = Kits.resolve(room, setting), genre = kit.genre;
+  if (!kit.homebrew) return { changed: 0 };
+  const era=require('../assets/cityArchitectureStyles').profile(genre);
+  // Fantasy-family rooms share the original wall-torch path; do not replace every flame with a rune/crystal fixture.
+  if(era.fixture==='torch')return {changed:0};
+  const fixture = Fixtures.select(genre, ['candle','oil','flame'].includes(era.fixture)?0:era.fixture==='gas'?1:hash(room.name || dungeon.geoKey || genre));
+  if (!fixture) return { changed: 0 };
+  const type = fixture.lightType, shape = Lights.TYPES[type].prop;
+  const old = dungeon.tiles?.torch;
+  if (!old || !Kits.has(shape) || old.fixtureVersion === Fixtures.VERSION && old.lightType === type && old.spriteSpec?.voxelShape === shape) return { changed: 0 };
+  const { createCanvas } = require('canvas'), canvas = createCanvas(128, 128);
+  Kits.paint(canvas.getContext('2d'), shape, 0, 0, 128, 128);
+  dungeon.tiles.torch = { ...old, lightType: type, fixtureVersion: Fixtures.VERSION, flame: false, url: canvas.toDataURL('image/png'),
+    spriteSpec: { voxelShape: shape, material: kit.voxel, palette: { ...kit.palette }, profile: 'flat', heightRatio: .3, baseWidth: .45 } };
+  // Preserve the wall cells and their collision geometry; only the mounted light's appearance changes.
+  dungeon.genreLights = (dungeon.genreLights || []).filter(l => Lights.TYPES[l.type] && !['torch', 'candle'].includes(l.type));
+  return { changed: 1, genre, lightType: type };
+}
 function decorate(dungeon, room = {}, { setting = activeSetting(), geoKey = '' } = {}) {
   if (!dungeon || !(Flags.on('GENRE_KITS') || Flags.on('GENRE_LIGHTS'))) return null;
   const r = Kits.resolve(room, setting);
@@ -18,6 +39,7 @@ function decorate(dungeon, room = {}, { setting = activeSetting(), geoKey = '' }
     const n = Math.min(4, Math.max(2, Math.floor(cells.length / 60))), h = hash(geoKey || room.name || '');
     dungeon.genreLights = Array.from({ length: cells.length ? n : 0 }, (_, i) => { const [k] = cells[(h + i * 7919) % cells.length], [x, y] = k.split(',').map(Number); return { x: x + .5, y: y + .5, z: 1.4, type: types[(h + i) % types.length] }; });
   }
+  fixtures(dungeon, room, { setting });
   return r;
 }
 // world1 GENRE_ARCH: the room's genre building style (walls/floor/ceiling/door/window/trim, room shape, street rule, props).
@@ -38,4 +60,4 @@ function archFor(room = {}, { setting = activeSetting() } = {}) {
   return require('../assets/genreArchitecture').style(r.mix, { name: room.name || '', seed: room.seed || room.roomKey || '', z }) ||
     (Flags.on('ARCHITECTURE_EXPANSION') ? {...require('../assets/genreExpansion').STYLES[r.genre],genre:r.genre,zone:'interior',taint:0} : null);
 }
-module.exports = { decorate, activeSetting, archFor };
+module.exports = { decorate, activeSetting, archFor, fixtures };

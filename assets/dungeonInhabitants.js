@@ -194,24 +194,26 @@
           .filter(id => typeof id === 'string' && SpellRules?.catalog(className).includes(id)).slice(0, 7),
         allegiance: state, state, encounterId: text(row.encounterId || row.encounter, 40) || `group-${Math.floor(index / 3)}`,
         homeSite: text(row.homeSite, 20) || 'commons',
+        ...(row.unitId?{unitId:text(row.unitId,60)}:{}),
+        ...(['shop','temple'].includes(row.serviceRole) ? {serviceRole:row.serviceRole} : {}),
         job: text(row.job, 70) || (state === 'Hostile' ? 'sentinel' : 'pilgrim'),
         activity: text(row.activity, 140) || (state === 'Hostile' ? 'watching the approach' : 'studying the ruins'),
-        personality: text(row.personality, 220), voice: text(row.voice, 140), motivation: text(row.motivation, 180),
-        history: text(row.history, 600), profile: row.profile && Profiles ? Profiles.create({ ...row, name }, '', row.profile) : undefined,
+        personality: text(row.personality, 220), voice: text(row.voice, 140), motivation: text(row.motivation, Infinity),
+        history: text(row.history, Infinity), profile: row.profile && Profiles ? Profiles.create({ ...row, name }, '', row.profile) : undefined,
         routine: ROUTINES.includes(row.routine) ? row.routine : state === 'Hostile' ? 'patrol' : 'work',
         dialogue: (Array.isArray(row.dialogue) ? row.dialogue : []).map(line => text(line, MAX_SPEECH_LENGTH)).filter(Boolean).slice(0, 3) }];
     });
   }
-  function createPopulation(geoKey, rows, { indoor = true, starting = false } = {}) {
+  function createPopulation(geoKey, rows, { indoor = true, starting = false, residentLimit = null,groupLimit=4 } = {}) {
     const actors = {};
     const groups = [];
     const groupById = new Map();
-    const limit = starting ? 4 : indoor ? 10 : 20;
+    const limit = starting ? 4 : Number.isInteger(residentLimit) ? Math.max(1,Math.min(24,residentLimit)) : indoor ? 10 : 20;
     for (const row of normalizeDescriptors(rows, { limit, starting })) {
-      // Limit each encounter to four and keep allegiances coherent within a group.
-      const base = `${row.encounterId}-${row.allegiance.toLowerCase()}${row.homeSite === 'commons' ? '' : '-' + row.homeSite}`;
+      // Older callers retain four; new authored encounters may request groups of up to six.
+      const base = `${row.encounterId}-${row.allegiance.toLowerCase()}${row.homeSite === 'commons' ? '' : '-' + row.homeSite}${row.unitId?'-'+row.unitId:''}`;
       let group = groupById.get(base);
-      if (!group || group.members.length >= 4) {
+      if (!group || group.members.length >= Math.max(2,Math.min(6,groupLimit))) {
         group = { id: `${base}-${groups.length}`, members: [], status: 'unseen', introPlayed: false, site: null };
         groups.push(group); groupById.set(base, group);
       }
@@ -245,6 +247,7 @@
       actor.state = state({ ...actor, state: ['Dead', 'Unconscious', 'Dying'].includes(actor.state) ? actor.state : actor.allegiance,
         status: actor.type === 'monster' ? record?.status : undefined });
       if (!record || actor.type !== 'monster') continue;
+      if(record.sprite?.appearanceLocked){actor.sprite=record.sprite;actor.visualIdentity=record.visualIdentity;}
       actor.encounterId = record.encounterId;
       actor.job = record.job; actor.activity = record.activity; actor.routine = record.routine;
       actor.personality=record.personality; actor.motivation=record.motivation;
@@ -425,8 +428,9 @@
     const available = new Map(tiles.map(t => [`${t.x},${t.y}`, t]));
     const occupied = new Set(Object.values(population.actors).filter(a => a.position).map(a => `${a.position.x},${a.position.y}`));
     const extent = Math.max(dungeon.layout?.width || 0, dungeon.layout?.height || 0);
-    const gap = population.starting ? 0 : population.settlement?.hub ? 6 : population.indoor ? 12 : Math.max(20, Math.min(60, extent / 9));
-    const safeDistance = population.starting ? 2 : population.indoor ? 9 : 16;
+    const cityVenue=population.venue?.version===1&&dungeon.cityVenue?.id===population.venue.id;
+    const gap = population.starting ? 0 : cityVenue?3:population.settlement?.hub ? 6 : population.indoor ? 12 : Math.max(20, Math.min(60, extent / 9));
+    const safeDistance = population.starting||cityVenue ? 2 : population.indoor ? 9 : 16;
     const smallGroups = population.groups.filter(g => !g.site && g.status !== 'exhausted' && g.members.length <= 3);
     const questGroup = !population.starting && population.questIntroduction?.status === 'pending' ?
       smallGroups.find(g => g.members.includes(population.questIntroduction.speaker) &&
@@ -436,30 +440,42 @@
     const candidates = tiles.filter(t => t.distance >= (entryGroup ? 2 : safeDistance) && !dungeon.cells[`${t.x},${t.y}`].object &&
       !dungeon.cells[`${t.x},${t.y}`].exitMarker);
     const sites = population.groups.map(g => g.site).filter(Boolean);
-    const groups = entryGroup ? [entryGroup, ...population.groups.filter(g => g !== entryGroup)] : population.groups;
+    const groups = entryGroup ? [entryGroup, ...population.groups.filter(g => g !== entryGroup)] : population.groups.slice();
+    const venueOperator=group=>group.members.some(n=>population.actors[n]?.serviceRole||/^venue-operator(?:-|$)/.test(population.actors[n]?.encounterId||''));
+    if(cityVenue)groups.sort((a,b)=>Number(venueOperator(b))-Number(venueOperator(a)));
     for (const group of groups) {
       if (group.site || group.status === 'exhausted') continue;
       let site = null, best = -Infinity;
       const homeSite = population.settlement?.hub && population.actors[group.members[0]]?.homeSite;
       const venue = homeSite && dungeon.sceneExteriors?.buildings?.find(b => b.direction === homeSite)?.doorway?.approach;
-      const center = population.settlement?.hub ? venue || dungeon.start : null;
+      const service = group.members.some(name => population.actors[name]?.serviceRole==='shop'||cityVenue&&
+        (population.actors[name]?.serviceRole==='temple'||/^venue-operator(?:-|$)/.test(population.actors[name]?.encounterId||'')));
+      const stallPart = service && dungeon.sceneStructures?.find(s => /stall/.test(s.shape || dungeon.tiles?.[s.tile]?.spriteSpec?.voxelShape || ''));
+      const stall = stallPart?.position && {x:stallPart.position.x+(stallPart.size?.x||1)/2,y:stallPart.position.y+(stallPart.size?.y||1)+1.5};
+      const counterSite=cityVenue&&service&&dungeon.cityVenue.workSites?.find(s=>s.serviceCounter)?.position;
+      const work=cityVenue&&service&&dungeon.sceneStructures?.find(s=>s.serviceCounter||s.role==='city-venue-furniture'&&/workstation|medical|food|craft/.test(s.shape||''));
+      const unitId=population.actors[group.members[0]]?.unitId,units=cityVenue&&dungeon.cityVenue.units?.filter(u=>u.position);
+      const unit=units?.length&&unitId&&(units.find(u=>u.id===unitId)||units[hash(unitId)%units.length]);
+      if(unit)for(const name of group.members)population.actors[name].unitId=unit.id;
+      const center = counterSite||unit?.position|| (work?.position?{x:work.position.x+2,y:work.position.y+1}:stall || (population.settlement?.hub ? venue || dungeon.start : null));
       // Sample a bounded number of sites, but across the entire reachable level.
-      const pool = group === entryGroup ? candidates.filter(t => Math.hypot(t.x - dungeon.start.x, t.y - dungeon.start.y,
+      const pool = !stall && (population.starting || group === entryGroup) ? candidates.filter(t => Math.hypot(t.x - dungeon.start.x, t.y - dungeon.start.y,
         (dungeon.cells[`${t.x},${t.y}`].floorHeight || 0) - (dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].floorHeight || 0)) <= MONSTER_DIALOGUE_RANGE &&
         lineClear(dungeon, { x: dungeon.start.x + .5, y: dungeon.start.y + .5 }, { x: t.x + .5, y: t.y + .5 })) : candidates;
-      const stride = group === entryGroup ? 1 : Math.max(1, Math.floor(pool.length / 1400));
+      const stride = population.starting || group === entryGroup ? 1 : Math.max(1, Math.floor(pool.length / 1400));
       const salt = hash(population.geoKey + group.id);
       for (let i = salt % stride; i < pool.length; i += stride) {
         const t = pool[i];
         if (t.distance < (group===entryGroup ? 2 : safeDistance)) continue;
         if (occupied.has(`${t.x},${t.y}`)) continue;
+        if(stallPart&&t.x>=stallPart.position.x&&t.x<stallPart.position.x+(stallPart.size?.x||1)&&t.y>=stallPart.position.y&&t.y<stallPart.position.y+(stallPart.size?.y||1))continue;
         const spacing = Math.min(...sites.map(p => Math.hypot(p.x - t.x, p.y - t.y)), Infinity);
         if (spacing < gap) continue;
         const floor = dungeon.cells[`${t.x},${t.y}`].floorHeight || 0;
         const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx,dy]) => available.has(`${t.x+dx},${t.y+dy}`) &&
           Math.abs((dungeon.cells[`${t.x+dx},${t.y+dy}`].floorHeight || 0) - floor) <= 1.5).length;
         if (neighbors < 2) continue;
-        const preferred = center && group !== entryGroup ? -Math.hypot(t.x - center.x, t.y - center.y) * 3 : population.starting || group===entryGroup ? -t.distance : -Math.abs(t.distance - safeDistance -
+        const preferred = center && (cityVenue||group !== entryGroup) ? -Math.hypot(t.x - center.x, t.y - center.y) * 3 : population.starting || group===entryGroup ? -t.distance : -Math.abs(t.distance - safeDistance -
           (group.members.length + sites.length + 1) * Math.max(12, extent / (population.groups.length + 2)));
         const score = preferred + Math.min(spacing, extent) * 0.25 + hash(`${salt}:${t.x},${t.y}`) / 4294967296 * 8;
         if (score > best) { best = score; site = t; }
@@ -475,7 +491,9 @@
           visited.add(key); cluster.push(next);
         }
       }
-      const spaces = cluster.filter(t => !occupied.has(`${t.x},${t.y}`) && !dungeon.cells[`${t.x},${t.y}`].object);
+      const spaces = cluster.filter(t => !occupied.has(`${t.x},${t.y}`) && !dungeon.cells[`${t.x},${t.y}`].object &&
+        (stall || !population.starting || Math.hypot(t.x-dungeon.start.x,t.y-dungeon.start.y) <= MONSTER_DIALOGUE_RANGE &&
+          lineClear(dungeon,{x:dungeon.start.x+.5,y:dungeon.start.y+.5},{x:t.x+.5,y:t.y+.5})));
       if (spaces.length < group.members.length) continue;
       group.site = { x: site.x, y: site.y }; sites.push(group.site);
       group.members.forEach((name, index) => {
@@ -507,6 +525,10 @@
     }
     for (const group of population.groups) {
       if (group.members.every(name => population.actors[name]?.status !== 'present')) group.status = 'exhausted';
+      else if (group.status === 'engaged' && !group.members.some(name => {
+        const actor = population.actors[name];
+        return actor?.status === 'present' && canAct(actor) && allegiance(actor) === 'Hostile';
+      })) { group.status = 'discovered'; population.revision++; }
     }
     return population;
   }
@@ -560,8 +582,12 @@
         (eligible.find(g => g.status === 'engaged') || eligible.sort((a,b) =>
         Math.min(...hostiles.filter(h => h.encounterId === a.id).map(h => space.distance(h,pc))) -
         Math.min(...hostiles.filter(h => h.encounterId === b.id).map(h => space.distance(h,pc))))[0]);
-      if (selected) selected.status = 'engaged';
-      hostiles = hostiles.filter(a => a.encounterId === selected?.id && space.point(a));
+      // A provoked encounter can have witnessed allies in another saved group without rewriting their identities.
+      const coalition = selected?.provokedWith || selected?.id;
+      const engaged = groups.filter(g => selected && (g.id === selected.id || g.provokedWith && g.provokedWith === coalition));
+      for (const group of engaged) group.status = 'engaged';
+      const ids = new Set(engaged.map(g => g.id));
+      hostiles = hostiles.filter(a => ids.has(a.encounterId) && space.point(a));
     }
     const friends = living.filter(a => allegiance(a, fallback) === 'Friendly' &&
       (a.type !== 'monster' || !space || !pc || space.distance(a, pc) <= (population?.indoor ? 10 : 14) &&
@@ -683,8 +709,13 @@
       const recipient = typeof target === 'string' && (/^PC$/i.test(target) ? 'PC' : allowed.get(keyOf(target)));
       return speaker && recipient && recipient !== speaker ? [[speaker, recipient]] : [];
     }));
+    const attentions = new Map(rows.flatMap(row => {
+      const speaker = allowed.get(keyOf(row?.speaker));
+      return speaker && ['passing','addressing','question'].includes(row?.attention) ? [[speaker,row.attention]] : [];
+    }));
     dialogue = dialogue.map(row => ({ ...row, ...(memories.has(row.speaker) ? { remember: memories.get(row.speaker) } : {}),
-      ...(recipients.has(row.speaker) ? { recipient: recipients.get(row.speaker) } : {}) }));
+      ...(recipients.has(row.speaker) ? { recipient: recipients.get(row.speaker) } : {}),
+      ...(attentions.has(row.speaker) ? { attention: attentions.get(row.speaker) } : {}) }));
     return { content, dialogue, ...(packaging.warnings.length?{dialogueProtocolWarnings:packaging.warnings}:{}),
       replies: sanitizeReplies(parsed?.replies, names), exchanges: sanitizeExchanges(parsed?.exchanges, names) };
   }
@@ -734,7 +765,8 @@
         (row.line.includes(entry.line) || entry.line.includes(row.line)));
       return { ...row, ...(metadata?.remember ? { remember: metadata.remember } : {}),
         ...(metadata?.attribution ? { attribution: metadata.attribution } : {}),
-        ...(metadata?.recipient ? { recipient: metadata.recipient } : {}) };
+        ...(metadata?.recipient ? { recipient: metadata.recipient } : {}),
+        ...(['passing','addressing','question'].includes(metadata?.attention) ? { attention: metadata.attention } : {}) };
     });
     return [...rows, ...explicit.filter(row => !speakers.has(row.speaker))].slice(0, 32);
   }
@@ -1100,10 +1132,11 @@
       population.groups.filter(g => g.status === 'engaged').map(g => g.id) : []);
     return [...records.values()].filter(a => {
       if (!a.position) return false;
-      if (engaged.has(a.encounterId)) return true;
       const point = { x: a.position.x + 0.5, y: a.position.y + 0.5 };
       if (Math.hypot(point.x - player.x, point.y - player.y) >
           ((population?.indoor ?? dungeon.classification?.indoor) ? 8 : 12)) return false;
+      // Engagement preserves nearby opponents behind cover, never remote or spared residents.
+      if (engaged.has(a.encounterId) && canAct(a) && allegiance(a) === 'Hostile') return true;
       return lineClear(dungeon, player, point) || a.encounteredAt > 0 &&
         dialogueReach(dungeon, { ...a, type: 'monster', mazeX: a.position.x, mazeY: a.position.y,
           mazeRoomKey: dungeon.geoKey }, player).canSpeak;

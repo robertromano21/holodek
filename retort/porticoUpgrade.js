@@ -87,14 +87,22 @@ function prepareRoom(state, geoKey, { finalize, player, actors = [] } = {}) {
   const [x, y, z] = geoKey.split(',').map(Number), coords = { x, y, z };
   const dungeon = state.getRoomDungeon(coords);
   if (!dungeon) return null;
+  const assets = require('./roomVisualAssets').repair(dungeon, geoKey);
+  const genreUpgrade = require('./genreAssetPolicy').enforceDungeon(dungeon);
+  const fixtureUpgrade = require('./genreLayer').fixtures(dungeon);
   const roster = JSON.parse(state.getCombatCharactersString() || '[]').filter(a => !a.mazeRoomKey || a.mazeRoomKey === geoKey);
   const population = state.getRoomPopulation(geoKey);
   const live = state.getLiveWorldState();
   const result = upgradePorticos(dungeon, { player, actors: [roster, population?.actors, actors,
     live?.roomKey === geoKey ? live : null] });
-  if (!result.changed) return dungeon;
+  const protectedKeys=new Set();protectPoints([roster,population?.actors,actors,player,live?.roomKey===geoKey?live:null],protectedKeys,1);
+  const circulation=require('./cityCirculation').install(dungeon,{protectedKeys});
+  if (!result.changed && !genreUpgrade.changed && !assets.changed && !fixtureUpgrade.changed && !circulation.changed) return dungeon;
+  require('./roomVisualAssets').stamp(dungeon);
+  if (genreUpgrade.changed) { delete dungeon._lodCache; delete dungeon._minFloor; }
   const finalized = finalize(geoKey, dungeon, dungeon.customTiles);
   state.setRoomDungeon(coords, finalized, finalized.customTiles);
+  if (genreUpgrade.changed) console.info('[GenreAssets]', JSON.stringify({ geoKey, ...genreUpgrade }));
   console.info('[PorticoUpgrade]', JSON.stringify({ geoKey, upgraded: result.upgraded, added: result.added, skipped: result.skipped }));
   return finalized;
 }

@@ -3,8 +3,10 @@ const fs=require('node:fs'),path=require('node:path'),{createHash}=require('node
 const Extended=require('./sid10582'),Clock=require('./sidMode'),Effects=require('./sidEffectPalette');
 const DIR=path.resolve(__dirname,'../sid/palettes'),pending=new Map(),queue=[];
 const busy={music:false,effect:false};
+const workers=new Map();let closed=false;
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0,40);
 function pump(kind){
+  if(closed)return;
   const index=queue.findIndex(j=>j.data.kind===kind);
   if(busy[kind]||index<0)return;
   const job=queue.splice(index,1)[0];busy[kind]=true;
@@ -12,11 +14,13 @@ function pump(kind){
   const finish=(error)=>{if(settled)return;settled=true;busy[kind]=false;pending.delete(job.key);error?job.reject(error):job.resolve();pump(kind);};
   try{
     worker=new Worker(path.join(__dirname,'audioPaletteWorker.js'),{workerData:job.data});
+    workers.set(worker,finish);worker.once('exit',()=>workers.delete(worker));
     worker.once('message',m=>finish(m.ok?null:Error(m.error)));
     worker.once('error',finish);worker.once('exit',code=>{if(!settled)finish(Error('Audio palette worker exited: '+code));});
   }catch(e){finish(e);}
 }
 function run(key,data){
+  if(closed)return Promise.reject(Error('Game audio rendering stopped.'));
   if(pending.has(key))return pending.get(key);
   if(queue.length>=32)return Promise.reject(Error('Audio palette render queue full; try again shortly.'));
   fs.mkdirSync(DIR,{recursive:true});
@@ -80,4 +84,11 @@ function install(app,state){
     catch(e){console.warn('[AudioPaletteEffect]',e.message);res.status(503).json({error:e.message});}
   });
 }
-module.exports={pair,effect,install,clockOf};
+async function close(){
+  closed=true;const error=Error('Game audio rendering stopped.');
+  for(const job of queue.splice(0)){pending.delete(job.key);job.reject(error);}
+  const stops=[];
+  for(const [worker,finish]of workers){finish(error);stops.push(worker.terminate());}
+  await Promise.allSettled(stops);
+}
+module.exports={pair,effect,install,clockOf,close};

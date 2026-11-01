@@ -11,18 +11,19 @@ const Mood = require('./mood'), VOC_VERSION = require('./voc64').VERSION || 1, S
 const VoiceProfile = require('./profile');
 const Timbre = require('./timbre');
 const stats = { jobs: 0, failures: 0, last: [] }, MAX_PREFETCH = 24;
-let worker = null, seq = 0, busy = false, disabled = null; const pending = new Map(), queue = [];
+let worker = null, seq = 0, busy = false, disabled = null, closed = false, warmTimer; const pending = new Map(), queue = [];
 function startWorker() {
-  if (worker || disabled) return;
+  if (closed || worker || disabled) return;
   try { worker = new Worker(path.join(__dirname, 'worker.js')); } catch (e) { disabled = e.message; return; }
   worker.on('message', m => { const p = pending.get(m.id); pending.delete(m.id); busy = false; if (p) m.ok ? p.res(m) : p.rej(new Error(m.error)); pump(); });
   worker.on('error', e => { console.warn('[SidVoice] worker error', e.message); stats.failures++; worker = null; busy = false; for (const p of pending.values()) p.rej(e); pending.clear(); });
 }
 function pump() {
-  if (busy || !queue.length) return; startWorker(); if (!worker) { while (queue.length) queue.shift().rej(new Error('sid voice disabled: ' + disabled)); return; }
+  if (closed || busy || !queue.length) return; startWorker(); if (!worker) { while (queue.length) queue.shift().rej(new Error('sid voice disabled: ' + disabled)); return; }
   const j = queue.shift(); busy = true; pending.set(j.msg.id, j); worker.postMessage(j.msg);
 }
 function run(msg, urgent) {
+  if (closed) return Promise.reject(Error('Game voice synthesis stopped.'));
   return new Promise((res, rej) => { msg.id = ++seq; const j = { msg, res, rej, urgent };
     if (urgent) { const i = queue.findIndex(q => !q.urgent); i < 0 ? queue.push(j) : queue.splice(i, 0, j); } else {
       queue.push(j); const pre = queue.filter(q => !q.urgent); if (pre.length > MAX_PREFETCH) { const drop = pre[0]; queue.splice(queue.indexOf(drop), 1); drop.rej(new Error('prefetch queue full')); } }
@@ -143,6 +144,14 @@ function install(app, express) {
   app.get('/voice/status', (req, res) => res.json({ mode: SidMode.get(), ...chipSettings(), synthesis: 'oscillators-noise-filters-only', transport:'live-register-score',chips:64,profileVersion: VoiceProfile.VERSION,
     disabled, queue: queue.length, busy, cachedLines: wavs.size, profiles: [...profiles.values()].map(P => P.name), voiceProfiles: [...profiles.values()], ...stats }));
   // warm Piper at server start so the first line is not slowed by model loading
-  setTimeout(() => { startWorker(); if (worker && !stats.warmed) { stats.warmed = true; run({ type: 'warm' }, false).catch(e => console.warn('[SidVoice] warm failed', e.message)); } }, 1500);
+  warmTimer = setTimeout(() => { startWorker(); if (worker && !stats.warmed) { stats.warmed = true; run({ type: 'warm' }, false).catch(e => console.warn('[SidVoice] warm failed', e.message)); } }, 1500);
 }
-module.exports = { withAccent, Accent, moodOf: (speaker, text) => Mood.moodOf(clean(text), profileOf(speaker).kind), cadenceOf: t => Mood.cadenceOf(clean(t)), confidenceOf: (speaker, text) => Mood.confOf(clean(text), profileOf(speaker)), install, prefetch, setProfiles, wavFor, scoreFor, chunksOf, profileOf, lsOf };
+async function close() {
+  closed = true; clearTimeout(warmTimer);
+  const error = Error('Game voice synthesis stopped.');
+  for (const job of queue.splice(0)) job.rej(error);
+  for (const job of pending.values()) job.rej(error);
+  pending.clear(); const active = worker; worker = null; busy = false;
+  await active?.terminate();
+}
+module.exports = { withAccent, Accent, moodOf: (speaker, text) => Mood.moodOf(clean(text), profileOf(speaker).kind), cadenceOf: t => Mood.cadenceOf(clean(t)), confidenceOf: (speaker, text) => Mood.confOf(clean(text), profileOf(speaker)), install, close, prefetch, setProfiles, wavFor, scoreFor, chunksOf, profileOf, lsOf };

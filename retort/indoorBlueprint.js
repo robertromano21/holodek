@@ -4,10 +4,10 @@ const { random } = require('./dungeonGeneration');
 const { makeNavigation, reachable } = require('./sceneArchitecture');
 const { isNaturalUnderground } = require('./undergroundEnvironments');
 const ROLES = new Set(['entrance', 'hall', 'chapel', 'sanctum', 'shrine', 'rotunda', 'courtyard', 'chamber', 'gallery', 'crypt', 'keep']);
-const ROOFS = new Set(['stone', 'barrel', 'groin', 'ribbed', 'fan', 'timber', 'hammerbeam', 'boarded', 'coffered', 'gold-coffered', 'pendentive', 'squinch', 'domed', 'pitched']);
+const ROOFS = new Set(['panel', 'stone', 'barrel', 'groin', 'ribbed', 'fan', 'timber', 'hammerbeam', 'boarded', 'coffered', 'gold-coffered', 'pendentive', 'squinch', 'domed', 'pitched']);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const finite = (v, fallback) => Number.isFinite(v) ? v : fallback;
-const center = r => ({ x: r.x + Math.floor(r.w / 2), y: r.y + Math.floor(r.h / 2) });
+const center = r => r.walkableCenter || ({ x: r.x + Math.floor(r.w / 2), y: r.y + Math.floor(r.h / 2) });
 const inside = (r, p) => p.x >= r.x && p.y >= r.y && p.x < r.x + r.w && p.y < r.y + r.h;
 
 function build(dungeon, plan = {}, base = {}) {
@@ -25,8 +25,14 @@ function build(dungeon, plan = {}, base = {}) {
       const shaped = a && require('../assets/genreArchitecture').roomPlan(a.shape, dungeon.generation?.seed || a.zone);
       if (shaped) { plan = { ...plan, ...shaped }; dungeon.genreShape = a.shape; } } catch { /* keep the default plan */ }
   }
+  const venue=dungeon.sceneSpec?.city?.venue;
+  if(venue&&!base.cavernVillage)plan=require('./cityVenueLayout').fit(plan,venue,width,height,dungeon.sceneSpec?.city?.architecture);
+  if(plan.venueBounds)dungeon.cityVenueBounds=plan.venueBounds;
+  const envelope=plan.venueBounds,outline=envelope?.outline,Footprints=require('../assets/cityBuildingFootprints');
+  const insideEnvelope=(x,y)=>!outline||Footprints.contains(outline,(x-envelope.left+.5)/envelope.width,(y-envelope.top+.5)/envelope.depth);
   const rng = random(`${dungeon.generation?.seed || dungeon.blueprint?.seed || 'indoor'}:blueprint`);
-  const floor = finite(base.floor, 0), clearance = clamp(finite(base.ceil, 2.5), 2, 14);
+  const minimumClearance=dungeon.sceneSpec?.city?.architecture?.plan?1.2:2;
+  const floor = finite(base.floor, 0), clearance = clamp(finite(base.ceil, 2.5), minimumClearance, 14);
   const cells = dungeon.cells;
   const architecture = base.architecture || dungeon.sceneSpec?.architecture;
   const underground = isNaturalUnderground({ indoor: true, architecture, biome: dungeon.classification?.biome });
@@ -42,12 +48,12 @@ function build(dungeon, plan = {}, base = {}) {
     const w = clamp(Math.floor(r.w * width), 3, width - 2), h = clamp(Math.floor(r.h * height), 3, height - 2);
     rooms.push({ x: clamp(Math.floor(r.x * (width - 1)), 1, width - w - 1),
       y: clamp(Math.floor(r.y * (height - 1)), 1, height - h - 1), w, h,
-      role: ROLES.has(r.role) ? r.role : 'chamber',
+      role: ROLES.has(r.role) ? r.role : 'chamber',...(r.venueUse?{venueUse:r.venueUse}:{}),
       shape: ['hall', 'round', 'irregular'].includes(r.shape) ? r.shape : defaultShape,
       ...(ROOFS.has(r.roofStyle) ? { roofStyle: r.roofStyle } : {}),
-      ...(['doric', 'ionic', 'corinthian'].includes(r.columnOrder) ? { columnOrder: r.columnOrder } : {}),
+      ...(['plain', 'doric', 'ionic', 'corinthian'].includes(r.columnOrder) ? { columnOrder: r.columnOrder } : {}),
       floor: floor + clamp(finite(r.floor, finite(levels[rooms.length % (levels.length || 1)], 0)), -8, 12),
-      clearance: clamp(finite(r.clearance, clearance), 2, 14) });
+      clearance: clamp(finite(r.clearance, clearance), minimumClearance, 14) });
   }
   if (!rooms.length) {
     const count = clamp(Math.floor(finite(plan.roomCount, 8)), 4, 12);
@@ -89,6 +95,12 @@ function build(dungeon, plan = {}, base = {}) {
     const points = [{ ...from }];
     const horizontal = request.style === 'H' || request.style !== 'V' && rng() < 0.5;
     let { x, y } = from;
+    if(outline&&repaired){
+      const mid=envelope.left+Math.floor(envelope.width/2);
+      while(x!==mid){x+=Math.sign(mid-x);points.push({x,y});}
+      while(y!==to.y){y+=Math.sign(to.y-y);points.push({x,y});}
+      while(x!==to.x){x+=Math.sign(to.x-x);points.push({x,y});}
+    }
     while (x !== to.x || y !== to.y) {
       if (horizontal ? x !== to.x : y === to.y) x += Math.sign(to.x - x);
       else y += Math.sign(to.y - y);
@@ -104,7 +116,7 @@ function build(dungeon, plan = {}, base = {}) {
       for (let dy = -Math.floor(span / 2); dy < Math.ceil(span / 2); dy++) {
         for (let dx = -Math.floor(span / 2); dx < Math.ceil(span / 2); dx++) {
           const px = p.x + dx, py = p.y + dy;
-          if (px < 1 || py < 1 || px >= width - 1 || py >= height - 1) continue;
+          if (px < 1 || py < 1 || px >= width - 1 || py >= height - 1 || !insideEnvelope(px,py)) continue;
           const c = cells[`${px},${py}`];
           // A repaired link may cross existing floors at incompatible heights, especially
           // overlapping chambers. Ramp that narrow path too, retaining its headroom.
@@ -123,6 +135,16 @@ function build(dungeon, plan = {}, base = {}) {
     if (from && to) connect(from, to, c);
   }
   // Repair only missing links, rather than replacing the designer's corridor network.
+  if(outline){
+    for(const [key,c]of Object.entries(cells)){const [x,y]=key.split(',').map(Number);if(!insideEnvelope(x,y)){c.tile='wall';delete c.navigationReserved;}}
+    for(const r of rooms){
+      const nominal=center(r),points=[];
+      for(let y=r.y;y<r.y+r.h;y++)for(let x=r.x;x<r.x+r.w;x++)if(cells[`${x},${y}`]?.tile==='floor')points.push({x,y});
+      points.sort((a,b)=>Math.hypot(a.x-nominal.x,a.y-nominal.y)-Math.hypot(b.x-nominal.x,b.y-nominal.y));
+      if(points[0])r.walkableCenter=points[0];
+    }
+    if(!insideEnvelope(dungeon.start.x,dungeon.start.y)||cells[`${dungeon.start.x},${dungeon.start.y}`]?.tile!=='floor')dungeon.start={...center(entrance)};
+  }
   let connected = reachable(makeNavigation(dungeon), dungeon.start);
   for (const r of rooms) {
     const to = center(r);
@@ -145,6 +167,11 @@ function build(dungeon, plan = {}, base = {}) {
   dungeon.indoorLayout = { version: 1, source: rooms.length && authored.length ? 'llm-blueprint' : 'seeded-fallback',
     rooms: rooms.length, corridors, repairedLinks: corridors.filter(c => c.repaired).length,
     reachableCells: connected.count, disconnectedRooms: rooms.filter(r => { const p = center(r); return !connected.seen[p.y * width + p.x]; }).length };
+  if (plan.designProfile) {
+    dungeon.indoorLayout.source = 'genre-designed';
+    dungeon.indoorLayout.designProfile = plan.designProfile;
+  }
+  if(venue&&!base.deferCityFurnishings)require('./cityVenueLayout').furnish(dungeon,venue);
   return dungeon.indoorLayout;
 }
 

@@ -41,10 +41,12 @@ function prepareSceneBiomeProps(spec = {}, options = {}) {
   const gardenRequested = GARDEN.test(text);
   const underground = appearanceKind(spec);
   const organicExcluded = excludesOrganic(spec, text) || options.vegetation === false;
-  const profiles = underground ? [underground] : Object.keys(PROFILE_RULES).filter(profile => PROFILE_RULES[profile].test(text));
+  const urban=!!spec.city||spec.biome==='city'||spec.architecture==='city_street';
+  const recipe=require('./biomeRecipes').resolve(spec);
+  const profiles = underground ? [underground] : recipe ? [...new Set(recipe.props.flatMap(s=>V.biomeProps[s]?.biomes||[]))].filter(p=>Object.hasOwn(PROFILE_RULES,p)) : Object.keys(PROFILE_RULES).filter(profile => PROFILE_RULES[profile].test(text)&&(!urban||profile!=='badlands'));
   const shapes = V.biomeShapes.filter(shape => {
     const meta = V.biomeProps[shape];
-    return profiles.some(profile => meta.biomes.includes(profile)) && !(organicExcluded && meta.organic) &&
+    return (!recipe||recipe.props.includes(shape)) && profiles.some(profile => meta.biomes.includes(profile)) && !(organicExcluded && meta.organic) &&
       !(/\b(no fungi|no mushrooms|without fungi)\b/.test(text) && /fungi|mushroom|toadstool/.test(shape));
   });
   const indoor = spec.indoor !== false;

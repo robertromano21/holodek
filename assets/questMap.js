@@ -1,9 +1,9 @@
 // world1 quest map: objectives on the level map, exit labels for remote objectives, giver map reveals,
 // and the first-time-on-foot exit lock. Pure helpers shared by the browser and the tests.
 (function(root, factory) {
-  const api = factory();
+  const api = factory(root);
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.QuestMap = api;
-})(typeof window !== 'undefined' ? window : globalThis, function() {
+})(typeof window !== 'undefined' ? window : globalThis, function(root) {
   'use strict';
   const flag = (flags, name) => !flags || flags[name] !== false;
   const parse = k => String(k || '').split(',').map(Number);
@@ -64,6 +64,10 @@
     const lm = landmarks.find(l => words.some(w => String(l.label || l.kind).toLowerCase().includes(w) || String(l.kind).toLowerCase().includes(w)));
     if (lm) return { x: Math.floor(lm.x), y: Math.floor(lm.y), landmarkId: lm.id };
     const w = dungeon?.layout?.width || 0, h = dungeon?.layout?.height || 0, start = dungeon?.start || { x: w / 2, y: h / 2 };
+    if (root.DungeonPerformance) {
+      const floors = root.DungeonPerformance.questFloors(dungeon, w, h, start);
+      return floors.length ? { ...floors[hash(seed) % floors.length] } : null;
+    }
     const floors = [];
     for (let y = 1; y < h - 1; y += 2) for (let x = 1; x < w - 1; x += 2) {
       const c = dungeon.cells?.[`${x},${y}`];

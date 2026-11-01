@@ -1,6 +1,6 @@
 'use strict';
 const Spells = require('./spellSystem');
-const Rules = require('../assets/spellRules');
+const Rules = require('./genreAbilities').rules;
 const I = require('../assets/dungeonInhabitants');
 function project(state) {
   const db = JSON.parse(state.getRoomNameDatabase() || '{}'), text = state.getUpdatedGameConsole();
@@ -41,6 +41,6 @@ function project(state) {
       bookRequired: !!settings?.spellbook, bookPresent,
       initialized: !!c, groups: levels.map(level => ({ level, spells: entries.filter(s => s.level === level) })) });
   }
-  return { runId: state.getDungeonRunId(), revision: pool.revision ?? 0, casters };
+  return { abilitySystem: require('./genreAbilities').language(), runId: state.getDungeonRunId(), revision: pool.revision ?? 0, casters };
 }
 module.exports = { project };

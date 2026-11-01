@@ -6,6 +6,7 @@ const retort = require('./gameRetort').retort;
 
 const run = require('./gameRetort').run;
 const GraveMasterProtocol = require('./graveMasterProtocol');
+const CombatEquipment = require('./combatEquipment');
 const StoryPrompts = require('./graveMasterStoryPrompts');
 const RoomDescription = require('./roomDescription');
 const GeneratedNames = require('./generatedNames');
@@ -133,33 +134,7 @@ function storeSceneSpecInRoomDb(dbString, coordKey, spec) {
 }
 
 function computeDungeonGeometryStamp(dungeon, geoKey) {
-  if (!dungeon || !dungeon.cells) return `${geoKey || 'unknown'}:empty`;
-  let hash = 2166136261 >>> 0;
-  const mix = (value) => {
-    const text = String(value);
-    for (let i = 0; i < text.length; i++) {
-      hash ^= text.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-  };
-  const layout = dungeon.layout || {};
-  mix(geoKey || dungeon.geoKey || '');
-  mix(layout.width || 0);
-  mix(layout.height || 0);
-  const keys = Object.keys(dungeon.cells).sort();
-  for (const key of keys) {
-    const cell = dungeon.cells[key] || {};
-    mix(key);
-    mix(cell.tile || 'floor');
-    mix(Number.isFinite(cell.floorHeight) ? Math.round(cell.floorHeight * 1000) : 0);
-    mix(Number.isFinite(cell.ceilHeight) ? Math.round(cell.ceilHeight * 1000) : 0);
-    if (cell.roof) mix(`roof:${cell.roof.style}:${cell.roof.height}:${cell.roof.slopeX}:${cell.roof.slopeY}`);
-    if (cell.structureHeight) mix(`support:${cell.structureHeight}`);
-    if (cell.door) mix(cell.door.isOpen === false ? 'door:closed' : 'door:open');
-  }
-  mix(JSON.stringify(dungeon.sceneStructures || []));
-  if(dungeon.surfaceArt?.length)mix(JSON.stringify(dungeon.surfaceArt));
-  return `${keys.length}:${(hash >>> 0).toString(16)}`;
+  return require('../assets/dungeonGeometryStamp').compute(dungeon,geoKey);
 }
 
 function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
@@ -169,12 +144,22 @@ function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   if (!cachedGeometry && !dungeon.sceneRoof) applySceneRoofs(dungeon, dungeon.sceneSpec);
   if (!cachedGeometry && !dungeon.roomExits) DungeonExits.install(dungeon);
   if (!cachedGeometry && typeof SecretDoors !== 'undefined') SecretDoors.install(dungeon);
+  require('./cityCirculation').install(dungeon);
   if (!dungeon.environment) dungeon.environment = buildEnvironment(dungeon);
   dungeon.geoKey = geoKey;
   dungeon.customTiles = Array.isArray(customTiles) ? customTiles : (dungeon.customTiles || []);
   if (typeof QuestWritings !== 'undefined') {
     const room = JSON.parse(sharedState.getRoomNameDatabase() || '{}')[geoKey];
+    const task = sharedState.getCurrentTasks?.()?.[sharedState.getCurrentTaskIndex?.() || 0];
+    const missing = task?.requiredElements?.some(e => e.placement === geoKey && ['object', 'key'].includes(e.type) &&
+      !dungeon.sceneObjects?.some(item => item.name === e.name));
+    if (missing) Object.assign(dungeon, require('./openingQuestPreparation').installPhysical(dungeon, room, task, geoKey));
     QuestWritings.apply(dungeon, room);
+  }
+  if (!cachedGeometry) {
+    require('./genreAssetPolicy').enforceDungeon(dungeon);
+    require('./genreLayer').fixtures(dungeon);
+    require('./roomVisualAssets').stamp(dungeon);
   }
   const geometryStamp = computeDungeonGeometryStamp(dungeon, geoKey);
   dungeon._geometryStamp = geometryStamp;
@@ -912,6 +897,8 @@ function mapToPlainObject(map) {
 
 // This function encapsulates your Retort-JS logic, now accepting dynamic input
 async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode(), options = {}) {
+  if(typeof WorldSetting!=='undefined' && WorldSetting.ensureDeathStory)await WorldSetting.ensureDeathStory(sharedState);
+  if (typeof require === 'function') await require('./genreAbilities').ensure(sharedState);
   console.log('Received combatMode in retortWithUserInput:', combatMode);
   const pursuitTransition = typeof HostilePursuit !== 'undefined' ? HostilePursuit.plan(sharedState, userInput) : null;
 
@@ -950,8 +937,10 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   }
 
   const dungeonTestingMode = sharedState.getDungeonTestingMode && sharedState.getDungeonTestingMode();
+  const directCombat = !dungeonTestingMode && typeof CombatProvocation !== 'undefined' &&
+    CombatProvocation.attackTarget(sharedState, userInput);
   let personalNarrative = '';
-  if (!dungeonTestingMode && !options.realtimeEncounter) {
+  if (!dungeonTestingMode && !options.realtimeEncounter && !directCombat) {
     personalNarrative = await getDelayedPersonalNarrative();
   }
     // Use the function to delay fetching the updatedGameConsole
@@ -987,10 +976,10 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
         roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatCharactersString: sharedState.getCombatCharactersString() };
     }
   }
-  const stagedRecruitment = options.realtimeEncounter || typeof QuestScenes === 'undefined' ? null : QuestScenes.recruitmentGuard(sharedState,userInput);
+  const stagedRecruitment = options.realtimeEncounter || directCombat || typeof QuestScenes === 'undefined' ? null : QuestScenes.recruitmentGuard(sharedState,userInput);
   if (stagedRecruitment) return {...stagedRecruitment,updatedGameConsole:sharedState.getUpdatedGameConsole(),
     combatCharactersString:sharedState.getCombatCharactersString(),roomNameDatabaseString:sharedState.getRoomNameDatabase()};
-  const giveResult = options.realtimeEncounter || typeof ItemTransfer === 'undefined' ? null : ItemTransfer.give(sharedState, populationService, userInput);
+  const giveResult = options.realtimeEncounter || directCombat || typeof ItemTransfer === 'undefined' ? null : ItemTransfer.give(sharedState, populationService, userInput);
   if (giveResult) {
     if (typeof QuestScenes !== 'undefined') QuestScenes.refresh(sharedState);
     if (typeof Economy !== 'undefined') {
@@ -999,9 +988,12 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
     }
     return {...giveResult,updatedGameConsole:sharedState.getUpdatedGameConsole(),roomNameDatabaseString:sharedState.getRoomNameDatabase()};
   }
-  const readableResult=options.realtimeEncounter?null:await tryReadableItemAction(userInput);
+  const requestedItem = options.realtimeEncounter || directCombat || typeof ItemTransfer === 'undefined' || !ItemTransfer.request ? null :
+    await ItemTransfer.request(sharedState, populationService, userInput);
+  if (requestedItem) return requestedItem;
+  const readableResult=options.realtimeEncounter||directCombat?null:await tryReadableItemAction(userInput);
   if(readableResult)return readableResult;
-  const physicalPuzzleResult = options.realtimeEncounter ? null : await tryPhysicalPuzzleAction(userInput);
+  const physicalPuzzleResult = options.realtimeEncounter || directCombat ? null : await tryPhysicalPuzzleAction(userInput);
   options.onPhysicalPuzzlePrepared?.(physicalPuzzleResult);
   if (physicalPuzzleResult && !physicalPuzzleResult.completed) return physicalPuzzleResponse(physicalPuzzleResult);
   if (physicalPuzzleResult) roomNameDatabaseString = sharedState.getRoomNameDatabase();
@@ -1092,6 +1084,17 @@ async function generateDefaultClassification($, currentRoom = null, isSideChambe
   // Inherit from currentRoom if possible
   if (currentRoom && currentRoom.classification) {
     return { ...currentRoom.classification }; // Shallow copy
+  }
+
+  if (WorldSetting.current()) {
+    const Homebrew = require('./homebrewStoryPrompts'), C = require('./generationContracts');
+    if (isSideChamber) return Homebrew.defaultShape();
+    return require('./holodekRoomWork').request($, 'room-classification', {
+      indoor: Boolean, size: { type: Number, enum: [24, 32, 48, 64, 80, 96, 128, 160, 192] },
+      biome: C.choice(['city', 'wasteland', 'temple', 'ruins', 'cave', 'fortress', 'palace', 'crypt']),
+      features: { type: [C.text(40)], minItems: 0, maxItems: 5 },
+      ...Object.fromEntries(['skyTop', 'skyBot', 'floorColor', 'wallColor'].map(key => [key, { ...C.text(7), pattern: '^#[0-9a-fA-F]{6}$' }]))
+    }, Homebrew.classification(currentRoom || {}));
   }
 
   // Default: Indoor temple (safe for side chambers/unvisited)
@@ -2620,7 +2623,8 @@ if (currentCoordinatesMatch) {
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
         $.system`Room Name: ${roomName} Room Description: ${roomDescription}`;
-        await $.assistant`Generate a fantasy race and class for an intelligent or unintelligent animal, monster, spirit or other NPC in ${roomName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, formatted exactly as 'Race: [race], Class: [class] and nothing else with no line breaks.'`;
+        if (WorldSetting.current()) await $.assistant(require('./homebrewStoryPrompts').raceClass({ roomName, roomDescription }));
+        else await $.assistant`Generate a fantasy race and class for an intelligent or unintelligent animal, monster, spirit or other NPC in ${roomName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, formatted exactly as 'Race: [race], Class: [class] and nothing else with no line breaks.'`;
         const raceClassResult = await $.assistant.generation({ maxTokens: 30 });
         console.log("Race and Class Result:", raceClassResult);
 
@@ -2803,14 +2807,14 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   const max = Math.min(20, pc.Name === 'Mortacia' ? 15 : pc.Name === 'Suzerain' && pc.Level >= 15 ? 13 : average + 2);
   const result = await generateInhabitants($, { roomName, roomDescription, geoKey, indoor,
     campaignSetting: room.campaignSetting, rooms: records,
-    partyNames: party.map(a => a.Name), usedNames, quest: sharedState.getCurrentQuest(),
+    partyNames: party.map(a => a.Name), party, usedNames, quest: sharedState.getCurrentQuest(),
     questSeed: needsQuestIntroduction(sharedState.getCurrentQuest(), records, geoKey, sharedState.getCurrentTaskIndex() || 0) }, {
     random: getRandomInt, sex: getRandomSex, level: () => getRandomInt(min, max),
     xp: (level, archetype) => calculateCumulativeXp(xpThresholds[archetype] || 3500, level),
     equipment: async actor => {
-      const object = { name: `${actor.Name.toLowerCase()} guard blade`, type: 'weapon' };
-      const modifiers = await generateObjectModifiers($, object);
-      if (!modifiers) return null;
+      const [object] = await require('./itemAuthoring').generate($, { count: 1, types: ['weapon'],
+        roomName, roomDescription, database: records, operator: actor.Name, purpose: 'personal equipment for this resident' });
+      const modifiers = require('./itemAuthoring').validateModifiers(object);
       actor.Equipped.Weapon = { ...object, ...modifiers };
       actor.Attack += modifiers.attack_modifier || 0; actor.Damage += modifiers.damage_modifier || 0;
       actor.Armor += modifiers.ac || 0; actor.AC += modifiers.ac || 0; actor.Magic += modifiers.magic || 0;
@@ -2842,6 +2846,10 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   updatedGameConsole = Inhabitants.withStates(Economy.syncGround(updatedGameConsole, economyDb[geoKey]), result.population);
   sharedState.setUpdatedGameConsole(updatedGameConsole);
   populationService.save(result.population);
+  if (Object.values(economyDb[geoKey].services || {}).some(service => Economy.needsStock(service))) {
+    try { await Economy.prepareStocks($, sharedState, geoKey); }
+    catch (error) { console.warn('[MerchantStock]', geoKey, error.message); }
+  }
   if (!construction) await Divinity.developBiographies($, sharedState, geoKey);
   await SpellSystem.developRecipes($, sharedState, { constructionKey: construction?.key });
   updatedGameConsole = sharedState.getUpdatedGameConsole();
@@ -2850,130 +2858,23 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
 }
 
 async function generateRoomObjects($, roomName, roomDescription) {
-    console.log(`Determining if there are objects for the ${roomName}...`);
-    
-    let updatedGameConsole = await getDelayedUpdatedGameConsole();
-
-    const artifactMatch = updatedGameConsole.match(/Next Artifact: ([^\n]+)/);
-    const questMatch = updatedGameConsole.match(/Current Quest: ([^\n]+)/);
-    let nextArtifact = artifactMatch ? artifactMatch[1].trim() : '';
-    let currentQuest = questMatch ? questMatch[1].trim() : '';
-
-    const hasItems = Math.random() < 1.00;
-
-    if (!hasItems) {
-        console.log(`No items in the ${roomName}.`);
-        const objects = [];
-        return objects; // No items in the room
-    }
-
-    const numberOfItems = Math.floor(Math.random() * 5) + 1;
-    console.log(`Generating ${numberOfItems} objects for the ${roomName}...`);
-    
-    const itemTypes = ['weapon', 'armor', 'shield', 'other'];
-    const objects = [];
-    let itemDatabase = {};
-    try { itemDatabase = JSON.parse(sharedState.getRoomNameDatabase() || '{}'); } catch {}
-    
-    for (let i = 0; i < numberOfItems; i++) {
-        const objectType = itemTypes[Math.floor(Math.random() * itemTypes.length)];
-        $.model = "gpt-4.1-mini";
-        $.temperature = 1.0;
-        let objectName;
-        if ((typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) {
-            objectName = await require('./holodekObjectName').generate($, { objectType, roomName, roomDescription });
-        } else {
-        await $.assistant`Generate a name for a ${objectType} as a portable object suitable for a fantasy, roleplaying adventure for the ${roomName}, with the object all lower case on a single line with no punctuation, dashes, bullets, numbering or capitalization whatsoever, just the object as a noun. Object Type: ${objectType} Room Description: ${roomDescription} If the object type is other, it might be a type of treasure that is wearable, a jewel, an orb, a relic or something readable like a scroll or tome. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
-        const objectResult = await $.assistant.generation({ maxTokens: 30 });
-        objectName = GeneratedNames.clean(objectResult.content).toLowerCase();
-        }
-        if (isReservedBossKeyName(itemDatabase, objectName)) {
-            console.warn('[BossKeyReserved] Ordinary object generation cannot seed the quest seal.');
-            continue;
-        }
-        objects.push({ name: objectName, type: objectType });
-    }
-
-    return objects;
+    const database = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+    return require('./itemAuthoring').generate($, {
+        count: Math.floor(Math.random() * 5) + 1, roomName, roomDescription, database,
+        world: database['0,0,0']?.setting || WorldSetting.current(),
+        excluded: Object.values(database).flatMap(room => (room?.objects || []).map(item => item.name)).slice(-40),
+        purpose: 'objects in this room'
+    });
 }
 
 async function generateObjectModifiers($, object) {
-    if ((typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) { // holodek-1: a bad structured answer must never abort the caller (e.g. startGameWithCharacter)
-        for (let attempt = 1; attempt <= 2; attempt++) try { return await generateObjectModifiersInner($, object); }
-        catch (error) { if (attempt < 2) { console.warn(`[holodek-1 modifiers] attempt 1 failed (${error.message}); retrying once`); continue; } console.warn(`[holodek-1 modifiers] ${object?.name}: ${error.message}; using 0/0/0/0`); return { attack_modifier: 0, damage_modifier: 0, ac: 0, magic: 0 }; }
-    }
-    return generateObjectModifiersInner($, object);
-}
-async function generateObjectModifiersInner($, object) {
-    if (!object || !object.name || !object.type) {
-        console.error("Invalid object provided to generateObjectModifiers", object);
-        return {
-            attack_modifier: 0,
-            damage_modifier: 0,
-            ac: 0,
-            magic: 0
-        };
-    }
-
-    const { name: objectName, type: objectType } = object;
-    if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) return require('./holodekRoomWork').request($, 'object-modifiers', {
-      attack_modifier: { type: Number, enum: [0, 3, 4, 5] }, damage_modifier: { type: Number, enum: [0, 4, 5, 6] },
-      ac: { type: Number, enum: [0, 1, 2] }, magic: { type: Number, enum: [0, 1, 2, 3] }
-    }, `Choose only the existing modifier fields for this item (data): ${JSON.stringify({ name: objectName, type: objectType })}. No prose, new item or invented mechanic. Choose exact schema values.`);
-    console.log(`Generating modifiers for the object: ${objectName}, which is a ${objectType}...`);
-
-    $.model = "gpt-4.1-mini";
-    $.temperature = 1.0;
-    await $.user`Provide the modifiers for "${objectName}" which is a ${objectType}. Respond with ONLY the JSON object in the format: {"attack_modifier": W, "damage_modifier": X, "ac": Y, "magic": Z} where W, X, Y, Z are numbers 0, 1, 2, or 3. Do not include any other text, explanations, or comments before or after the JSON.`;
-
-    const modifiersResult = await $.assistant.generation({ maxTokens: 60,
-        parameters: {
-            attack_modifier: {type: Number, enum: [0, 3, 4, 5]},
-            damage_modifier: {type: Number, enum: [0, 4, 5, 6]},
-            ac: {type: Number, enum: [0, 1, 2]},
-            magic: {type: Number, enum: [0, 1, 2, 3]}
-        }
-    });
-
-    console.log(`Modifiers result (raw): ${JSON.stringify(modifiersResult)}`);
-    const responseString = modifiersResult.content || String(modifiersResult.result);
-    console.log(`Assistant response: ${responseString}`);
-
-    let attack_modifier = 0;
-    let damage_modifier = 0;
-    let ac = 0;
-    let magic = 0;
-
-    // Extract JSON between first '{' and last '}'
-    const firstBrace = responseString.indexOf('{');
-    const lastBrace = responseString.lastIndexOf('}');
-
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-        const jsonString = responseString.substring(firstBrace, lastBrace + 1);
-        console.log(`Extracted JSON: ${jsonString}`);
-        try {
-            const parsed = JSON.parse(jsonString);
-            attack_modifier = parsed.attack_modifier || 0;
-            damage_modifier = parsed.damage_modifier || 0;
-            ac = parsed.ac || 0;
-            magic = parsed.magic || 0;
-        } catch (error) {
-            console.error(`Failed to parse extracted JSON: ${jsonString}`, error);
-        }
-    } else {
-        console.error(`No valid JSON object found in response: ${responseString}`);
-    }
-
-    return {
-        attack_modifier,
-        damage_modifier,
-        ac,
-        magic
-    };
+    return require('./itemAuthoring').modifiers($, object);
 }
 
 // Generate room-specific custom obstacle tiles using a higher-level drawing "program"
 async function generateCustomTiles($, roomDesc, puzzleDesc, isOutdoor, requiredTypes = []) {
+  if (require('./genreAssetPolicy').catalog().strict)
+    return require('./genreAssetPolicy').generateTiles($, { roomDesc, puzzleDesc, isOutdoor, requiredTypes });
 
   $.model = "gpt-4.1-mini";
   $.temperature = 0.8;
@@ -3337,7 +3238,9 @@ async function classifyDungeon(input, forColorsOnly = false) {
 
   // IMPORTANT: we want variation; avoid always returning the same palette.
   let prompt;
-  if (forColorsOnly) {
+  if (WorldSetting.current()) {
+    prompt = require('./homebrewStoryPrompts').classification(cleanInput, forColorsOnly);
+  } else if (forColorsOnly) {
     prompt = `From this Children of the Grave room DESCRIPTION: "${cleanInput}"
 
 Return ONLY JSON with these keys:
@@ -3424,7 +3327,7 @@ JSON only.`;
     // Validate shape fields
     if (!forColorsOnly) {
         if (normalized.size && ![24, 32, 48, 64, 80, 96, 128, 160, 192].includes(normalized.size)) normalized.size = undefined;
-      if (normalized.biome && !['wasteland', 'temple', 'ruins', 'cave', 'fortress', 'palace', 'crypt'].includes(normalized.biome)) normalized.biome = undefined;
+      if (normalized.biome && !['city', 'wasteland', 'temple', 'ruins', 'cave', 'fortress', 'palace', 'crypt'].includes(normalized.biome)) normalized.biome = undefined;
     }
 
     // Guarantee colors (no null / missing)
@@ -3454,6 +3357,10 @@ JSON only.`;
 
 // Fallback stays the same (but used more reliably now)
 function getFallback(forColorsOnly) {
+  if (WorldSetting.current()) {
+    const shape = require('./homebrewStoryPrompts').defaultShape();
+    return forColorsOnly ? Object.fromEntries(['skyTop', 'skyBot', 'floorColor', 'wallColor'].map(key => [key, shape[key]])) : shape;
+  }
   const base = {
     indoor: true,
     size: 32,
@@ -3624,7 +3531,13 @@ ${roomDescription}
 }
 
 async function generateDungeonBlueprint($, roomDescription, puzzleDesc, classification, size, customTiles, generation = null, sceneSpec = null) {
-  if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) {
+  if(classification?.indoor===true&&sceneSpec?.city?.architecture?.plan?.version===1&&!sceneSpec.city.architecture.authored){
+    const plan=sceneSpec.city.architecture.plan;
+    return DungeonGeneration.seedBlueprint({base:{floor:0,ceil:plan.clearance},indoorPlan:{rooms:[],corridors:[],modules:[]},
+      props:[],designContract:{version:1,source:'saved-city-building-plan',added:[],rejected:[]}},generation);
+  }
+  if ((typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) ||
+      (typeof require === 'function' && require('./genreAssetPolicy').catalog(sceneSpec || {}).strict)) {
     const parsed = await require('./holodekBlueprint').generate($, { roomDescription, puzzleDesc, classification, size, customTiles, generation, sceneSpec });
     return BlueprintDesign.enrich(DungeonGeneration.seedBlueprint(parsed, generation), { classification, size, generation, sceneSpec, description: roomDescription });
   }
@@ -3640,6 +3553,7 @@ Return ONLY JSON. Coordinates are normalized 0.0..1.0, where (0,0)=top-left.
   This campaign's room seed: ${generation?.seed || 'unspecified'}.
   Room description (the layout must realize this): ${roomDescription || 'unspecified'}.
   Architectural family: ${sceneSpec?.architecture || 'choose from the description'}.
+  ${sceneSpec?.city?.venue&&typeof require==='function'?require('./cityLife').guidance(sceneSpec.city.venue):''} For named venues, normalized rooms fill the saved venue envelope, not a whole city district; keep main halls broad enough for their purpose and smaller service rooms secondary.
   Storey plan: ${sceneSpec?.worldContext?.fortifiedFloor ? JSON.stringify(sceneSpec.worldContext.fortifiedFloor) + '. Build only this storey, not the entire building again. Reserve separate unobstructed 3-by-16-tile stair wings for each declared up/down exit, connected to the entrance. If an upper storey exists, no roofless courtyard: its floor is the ceiling above this room. Preserve the patron and practical purpose.' : 'Ordinary room; no multi-storey override.'}
   Planned physical features: ${sceneSpec?.level?.layoutFeatures?.join('; ') || 'invent a fitting arrangement'}.
   Planned scenery: ${(sceneSpec?.landmarks || []).map(l => `${l.count || 1}x ${l.type} (${l.placement || 'scattered'})`).join('; ') || 'choose fitting physical scenery'}.
@@ -4575,7 +4489,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
         spriteSpec: tile.spriteSpec || null
       };
       dungeon.tiles[tileName] = {
-        url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`),
+        url: generateSpriteFromStyle(style, `custom_${tile.type}`, require('./roomVisualAssets').spriteName(`${geoKey}_${tileName}`)),
         spriteSpec: tile.spriteSpec || {
           profile: 'flat',
           depth: 0.5,
@@ -5377,7 +5291,8 @@ async function generateBossMonster($, updatedGameConsole, bossName) {
     // Generate boss sex, race, and class
     $.model = "gpt-4.1-mini";
     $.temperature = 1.0;
-    await $.assistant`Generate a fantasy race and class for a powerful boss character named ${bossName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise), high magical beings, and other entities of pure energy and form, angels, powerful demons. Format exactly as 'Race: [race], Class: [class]' and nothing else with no line breaks.`;
+    if (WorldSetting.current()) await $.assistant(require('./homebrewStoryPrompts').raceClass({ bossName }));
+    else await $.assistant`Generate a fantasy race and class for a powerful boss character named ${bossName} from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise), high magical beings, and other entities of pure energy and form, angels, powerful demons. Format exactly as 'Race: [race], Class: [class]' and nothing else with no line breaks.`;
     const raceClassResult = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1() ? await (async () => {
       const value = await require('./holodekRoomWork').request($, 'boss-identity', {
         race: { type: String, minLength: 1, maxLength: 70 }, className: { type: String, minLength: 1, maxLength: 70 }
@@ -5815,7 +5730,7 @@ try {
         spriteSpec: tile.spriteSpec || null
       };
   dungeon.tiles[tileName] = {
-    url: generateSpriteFromStyle(style, `custom_${tile.type}`, `${geoKey}_${tileName}`),
+    url: generateSpriteFromStyle(style, `custom_${tile.type}`, require('./roomVisualAssets').spriteName(`${geoKey}_${tileName}`)),
     spriteSpec: tile.spriteSpec || {
       profile: 'flat',
       depth: 0.5,
@@ -5964,7 +5879,8 @@ return { geoCoords, geoKey };
 
 async function generateMissingRoomDetails($, object, construction = null) {
   const constructionReadOnly = key => construction && key !== construction.key && (key === '0,0,0' ||
-    construction.assignment?.readOnly?.includes(key) || construction.assignment?.assignments?.some(other => other.destination === key && other.owner !== construction.id));
+    construction.assignment?.readOnly?.includes(key) || construction.assignment?.assignments?.some(other => other.destination === key && other.owner !== construction.id) ||
+    construction.assignment?.reservations?.some(other => other.key === key && other.id !== construction.id));
   const diversitySeed = ['vitality_contrast', 'auditory_twist', 'conversational_detail'][Math.floor(Math.random() * 3)];
   let roomDescriptionGenerated = false;
   let environmentDescription = '';
@@ -6200,18 +6116,19 @@ async function generateMissingRoomDetails($, object, construction = null) {
   // ----------------------------
   let startRoom = getRoomSafeLocal(roomNameDatabasePlain, startKey);
   if (!startRoom) {
-    const startClassification = ((typeof TempleComplex !== 'undefined' ? TempleComplex : null)?.mark || (c => c))(await generateDefaultClassification($, null, true));
+    const profile = WorldSetting.startRoomProfile();
+    const startClassification = profile ? profile.classification : ((typeof TempleComplex !== 'undefined' ? TempleComplex : null)?.mark || (c => c))(await generateDefaultClassification($, null, true));
     startRoom = {
-      name: "Ruined Temple Entrance",
+      name: profile?.name || "Ruined Temple Entrance",
       exhaustionLimit: 4,
       attemptedSearches: 0,
       trapTriggered: false,
       exits: {},
       objects: [],
-      indoor: true,
+      indoor: profile?.indoor ?? true,
       classification: startClassification,
-      isIndoor: true,
-      isOutdoor: false,
+      isIndoor: profile?.indoor ?? true,
+      isOutdoor: profile ? !profile.indoor : false,
       monsters: { inRoom: "None", equippedProperties: "None", state: "None" }
     };
     setRoomSafeLocal(roomNameDatabasePlain, startKey, startRoom);
@@ -6220,7 +6137,7 @@ async function generateMissingRoomDetails($, object, construction = null) {
     setRoomSafeLocal(roomNameDatabasePlain, startKey, startRoom);
   }
   // The starting temple is a fixed interior, even when currency/atlas metadata created its skeleton first.
-  if (!constructionReadOnly(startKey)) {
+  if (!constructionReadOnly(startKey) && !startRoom.cityFloorContext) {
   if (typeof WorldSetting !== 'undefined' && WorldSetting.current()) WorldSetting.applyStartRoom(startRoom);
   else { startRoom.indoor = true;
     startRoom.classification = { size: 16, features: ['pillars'], ...startRoom.classification, indoor: true, biome: 'temple' }; }
@@ -6249,10 +6166,19 @@ async function generateMissingRoomDetails($, object, construction = null) {
     };
     setRoomSafeLocal(roomNameDatabasePlain, coordKey, currentRoomData);
   } else {
-    if (FortifiedSites.isFloor(currentRoomData)) roomName = currentRoomData.name;
+    if (construction || currentRoomData.preparedBuild || FortifiedSites.isFloor(currentRoomData) || currentRoomData.cityRoom) roomName = currentRoomData.name || roomName;
     else currentRoomData.name = roomName || currentRoomData.name;
     ensureRoomFlagsConsistent(currentRoomData);
     setRoomSafeLocal(roomNameDatabasePlain, coordKey, currentRoomData);
+  }
+  if(currentRoomData.namePending&&!currentRoomData.visited&&!currentRoomData.description&&!currentRoomData.sceneSpec){
+    roomName=await require('./holodekRoomWork').locationName($,{destination:{coordinates:coordKey,indoor:currentRoomData.indoor,
+      biome:currentRoomData.classification?.biome,kind:currentRoomData.cityRoom?.kind,venue:currentRoomData.cityRoom?.establishmentType,
+      city:currentRoomData.cityRoom?.cityName,district:currentRoomData.cityRoom?.districtName,atmosphere:currentRoomData.cityRoom?.atmosphere},
+      region:currentRoomData.campaignSetting},Object.values(roomNameDatabasePlain).filter(r=>!r.namePending).map(r=>r.name));
+    currentRoomData.name=roomName;delete currentRoomData.namePending;
+    updatedGameConsole=updatedGameConsole.replace(/^Room Name:.*$/m,`Room Name: ${roomName}`);
+    setRoomSafeLocal(roomNameDatabasePlain,coordKey,currentRoomData);
   }
   if (!construction && currentRoomData.pendingCommunityActivation) {
     const activation = require('./preparedRoomEntry').activate(sharedState, coordKey, updatedGameConsole);
@@ -6263,9 +6189,9 @@ async function generateMissingRoomDetails($, object, construction = null) {
       currentRoomData = roomNameDatabasePlain[coordKey]; startRoom = roomNameDatabasePlain[startKey];
     }
   }
-  if (FortifiedSites.isFloor(currentRoomData)) {
+  if (construction || currentRoomData.backgroundTopology || currentRoomData.preparedBuild || FortifiedSites.isFloor(currentRoomData) || currentRoomData.cityRoom || currentRoomData.citySites) {
     updatedGameConsole = updatedGameConsole.replace(/^Room Name:.*$/m, `Room Name: ${currentRoomData.name}`);
-    const fixed = Object.keys(currentRoomData.exits);
+    const fixed = Object.keys(currentRoomData.exits || {});
     roomExitsArray.splice(0, roomExitsArray.length, ...fixed);
     existingAdjacentRooms.splice(0, existingAdjacentRooms.length, ...fixed.filter(d => roomNameDatabasePlain[currentRoomData.exits[d].targetCoordinates]?.name));
     updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${fixed.join(', ')}`);
@@ -6392,10 +6318,11 @@ async function generateMissingRoomDetails($, object, construction = null) {
         const targetKey = exit?.targetCoordinates ? normalizeCoordKeyLocal(exit.targetCoordinates) :
           coordinatesToString({ x: currentCoordinates.x + dx, y: currentCoordinates.y + dy, z: currentCoordinates.z + dz });
         if (targetKey === coordKey) continue;
+        if (constructionReadOnly(targetKey)) continue;
         let neighbor = getRoomSafeLocal(roomNameDatabasePlain, targetKey);
         let name = neighbor?.name;
         if (!name || /^(none|null|undefined|empty)$/i.test(String(name).trim())) {
-          if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) {
+          if (WorldSetting.current() || (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) {
             name = await require('./holodekRoomWork').roomName($, { database: roomNameDatabasePlain,
               sourceKey: coordKey, sourceName: roomName, direction,
               forceOutdoor: !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0] });
@@ -6411,7 +6338,7 @@ async function generateMissingRoomDetails($, object, construction = null) {
         if (!neighbor) {
           let shape;
           try { shape = await classifyDungeon(name, false); }
-          catch { shape = { indoor: true, size: 32, biome: 'temple', features: [] }; }
+          catch { shape = WorldSetting.current() ? require('./homebrewStoryPrompts').defaultShape() : { indoor: true, size: 32, biome: 'temple', features: [] }; }
           const outdoorEntrance = !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0];
           const indoor = outdoorEntrance ? false : shape.indoor;
           neighbor = { name, exhaustionLimit: null, attemptedSearches: 0, trapTriggered: false,
@@ -6442,7 +6369,21 @@ async function generateMissingRoomDetails($, object, construction = null) {
       }
       persistRoomDb(roomNameDatabasePlain);
     }
+    // Mode 4 starts with an authored description, not an authored resident cast.
+    // Repair only that missing component, preserving puzzles, loot and room geometry.
+    if (alreadyPopulated && !missingDescription && typeof WorldSetting !== 'undefined' && require('./inhabitantGeneration').needsStartingResidents(currentRoomData, coordKey, !!WorldSetting.current())) {
+      persistRoomDb(roomNameDatabasePlain);
+      await $.run(agent => generateRoomInhabitantPopulation(agent, roomName, roomDescription, coordKey));
+      const generated = JSON.parse(sharedState.getRoomNameDatabase() || '{}')[coordKey];
+      if (!generated?.inhabitants?.authoredAt) throw new Error('Starting residents were not generated.');
+      Object.assign(currentRoomData, generated, { startingResidentsComplete: true });
+      persistRoomDb(roomNameDatabasePlain);
+      needsUpdate = true;
+      console.info('[RoomPopulation]', JSON.stringify({ phase: 'starting-residents', geoKey: coordKey,
+        actors: Object.keys(generated.inhabitants.actors).length }));
+    }
     // world1 CITY_SITES: entering a placed city room installs the full city plan (named skeleton rooms; prose comes later from the model).
+    await require('./cityAuthoring').ensure($, currentRoomData, { seed: sharedState.getDungeonRunId?.() || '', ecology: require('./settingEcology').get(roomNameDatabasePlain) });
     try { const cityReport = CitySites.install(roomNameDatabasePlain, coordKey, { seed: sharedState.getDungeonRunId?.() || '' });
       if (cityReport.status === 'installed') { const d = cityReport.direction; if (!roomExitsArray.includes(d)) roomExitsArray.push(d); if (!existingAdjacentRooms.includes(d)) existingAdjacentRooms.push(d);
         updatedGameConsole = updatedGameConsole.replace(/^Exits:.*$/m, `Exits: ${roomExitsArray.join(', ')}`); persistRoomDb(roomNameDatabasePlain); }
@@ -6504,12 +6445,16 @@ async function generateMissingRoomDetails($, object, construction = null) {
     const worldContext = buildRoomWorldContext(roomNameDatabasePlain, currentCoordinates,
       { exits: roomExitsArray, quest: snapshotQuestContext(sharedState, updatedGameConsole) });
     console.info('[WorldContext]', JSON.stringify(worldContext));
+    if (WorldSetting.current()) {
+      require('./homebrewStoryPrompts').appendRoom($, { roomName, worldContext, diversitySeed });
+    } else {
     await $.assistant`Conditional world context for this newly described room: ${JSON.stringify(worldContext)}
 Use only known facts here, not an invented list of exits. If outdoors, describe real terrain, walkable approaches and suitable dead vegetation, not only abstract metaphors. If a known route leads to an indoor building, describe that destination's exterior, forecourt and physical entrance; its other walls enclose the building, while the surrounding perimeter can be explored. If a route leads outdoors, it is a continuation through the region rather than an arbitrary indoor hall. If indoors and linked to the same complex, distinguish deeper interior passages from gateways to exterior courts or wasteland. The Ruined Temple is a large complex, not a single shed, and can have multiple entrance rooms connected by its interior. Keep each known complex's architectural identity coherent. The journey ultimately heads toward Hades and Arithus, but do not rush, teleport, complete quests, invent visible exits, or change encounter mechanics. Plan a few plausible developments ahead using existing neighbor names and quest context, leaving branches, surprises, settlements, ruins and environmental challenges imaginative and responsive to player choices. Choose what lies along the road; this is not a fixed sequence of scenes. Hints of Hades can motivate the journey without prematurely revealing the finale. These distinctions supplement the existing system prompt and never replace startup, monster, item, puzzle or quest generation.`;
     await $.assistant`Physical architecture guidance for newly described locations: describe concrete, navigable buildings, not only metaphors. Match the existing room name and biome; never replace an already described room. Use one dominant plan, with a few coherent nested structures: Roman temples, basilicas, forums, amphitheaters, theaters, chariot circuses, bathhouses, granaries/horrea, atrium houses/domus, villas, insula courtyards, aqueduct arcades or monumental arches; or motte-and-bailey, shell-keep, stone-keep or concentric castles. Indoor halls and corridors are normally roofed, with explicitly located open courtyards or ruined sections. Mention an appropriate roof where relevant: barrel/groin/ribbed/fan vault, timber or hammerbeam roof, boarded or gold-coffered ceiling, pendentive or squinch dome. Pillars support grouped buildings, not random farms. A pedimented portico may lead into a rotunda inside a larger complex. These are visual construction cues, not new inventory items, exits, characters or rules. Do not list every style; choose what serves this location's lore and physical use.`;
     if (!(typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) // holodek-1 only: the compact room work order below carries this instruction
     await $.assistant`Generate a unique description in a single paragraph with no line breaks or using the word "you" for the ${roomName} taking into account the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. Make up the room's purpose based on the name, its features and the history of the room while drawing upon the game's lore. To make each room and story element feel unique and captivating, draw inspiration from diverse sources like ancient myths (e.g., Greek labyrinths with psychological twists), surreal literature (e.g., infinite libraries or absurd bureaucracies), or modern fantasy (e.g., dreamlike underworlds). Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Infuse strangeness: subvert expectations (e.g., a 'wasteland' room that's a living memory palace of forgotten gods). Vary from history: Scan conversation history for last motif (e.g., 'decay' → subvert with contrast element from  ${diversitySeed}); limit repeats (e.g., 'whispers/shadows' ≤1). Merge sensory/lore into 1 flowing para—no stacking motifs. Make it thought-provoking: Tie to 1 theme (mortality/corruption/redemption) with personal stakes (e.g., [generalized: a haunting echo of lost oaths])—vary from examples, no direct repeats. Vary tone per room: One might be eerie and introspective, another chaotic and humorous. Ensure every description, quest, or interaction reveals a new lore fragment or moral dilemma, building toward the overarching Mortacia plot. Avoid repetition—make this room distinctly different from previous ones in the conversation history. Occasionally include a quote in the past tence from a sage or some other prominent figure from Danae who once wrote describing the significance, purpose or history of the room dating the text and include the book's title. STYLE — Storybook:- Occasionally adopt a fairy-tale / story lilt with light rhyme and meter. - Keep crystal clarity for actions/adjudication. Do NOT rhyme rules, coordinates, inventory, or outcomes like damage/XP. - Do not alter proper nouns, item names, stats, exits, or coordinates; never obscure actionable info with rhyme. - Rhymes can carry character flavor (friendly NPCs = playful riddles; monsters = sly or crooked half-rhymes; ancients = solemn couplets). - Cap lilt/rhymes: Use in 1 element only if seed fits; skip for auditory. - If apt, echo a regional refrain once in a while (not every turn). - Motif cap: Replace repeats with seed alternatives.`;
-    if (coordKey === startKey) await $.assistant`[START-ROOM] Ruined Temple Entrance at 0,0,0 is an INDOOR temple chamber with a roof, walls and interior floor. Describe the party inside it. Tartarus's dunes and yellow sky are beyond the outdoor exit, not the ground or open sky of this chamber. This fixed physical rule overrides environmental poetry and variability hints. [/START-ROOM]`;
+    if (coordKey === startKey && !currentRoomData.cityFloorContext) await $.assistant`[START-ROOM] Ruined Temple Entrance at 0,0,0 is an INDOOR temple chamber with a roof, walls and interior floor. Describe the party inside it. Tartarus's dunes and yellow sky are beyond the outdoor exit, not the ground or open sky of this chamber. This fixed physical rule overrides environmental poetry and variability hints. [/START-ROOM]`;
+    }
     // A matching background description is consumed once; mechanics and population still run here.
     const pregeneratedDescription = AdjacentRooms.take(coordKey, roomName, sharedState.getDungeonRunId?.() || '', currentRoomData);
     if (pregeneratedDescription) roomDescription = pregeneratedDescription;
@@ -6530,6 +6475,9 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       let objectsInRoomArr = [];
       let objectMetadata = [];
       for (const object of objects) {
+        if (object.item_source === require('./itemAuthoring').SOURCE) {
+          objectsInRoomArr.push(object.name); objectMetadata.push(object); continue;
+        }
         if (/\bhealing\b.*\b(potion|elixir|vial|draught)\b|\b(potion|elixir|vial|draught)\b.*\bhealing\b/i.test(object.name)) {
           const potion = require('../assets/economyRules').healingPotion(getRandomInt(3, 10));
           object.name = potion.name; object.type = potion.type;
@@ -6540,7 +6488,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
         objectMetadata.push({ name: object.name, type: object.type, ...objectModifiers });
       }
       const objectPropertiesString = objectMetadata
-        .map(obj => obj.consumable_kind ? JSON.stringify(obj) : `{name: "${obj.name}", type: "${obj.type}", attack_modifier: ${obj.attack_modifier}, damage_modifier: ${obj.damage_modifier}, ac: ${obj.ac}, magic: ${obj.magic}}`)
+        .map(obj => obj.consumable_kind || obj.item_source ? JSON.stringify(obj) : `{name: "${obj.name}", type: "${obj.type}", attack_modifier: ${obj.attack_modifier}, damage_modifier: ${obj.damage_modifier}, ac: ${obj.ac}, magic: ${obj.magic}}`)
         .join(', ');
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room: .*/, `Objects in Room: ${objectsInRoomArr.join(', ')}`);
       updatedGameConsole = updatedGameConsole.replace(/Objects in Room Properties: .*/, `Objects in Room Properties: ${objectPropertiesString}`);
@@ -6599,8 +6547,10 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     // Generate new adjacent rooms (names)
     const questIntentContext = snapshotQuestContext(sharedState, updatedGameConsole);
     const bossIntentNumbers = questIntentContext.bossCoordinates.match(/-?\d+/g);
+    const namingDirections = roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction) &&
+      !constructionReadOnly(currentRoomData.exits?.[direction]?.targetCoordinates));
     const frontierIntent = await chooseEnvironmentIntents($, { coords: currentCoordinates,
-      directions: roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction)), database: roomNameDatabasePlain,
+      directions: namingDirections, database: roomNameDatabasePlain,
       currentQuest: questIntentContext.currentQuest, tasks: questIntentContext.tasks, taskIndex: questIntentContext.taskIndex,
       nextBoss: questIntentContext.nextBoss, nextBossRoom: questIntentContext.nextBossRoom,
       bossCoordinates: bossIntentNumbers?.length === 3 ? { x: +bossIntentNumbers[0], y: +bossIntentNumbers[1], z: +bossIntentNumbers[2] } : null,
@@ -6608,10 +6558,10 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       completedQuests: Number(updatedGameConsole.match(/^Quests Achieved:\s*(\d+)/m)?.[1]) || 0 });
     console.info('[EnvironmentIntent]', coordKey, JSON.stringify(frontierIntent));
     let newAdjacentRooms = {};
-    const localNaming = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
+    const localNaming = !!WorldSetting.current() || (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1());
     if (localNaming) {
       newAdjacentRooms = await require('./holodekRoomWork').adjacentNames($, { database: roomNameDatabasePlain,
-        sourceKey: coordKey, sourceName: roomName, directions: roomExitsArray.filter(direction => !existingAdjacentRooms.includes(direction)),
+        sourceKey: coordKey, sourceName: roomName, directions: namingDirections,
         intents: frontierIntent.intents, outdoorDirection: !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 ? roomExitsArray[0] : null });
     } else if (roomName === 'Ruined Temple Entrance' && roomExitsArray.length > 1 && !existingAdjacentRooms.includes(roomExitsArray[0])) {
       console.log("Generating a room name for the first exit leading to the Wastelands of Tartarus.");
@@ -6634,7 +6584,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
     }
     for (const exit of roomExitsArray.slice(1)) {
-      if (!localNaming && !existingAdjacentRooms.includes(exit)) {
+      if (!localNaming && namingDirections.includes(exit)) {
         const guidance = describeEnvironmentIntent(frontierIntent.intents[exit]);
         if (guidance) await $.assistant`${guidance}`;
         $.model = "gpt-4.1-mini";
@@ -6661,7 +6611,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
     };
 
     // SPECIAL: entrance first exit is outdoors if multiple exits
-    if (coordKey === startKey && roomExitsArray.length > 1) {
+    if (WorldSetting.isCotGPlay() && coordKey === startKey && roomExitsArray.length > 1) {
       const firstDir = roomExitsArray[0];
       const offset = directionMap[firstDir] || { x: 0, y: 0, z: 0 };
       const outCoord = {
@@ -6717,14 +6667,14 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       };
       const newKey = coordinatesToString(newCoord);
 
-      if (roomNameDatabasePlain[newKey]) continue;
+      if (roomNameDatabasePlain[newKey] || constructionReadOnly(newKey)) continue;
 
       let roomShape;
       try {
         roomShape = await classifyDungeon(newRoomName, false);
       } catch (err) {
         console.error(`classifyDungeon failed for ${newKey}:`, err);
-        roomShape = { indoor: true, size: 32, biome: 'temple', features: [] };
+        roomShape = WorldSetting.current() ? require('./homebrewStoryPrompts').defaultShape() : { indoor: true, size: 32, biome: 'temple', features: [] };
       }
       const intendedEnvironment = frontierIntent.intents[dir];
       if (intendedEnvironment) roomShape = { ...roomShape, indoor: intendedEnvironment.indoor, biome: intendedEnvironment.biome,
@@ -6758,7 +6708,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
 
     // Persist only the new neighbor's compact intent, not repeated quest snapshots per room.
     for (const [direction, intent] of Object.entries(frontierIntent.intents)) {
-      if (newAdjacentRooms[direction] && roomNameDatabasePlain[intent.targetKey] && !roomNameDatabasePlain[intent.targetKey].environmentIntent) {
+      if (newAdjacentRooms[direction] && !constructionReadOnly(intent.targetKey) && roomNameDatabasePlain[intent.targetKey] && !roomNameDatabasePlain[intent.targetKey].environmentIntent) {
         roomNameDatabasePlain[intent.targetKey].environmentIntent = intent;
         if (currentRoomData.planarRealm) {
           roomNameDatabasePlain[intent.targetKey].planarRealm = structuredClone(currentRoomData.planarRealm);
@@ -7294,10 +7244,11 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
 }
 // ===== end helpers =====
 
-async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast) {
+async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast, preparation = false) {
   const localQuestWork = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
   const questLink = (component, parameters, data, instruction) => require('./holodekRoomWork').questReply($, component, parameters,
-    { quest: sharedState.getCurrentQuest(), ...data }, instruction);
+    { quest: sharedState.getCurrentQuest(),...(['quest-task-kind','quest-task-description'].includes(component)?{
+      bookInspiration:require('./bookResearch').seeds(JSON.parse(sharedState.getRoomNameDatabase()||'{}'),data.elements?.map(e=>e.name),1)}:{}), ...data }, instruction);
   const currentQuest = sharedState.getCurrentQuest();
   if (!currentQuest || /^none$/i.test(String(currentQuest).trim())) return { questJustSeeded: false, questUpdate: '', activeTask: null };
   // ---------- small utils ----------
@@ -7425,7 +7376,7 @@ async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadca
     updatedGameConsole = consoleText = sharedState.getUpdatedGameConsole();
   }
   // Defer a new quest's first hook, but keep existing quest progress on return visits.
-  if (currentRoomKey === '0,0,0' && !sharedState.getQuestSeeded() &&
+  if (!preparation && currentRoomKey === '0,0,0' && !sharedState.getQuestSeeded() &&
       !(sharedState.getCurrentTasks() || []).length && !(sharedState.getCurrentTaskIndex() || 0)) {
     return { questJustSeeded: false, questUpdate: '', activeTask: null };
   }
@@ -7713,7 +7664,13 @@ Use the existing quest and characters for context. Do not place it inside the bo
     }
     // The first regional story supplements the older generator; all later steps keep its existing path.
     if (typeof RegionalAdventure !== 'undefined') {
-      const regional = await RegionalAdventure.trySeed($, sharedState, roomNameDatabasePlain, currentRoomKey, bossGateReport.gate, updatedGameConsole);
+      const planning = preparation && options.prepareOpeningQuest;
+      const reserved = new Set([...(planning?.assignment?.assignments || []).filter(row => row.owner !== planning.id).map(row => row.destination),
+        ...(planning?.assignment?.reservations || []).filter(row => row.id !== planning?.id).map(row => row.key)]);
+      const proposed = planning && bossGateReport.gate && RegionalAdventure.route(roomNameDatabasePlain, currentRoomKey, bossGateReport.gate.targetKey);
+      // Never replace an adjacent helper's assigned site with a new regional layout.
+      const regional = proposed?.rooms?.some(key => reserved.has(key)) ? null :
+        await RegionalAdventure.trySeed($, sharedState, roomNameDatabasePlain, currentRoomKey, bossGateReport.gate, updatedGameConsole);
       if (regional) {
         const parts = currentRoomKey.split(',').map(Number), coords = {x:parts[0],y:parts[1],z:parts[2]};
         const dungeon = sharedState.getRoomDungeon(coords), next = dungeon && structuredClone(dungeon);
@@ -7743,10 +7700,11 @@ Use the existing quest and characters for context. Do not place it inside the bo
       }
     }
     // 1) Decide how many elements are REQUIRED TO COMPLETE the step
-    await $.user`How many required elements (0–3) are needed to COMPLETE the next quest step? These are world elements the player must use/defeat/deliver to finish the step (not just to begin it). Respond ONLY {"count": N} with N in {0,1,2,3}.`;
-    const reqCountResp = localQuestWork ? await questLink('quest-required-count', { count: { type: Number, enum: [0, 1, 2, 3] } },
+    const countChoices = preparation ? [1, 2, 3] : [0, 1, 2, 3];
+    await $.user`How many required elements are needed to COMPLETE the next quest step? These are world elements the player must use/defeat/deliver to finish the step (not just to begin it). Respond ONLY {"count": N} with N in ${JSON.stringify(countChoices)}.`;
+    const reqCountResp = localQuestWork ? await questLink('quest-required-count', { count: { type: Number, enum: countChoices } },
       { room: roomNameDatabasePlain[currentRoomKey]?.name, existingMonsters: monstersInRoom }, 'Choose only the number (0-3) of ordinary required elements for a mechanically supported next task.') : await $.assistant.generation({ maxTokens: 50,
-      parameters: { count: { type: Number, enum: [0, 1, 2, 3] } }
+      parameters: { count: { type: Number, enum: countChoices } }
     });
     let countParsed = 0;
     try { countParsed = Number(parseOnlyJson(reqCountResp.content, { count: 0 }).count || 0); } catch {}
@@ -7755,7 +7713,6 @@ Use the existing quest and characters for context. Do not place it inside the bo
     const allCoords = Object.keys(roomNameDatabasePlain).filter(key => key !== bossGateReport.gate?.targetKey);
     if (!allCoords.includes(currentRoomKey) && currentRoomKey !== bossGateReport.gate?.targetKey) allCoords.push(currentRoomKey);
     if (!allCoords.length) return null;
-    const coordsExceptCurrent = allCoords.filter(c => c !== currentRoomKey);
     const preferElsewhere = Math.random() < 0.8;
     const usedPlacements = new Set();
     const requiredElementsStrings = [];
@@ -7768,12 +7725,12 @@ Use the existing quest and characters for context. Do not place it inside the bo
         parameters: { type: { type: String, enum: ["object", "key", "monster"] } }
       });
       const elType = (parseOnlyJson(typeRespEl.content, { type: "object" }).type || "object").toLowerCase();
-      const enumList = (preferElsewhere && coordsExceptCurrent.length) ? coordsExceptCurrent : allCoords;
-      await $.user`Pick the placement coordinates from this list: ${enumList.join(', ')}. If the element is a monster and there are monsters here, prefer the current room ${currentRoomKey}. Respond ONLY {"placement":"x,y,z"} using one of them.`;
+      const placementPlan = require('./questPlacement').plan({ coordinates: allCoords, currentRoomKey,
+        bossKey: bossGateReport.gate?.targetKey, elementType: elType, hasMonstersInCurrent, preferElsewhere, alreadyUsed: [...usedPlacements] });
+      const enumList = placementPlan.candidates;
+      await $.user`${placementPlan.brief}`;
       const placeRespEl = localQuestWork ? await questLink('quest-required-placement', { placement: { type: String, enum: enumList } },
-        { elementType: elType, currentRoomKey, alreadyUsed: [...usedPlacements] }, 'Choose only this element placement from the exact coordinate enum. Reuse an existing inhabitant at its saved location.') : await $.assistant.generation({ maxTokens: 50,
-        parameters: { placement: { type: String, enum: enumList } }
-      });
+        placementPlan.data, placementPlan.instruction) : await require('./questPlacement').request($, placementPlan);
       let placement = (parseOnlyJson(placeRespEl.content, { placement: currentRoomKey }).placement || currentRoomKey).trim();
       if (usedPlacements.has(placement)) {
         const alts = enumList.filter(c => !usedPlacements.has(c));
@@ -7895,7 +7852,7 @@ Respond ONLY {"type":"X"}.`;
     const actionKinds = pickedTypeRaw === 'fetch' ? ['take_item', 'fetch_object', 'other',
       ...(compileGeneratedTask({ id: 'candidate', type: 'Fetch', actionKind: 'unlock_exit', requiredElements: actualElements },
         roomNameDatabasePlain, currentRoomKey) ? ['unlock_exit'] : [])] :
-      pickedTypeRaw === 'defeat' ? ['defeat_monster'] : pickedTypeRaw === 'deliver' ? ['deliver_item'] : ['solve_puzzle'];
+      pickedTypeRaw === 'defeat' ? ['defeat_monster'] : pickedTypeRaw === 'deliver' ? ['deliver_item'] : pickedTypeRaw==='research'?['read_book']:['solve_puzzle'];
     await $.user`Pick the primary action the player must perform to COMPLETE the step (beyond prerequisites), given those elements.
 Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} using one of ${JSON.stringify(actionKinds)}. Deliver means actually handing each required item to its recipient.`;
     const actResp = localQuestWork ? await questLink('quest-task-action', { actionKind: { type: String, enum: actionKinds } },
@@ -7909,6 +7866,7 @@ Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} u
 elementsJson=${JSON.stringify(actualElements)}
 Party NPCs remain allies; do not cast them as enemies.
 Primary completion action: ${actionKind}.
+Saved book inspiration (background only; bind research to real chapters, never grant spells or rewards through prose): ${JSON.stringify(require('./bookResearch').seeds(roomNameDatabasePlain,actualElements.map(e=>e.name),localQuestWork?1:3))}.
 Placements are authoritative. If targets occupy different rooms, describe a journey between those rooms; never claim all of them inhabit the same room or entrance.
 Use the full exact item and recipient names. Do not abbreviate an item to "the shroud" or replace a bound room with an invented "northern hall". A delivery means giving each item to its bound recipient, not dropping it or just meeting them.
 Respond ONLY {"desc":"..."}.
@@ -8004,6 +7962,7 @@ Respond ONLY {"metrics":"..."}.
     questJustSeeded = !!seeded;
     activeTask = seeded;
   }
+  if (preparation) return { questJustSeeded, questUpdate: '', activeTask };
   // Read last adjudication hint
   const adjud = (typeof sharedState.getLastAdjudication === 'function') ? sharedState.getLastAdjudication() : null;
   if (adjud && activeTask && adjud.taskBinding === taskBinding(activeTask)) {
@@ -8019,6 +7978,7 @@ Respond ONLY {"metrics":"..."}.
         sharedState.setCurrentTaskIndex(oldIdx + 1);
         sharedState.setQuestSeeded(false);
         completedTaskThisTurn = true;
+        require('./completionFeedback').task(sharedState, activeTask, oldIdx);
         activeTask = null;
         sharedState.setCurrentTasks(currentTasks);
       }
@@ -8078,6 +8038,7 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
         const oldIdx = idx;
         sharedState.setCurrentTaskIndex(oldIdx + 1);
         sharedState.setQuestSeeded(false);
+        require('./completionFeedback').task(sharedState, activeTask, oldIdx);
         activeTask = null;
       }
       sharedState.setCurrentTasks(currentTasks);
@@ -8136,11 +8097,12 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
   return { questJustSeeded, questUpdate, activeTask, questProgress };
 }
 
-async function generateQuest($) {
-    const localQuestWork = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
+async function generateQuest($, preparation = null) {
+    const questWorld = typeof WorldSetting !== 'undefined' ? WorldSetting.current() : null;
+    const localQuestWork = !!questWorld || (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1());
     // The visited counter can advance while still at the entrance; location is authoritative.
     const questRoomCoordinates = updatedGameConsole.match(/^Coordinates:[ \t]*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/m);
-    if (!questRoomCoordinates || questRoomCoordinates.slice(1).every(value => Number(value) === 0)) return;
+    if (!questRoomCoordinates || !preparation && questRoomCoordinates.slice(1).every(value => Number(value) === 0)) return;
     let needsUpdate = false;
     // Ensure updatedGameConsole is properly initialized
 // let updatedGameConsole = await getDelayedUpdatedGameConsole();
@@ -8160,20 +8122,28 @@ async function generateQuest($) {
     let roomsVisited = roomsVisitedMatch ? parseInt(roomsVisitedMatch[1].trim()) : 0;
     let currentCoordinates = currentCoordinatesMatch ? currentCoordinatesMatch[1].trim() : '';
     let bossCoordinates = bossCoordinatesMatch ? bossCoordinatesMatch[1].trim() : '';
+    let bossRoom = nextBossRoom;
+    const taskIndex = sharedState.getCurrentTaskIndex() || 0;
+    const hasQuest = value => typeof value === 'string' && value.trim() && !/^(?:none|null|undefined|empty)$/i.test(value.trim());
+    // Missing artifact metadata must not discard an unfinished quest or its tasks.
+    if (taskIndex < 3 && ([currentQuest, sharedState.getCurrentQuest()].some(hasQuest) || sharedState.getCurrentTasks()?.length)) return;
+    let authoredConsole = updatedGameConsole;
     console.log("Parsed currentQuest:", currentQuest);
     console.log("Parsed nextArtifact:", nextArtifact);
     console.log("Parsed roomsVisited:", roomsVisited);
     // Only proceed if nextArtifact is missing
-    if (nextArtifact === 'None' && roomsVisited > 1) {
+    if (nextArtifact === 'None' && (roomsVisited > 1 || preparation)) {
         const roll = Math.random();
         if (roll < 1.00) {
             console.log("Next artifact missing, generating new details.");
+            if (!localQuestWork) {
             await $.user`${require('./underworldLore').GUIDANCE}`;
             await CampaignMemory.appendPlanning($, sharedState, 'campaign quest planning: prior choices, unresolved threads, relationships and completed troubles',
               { consoleText: updatedGameConsole });
             $.model = "gpt-4.1-mini";
             $.temperature = 1.2;
-            if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) $.user`${StoryPrompts.SHORT_GM}`; // holodek-1 only: compact rules instead of the inline 12.5k-token lore copy
+            if (typeof WorldSetting !== 'undefined' && WorldSetting.current()) StoryPrompts.appendOriginal($);
+            else if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) $.user`${StoryPrompts.SHORT_GM}`; // holodek-1 only: compact rules instead of the inline 12.5k-token lore copy
             else $.user`Instructions for the Grave Master:
             
             Hereafter, 'You' refers to you, who is adminstering this chat, which hereafter you shall refer to as the Grave Master. 'Me' and 'I' refers to the user, the player and me, the person writing this. You must store the following words into memory: Using all of the real-time game information from Current Game Console and the die rolls, write an AI-generated fantasy roleplaying interactive fiction game wherein Assistant is the Grave Master, the user is the player, and let's play in ChatGPT. Make up the story as you go including imagining the names and histories of people, places and things encountered, but you must allow me, the player, to type the commands, allowing for potential failure. Make it strange, unusual and as thought-provoking as possible. The Grave Master must always obey the player's commands and selections without improvisation and must not make any decisions or take any actions on behalf the player, however the Grave Master must describe and control the actions of all NPCs and monsters in the Current Game Console in the assistant prompt. The Grave Master must always do its best and follow the instructions as written herein without improvisation no matter what and is responsible for overseeing the game and describing the game world, but the player is responsible for making all choices and taking all actions within the game, while the Grave Master controls monsters and NPCs. Do not display the game console, but be sure to include the actions being taken by NPCs and monsters in the room. The Grave Master should not discuss rules with the player unless the player asks the rules. The Grave Master's job is the keep the illusion of the role playing game, or RPG, intact, by using this interactive fiction game format to create the story based on my commands. If any later instruction conflicts with this block, the later instruction overrides. In the background, the game uses javascript that constructs and maintains the 1000 navigable rooms with X: Y: Z: coordinates, exits, npcs, monsters and objects that are automatically stored in the system prompt to ensure they are connected starting with the Ruined Temple in Tartarus and leading either outdoors into the wastelands of Tartarus or deeper into the temple, ultimately leading to the 1000th room, the Throne Room in Hades, with north (n), south (s), east (e), west (w), northwest (nw), southwest (sw), northeast (ne), southeast (se), up (u) and down (d) exits for each room. The exits in the room description should be written based on the exits and connected rooms provided in the assistant prompt from the game console. This means that the exits in the room description should match the exits listed in the game console and lead to the connected rooms listed in the game console, and include npcs, monsters and objects. When the user enters a direction, the game's javascript automatically produces the next room's coordinates, exits, npcs, monsters and objects in the system prompt, thereby keeping the map of the 1000 rooms in memory so that the maze is persistent, with every room having at least one visible exit, always remembering your location in the map. Your job is to provide the room's descriptions and game responses, including exits, npcs, monsters and objects and the 21 artifacts (often guarded by monsters) and 15 quests needed to win the game into many of the locations of the 1000 rooms, allocating XP and score for the player along the way and telling the story of the Children of the Grave, utilizing the game's current, updated console below and using unique characters, plots, conflicts and battles to compose the adventure, and utilizing roleplaying game elements, combat and magic systems of your own design in describing the interactive fiction story. Do not change the exits and objects provided in the system prompt. The 15 quests must be of your own design and either advance the central narrative or are side quests, and should include defeating monsters and discovering the 21 artifacts, with the game beginning with the first quest, and each quest leading to the final quest to confront Arithus in Hades after all 21 artifacts have been discovered. Never forget the player's location in the maze by referring to the game's current, updated console, and always plan 10 rooms ahead, including any NPCs, objects, artifacts, quest hooks and game progress, the score, puzzles and encounters so that gameplay is consistent. NPCs in Party: who accompany the player and Monsters in Room: encountered listed in the game console are not the same, they are distinct. The monsters and NPCs encountered by the player could be hostile, friendly or neutral, whether monsters like undead or dragons or others suitable for a fantasy setting, and possibly be potential allies who may seed or assist in quests depending on the player's actions and choices. You, the Grave Master, must control NPCs and monsters and determine their courses of action every turn. The Grave Master should use this as inspiration: 'You have died and find yourself standing in the the first room in the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.'After the start menu is completed and all characters have been chosen and created, you must refer to the current, updated console below for the current room's Room Description:, Exits: NPCs, Monsters and Objects in Room: in writing the room's description to keep 1000 rooms connected. Proceed with the game when I have made my selections from the start menu of either Mortacia, goddess of death, Mortacia is (an 8 1/2 tall human-looking female with long blonde hair, large grey dragon wings that look slightly decayed with many holes and openings and can fly but not too far, and is on a quest to reclaim the Sepulchra to reclaim her throne in Hades, Suzerain, Knight of Atinus, the recurring hero of the Children of the Grave campaign setting who keeps having to save the world, die and go to the afterlife, raise an army of the dead souls to save the underworld plane of Hades from Arithus, and then be reborn again, who has just died and finds himself in the first room of the afterlife, or an adventuring party of seven adventurers named the Children of the Grave who have died and find themselves in the first room of the afterlife and been summoned by Mortacia, but who are unaware of their circumstances at first: 1 PC whom I direct, 5 NPCs you control and also Mortacia, who is also an NPC you control and joins the party, described herein, all the characters described herein have been created and I am in the Ruined Temple in Tartarus described herein and issued the command to proceed. Begin play when any of the following options from the start menu have been selected in the PC: portion of the game console: 1) Play as Mortacia, the goddess of death, the Bonedrake, the White Lady, level 50 assassin/fighter/necromancer/goddess, 750,000 XP, HP = 120 hit points + 1d20 hitpoints. 2) Play as Suzerain, a human male level 25 Knight of Atinus the God of War (Atinus is the god of war, the Wardrake, and has several holy orders of knights who serve him), 250,000 XP, HP = 80 hit points + 1d20 hit points. 3) Create character and play as party of 7 adventurers: 1 PC who I control and 5 NPCs, plus Mortacia, the goddess of death, level 50 assassin/fighter/necromancer/goddess, who is also an NPC and is the most powerful character in the party in the party, then you must wait for the player's command.  Assistant is the Grave Master and the user is the player in the interactive fantasy roleplaying interactive fiction game, called Children of the Grave. The Grave Master administers the game. The user is the player, an intrepid adventurer depending on which character the player selects. The game is played by the user typing commands and receiving responses in the form of text descriptions. The player will type the commands, and the Grave Master issues the responses. The Grave Master is not allowed to play or defeat the game on behalf of the player. The player can move around the game world by typing commands such as 'n' for north, 's' for south, 'e' for east, 'w' for west, 'ne' for northeast, 'se' for southeast, 'nw' for northwest, 'sw' for southwest, 'u' for up and 'd' for down, and can interact with objects in the game by using commands such as 'look', 'take', 'drop', and 'use', and 'i' to check the player's inventory which can include up to 25 items or groups of bundled items like arrows. The player starts out the game with no weapons (they must be acquired). Many of the rooms in the labyrinth will contain objects that the user may put into his inventory, and some of those will be useful in solving puzzles, opening doors or other objects, casting magic spells, performing rituals and so forth, but must never contain a map of the game. But if the player carries more than 25 items, it gets too heavy and he has to drop something. Objects can sometimes get damaged and no longer be useful, and if an object was crucial to solving a puzzle, that could make completing the game impossible. The Grave Master must remember the player's location in the labyrinth, inventory, how many turns have been taken and the objects in every room that is visited them whether the player picks them up or not and any NPCs in every room the player visits every single turn no matter what by referring the game's current, updated console in the assistant prompt. Regardless of the game mode chosen, each room, object, NPC (who may include some of the deities of Danae), puzzle, etc. encountered should endeavor to offer some clues and insight to uncover how Mortacia lost her power to judge the dead, the undead rose thanks to Dantuea, Hades fell to Arithus and how the balance between life and death might be restored by the heroes in the game, developing a rich narrative and story whose details you must create. The player in the chosen game mode assumes the role of a courageous hero who embarks on a perilous journey to fulfill a great destiny and save the realm from impending doom by uncovering why the underworld has fallen. The game's labyrinth starting from the Ruined Temple in Tartarus to the Throne Room in Hades contains 1000 interconnected rooms with n, s, e, w, nw, sw, ne, se, up and/or down exits using X, Y, Z Cartesian coordinates starting with X: 0, Y: 0, Z: 0. To ensure there are 1000 interconnected rooms leading from Tartarus to Hades, the Grave Master must always refer to the game's current, updated game console located in the assistant prompt which contains the current coordinates and room exits in order create a carefully designed labyrinthine structure where each room has unique exits that connect to other rooms in the sequence. This will provide a sense of progression and direction within the game while maintaining the desired number of rooms. Every new room must include the exits and objects displayed in the assistant prompt writing in the room's description. Each new room has a unique name, always use the exits and objects from the assistant prompt in writing the room's description, and describes the environment, objects and NPCs in each room. Every room should have a unique purpose and often contain useful objects and interesting NPCs. You have to remember where I am in the labyrinth and remember all the rooms I've already visited by referring to coordinates and exits in the assistant prompt. Some rooms will contain hints about how to find the end of the labyrinth, or hints on solutions to puzzles along the way, including useful descriptions of features in the room, including objects, the history of the room, including its construction whether natural or artificial, and the processes that were used to create the room, who is depicted in the scenes if there are paintings or frescoes including characters. NPCs should often talk to the player and to other NPCs. Some characters might only fight when they are attacked, while other monsters will be hostile no matter what. The road from Tartarus to Hades should include numerous NPCs, including animals, persons (living or dead), restless souls, monsters including undead and even the deities of Danae. The Grave Master must ensure NPCs are unique individuals with biases/emotions/backstories, creating a varied and dynamic gameplay experience. NPCs can range from friendly, neutral, to hostile, adding depth and unpredictability to the interactions with the player character. NPCs have unique motivations as the afterlife is populated by all of the souls who have ever lived, and who have had eternity to create communities and pursue their own objectives. The end of the labyrinth must be the 1000th room furthest away, the throne room in Hades, with some rooms indoors and others outdoors in the fantastic, otherworldly environment whether it is above ground or below ground, of Tartarus, which eventually, after a series of quests, leads to Hades, where Arithus awaits the player in Mortacia's old throne room and it has gone from being the City of the Dead under Mortacia to the Realm of the Damned under Arithus. Each room has a unique name that corresponds to the room's environment. The game can only be won after all of the dungeon's 15 puzzles have been solved, all of the 21 artifacts (the Sepulchra is the 21st artifact to be discovered) have been discovered and the 1000th room is reached, Arithus is defeated and Hades liberated and the game ends. The game must keep a score out of 1000 possible points. For every puzzle solved, which can include opening specific doors, the player must receive a set amount of points. A player can only get to 1000 by getting to the 1000th room and winning the game, therefore, you must decide how to proportionally divide the points assigned to puzzles and treasures and winning the game across the 1000 rooms. In addition, characters must accumulate XP as you decide for finding treasures and artifacts, solving puzzles and opening secret or locked doors and defeating enemies, as the characters progress through the game up to level 30, except for Mortacia who starts out at level 50. ...  
@@ -8242,34 +8212,39 @@ Narrative Guidelines
 
 Backend Integration: Programmatic vs. Narrative Handling`;
  
-            await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next artifact to be found in the game taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only the next quest objective item, using 1-5 words.', { previousQuest: currentQuest }, questWorld));
+            else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next artifact to be found in the game taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            }
             const generationResultArtifact = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-artifact-name',
               { name: { type: String, minLength: 1, maxLength: 70 } }, { previousQuest: currentQuest }, 'Name ONLY a new ordinary non-divine artifact, 1-5 words, no punctuation or description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
-            nextArtifact = GeneratedNames.clean(generationResultArtifact.content);
+            nextArtifact = require('./holodekRoomWork').questName(generationResultArtifact.content);
             const finalDivineStage = Divinity.finalStage(updatedGameConsole);
             if (finalDivineStage) nextArtifact = 'Sepulchra';
             console.log("Generated nextArtifact:", nextArtifact);
            
             // Check if the replacement string exists in the console
-            if (updatedGameConsole.includes("Next Artifact: ")) {
-                updatedGameConsole = updatedGameConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
+            if (authoredConsole.includes("Next Artifact: ")) {
+                authoredConsole = authoredConsole.replace(/Next Artifact: .*/, `Next Artifact: ${nextArtifact}`);
             } else {
                 console.error("Next Artifact: placeholder not found in the game console.");
             }
            
             // Generate the next boss and boss room name
+            if (!localQuestWork) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
-            await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next powerful boss monster taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only a new boss opponent native to this world, using 1-5 words.', { artifact: nextArtifact }, questWorld));
+            else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next powerful boss monster taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            }
             const generationResultBoss = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-boss-name',
               { name: { type: String, minLength: 1, maxLength: 70 } }, { artifact: nextArtifact }, 'Name ONLY a new powerful non-divine boss monster, not a member of the reserved pantheon.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
-            nextBoss = GeneratedNames.clean(generationResultBoss.content);
+            nextBoss = require('./holodekRoomWork').questName(generationResultBoss.content);
             if (finalDivineStage) nextBoss = 'Arithus';
             else if (Pantheon.name(nextBoss)) nextBoss = 'Throneward Sentinel ' + Inhabitants.hash(nextBoss + nextArtifact).toString(36);
             console.log("Generated nextBoss:", nextBoss);
            
-            if (updatedGameConsole.includes("Next Boss: ")) {
-                updatedGameConsole = updatedGameConsole.replace(/Next Boss: .*/, `Next Boss: ${nextBoss}`);
+            if (authoredConsole.includes("Next Boss: ")) {
+                authoredConsole = authoredConsole.replace(/Next Boss: .*/, `Next Boss: ${nextBoss}`);
             } else {
                 console.error("Next Boss: placeholder not found in the game console.");
             }
@@ -8278,7 +8253,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             const existingCoords = new Set(Object.keys(parsedDatabase));
             const siteBossRooms = finalDivineStage ? [] : FortifiedSites.bossCandidates(parsedDatabase,
               snapshotQuestContext(sharedState, updatedGameConsole));
-            const siteBossRoom = siteBossRooms.length && Math.random() < .35 ? siteBossRooms[Math.floor(Math.random() * siteBossRooms.length)] : null;
+            const siteBossRoom = !preparation && siteBossRooms.length && Math.random() < .35 ? siteBossRooms[Math.floor(Math.random() * siteBossRooms.length)] : null;
            
             // Extract current coordinates from updatedGameConsole to ensure it's available
             const currentCoordinatesMatch = updatedGameConsole.match(/Coordinates: X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/);
@@ -8320,7 +8295,10 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             }
            
             let bossCoordinates;
-            if (siteBossRoom) {
+            if (preparation?.bossKey) {
+                const [x, y, z] = preparation.bossKey.split(',').map(Number);
+                bossCoordinates = `X: ${x}, Y: ${y}, Z: ${z}`;
+            } else if (siteBossRoom) {
                 const [x, y, z] = siteBossRoom.coordinates.split(',').map(Number);
                 bossCoordinates = `X: ${x}, Y: ${y}, Z: ${z}`;
             } else if (candidates.length === 0) {
@@ -8334,8 +8312,8 @@ Backend Integration: Programmatic vs. Narrative Handling`;
            
             // Ensure the coordinates string is formatted consistently
             if (/^X: -?\d+, Y: -?\d+, Z: -?\d+$/.test(bossCoordinates)) {
-                if (updatedGameConsole.includes("Boss Room Coordinates: ")) {
-                    updatedGameConsole = updatedGameConsole.replace(/Boss Room Coordinates: .*/, `Boss Room Coordinates: ${bossCoordinates}`);
+                if (authoredConsole.includes("Boss Room Coordinates: ")) {
+                    authoredConsole = authoredConsole.replace(/Boss Room Coordinates: .*/, `Boss Room Coordinates: ${bossCoordinates}`);
                 } else {
                     console.error("Boss Room Coordinates: placeholder not found in the game console.");
                 }
@@ -8343,45 +8321,52 @@ Backend Integration: Programmatic vs. Narrative Handling`;
                 console.error("Invalid boss room coordinates format generated:", bossCoordinates);
             }
            
-            if (updatedGameConsole.includes("Boss Room Coordinates: ")) {
-                updatedGameConsole = updatedGameConsole.replace(/Boss Room Coordinates: .*/, `Boss Room Coordinates: ${bossCoordinates}`);
+            if (authoredConsole.includes("Boss Room Coordinates: ")) {
+                authoredConsole = authoredConsole.replace(/Boss Room Coordinates: .*/, `Boss Room Coordinates: ${bossCoordinates}`);
             } else {
-                updatedGameConsole += `\nBoss Room Coordinates: ${bossCoordinates}`;
+                authoredConsole += `\nBoss Room Coordinates: ${bossCoordinates}`;
                 console.log("Added Boss Room Coordinates to the game console.");
             }
-            $.model = "gpt-4.1-mini";
-            $.temperature = 1.0;
             if (siteBossRoom) bossRoom = siteBossRoom.name;
             else {
-            await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            if (!localQuestWork) {
+            $.model = "gpt-4.1-mini";
+            $.temperature = 1.0;
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only the bound boss location, using 1-5 words. Preserve its physical genre.', { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, questWorld));
+            else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            }
             const generationResultBossRoom = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-boss-location',
               { name: { type: String, minLength: 1, maxLength: 70 } }, { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, 'Name ONLY the boss location, 1-5 words, not a description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
-            bossRoom = generationResultBossRoom.content.trim();
+            bossRoom = require('./holodekRoomWork').questName(generationResultBossRoom.content);
             }
             if (finalDivineStage) bossRoom = 'Throne Room of Hades';
             console.log("Generated bossRoom:", bossRoom);
            
-            if (updatedGameConsole.includes("Next Boss Room: ")) {
-                updatedGameConsole = updatedGameConsole.replace(/Next Boss Room: .*/, `Next Boss Room: ${bossRoom}`);
+            if (authoredConsole.includes("Next Boss Room: ")) {
+                authoredConsole = authoredConsole.replace(/Next Boss Room: .*/, `Next Boss Room: ${bossRoom}`);
             } else {
                 console.error("Next Boss Room: placeholder not found in the game console.");
             }
             // Generate quest description
+            if (!localQuestWork) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
-            await $.assistant`Generate a unique description in a single paragraph with no line breaks for the next quest to retrieve ${nextArtifact} by defeating ${nextBoss} at ${bossRoom} taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Describe only the next quest to retrieve this exact objective item by defeating this bound boss at this location. One paragraph; no new prerequisites or alternate boss.', { artifact: nextArtifact, boss: nextBoss, location: bossRoom, coordinates: bossCoordinates }, questWorld));
+            else await $.assistant`Generate a unique description in a single paragraph with no line breaks for the next quest to retrieve ${nextArtifact} by defeating ${nextBoss} at ${bossRoom} taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
+            }
             const generationResultQuest = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-premise',
               { description: { type: String, minLength: 1, maxLength: 600 } }, { artifact: nextArtifact, boss: nextBoss, location: bossRoom, coordinates: bossCoordinates },
               'Describe ONLY the next quest to retrieve this exact artifact by defeating this bound boss at this location. One complete concise paragraph, no new prerequisites or alternate boss.')).result.description } : await $.assistant.generation({ maxTokens: 120 });
-            currentQuest = generationResultQuest.content.trim();
+            currentQuest = require('./holodekRoomWork').questDescription(generationResultQuest.content);
             console.log("Generated currentQuest:", currentQuest);
             // Check if the replacement string exists in the console
-            if (updatedGameConsole.includes("Current Quest: ")) {
-                updatedGameConsole = updatedGameConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
+            if (authoredConsole.includes("Current Quest: ")) {
+                authoredConsole = authoredConsole.replace(/Current Quest: .*/, `Current Quest: ${currentQuest}`);
             } else {
                 console.error("Current Quest: placeholder not found in the game console.");
             }
             // Store string in sharedState
+            updatedGameConsole = authoredConsole;
             sharedState.setCurrentQuest(currentQuest);
             // Reset tasks and index for new quest
             sharedState.setCurrentTasks([]);
@@ -8540,7 +8525,8 @@ async function tryReadableItemAction(userInput) {
     if(plan.allowed){
         const room=database[geoKey];
         if(room){room.readableFocus||={};room.readableFocus[actor.name]=plan.record.mechanismId+':'+plan.record.id;sharedState.setRoomNameDatabase(JSON.stringify(database));}
-        if (typeof QuestScenes !== 'undefined') QuestScenes.onRead(sharedState,plan);
+        require('./bookResearch').record(sharedState,plan);
+        if (typeof QuestScenes !== 'undefined') {QuestScenes.onRead(sharedState,plan,broadcast);QuestScenes.refresh(sharedState);}
         CampaignMemory.add(sharedState,Inhabitants.splitSpeech(plan.message,600,100).map((text,i)=>({id:`read:${plan.record.mechanismId}:${plan.record.id}:${actor.name}:${plan.inspect?'cover':plan.chapter}:${i}`,
           runId:sharedState.getDungeonRunId(),at:Date.now(),
           kind:'activity',authority:'state',source:'stored-readable-metadata',roomKey:geoKey,roomName:database[geoKey]?.name,
@@ -8654,9 +8640,10 @@ let commandedCombatTarget = null;
 async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
   return new Promise(resolve => {
     let remaining = 180000, previous = Date.now();
-    let prompt, tactics, choosing = false, finished = false;
+    let prompt, tactics, equipment, choosing = false, finished = false;
     const finish = target => { if (finished) return; finished = true; clearInterval(timer); sharedState.emitter.removeListener(`target_response_${combatant.name}`, respond);
       tactics?.close();
+      equipment?.close();
       if (typeof combatTurnFlow !== 'undefined') combatTurnFlow?.clearPrompt(prompt?.turnId); resolve(target); };
     const respond = message => {
       if (finished || choosing || message.actionId !== actionDice.active?.id || actionDice.paused) return;
@@ -8695,7 +8682,7 @@ async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
     }, 1000);
     timer.unref?.();
     sharedState.emitter.on(`target_response_${combatant.name}`, respond);
-    const positions = targets.map(t => ({ name: t.name, x: t.x, y: t.y,
+    const positions = targets.map(t => ({ name: t.name, x: combatSpace?.point?.(t)?.x ?? t.x, y: combatSpace?.point?.(t)?.y ?? t.y,
       distance: combatSpace ? combatSpace.distance(combatant,t) : Math.hypot(combatant.x - t.x, combatant.y - t.y) }));
     prompt = combatTurnFlow ? combatTurnFlow.prompt(combatant, targets, positions, allowRetreat) :
       { type: 'target_prompt', actionId: actionDice.active.id, combatant: combatant.name, targets: targets.map(t => t.name), positions };
@@ -8727,6 +8714,10 @@ async function chooseDefenceTarget(combatant, targets, allowRetreat = false) {
           await new Promise(done => setTimeout(done, 200));
         } });
     }
+    if (typeof CombatEquipment !== 'undefined') equipment = CombatEquipment.attach({ dice: actionDice, state: sharedState, service: populationService,
+      actor: combatant, turn: prompt, targets, space: combatSpace, roster: combatTurnFlow?.teams?.combatants,
+      live: () => !finished && !choosing && !tactics?.busy(), update: tactics ? () => tactics.update() : null,
+      committed: () => { updatedGameConsole = sharedState.getUpdatedGameConsole(); } });
     broadcast(prompt);
     if (combatant.type === 'pc' && commandedCombatTarget && tactics) {
       const name = commandedCombatTarget.toLowerCase(); commandedCombatTarget = null;
@@ -8772,6 +8763,12 @@ function gameConsoleForPerception(consoleText = updatedGameConsole) {
   return require('../assets/gameLogContent').withoutLootLists(perceived, { inventory: false });
 }
 async function handleCombatRound($, userInput, combatMode) {
+    const currentConsole = sharedState.getUpdatedGameConsole?.() || updatedGameConsole;
+    const partyAtStart = ['PC', 'NPCs in Party'].flatMap(label => Inhabitants.parseSheets(currentConsole, label));
+    if (partyAtStart.length && !partyAtStart.some(actor => actor.hp > 0 && Inhabitants.canAct(actor))) {
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase) CombatLife.settle(sharedState);
+        return { combatLog: 'The party is down. Hostiles stop attacking; wounds and any remaining recovery still need to be resolved.', needsUpdate: false };
+    }
     commandedCombatTarget = /^\s*attack\s+(.+?)\s*$/i.exec(String(userInput))?.[1] || null;
     const provocation = typeof CombatProvocation !== 'undefined' ? CombatProvocation.prepare(sharedState, populationService, userInput) : null;
     if (provocation) { updatedGameConsole = sharedState.getUpdatedGameConsole(); broadcast(provocation); }
@@ -8800,7 +8797,7 @@ async function handleCombatRound($, userInput, combatMode) {
                 }
               }
             }
-            if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
+            if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && (CombatLife.status(sharedState).gameOver || CombatLife.status(sharedState).pendingRespawn)) break;
             result = await resolveCombatRound($, userInput, combatMode);
             logs.push(`Round ${combatTurnFlow.round}\n${result.combatLog}`);
             if (logs.length > 20) logs.shift();
@@ -8808,6 +8805,32 @@ async function handleCombatRound($, userInput, combatMode) {
             // Keep the same action lock between rounds: walking away must use the Retreat choice.
             if (combatTurnFlow.canContinue()) userInput = '__ENCOUNTER_DEFENCE__';
         } while (combatTurnFlow.canContinue());
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase) {
+            const sheets = CombatLife.actors(sharedState.getUpdatedGameConsole());
+            const pc = sheets.find(a => a.type === 'pc'), npcs = sheets.filter(a => a.type === 'npc'), monsters = sheets.filter(a => a.type === 'monster');
+            if (pc && Inhabitants.isDown(pc) && !CombatLife.status(sharedState).pendingRespawn) {
+                const aidLog = [];
+                for (const companion of npcs.filter(Inhabitants.canAct)) {
+                    if (!Inhabitants.isDown(pc)) break;
+                    let helped = await automaticCombatAid(companion, pc, npcs, monsters, aidLog, new Set(), []);
+                    if (!helped && combatSpace && Inhabitants.isDown(pc)) {
+                        const path = combatSpace.pursuitPath(companion, pc, 6);
+                        for (const step of path) {
+                            combatSpace.move(companion, step);
+                            const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+                            sharedState.setCombatCharactersString(JSON.stringify(combatSpace.syncRoster(roster)));
+                            broadcast({ type: 'combat_maze_step', actionId: actionDice.active.id, geoKey: actionDice.active.geoKey,
+                              character: companion.name, ...step, duration: 200 });
+                            await new Promise(done => setTimeout(done, 200));
+                        }
+                        helped = await automaticCombatAid(companion, pc, npcs, monsters, aidLog, new Set(), []);
+                    }
+                    if (!helped) aidLog.push(companion.name + ' stays nearby; no usable healing or stabilization is currently available.');
+                }
+                if (aidLog.length) logs.push(aidLog.join('\n'));
+            }
+            CombatLife.settle(sharedState);
+        }
         return { ...result, combatLog: logs.join('\n\n'), retreated: combatTurnFlow.retreated };
     } finally {
         try {
@@ -8843,6 +8866,11 @@ async function handleCombatRound($, userInput, combatMode) {
             combatTurnFlow = null;
             commandedCombatTarget = null;
             actionDice.end();
+            if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).pendingRespawn) {
+                const event = require('./playerRespawn').complete(sharedState);
+                updatedGameConsole = sharedState.getUpdatedGameConsole();
+                if (event) { broadcast(event); sharedState.emitter?.emit('combat_life', CombatLife.status(sharedState)); }
+            }
         }
     }
 }
@@ -8942,6 +8970,7 @@ async function resolveTurnedCombatant(combatant, combatLog) {
 // world1 RANGED_COMBAT: optional; absent when this file is evaluated without CommonJS (tests' vm harness).
 function rangedHook() { try { return typeof require === 'function' ? require('./rangedCombat') : null; } catch { return null; } }
 async function rollCombatAttack(combatant, target, pc, combatLog) {
+    if (!target || target.hp <= 0) { combatLog.push(combatant.name + ' holds the attack: no standing target.'); return null; }
     if (typeof SpellSystem !== 'undefined' && SpellSystem.turned(sharedState, combatant)) return null;
     if (combatSpace && !combatant.tacticalControlled && !combatSpace.canAttack(combatant, target)) {
         const path = combatSpace.pursuitPath(combatant, target, combatTurnFlow ? 6 : Infinity);
@@ -9013,14 +9042,15 @@ async function applyCombatDamage(target, damage, combatLog, attacker = null) {
     record();
 }
 function playerControls(combatant, pc, npcs) {
-    return combatant.name === (pc?.hp > 0 ? pc.name : npcs.find(a => a.hp > 0)?.name);
+    return pc?.hp > 0 && combatant.name === pc.name;
 }
 async function automaticCombatAid(combatant, pc, npcs, monsters, combatLog, alreadyKilled, targets) {
     if (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase || playerControls(combatant, pc, npcs)) return false;
     const choice = SpellSystem.aiChoice(sharedState, combatant, targets.map(a => a.name));
     if (choice?.effect === 'heal' && CombatLife.actors(sharedState.getUpdatedGameConsole()).some(a => a.name === choice.target && Inhabitants.isDown(a)))
       return resolveCombatSpell({ ...choice, nonce: require('node:crypto').randomUUID() }, combatant, pc, npcs, monsters, alreadyKilled, combatLog, targets);
-    const aid = CombatLife.careChoices(sharedState, combatant.name).find(c => c.kind === 'bandage');
+    const aidChoices = CombatLife.careChoices(sharedState, combatant.name, { mercy: false });
+    const aid = aidChoices.find(c => c.target === pc?.name && c.kind === 'drink') || aidChoices.find(c => c.kind === 'bandage');
     return aid ? resolveCombatCare({ ...aid, actor: combatant.name, runId: sharedState.getDungeonRunId(), geoKey: actionDice.active.geoKey,
       nonce: require('node:crypto').randomUUID() }, pc, npcs, monsters, combatLog) : false;
 }
@@ -9031,6 +9061,7 @@ function resolveCombatCare(choice, pc, npcs, monsters, combatLog) {
     const sheets = new Map(CombatLife.actors(updatedGameConsole).map(a => [a.name, a]));
     for (const actor of [pc, ...npcs, ...monsters].filter(Boolean)) {
       const sheet = sheets.get(actor.name); if (sheet) { actor.hp = sheet.hp; actor.state = sheet.state; }
+      if (actor.name === result.target && result.allegiance) actor.allegiance = result.allegiance;
     }
     combatLog.push(result.content); actionDice.recordCombat?.({ kind: 'notice', text: result.content }); commitCombatHealth(pc, npcs, monsters); return true;
 }
@@ -9192,7 +9223,7 @@ async function resolveCombatRound($, userInput, combatMode) {
     combatLog.push(`Initiative order: ${initiativeOrder.map(c => `${c.name} (${c.initiative})`).join(', ')}`);
 
     for (const combatant of initiativeOrder) {
-        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && (CombatLife.status(sharedState).gameOver || CombatLife.status(sharedState).pendingRespawn)) break;
         if (!Inhabitants.canAct(combatant) || alreadyKilled.has(combatant.name)) continue;
         if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
@@ -9375,6 +9406,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     // Use client-provided combatCharacters if available, otherwise fall back to sharedState
     let combatCharacters = clientCombatCharacters ? clientCombatCharacters : (sharedState.getCombatCharactersString() ? JSON.parse(sharedState.getCombatCharactersString()) : []);
 
+    combatSpace?.syncRoster(combatCharacters);
     // Ensure only characters with HP > 0 are in combatCharacters at the start
     combatCharacters = combatCharacters.filter(c => allCombatants.some(a => a.name === c.name && Inhabitants.isAlive(a)));
     // Assign positions from combatCharacters directly to allCombatants
@@ -9529,7 +9561,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
     }
 
     for (const combatant of initiativeOrder) {
-        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && (CombatLife.status(sharedState).gameOver || CombatLife.status(sharedState).pendingRespawn)) break;
         if (!Inhabitants.canAct(combatant) || alreadyKilled.has(combatant.name)) {
             combatLog.push(`${combatant.name} skipped due to HP (${combatant.hp}) or already killed.`);
             continue;
@@ -9596,7 +9628,8 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
             }
         }
 
-        combatLog.push(`${combatant.name} targets ${target.name} at (${target.x}, ${target.y}) from (${combatant.x}, ${combatant.y}).`);
+        const targetPoint = combatSpace?.point(target), actorPoint = combatSpace?.point(combatant);
+        combatLog.push(`${combatant.name} targets ${target.name} at (${targetPoint?.x ?? target.x}, ${targetPoint?.y ?? target.y}) from (${actorPoint?.x ?? combatant.x}, ${actorPoint?.y ?? combatant.y}).`);
 
         const isAdjacent = getAdjacentPositions(combatant.x, combatant.y).some(pos => pos.x === target.x && pos.y === target.y);
         
@@ -9763,9 +9796,9 @@ function commitCombatHealth(pc, npcs, monsters) {
   combatSpace?.syncRoster(roster);
   sharedState.setCombatCharactersString(JSON.stringify(roster));
   // Commit before the next awaited turn; continuous combat no longer returns after each round.
-  updatedGameConsole = patchLiveHPToConsole(updatedGameConsole, pc, npcs, monsters);
+  updatedGameConsole = patchLiveHPToConsole(sharedState.getUpdatedGameConsole?.() || updatedGameConsole, pc, npcs, monsters);
   sharedState.setUpdatedGameConsole(updatedGameConsole);
-  if (combatPopulation) populationService.save(combatPopulation);
+  if (combatPopulation) { populationService.recordPositions?.(combatPopulation, roster); populationService.save(combatPopulation); }
   combatTurnFlow?.refreshInitiative?.();
   broadcastCombatHealth();
 }
@@ -9897,6 +9930,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     // Use client-provided combatCharacters or fall back to sharedState
     let combatCharacters = clientCombatCharacters ? clientCombatCharacters : (sharedState.getCombatCharactersString() ? JSON.parse(sharedState.getCombatCharactersString()) : []);
 
+    combatSpace?.syncRoster(combatCharacters);
     // Ensure only characters with HP > 0 are in combatCharacters
     combatCharacters = combatCharacters.filter(c => allCombatants.some(a => a.name === c.name && Inhabitants.isAlive(a)));
     allCombatants.forEach(combatant => {
@@ -10052,7 +10086,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
     }
 
     for (const combatant of initiativeOrder) {
-        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && CombatLife.status(sharedState).gameOver) break;
+        if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase && (CombatLife.status(sharedState).gameOver || CombatLife.status(sharedState).pendingRespawn)) break;
         if (!Inhabitants.canAct(combatant) || alreadyKilled.has(combatant.name)) {
             combatLog.push(`${combatant.name} is skipped due to HP (${combatant.hp}) or already killed.`);
             continue;
@@ -10072,7 +10106,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
             target = await choosePlayerCombatAction(combatant, targets);
             if (target?.retreat) { needsUpdate = true; await retreatCombatParty(pc, npcs, aliveMonsters, combatLog); break; }
             if (!target) continue;
-        } else if (combatant.name === pc?.name || npcs.some(n => n.name === combatant.name)) {
+        } else if (pc?.hp > 0 && (combatant.name === pc.name || npcs.some(n => n.name === combatant.name))) {
             combatLog.push(`Waiting for player to select a target for ${combatant.name}.`);
             target = await promptForTarget(combatant, targets);
             if (!target) { combatLog.push(`${combatant.name} holds position: no target was selected.`); continue; }
@@ -12136,6 +12170,29 @@ async function logThreadMessages() {
     }
 }
 
+  if (options.prepareOpeningQuest) {
+    if (require('node:worker_threads').isMainThread) throw Error('Opening quest preparation requires an isolated worker.');
+    const job = options.prepareOpeningQuest, Opening = require('./openingQuestPreparation');
+    if (job.runId !== sharedState.getDungeonRunId() || job.key !== '0,0,0') throw Error('Stale opening quest order.');
+    const base = JSON.parse(roomNameDatabaseString || '{}'), runtime = GraveMasterProtocol.runtimeFor(sharedState);
+    return runtime.run(runtime.retort(async $ => {
+      StoryPrompts.appendOriginal($);
+      await $.user`Private opening-quest authoring, not a player turn. Prepare the existing quest pipeline once using this campaign. The introduction will be bound to whichever second room the player enters. Do not claim the player accepted, completed or witnessed anything. Keep all required elements in real engine-bound locations. ${updatedGameConsole}`;
+      await generateQuest($, job);
+      const database = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+      const bossName = Opening.line(updatedGameConsole, 'Next Boss Room');
+      database[job.bossKey] ||= { name: bossName, objects: [], exits: {}, monsters: { inRoom: 'None', state: 'None' } };
+      sharedState.setRoomNameDatabase(JSON.stringify(database)); roomNameDatabaseString = sharedState.getRoomNameDatabase();
+      const result = await seedAndManageQuest($, updatedGameConsole, '', null, true);
+      if (!result.activeTask?.id) throw Error('Opening quest has no validated first task.');
+      await Opening.authorIntroduction($, sharedState, result.activeTask);
+      const artifact = { stage: 'quest', jobId: job.id, runId: job.runId, base,
+        rooms: JSON.parse(sharedState.getRoomNameDatabase()), quest: sharedState.getCurrentQuest(), task: result.activeTask,
+        fields: Object.fromEntries(Opening.labels.map(label => [label, Opening.line(sharedState.getUpdatedGameConsole(), label)])) };
+      options.onBuildCheckpoint?.(artifact); return artifact;
+    }));
+  }
+
   if (options.prepareRoom) {
     if (require('node:worker_threads').isMainThread) throw Error('Background construction requires an isolated worker.');
     const job = options.prepareRoom, Build = require('./roomBuildState');
@@ -12145,7 +12202,8 @@ async function logThreadMessages() {
     const buildBase = job.baseRooms || JSON.parse(JSON.stringify(database));
     if (!target || target.name !== job.name || sharedState.getDungeonRunId() !== job.runId) throw Error('Stale room work order.');
     require('./roomBuildTopology').prepare(database, job.key, { seed: job.runId,
-      protectedKeys: new Set((job.assignment?.assignments || []).filter(other => other.owner !== job.id).map(other => other.destination)) });
+      protectedKeys: new Set([...(job.assignment?.assignments || []).filter(other => other.owner !== job.id).map(other => other.destination),
+        ...(job.assignment?.reservations || []).filter(other => other.id !== job.id).map(other => other.key)]) });
     sharedState.setRoomNameDatabase(JSON.stringify(database)); roomNameDatabaseString = sharedState.getRoomNameDatabase();
     updatedGameConsole = Build.projectConsole(updatedGameConsole, target, job.key, database,
       { pending: target.populationComplete !== true });
@@ -12196,6 +12254,16 @@ async function logThreadMessages() {
     }));
   }
 
+    if (directCombat && !options.realtimeEncounter) {
+      console.info('[CombatStart]', JSON.stringify({ source: 'explicit-attack', target: directCombat.name, allegiance: directCombat.allegiance || directCombat.state }));
+      const result = await handleCombatRound({}, userInput, combatMode);
+      let combatLog = result.combatLog || '';
+      try { const RC = rangedHook(); RC?.endRound(sharedState);
+        if (/monsters? (have been |are )?defeated|combat (is )?over|victory/i.test(combatLog)) { const rec = RC.endCombat(sharedState); if (rec.length) combatLog += '\n' + rec.map(r => `Recovered ${r.recovered} ${r.ammo} for the ${r.weapon}.`).join('\n'); }
+      } catch (error) { console.warn('[ranged] after-round', error.message); }
+      return { content: combatLog, updatedGameConsole: sharedState.getUpdatedGameConsole(),
+        combatCharactersString: sharedState.getCombatCharactersString(), roomNameDatabaseString: sharedState.getRoomNameDatabase(), combatRoundOnly: true };
+    }
     if (options.realtimeEncounter) {
       const result = await handleCombatRound({}, '__ENCOUNTER_DEFENCE__', combatMode);
       updatedGameConsole = sharedState.getUpdatedGameConsole();
@@ -12210,7 +12278,6 @@ async function logThreadMessages() {
     $.model = "gpt-4.1-mini";
     $.temperature = 1.2;
 //    await $.run($ => generateMissingRoomDetails($)); 
-    await $.run($ => generateQuest($));
 
             // If the player arrived via the sprite review "Save & Continue" (special __START_WITH_CHARACTER__ path),
             // a full character (with chosen sprite) was set via setCurrentPC. Inject the selection fact here
@@ -12225,7 +12292,8 @@ async function logThreadMessages() {
               await $.assistant`The player has selected and confirmed their starting character: ${JSON.stringify(slimForLLM)}. Begin the game in the Ruined Temple Entrance with this exact character. Do not re-offer the start menu.`;
             }
 
-            if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) $.user`${StoryPrompts.SHORT_GM}${StoryPrompts.settingOnce($)}`; // holodek-1 only: compact rules instead of the inline 12.5k-token lore copy
+            if (typeof WorldSetting !== 'undefined' && WorldSetting.current()) StoryPrompts.appendOriginal($);
+            else if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) $.user`${StoryPrompts.SHORT_GM}${StoryPrompts.settingOnce($)}`; // holodek-1 only: compact rules instead of the inline 12.5k-token lore copy
             else $.user`Instructions for the Grave Master:
             
             Hereafter, 'You' refers to you, who is adminstering this chat, which hereafter you shall refer to as the Grave Master. 'Me' and 'I' refers to the user, the player and me, the person writing this. You must store the following words into memory: Using all of the real-time game information from Current Game Console and the die rolls, write an AI-generated fantasy roleplaying interactive fiction game wherein Assistant is the Grave Master, the user is the player, and let's play in ChatGPT. Make up the story as you go including imagining the names and histories of people, places and things encountered, but you must allow me, the player, to type the commands, allowing for potential failure. Make it strange, unusual and as thought-provoking as possible. The Grave Master must always obey the player's commands and selections without improvisation and must not make any decisions or take any actions on behalf the player, however the Grave Master must describe and control the actions of all NPCs and monsters in the Current Game Console in the assistant prompt. The Grave Master must always do its best and follow the instructions as written herein without improvisation no matter what and is responsible for overseeing the game and describing the game world, but the player is responsible for making all choices and taking all actions within the game, while the Grave Master controls monsters and NPCs. Do not display the game console, but be sure to include the actions being taken by NPCs and monsters in the room. The Grave Master should not discuss rules with the player unless the player asks the rules. The Grave Master's job is the keep the illusion of the role playing game, or RPG, intact, by using this interactive fiction game format to create the story based on my commands. If any later instruction conflicts with this block, the later instruction overrides. In the background, the game uses javascript that constructs and maintains the 1000 navigable rooms with X: Y: Z: coordinates, exits, npcs, monsters and objects that are automatically stored in the system prompt to ensure they are connected starting with the Ruined Temple in Tartarus and leading either outdoors into the wastelands of Tartarus or deeper into the temple, ultimately leading to the 1000th room, the Throne Room in Hades, with north (n), south (s), east (e), west (w), northwest (nw), southwest (sw), northeast (ne), southeast (se), up (u) and down (d) exits for each room. The exits in the room description should be written based on the exits and connected rooms provided in the assistant prompt from the game console. This means that the exits in the room description should match the exits listed in the game console and lead to the connected rooms listed in the game console, and include npcs, monsters and objects. When the user enters a direction, the game's javascript automatically produces the next room's coordinates, exits, npcs, monsters and objects in the system prompt, thereby keeping the map of the 1000 rooms in memory so that the maze is persistent, with every room having at least one visible exit, always remembering your location in the map. Your job is to provide the room's descriptions and game responses, including exits, npcs, monsters and objects and the 21 artifacts (often guarded by monsters) and 15 quests needed to win the game into many of the locations of the 1000 rooms, allocating XP and score for the player along the way and telling the story of the Children of the Grave, utilizing the game's current, updated console below and using unique characters, plots, conflicts and battles to compose the adventure, and utilizing roleplaying game elements, combat and magic systems of your own design in describing the interactive fiction story. Do not change the exits and objects provided in the system prompt. The 15 quests must be of your own design and either advance the central narrative or are side quests, and should include defeating monsters and discovering the 21 artifacts, with the game beginning with the first quest, and each quest leading to the final quest to confront Arithus in Hades after all 21 artifacts have been discovered. Never forget the player's location in the maze by referring to the game's current, updated console, and always plan 10 rooms ahead, including any NPCs, objects, artifacts, quest hooks and game progress, the score, puzzles and encounters so that gameplay is consistent. NPCs in Party: who accompany the player and Monsters in Room: encountered listed in the game console are not the same, they are distinct. The monsters and NPCs encountered by the player could be hostile, friendly or neutral, whether monsters like undead or dragons or others suitable for a fantasy setting, and possibly be potential allies who may seed or assist in quests depending on the player's actions and choices. You, the Grave Master, must control NPCs and monsters and determine their courses of action every turn. The Grave Master should use this as inspiration: 'You have died and find yourself standing in the the first room in the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.'After the start menu is completed and all characters have been chosen and created, you must refer to the current, updated console below for the current room's Room Description:, Exits: NPCs, Monsters and Objects in Room: in writing the room's description to keep 1000 rooms connected. Proceed with the game when I have made my selections from the start menu of either Mortacia, goddess of death, Mortacia is (an 8 1/2 tall human-looking female with long blonde hair, large grey dragon wings that look slightly decayed with many holes and openings and can fly but not too far, and is on a quest to reclaim the Sepulchra to reclaim her throne in Hades, Suzerain, Knight of Atinus, the recurring hero of the Children of the Grave campaign setting who keeps having to save the world, die and go to the afterlife, raise an army of the dead souls to save the underworld plane of Hades from Arithus, and then be reborn again, who has just died and finds himself in the first room of the afterlife, or an adventuring party of seven adventurers named the Children of the Grave who have died and find themselves in the first room of the afterlife and been summoned by Mortacia, but who are unaware of their circumstances at first: 1 PC whom I direct, 5 NPCs you control and also Mortacia, who is also an NPC you control and joins the party, described herein, all the characters described herein have been created and I am in the Ruined Temple in Tartarus described herein and issued the command to proceed. Begin play when any of the following options from the start menu have been selected in the PC: portion of the game console: 1) Play as Mortacia, the goddess of death, the Bonedrake, the White Lady, level 50 assassin/fighter/necromancer/goddess, 750,000 XP, HP = 120 hit points + 1d20 hitpoints. 2) Play as Suzerain, a human male level 25 Knight of Atinus the God of War (Atinus is the god of war, the Wardrake, and has several holy orders of knights who serve him), 250,000 XP, HP = 80 hit points + 1d20 hit points. 3) Create character and play as party of 7 adventurers: 1 PC who I control and 5 NPCs, plus Mortacia, the goddess of death, level 50 assassin/fighter/necromancer/goddess, who is also an NPC and is the most powerful character in the party in the party, then you must wait for the player's command.  Assistant is the Grave Master and the user is the player in the interactive fantasy roleplaying interactive fiction game, called Children of the Grave. The Grave Master administers the game. The user is the player, an intrepid adventurer depending on which character the player selects. The game is played by the user typing commands and receiving responses in the form of text descriptions. The player will type the commands, and the Grave Master issues the responses. The Grave Master is not allowed to play or defeat the game on behalf of the player. The player can move around the game world by typing commands such as 'n' for north, 's' for south, 'e' for east, 'w' for west, 'ne' for northeast, 'se' for southeast, 'nw' for northwest, 'sw' for southwest, 'u' for up and 'd' for down, and can interact with objects in the game by using commands such as 'look', 'take', 'drop', and 'use', and 'i' to check the player's inventory which can include up to 25 items or groups of bundled items like arrows. The player starts out the game with no weapons (they must be acquired). Many of the rooms in the labyrinth will contain objects that the user may put into his inventory, and some of those will be useful in solving puzzles, opening doors or other objects, casting magic spells, performing rituals and so forth, but must never contain a map of the game. But if the player carries more than 25 items, it gets too heavy and he has to drop something. Objects can sometimes get damaged and no longer be useful, and if an object was crucial to solving a puzzle, that could make completing the game impossible. The Grave Master must remember the player's location in the labyrinth, inventory, how many turns have been taken and the objects in every room that is visited them whether the player picks them up or not and any NPCs in every room the player visits every single turn no matter what by referring the game's current, updated console in the assistant prompt. Regardless of the game mode chosen, each room, object, NPC (who may include some of the deities of Danae), puzzle, etc. encountered should endeavor to offer some clues and insight to uncover how Mortacia lost her power to judge the dead, the undead rose thanks to Dantuea, Hades fell to Arithus and how the balance between life and death might be restored by the heroes in the game, developing a rich narrative and story whose details you must create. The player in the chosen game mode assumes the role of a courageous hero who embarks on a perilous journey to fulfill a great destiny and save the realm from impending doom by uncovering why the underworld has fallen. The game's labyrinth starting from the Ruined Temple in Tartarus to the Throne Room in Hades contains 1000 interconnected rooms with n, s, e, w, nw, sw, ne, se, up and/or down exits using X, Y, Z Cartesian coordinates starting with X: 0, Y: 0, Z: 0. To ensure there are 1000 interconnected rooms leading from Tartarus to Hades, the Grave Master must always refer to the game's current, updated game console located in the assistant prompt which contains the current coordinates and room exits in order create a carefully designed labyrinthine structure where each room has unique exits that connect to other rooms in the sequence. This will provide a sense of progression and direction within the game while maintaining the desired number of rooms. Every new room must include the exits and objects displayed in the assistant prompt writing in the room's description. Each new room has a unique name, always use the exits and objects from the assistant prompt in writing the room's description, and describes the environment, objects and NPCs in each room. Every room should have a unique purpose and often contain useful objects and interesting NPCs. You have to remember where I am in the labyrinth and remember all the rooms I've already visited by referring to coordinates and exits in the assistant prompt. Some rooms will contain hints about how to find the end of the labyrinth, or hints on solutions to puzzles along the way, including useful descriptions of features in the room, including objects, the history of the room, including its construction whether natural or artificial, and the processes that were used to create the room, who is depicted in the scenes if there are paintings or frescoes including characters. NPCs should often talk to the player and to other NPCs. Some characters might only fight when they are attacked, while other monsters will be hostile no matter what. The road from Tartarus to Hades should include numerous NPCs, including animals, persons (living or dead), restless souls, monsters including undead and even the deities of Danae. The Grave Master must ensure NPCs are unique individuals with biases/emotions/backstories, creating a varied and dynamic gameplay experience. NPCs can range from friendly, neutral, to hostile, adding depth and unpredictability to the interactions with the player character. NPCs have unique motivations as the afterlife is populated by all of the souls who have ever lived, and who have had eternity to create communities and pursue their own objectives. The end of the labyrinth must be the 1000th room furthest away, the throne room in Hades, with some rooms indoors and others outdoors in the fantastic, otherworldly environment whether it is above ground or below ground, of Tartarus, which eventually, after a series of quests, leads to Hades, where Arithus awaits the player in Mortacia's old throne room and it has gone from being the City of the Dead under Mortacia to the Realm of the Damned under Arithus. Each room has a unique name that corresponds to the room's environment. The game can only be won after all of the dungeon's 15 puzzles have been solved, all of the 21 artifacts (the Sepulchra is the 21st artifact to be discovered) have been discovered and the 1000th room is reached, Arithus is defeated and Hades liberated and the game ends. The game must keep a score out of 1000 possible points. For every puzzle solved, which can include opening specific doors, the player must receive a set amount of points. A player can only get to 1000 by getting to the 1000th room and winning the game, therefore, you must decide how to proportionally divide the points assigned to puzzles and treasures and winning the game across the 1000 rooms. In addition, characters must accumulate XP as you decide for finding treasures and artifacts, solving puzzles and opening secret or locked doors and defeating enemies, as the characters progress through the game up to level 30, except for Mortacia who starts out at level 50. ...  
@@ -12302,6 +12370,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       await CampaignSetting.prepareAtlas($, sharedState);
       roomNameDatabaseString = sharedState.getRoomNameDatabase();
     }
+    let preparedEntry = null;
     const preparedKey = Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:\s*(.*)$/m)?.[1]);
     if (preparedKey) {
       await require('./roomBuildQueue').service(sharedState).join(preparedKey);
@@ -12313,19 +12382,50 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         console.info('[AdjacentRoomBuild]', JSON.stringify({ phase: 'used', key: preparedKey, ready: prepared.preparedBuild.ready, stage: prepared.preparedBuild.stage }));
       }
     }
+    // Quest-required objects and writings must exist before a prepared destination is shown.
+    const Opening = require('./openingQuestPreparation'), openingService = Opening.service(sharedState);
+    let openingQuestActivated = false;
+    if (preparedKey && preparedKey !== '0,0,0' && Opening.entryPending(sharedState)) {
+      const destination = Object.fromEntries(preparedKey.split(',').map((v, i) => [['x', 'y', 'z'][i], Number(v)]));
+      const candidate = JSON.parse(sharedState.getRoomNameDatabase() || '{}')[preparedKey];
+      if (!candidate?.populationComplete) await $.run(agent => generateMissingRoomDetails(agent));
+      if (['running', 'ready'].includes(openingService.status()?.phase) &&
+          !sharedState.getRoomDungeonForSimulation(destination)?.cells) {
+        const description = require('./roomBuildState').description(JSON.parse(sharedState.getRoomNameDatabase())[preparedKey]);
+        const send = broadcast; broadcast = () => {};
+        try { await buildGeneratedRoom($, description, 'None', false, {}); } finally { broadcast = send; }
+      }
+      openingQuestActivated = await openingService.activate(preparedKey, { input: userInput });
+      if (!openingQuestActivated) {
+        // With no usable private result, author once behind the same entry barrier, never after display.
+        await $.run(agent => generateQuest(agent, {}));
+        const seeded = await seedAndManageQuest($, sharedState.getUpdatedGameConsole(), '', null, true);
+        if (!seeded.activeTask) throw Error('The opening quest has no validated first task; destination entry was not released.');
+        openingQuestActivated = true;
+      }
+    }
+    updatedGameConsole = sharedState.getUpdatedGameConsole() || updatedGameConsole;
+    roomNameDatabaseString = sharedState.getRoomNameDatabase() || roomNameDatabaseString;
+    preparedEntry = require('./preparedRoomEntry').publish(sharedState, { key: preparedKey, input: userInput,
+      model: require('./gameModels').current().id, population: populationService, broadcast });
+    updatedGameConsole = sharedState.getUpdatedGameConsole() || updatedGameConsole;
+    roomNameDatabaseString = sharedState.getRoomNameDatabase() || roomNameDatabaseString;
+    // Consume the chosen prebuild before first-quest setup changes its context.
+    // A ready private opening quest has already been activated; later travel reuses it.
+    await $.run($ => generateQuest($));
     let roomDescriptionGenerated =  await $.run($ => generateMissingRoomDetails($));
     require('./websiteRoomPipeline')?.begin?.(sharedState, updatedGameConsole);
     const entryRoomKey = Inhabitants.roomKey(updatedGameConsole.match(/^Coordinates:\s*(.*)$/m)?.[1]);
-    const entryPrevious = sharedState.getLastCoords();
-    const enteringRoom = roomDescriptionGenerated || entryRoomKey !== `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`;
+    const entryPrevious = preparedEntry?.entryPrevious || sharedState.getLastCoords();
+    const enteringRoom = !!preparedEntry || roomDescriptionGenerated || entryRoomKey !== `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`;
     // Background neighbors are queued only after the browser acknowledges a displayed room.
 
     
     const roomDescMatch = updatedGameConsole.match(/Room Description: ([^\n]+)/);
     let roomDescription = roomDescMatch ? roomDescMatch[1].trim() : 'A mysterious chamber in Tartarus';
     
-    const monstersMatch = updatedGameConsole.match(/Monsters in Room: ([^\n]*)/);
-    const monstersInRoom = monstersMatch ? monstersMatch[1].trim() : 'None';
+    const monstersMatch = updatedGameConsole.match(Inhabitants.sectionPattern('Monsters in Room'));
+    const monstersInRoom = monstersMatch?.[2]?.trim() || 'None';
     
     // Sync keys again after generating new room details to catch any newly placed keys
     const currentCoordinatesMatch = updatedGameConsole.match(/Coordinates: X: (-?\d+), Y: (-?\d+), Z: (-?\d+)/);
@@ -12430,7 +12530,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
     // --- Enforce global rule: 0,0,0 is ALWAYS indoors ---
     const startKey = "0,0,0";
     let startRoom = roomNameDatabasePlain[startKey];
-    if (startRoom && typeof startRoom === "object" && !(typeof WorldSetting !== 'undefined' && WorldSetting.current())) {
+    if (startRoom && !startRoom.cityFloorContext && typeof startRoom === "object" && !(typeof WorldSetting !== 'undefined' && WorldSetting.current())) {
       startRoom.indoor = true;
       startRoom.classification = { ...startRoom.classification, indoor: true, biome: 'temple' };
       startRoom.isIndoor = true;
@@ -12456,9 +12556,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       roomNameDatabasePlain[startKey] = startRoom;
     }
     
-    if (typeof WorldSetting !== 'undefined' && WorldSetting.current()) WorldSetting.applyStartRoom(startRoom);
+    if (typeof WorldSetting !== 'undefined' && WorldSetting.current() && !startRoom.cityFloorContext) WorldSetting.applyStartRoom(startRoom);
     // CotG alone requires its first exit to lead outdoors.
-    if (startRoom && !(typeof WorldSetting !== 'undefined' && WorldSetting.current()) && startRoom.exits && typeof startRoom.exits === "object") {
+    if (startRoom && !startRoom.cityFloorContext && !(typeof WorldSetting !== 'undefined' && WorldSetting.current()) && startRoom.exits && typeof startRoom.exits === "object") {
       const exitDirs = Object.keys(startRoom.exits);
       if (exitDirs.length > 0) {
         const firstDir = exitDirs[0];
@@ -12810,7 +12910,9 @@ if (typeof CampaignMemory !== 'undefined') {
   const recall = CampaignMemory.context(sharedState, userInput, updatedGameConsole, sharedState.getActiveTask?.());
   if (recall.evidence.length || recall.profiles?.length) await $.user(CampaignMemory.prompt(recall));
 }
-const { questJustSeeded, questUpdate, activeTask } = await seedAndManageQuest($, updatedGameConsole, userInput, broadcast);
+const { questJustSeeded, questUpdate, activeTask } = openingQuestActivated ?
+  { questJustSeeded: true, questUpdate: '', activeTask: sharedState.getCurrentTasks()[0] } :
+  await seedAndManageQuest($, updatedGameConsole, userInput, broadcast);
 if (typeof CampaignMemory !== 'undefined') CampaignMemory.rememberQuest(sharedState, taskMemoryBefore, broadcast);
 
 // Refresh local copies because seedAndManageQuest may have updated shared state
@@ -12917,7 +13019,7 @@ let returnObj = { content: '', updatedGameConsole, musicArrangement };
 
 // === LLM-GENERATED 3D DUNGEON + C64 SPRITES (THE SOUL OF TARTARUS) ===
 
-const { geoCoords, geoKey } = await buildGeneratedRoom($, roomDescription, puzzleInRoom, isAutoSimAdvance, returnObj, { enteringRoom, entryPrevious });
+const { geoCoords, geoKey } = preparedEntry || await buildGeneratedRoom($, roomDescription, puzzleInRoom, isAutoSimAdvance, returnObj, { enteringRoom, entryPrevious });
 
 // Narration runs only after placement, so a room-wide console list cannot become an entrance mob.
 const activeDungeonForPopulation = sharedState.getRoomDungeonForSimulation(geoCoords);

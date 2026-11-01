@@ -33,7 +33,7 @@ function fixture() {
     objectView: { ...objectView, names: d.sceneObjects.map(o => o.name) }, ...input });
   const change = fn => { const data = JSON.parse(db); fn(data); db = JSON.stringify(data); };
   const inventory = (item, count = 1) => { text = E.write(E.write(text, 'Inventory', Array(count).fill(item.name).join(', ')), 'Inventory Properties', JSON.stringify(item)); };
-  const business = kind => { change(data => data[geoKey].services = { shop: { id: 'shop', kind, operator: 'Keeper', originalOperator: 'Keeper', stock: [{ ...R.healingPotion(6), quantity: 2 }], till: 12, revision: 0 } }); };
+  const business = kind => { change(data => data[geoKey].services = { shop: { id: 'shop', kind, operator: 'Keeper', originalOperator: 'Keeper', stock: [{ ...R.healingPotion(6), quantity: 2 }], stockAuthorship:{version:1,status:'ready'}, till: 12, revision: 0 } }); };
   return { state, service, action, change, inventory, business, p, d, row, book: () => E.project(state), pause: () => paused = true, db: () => JSON.parse(db) };
 }
 test('initial pooled silver excludes Mortacia and is never an inventory property', () => {
@@ -61,7 +61,7 @@ test('drop all preserves equipped gear and cannot be undone by an older browser 
   assert.equal(E.field(repaired, 'Inventory'), 'Empty');
 });
 
-test('a monster dying two turns later releases its real equipment and private belongings without another battle', () => {
+test('a defeated monster immediately drops real gear and belongings before the dying countdown expires', () => {
   const f = fixture(), Life = require('../retort/combatLife');
   const gear = { name: 'charged iron spear', type: 'weapon', attack_modifier: 2, damage_modifier: 1, ac: 0, magic: 3,
     owner: 'Keeper', slot: 'Weapon', spell_charge_id: 'keeper-spear', spell_magic_remaining: 2 };
@@ -73,13 +73,42 @@ test('a monster dying two turns later releases its real equipment and private be
   const db = f.db(); db['1,0,0'].inhabitants = f.p;
   Life.apply(db, 'test-run', I.parseSheets(f.state.getUpdatedGameConsole())[0], 0, 1, { damage: 20, geoKey: '1,0,0' }); Life.commit(f.state, db);
   assert.equal(E.corpseDrops(f.state, 'Keeper'), false);
-  Life.advance(f.state); assert.equal(f.db()['1,0,0'].objects.length, 0);
+  assert.ok(f.db()['1,0,0'].objects.some(o => o.name === potion.name));
+  const dropCount = f.db()['1,0,0'].objects.length;
+  Life.advance(f.state); assert.equal(f.db()['1,0,0'].objects.length, dropCount);
   Life.advance(f.state);
   const loot = f.db()['1,0,0'].objects;
   assert.ok(loot.some(o => o.name === potion.name));
   assert.equal(loot.find(o => o.name === gear.name).spell_magic_remaining, 2);
   assert.equal(I.parseEquipment(I.parseSheets(f.state.getUpdatedGameConsole())[0].lines[9]).Weapon, 'None');
   assert.equal(E.corpseDrops(f.state, 'Keeper'), false);
+});
+
+for (const natural of [1, 20]) test(`defeat loot survives healing without duplication or restored equipment (save ${natural})`, () => {
+  const f = fixture(), Life = require('../retort/combatLife');
+  const item = { name: 'lost spear', type: 'weapon', owner: 'Keeper', slot: 'Weapon', attack_modifier: 2, damage_modifier: 3, ac: 1, magic: 2 };
+  const old = I.parseSheets(f.state.getUpdatedGameConsole()).find(a => a.name === 'Keeper');
+  const raw = old.rawSheet.replace('Weapon: None', 'Weapon: lost spear').replace('Attack: 0', 'Attack: 2').replace('Damage: 0', 'Damage: 3');
+  f.state.setUpdatedGameConsole(E.write(f.state.getUpdatedGameConsole().replace(old.rawSheet, raw), 'Monsters Equipped Properties', JSON.stringify(item)));
+  const staleText = f.state.getUpdatedGameConsole(), staleDatabase = f.state.getRoomNameDatabase();
+  f.p.actors.Keeper.inventory = [{ name: 'quest token', type: 'artifact', magic: 7 }];
+  let db = f.db(), actor = I.parseSheets(f.state.getUpdatedGameConsole()).find(a => a.name === 'Keeper');
+  Life.apply(db, 'test-run', actor, 0, natural, { damage: 30, geoKey: '1,0,0' }); Life.commit(f.state, db);
+  const loot = f.db()['1,0,0'].objects;
+  assert.equal(loot.length, 2); assert.equal(f.p.actors.Keeper.inventory.length, 0);
+  assert.equal(f.d.sceneObjects.length, 2);
+  actor = I.parseSheets(f.state.getUpdatedGameConsole()).find(a => a.name === 'Keeper');
+  assert.equal(actor.attack, 0); assert.equal(actor.damage, 0);
+  db = f.db(); Life.apply(db, 'test-run', actor, 4, null, { geoKey: '1,0,0' }); Life.commit(f.state, db);
+  assert.deepEqual(f.db()['1,0,0'].objects, loot);
+  assert.equal(I.parseEquipment(I.parseSheets(f.state.getUpdatedGameConsole())[0].lines[9]).Weapon, 'None');
+  assert.equal(E.corpseDrops(f.state, 'Keeper'), false);
+  assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a => a.name === 'Keeper').equipped.Weapon, 'None');
+  const protectedText = E.preserveInventory(f.state.getUpdatedGameConsole(), staleText, f.state.getRoomNameDatabase());
+  assert.equal(I.parseEquipment(I.parseSheets(protectedText)[0].lines[9]).Weapon, 'None');
+  const protectedDatabase = JSON.parse(E.preserve(f.state.getRoomNameDatabase(), staleDatabase));
+  assert.equal(protectedDatabase['1,0,0'].inhabitants.actors.Keeper.inventory.length, 0);
+  assert.equal(protectedDatabase['1,0,0'].monsters.equippedProperties, 'None');
 });
 
 test('equipping and unequipping all four slots atomically preserves actual properties and modifiers', () => {
@@ -272,11 +301,14 @@ test('a corpse drops only its recorded purse and carried items; collecting coins
 });
 test('a real local delivery pays once and never advances the main quest', () => {
   const f = fixture(), item = { name: 'guild packet', type: 'other', minor_mission_id: 'contract' }; f.inventory(item);
+  const events = []; f.state.emitter = new (require('node:events').EventEmitter)();
+  f.state.emitter.on('game_action_notice', event => { assert.equal(f.book().silver, 4); events.push(event); });
   f.change(db => db['1,0,0'].minorMissions = { contract: { id: 'contract', status: 'accepted', item: item.name,
     recipient: 'Keeper', originalRecipient: 'Keeper', roomKey: '1,0,0', escrowSilver: 2, rewardSilver: 2, description: 'Give guild packet to Keeper.' } });
   const given = Give.give(f.state, f.service, 'give guild packet to Keeper'); assert.match(given.content, /You give/);
   E.refresh(f.state); assert.equal(f.book().silver, 4); E.refresh(f.state); assert.equal(f.book().silver, 4);
   assert.equal(f.db()['1,0,0'].minorMissions.contract.status, 'completed'); assert.equal(f.state.getCurrentTaskIndex(), 0);
+  assert.equal(events.length, 1); assert.equal(events[0].kind, 'contract-complete'); assert.match(events[0].message, /received 2 silver pieces/);
 });
 test('an item-paid local contract releases only its escrowed potion and never duplicates it', () => {
   const f = fixture(), item = { name: 'guild packet', type: 'other', minor_mission_id: 'contract' }; f.inventory(item);

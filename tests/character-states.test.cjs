@@ -99,6 +99,36 @@ test('repeated nearby console projections do not accumulate blank lines or shift
   }
 });
 
+test('spared residents and old engaged packs stop appearing when the player walks away', () => {
+  const d = dungeon(), p = I.createPopulation(d.geoKey, [
+    { name: 'Rell Sorn', allegiance: 'Neutral' }, { name: 'Mira Tann', allegiance: 'Neutral' }
+  ]);
+  Object.assign(p.actors['Rell Sorn'], { hp: 1, state: 'Neutral', position: { x: 54, y: 4 }, encounteredAt: 1 });
+  Object.assign(p.actors['Mira Tann'], { hp: 0, state: 'Unconscious', position: { x: 5, y: 4 }, encounteredAt: 1 });
+  for (const group of p.groups) group.status = 'engaged';
+  const before = JSON.stringify(p);
+  assert.deepEqual(I.nearbyMonsterNames(d, [], p, { x: 4.5, y: 4.5 }), ['Mira Tann']);
+  assert.deepEqual(I.nearbyMonsterNames(d, [], p, { x: 54.5, y: 4.5 }), ['Rell Sorn']);
+  p.actors['Rell Sorn'].state = p.actors['Rell Sorn'].allegiance = 'Hostile';
+  assert.deepEqual(I.nearbyMonsterNames(d, [], p, { x: 4.5, y: 4.5 }), ['Mira Tann'], 'Even an old hostile pack cannot bypass the nearby range.');
+  p.actors['Rell Sorn'].state = p.actors['Rell Sorn'].allegiance = 'Neutral';
+  assert.equal(JSON.stringify(p), before, 'A console projection never moves or deletes residents.');
+});
+
+test('synchronization clears peaceful engaged encounters without deleting downed residents or active enemies', () => {
+  for (const [name, state, hp, allegiance, expected] of [
+    ['Spared', 'Neutral', 1, 'Neutral', 'discovered'], ['Friendly', 'Friendly', 5, 'Friendly', 'discovered'],
+    ['Bandaged', 'Unconscious', 0, 'Neutral', 'discovered'], ['Dying', 'Dying', 0, 'Hostile', 'discovered'],
+    ['Opponent', 'Hostile', 1, 'Hostile', 'engaged']
+  ]) {
+    const p = I.createPopulation('1,0,0', [{ name, allegiance }]);
+    Object.assign(p.actors[name], { state, hp, position: { x: 6, y: 4 } }); p.groups[0].status = 'engaged';
+    I.sync(p, []);
+    assert.equal(p.groups[0].status, expected, name); assert.equal(p.actors[name].status, 'present');
+    assert.equal(p.actors[name].hp, hp); assert.deepEqual(p.actors[name].position, { x: 6, y: 4 });
+  }
+});
+
 test('nearby corpses still expose Dead for testing, but cannot speak or fight', () => {
   const d = dungeon(), p = I.createPopulation(d.geoKey, [{ name: 'Fallen', allegiance: 'Hostile' }]);
   p.actors.Fallen.position = { x: 5, y: 4 }; I.sync(p, [{ name: 'Fallen', hp: 0 }]);

@@ -8,6 +8,7 @@ const Diagnostics = require('./generationDiagnostics');
 const { CATALOG } = require('./environmentIntents');
 const { formatStartingCharacterSheet } = require('./initialGameState');
 const Q = () => require('./questProgress');
+const Native = require('./homebrewRegionalAdventure');
 const templates = ['oasis', 'graveyard', 'wasteland', 'roman_temple'];
 const directions = [['north', 0, 1, 'south'], ['east', 1, 0, 'west'], ['south', 0, -1, 'north'], ['west', -1, 0, 'east'],
   ['northeast', 1, 1, 'southwest'], ['southeast', 1, -1, 'northwest'], ['southwest', -1, -1, 'northeast'], ['northwest', -1, 1, 'southeast']];
@@ -36,6 +37,7 @@ function route(database, origin, bossKey) {
   return null;
 }
 function prompt(context) {
+  if (context.world?.kind === 'homebrew') return Native.prompt(context.world, context);
   return `${require('./underworldLore').GUIDANCE}\nAuthor the FIRST connected regional adventure in Children of the Grave, supplementing the existing main quest.
 Use the system prompt's underworld lore and these real bindings: ${JSON.stringify(context)}.
 The engine owns mechanics: accept the hook; read burial records; defeat two road extortionists; defeat two hostile temple jailers;
@@ -77,6 +79,11 @@ function validate(raw, database, partyNames, firstSiteName = null) {
   const names = [...out.sites, ...out.actors].map(o => o.name.toLowerCase());
   if (new Set(names).size !== names.length || names.some((n, i) => ['__proto__','constructor','prototype'].includes(n) ||
       (existing.has(n) && !(i===0 && n===firstSiteName?.toLowerCase())) || /[,":{}]/.test(n)) || out.actors.some(a => Pantheon.canon(a.name))) return null;
+  const world = Native.world(database);
+  if (world) {
+    if (!world.factions.some(f => f.name === raw.templePatron) || require('./campaignBuilder').lintGenerated(out).length) return null;
+    out.templePatron = raw.templePatron; return out;
+  }
   out.templePatron=raw.templePatron || (/arithus/i.test(out.sites[3].name)?'Arithus':'Dantuea');
   if(!['Arithus','Dantuea'].includes(out.templePatron)||Pantheon.names.some(n=>n!==out.templePatron&&out.sites[3].name.toLowerCase().includes(n.toLowerCase())))return null;
   return out;
@@ -93,31 +100,38 @@ function compile(raw, database, origin, gate, text, runId) {
   const authored = validate(raw, database, party.map(a => a.name), planned && database[planned.rooms[0]]?.name);
   const contact = contactAt(database,origin);
   if (!planned || !authored || !contact) return null;
+  const world = Native.world(database), native = world && Native.policy(world);
   const db = structuredClone(database), id = 'regional:' + randomUUID(), storyId = 'story:' + id;
   const [oasis, graveyard, road, temple] = planned.rooms;
   const [delegate, prisoner, ...guards] = authored.actors;
   const levels = party.filter(a => a.name !== 'Mortacia').map(a => a.level);
   const level = Math.max(1, Math.min(12, levels.length ? Math.round(levels.reduce((a, b) => a + b, 0) / levels.length) : 1));
   for (const [i, roomKey] of planned.rooms.entries()) {
-    const template = templates[i], setting = Campaign.plan({ database: db, sourceKey: origin, targetKey: roomKey, seed: runId, template });
+    const template = (native?.templates || templates)[i], setting = Campaign.plan({ database: db, sourceKey: origin, targetKey: roomKey, seed: runId, template });
+    if (!native) {
     setting.faction = { ...Campaign.FACTIONS.find(f => f.id === (i === 3 ? 'tollwardens' : 'wellkeepers')), ...Campaign.FAITH[i === 3 ? 'tollwardens' : 'wellkeepers'] };
     const patron=i===3?authored.templePatron:'Dyanetzia';
     setting.religion = { ...setting.religion, patron, allegiance: i === 3 ? 'Hostile' : 'Neutral',
       concern:Pantheon.canon(patron).obligation[0],practice:i===3?'The cult imprisons dissenters and demands tribute.':'Households maintain the shared spring and its records.' };
+    } else {
+      const faction = i === 3 ? native.factions.find(f => f.name === authored.templePatron) : native.factions[0];
+      setting.faction = { ...faction, allegiance: i === 3 ? 'Hostile' : 'Neutral' };
+      setting.religion = { patron: null, allegiance: 'Neutral', practice: 'Follow the saved world’s beliefs and institutions.' };
+    }
     db[roomKey] = { ...db[roomKey], name: db[roomKey]?.name || authored.sites[i].name, objects: [], exits: { [planned.back]: { status: 'open', targetCoordinates: i ? planned.rooms[i-1] : origin },
       ...(i < 3 ? { [planned.direction]: { status: 'open', targetCoordinates: planned.rooms[i+1] } } : {}) },
       monsters: { inRoom: 'None', state: 'None', equippedProperties: 'None' },
       indoor: CATALOG[template].indoor, classification: { indoor: CATALOG[template].indoor, biome: CATALOG[template].biome, size: i === 3 ? 32 : 64 },
       environmentIntent: { ...CATALOG[template], targetKey: roomKey, campaignSetting: setting }, campaignSetting: setting,
-      regionalSite: { source: 'engine-regional-site-v1', storyId, flavor: authored.sites[i].flavor,
+      regionalSite: { source: 'engine-regional-site-v1', storyId, homebrew: !!native, world: native ? { classes: world.classes, races: world.races } : null,  flavor: authored.sites[i].flavor,
         actors: (i === 0 ? [delegate] : i === 2 ? guards.slice(0, 2) : i === 3 ? [...guards.slice(2), prisoner] : [])
           .map(a => ({ ...a, level, role: a === prisoner ? 'prisoner' : a === delegate ? 'delegate' : 'guard',
-            allegiance: guards.includes(a) ? 'Hostile' : 'Neutral', factionId: guards.includes(a) ? 'tollwardens' : 'wellkeepers' })) } };
+            allegiance: guards.includes(a) ? 'Hostile' : 'Neutral', factionId: native ? setting.faction.id : guards.includes(a) ? 'tollwardens' : 'wellkeepers' })) } };
   }
-  const burial = inscription('burial:' + id, 'burial register ' + I.hash(id).toString(16), authored.burialText, storyId);
-  const testimony = inscription('testimony:' + id, 'prison testimony ' + I.hash(id).toString(16), authored.testimonyText, storyId);
+  const burial = inscription('burial:' + id, (native ? native.record + ' ' : 'burial register ') + I.hash(id).toString(16), authored.burialText, storyId);
+  const testimony = inscription('testimony:' + id, (native ? native.testimony + ' ' : 'prison testimony ') + I.hash(id).toString(16), authored.testimonyText, storyId);
   const fallback = inscription('covenant:' + id, 'regional covenant ' + I.hash(id).toString(16), authored.premise, storyId);
-  const oath = inscription('oasis:' + id, 'oasis charter ' + I.hash(id).toString(16), authored.conclusion, storyId);
+  const oath = inscription('oasis:' + id, (native ? native.agreement + ' ' : 'oasis charter ') + I.hash(id).toString(16), authored.conclusion, storyId);
   db[graveyard].inscriptions = [burial]; db[temple].inscriptions = [testimony]; db[oasis].inscriptions = [oath];
   db[origin].inscriptions = [...(db[origin].inscriptions || []), fallback];
   const stages = [
@@ -140,11 +154,21 @@ function compile(raw, database, origin, gate, text, runId) {
         { id: 'caravan-stewards', label: 'Entrust the route to the Ashroad Fellowship', action: 'finish', next: 'complete', factionEffects: { salvagers: 2, wellkeepers: -1 } }] },
     { id: 'complete', kind: 'complete', roomKey: oasis, text: 'The regional obligation is settled. The existing boss-key task comes next.' }
   ];
+  if (native) {
+    stages[0].options[0].label = 'Investigate the report';
+    stages[1].options[0].label = 'Read the investigation record';
+    stages[2].text = 'Defeat the named route opponents.';
+    stages[3].text = 'Defeat the named holding-facility opponents before arranging the rescue.';
+    stages[4].options[1].label = 'Recover the witness statement instead (no escort)';
+    stages[6].options[0].label = 'Read the witness statement';
+    stages[8].options.forEach((o,i) => { o.label = 'Support ' + native.factions[i].name;
+      o.factionEffects = { [native.factions[i].id]: 2, [native.factions[1-i].id]: -1 }; });
+  }
   const story = { version: 1, family: 'regional-v1', id: storyId, title: authored.title,
     hook: { kind: 'npc', roomKey: origin, roomName: db[origin].name, actor: contact.name }, fallback: { name: fallback.name, readableId: fallback.id },
     rumor: { text: authored.rumor, source: contact.name, resolvedBy: 'investigation' }, stages };
   const task = { id, type: 'Regional', actionKind: 'resolve_regional_adventure', desc: authored.premise +
-    ` Read "${burial.name}" in ${db[graveyard].name} (${graveyard}); defeat ${guards.map(a => a.name).join(', ')} in ${db[road].name} and ${db[temple].name}; escort ${prisoner.name} to ${db[oasis].name} (${oasis}), or read "${testimony.name}" in ${db[temple].name} (${temple}); settle with ${delegate.name} at the oasis. Then retrieve the existing boss key and face ${gate.bossName || 'the bound boss'} in ${db[gate.targetKey]?.name}.`,
+    ` Read "${burial.name}" in ${db[graveyard].name} (${graveyard}); defeat ${guards.map(a => a.name).join(', ')} in ${db[road].name} and ${db[temple].name}; escort ${prisoner.name} to ${db[oasis].name} (${oasis}), or read "${testimony.name}" in ${db[temple].name} (${temple}); settle with ${delegate.name} at ${native ? db[oasis].name : 'the oasis'}. Then retrieve the existing boss key and face ${gate.bossName || 'the bound boss'} in ${db[gate.targetKey]?.name}.`,
     metrics: 'Recorded readings, bound encounter outcomes, live escort arrival or recovered testimony, and explicit faction resolution.',
     status: 'Pending', story, requiredElements: [...guards.map((a, i) => ({ type: 'monster', name: a.name, placement: i < 2 ? road : temple })),
       { type: 'monster', name: prisoner.name, placement: temple }, { type: 'monster', name: delegate.name, placement: oasis }],
@@ -174,14 +198,14 @@ async function trySeed($, state, database, origin, gate, text) {
   if (!route(database, origin, gate.targetKey)||!contact) return fallback(!contact ? 'No living neutral opening contact.' : 'No safe connected regional route; existing quest generator retained.');
   try {
     await require('./campaignMemory').appendPlanning($, state, 'regional adventure: past choices, unresolved trouble, factions and relationships', { consoleText: text });
-    await $.assistant`${prompt({ origin, room: database[origin]?.name, mainQuest: state.getCurrentQuest(), bossRoom: database[gate.targetKey]?.name,
+    await $.assistant`${prompt({ world: Native.world(database), origin, room: database[origin]?.name, mainQuest: state.getCurrentQuest(), bossRoom: database[gate.targetKey]?.name,
       contact:{name:contact.name,history:database[origin].inhabitants.actors[contact.name].history},
       party: I.parseSheets(text, 'PC').concat(I.parseSheets(text, 'NPCs in Party')).map(a => a.name),
       firstSiteName: database[route(database,origin,gate.targetKey).rooms[0]]?.name, campaign: database['0,0,0'].campaignAtlas })}`;
     const limits = { title: 70, premise: 220, hook: 400, rumor: 220, investigation: 400, rescue: 400, conclusion: 400, burialText: 700, testimonyText: 700 };
     const generated = await Contracts.request($, { component: 'regional-adventure', context: { runId: state.getDungeonRunId(), geoKey: origin }, maxTokens: 3200,
       localWork: {
-        brief: `Author one connected underworld adventure, supplementing the existing quest without replacing its boss/key. Existing contact: ${contact.name}; origin: ${database[origin]?.name}; main quest: ${state.getCurrentQuest()}; bound boss room: ${database[gate.targetKey]?.name}. Existing first site name: ${database[route(database, origin, gate.targetKey).rooms[0]]?.name || 'not named'}. Four sites IN ORDER: oasis/community, outdoor graveyard, dangerous road, indoor temple. Six NEW non-divine actors IN ORDER: oasis representative, prisoner, two road extortionists, two temple jailers. Never reuse contact/party names: ${JSON.stringify([contact.name, ...I.parseSheets(text, 'PC').concat(I.parseSheets(text, 'NPCs in Party')).map(a => a.name)])}. Preserve accepted exact names; use single-line complete sentences comfortably below limits. Engine stages: existing contact hook, check rumor in burial record, defeat road/temple guards, rescue prisoner OR read testimony, resolve a defensible choice between shared wells and caravan stewardship. No new keys, completion metrics or rewards.`,
+        brief: Native.world(database) ? Native.prompt(Native.world(database), { origin, contact: contact.name, mainQuest: state.getCurrentQuest() }) : `Author one connected underworld adventure, supplementing the existing quest without replacing its boss/key. Existing contact: ${contact.name}; origin: ${database[origin]?.name}; main quest: ${state.getCurrentQuest()}; bound boss room: ${database[gate.targetKey]?.name}. Existing first site name: ${database[route(database, origin, gate.targetKey).rooms[0]]?.name || 'not named'}. Four sites IN ORDER: oasis/community, outdoor graveyard, dangerous road, indoor temple. Six NEW non-divine actors IN ORDER: oasis representative, prisoner, two road extortionists, two temple jailers. Never reuse contact/party names: ${JSON.stringify([contact.name, ...I.parseSheets(text, 'PC').concat(I.parseSheets(text, 'NPCs in Party')).map(a => a.name)])}. Preserve accepted exact names; use single-line complete sentences comfortably below limits. Engine stages: existing contact hook, check rumor in burial record, defeat road/temple guards, rescue prisoner OR read testimony, resolve a defensible choice between shared wells and caravan stewardship. No new keys, completion metrics or rewards.`,
         leading: ['templePatron', 'sites', 'actors', 'title', 'premise', 'rumor', 'burialText', 'testimonyText'],
         arrays: { sites: { count: 4, max: 4, batch: 1 }, actors: { count: 6, max: 6, batch: 1 } },
         specific: (part, prior) => part.includes('sites') ? 'Author only site #' + ((prior.nextIndex || 0) + 1) + '. The temple name must agree with templePatron.' :
@@ -191,7 +215,7 @@ async function trySeed($, state, database, origin, gate, text) {
       parameters: { ...Object.fromEntries(Object.entries(limits).map(([field, max]) => [field, { ...Contracts.text(max), pattern: '^[^<>\\r\\n|`]+$' }])),
         sites: Contracts.list({ name: Contracts.text(80), flavor: Contracts.text(240) }),
         actors: Contracts.list({ name: Contracts.text(60), history: Contracts.text(220), personality: Contracts.text(160) }),
-        templePatron: Contracts.choice(['Arithus', 'Dantuea']) },
+        templePatron: Contracts.choice(Native.world(database) ? Native.world(database).factions.map(f => f.name) : ['Arithus', 'Dantuea']) },
       validate(raw) {
         const issues = validationIssues(raw);
         if (issues.length) throw Error(issues.join(' '));
@@ -211,19 +235,22 @@ function bindPopulation(room, result) {
   const site = room?.regionalSite;
   if (site?.source !== 'engine-regional-site-v1' || !site.actors.length) return result;
   const names = new Set(site.actors.map(a => a.name));
+  const worldClass = site.homebrew ? site.world?.classes?.[0]?.name : null;
+  const worldRace = site.homebrew ? site.world?.races?.[0]?.name : null;
+  if (site.homebrew && (!worldClass || !worldRace)) throw Error('Regional residents require the saved world roster.');
   const retained = new Set(Object.keys(result.population.actors).filter(n => !names.has(n)).slice(0, (result.population.indoor ? 10 : 20) - site.actors.length));
   result.population.actors = Object.fromEntries(Object.entries(result.population.actors).filter(([n]) => retained.has(n)));
   result.population.groups = result.population.groups.map(g => ({ ...g, members: g.members.filter(n => retained.has(n)) })).filter(g => g.members.length);
   for (const a of site.actors) {
     const old = room.inhabitants?.actors?.[a.name];
     const hp = old?.hp ?? 12 + a.level * 3;
-    const sheet = old?.sheet || formatStartingCharacterSheet({ Name: a.name, Sex: 'Unknown', Race: 'Human', Class: a.role === 'guard' ? 'Oath Warden [rules: Fighter]' : 'Wayfarer [rules: Fighter]',
+    const sheet = old?.sheet || formatStartingCharacterSheet({ Name: a.name, Sex: 'Unknown', Race: worldRace || 'Human', Class: worldClass || (a.role === 'guard' ? 'Oath Warden [rules: Fighter]' : 'Wayfarer [rules: Fighter]'),
       Level: a.level, HP: hp, MaxHP: 12 + a.level * 3, AC: 10 + Math.ceil(a.level / 2), Attack: 1 + Math.floor(a.level / 2), Damage: 2,
       Armor: 0, Magic: 0 }, 6, 'npc').replace(/State: Friendly$/, 'State: ' + a.allegiance);
-    const extra = I.createPopulation(result.population.geoKey, [{ ...a, hp, maxHp: 12 + a.level * 3, race: 'Human',
-      className: a.role === 'guard' ? 'Oath Warden [rules: Fighter]' : 'Wayfarer [rules: Fighter]', combatRole: 'Warrior', combatArchetype: 'Fighter',
-      sheet, job: a.role === 'guard' ? 'temple guard' : 'wayfarer', encounterId: 'regional-' + I.hash(a.name),
-      dialogue: [a.role === 'prisoner' ? 'Get me back to the spring. I will not trust another escort on promises alone.' : a.role === 'delegate' ? 'The wells belong to people, not to their conquerors.' : 'The toll is owed. Stand aside or bleed.'] }], { indoor: result.population.indoor });
+    const extra = I.createPopulation(result.population.geoKey, [{ ...a, hp, maxHp: 12 + a.level * 3, race: worldRace || 'Human',
+      className: worldClass || (a.role === 'guard' ? 'Oath Warden [rules: Fighter]' : 'Wayfarer [rules: Fighter]'), combatRole: 'Warrior', combatArchetype: 'Fighter',
+      sheet, job: site.homebrew ? a.role : a.role === 'guard' ? 'temple guard' : 'wayfarer', encounterId: 'regional-' + I.hash(a.name),
+      dialogue: site.homebrew ? [a.history, a.personality, 'We should discuss what happens next.'] : [a.role === 'prisoner' ? 'Get me back to the spring. I will not trust another escort on promises alone.' : a.role === 'delegate' ? 'The wells belong to people, not to their conquerors.' : 'The toll is owed. Stand aside or bleed.'] }], { indoor: result.population.indoor });
     Object.assign(extra.actors[a.name], { sheet, hp, maxHp: 12 + a.level * 3, level: a.level, factionId: a.factionId, regionalRole: a.role });
     if (old) Object.assign(extra.actors[a.name], structuredClone(old));
     extra.actors[a.name].regionalStoryId = site.storyId;

@@ -188,26 +188,46 @@
   const LINEAR = new Set(['paving_slab', 'lamp_post', 'water_channel', 'aqueduct_arch', 'city_wall', 'sewer_grate']);
   const CULL = { detail: 22, building: 64 };
   // Plan placements for one city room. cells: {"x,y": {tile, floorHeight, navigationReserved, exitMarker}}; rect: walkable bounds.
-  function planCity({ cells, width, height, city, seed = 'city', reserved = new Set() }) {
+  function planCity({ cells, width, height, city, seed = 'city', reserved = new Set(), arrival = null, urban = null }) {
     const r = rnd(`${seed}:${city?.id || ''}`), palette = paletteFor(city), out = [], used = new Set(), counts = {};
-    const free = (x, y, w = 1, d = 1) => { for (let j = 0; j < d; j++) for (let i = 0; i < w; i++) { const k = `${x + i},${y + j}`, c = cells[k]; if (!c || c.tile !== 'floor' || c.navigationReserved || c.exitMarker || used.has(k) || reserved.has(k)) return false; } return true; };
-    const claim = (x, y, w, d) => { for (let j = 0; j < d; j++) for (let i = 0; i < w; i++) used.add(`${x + i},${y + j}`); };
+    const radius=urban?.scale==='metropolis'?38:30;
+    const ox=arrival?Math.max(0,Math.min(width-radius*2,Math.floor(arrival.x-radius))):0;
+    const oy=arrival?Math.max(0,Math.min(height-radius*2,Math.floor(arrival.y-radius))):0;
+    if(arrival){width=Math.min(width,radius*2);height=Math.min(height,radius*2);}
+    const free = (x, y, w = 1, d = 1) => { if(x<0||y<0||x+w>width||y+d>height)return false; for (let j = 0; j < d; j++) for (let i = 0; i < w; i++) { const k = `${x + ox + i},${y + oy + j}`, c = cells[k]; if (!c || c.tile !== 'floor' || c.navigationReserved || c.exitMarker || used.has(k) || reserved.has(k)) return false; } return true; };
+    const claim = (x, y, w, d) => { for (let j = 0; j < d; j++) for (let i = 0; i < w; i++) used.add(`${x + ox + i},${y + oy + j}`); };
     const put = (shape, x, y, extra = {}) => {
+      if(urban?.walkIn&&['city_townhouse','city_insula','guild_hall','city_temple','public_baths','city_wall','city_tower','watchtower','lighthouse','forum_portico','basilica','amphitheatre','granary','warehouse'].includes(shape))return false;
       const s = S[shape]; if (!s || out.length >= CAPS.total || (counts[shape] || 0) >= (LINEAR.has(shape) ? CAPS.linear : CAPS.perShape)) return false;
       if (s.detail && out.filter(p => p.detail).length >= CAPS.detail) return false;
-      const [w, d] = s.footprint; if (!free(x, y, w, d)) return false;
+      const [w, d] = extra.footprint || s.footprint; if (!free(x, y, w, d)) return false;
       claim(x, y, w, d); counts[shape] = (counts[shape] || 0) + 1;
       const pool = variants(shape), variant = pool[Math.floor(r() * pool.length)], tileShape = `${shape}__v${variant}`;
-      out.push({ shape, tileShape, variant, palette, x, y, footprint: [w, d], height: s.height, group: s.group, detail: !!s.detail, blocking: !!s.blocking,
+      out.push({ shape, tileShape, variant, palette, x:x+ox, y:y+oy, footprint: [w, d], height: s.height, group: s.group, detail: !!s.detail, blocking: !!s.blocking,
         cullDistance: s.detail ? CULL.detail : CULL.building, light: !!s.light, ...extra });
       return true;
     };
     // Districts: split the room into vertical bands, one per city district (+ temple/stores when the city has room).
     const districts = [...(city?.districts || ['forum', 'market ward', 'guild quarter', 'tenements'])];
-    if ((city?.population || 0) > 6000 && !districts.includes('temple')) districts.push('temple');
+    if (!urban && (city?.population || 0) > 6000 && !districts.includes('temple')) districts.push('temple');
     if (city?.utilities?.includes('cistern') && !districts.includes('stores')) districts.push('stores');
     const bandW = Math.max(6, Math.floor(width / districts.length));
     const roadY = Math.floor(height / 2);
+    // Build a bounded, visible streetscape around arrival before spending the detail budget.
+    if(urban&&arrival){
+      const cx=arrival.x-ox,cy=arrival.y-oy;
+      for(const [dx,dy] of [[-8,-3],[7,4]])put('market_stall',Math.round(cx+dx),Math.round(cy+dy),{district:'market ward'});
+    }
+    if(urban&&arrival&&!urban.walkIn){
+      const cx=arrival.x-ox,cy=arrival.y-oy,metro=urban.scale==='metropolis';
+      let slot=0;
+      for(const ring of [12,22,32])for(let j=0;j<(metro?14:9);j++){
+        const angle=(j+.2)*Math.PI*2/(metro?14:9),role=ring===32?'skyline':j%3===0?'terrace':'midrise';
+        const shape=role==='skyline'?'city_tower':role==='terrace'?'warehouse':'city_insula';
+        put(shape,Math.round(cx+Math.cos(angle)*ring),Math.round(cy+Math.sin(angle)*ring),
+          {district:districts[slot++%districts.length],urbanRole:role,footprint:role==='terrace'?[5,4]:[3,3],height:urban.heights[role]});
+      }
+    }
     districts.forEach((district, i) => {
       const plan = DISTRICTS[district] || DISTRICTS.tenements, x0 = i * bandW, x1 = Math.min(width - 1, x0 + bandW - 1);
       const tryPut = (shape, tries = 30, extra) => { for (let t = 0; t < tries; t++) { const x = x0 + Math.floor(r() * Math.max(1, x1 - x0 - 2)), y = 1 + Math.floor(r() * (height - 4)); if (Math.abs(y - roadY) <= 1) continue; if (put(shape, x, y, { district, ...extra })) return true; } return false; };
@@ -218,7 +238,7 @@
       for (let k = 0; k < 8; k++) tryPut(plan.fill[Math.floor(r() * plan.fill.length)], 12);
       // the main street through every district: paving, lamp posts every ROAD.every cells, a sewer grate now and then
       for (let x = x0; x <= x1; x++) {
-        if (cells[`${x},${roadY}`]?.tile === 'floor') put('paving_slab', x, roadY, { district, ground: true });
+        if (cells[`${x+ox},${roadY+oy}`]?.tile === 'floor') put('paving_slab', x, roadY, { district, ground: true });
         if ((x - x0) % ROAD.every === 0) put(ROAD.furniture, x, roadY - 1, { district });
         if ((x - x0) % 9 === 5) put(ROAD.grate, x, roadY + 1, { district });
       }
@@ -237,5 +257,6 @@
     for (let x = 2; x < width - 2; x += 3) put('city_wall', x, 0, { district: 'walls' });
     return { version: 'world1-city-kit-1', palette, placements: out, counts, caps: CAPS, instancedTiles: new Set(out.map(p => `${p.tileShape}:${p.palette}`)).size };
   }
-  return { variants, SHAPES, SPECS: S, PALETTES, DISTRICTS, CAPS, CULL, has, build, color, paletteFor, planCity, baseOf, variantOf, hash };
+  function domeProfile(x,y){const radius=Math.hypot(x-.5,y-.5)/.5;return{radius,height:Math.sqrt(Math.max(0,1-radius*radius))};}
+  return { variants, SHAPES, SPECS: S, PALETTES, DISTRICTS, CAPS, CULL, has, build, color, paletteFor, planCity, baseOf, variantOf, hash, domeProfile };
 });

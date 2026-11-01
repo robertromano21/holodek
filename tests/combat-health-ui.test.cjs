@@ -115,3 +115,25 @@ test('browser state replacement cannot overwrite health while automatic combat i
   await handler({ body: { updatedGameConsole: 'Stale HP' } }, res);
   assert.equal(status, 409); assert.match(result.error, /during an action/);
 });
+
+test('reconnect health reconciles missed movement after population updates without replacing sprites', () => {
+  const f = fixture(), actor = f.window.combatCharacters[2], sprite = actor.sprite;
+  f.dungeon.cells['7,4'] = { tile: 'floor' };
+  f.window.DungeonLife.receivePopulation = () => { actor.mazeX = 1; actor.mazeY = 1; };
+  f.window.applyLiveCombatHealth({ ...f.event, combatCharactersString: JSON.stringify([{ name: actor.name, mazeX: 7, mazeY: 4, mazeRoomKey: f.event.geoKey }]) });
+  assert.equal(actor.mazeX, 7); assert.equal(actor.mazeY, 4); assert.equal(actor.renderMazeX, 7);
+  assert.equal(actor.sprite, sprite); assert.equal(f.window._combatCommandPending, true);
+  f.window.applyLiveCombatHealth({ ...f.event, revision: 0, combatCharactersString: JSON.stringify([{ name: actor.name, mazeX: 2, mazeY: 4, mazeRoomKey: f.event.geoKey }]) });
+  assert.equal(actor.mazeX, 7, 'Stale snapshots cannot rewind a moved actor');
+});
+
+test('mercy health updates the visible allegiance and clears old pursuit without moving or replacing the sprite', () => {
+  const f = fixture(), actor = f.window.combatCharacters[2], sprite = actor.sprite;
+  Object.assign(actor, { mazeX: 7, mazeY: 4, allegiance: 'Hostile', pursuit: { target: 'Hero' } });
+  f.dungeon.cells['7,4'] = { tile: 'floor' };
+  f.window.applyLiveCombatHealth({ ...f.event, combatCharactersString: JSON.stringify([
+    { name: actor.name, mazeX: 7, mazeY: 4, mazeRoomKey: f.event.geoKey, allegiance: 'Neutral', mercy: { by: 'Hero' } }
+  ]) });
+  assert.equal(actor.allegiance, 'Neutral'); assert.equal(actor.pursuit, undefined);
+  assert.equal(actor.mazeX, 7); assert.equal(actor.mazeY, 4); assert.equal(actor.sprite, sprite);
+});

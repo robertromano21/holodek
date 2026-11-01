@@ -4,7 +4,7 @@ const { makeNavigation, reachable, chooseArchitecture, complexDimensions } = req
 const { planIndoorRoofs, whollyRoofless, inside } = require('./indoorRoofPlan');
 const { random } = require('./dungeonGeneration');
 const { isNaturalUnderground } = require('./undergroundEnvironments');
-const VERSION = 6;
+const VERSION = 7;
 
 function unsupportedWallRoofCorners(zone, supportKeys, cells) {
   if (!supportKeys.some(key => cells[key]?.tile === 'wall')) return [];
@@ -162,6 +162,9 @@ function roofProfile(style, x, width) {
 }
 
 function applySceneRoofs(dungeon, spec = {}) {
+  const Assets = require('./genreAssetPolicy');
+  const approved = Assets.catalog({ ...spec, genreKit: dungeon?.genreKit });
+  const genreRoof = approved.strict && !approved.classical;
   const architecture = dungeon?.sceneArchitecture;
   if (!dungeon?.cells || !dungeon.layout || !dungeon.start || architecture?.reason === 'disabled') {
     return { status: 'skipped', reason: 'no-architecture' };
@@ -171,10 +174,10 @@ function applySceneRoofs(dungeon, spec = {}) {
     biome: spec.biome || dungeon.classification?.biome })) {
     return (dungeon.sceneRoof = require('./undergroundRoofs').build(dungeon, spec, VERSION));
   }
-  const idiom = architecturalStyle(spec), order = columnOrder(spec);
+  const idiom = genreRoof ? approved.genre : architecturalStyle(spec), order = genreRoof ? 'plain' : columnOrder(spec);
   const text = `${spec.source?.roomName || ''} ${spec.source?.description || ''}`;
   const explicitlyRoofless = whollyRoofless(spec);
-  const declaredStyle = roofStyle(spec);
+  const declaredStyle = genreRoof ? approved.roofs[0] : roofStyle(spec);
   const defaults = { temple: idiom === 'gothic' ? 'ribbed' : 'coffered', castle: architecture?.variant === 'stone-keep' ? 'groin' : 'timber',
     bathhouse: 'barrel', catacomb: 'barrel', rotunda: 'domed', basilica: 'coffered', forum: 'coffered',
     domus: 'coffered', villa: 'coffered', warehouse: 'timber', insula: 'boarded',
@@ -184,18 +187,20 @@ function applySceneRoofs(dungeon, spec = {}) {
     idiom === 'romanesque' ? 'barrel' : defaults[architecture?.family] || (indoor ? 'barrel' : null));
   const courtyardMentioned = /courtyard|open[- ]air|roofless|collapsed roof/i.test(text);
   const parts = [], bays = [], rejected = [];
-  const material = spec.wallStyleMaterial || spec.wallMaterial || 'stone';
+  const material = genreRoof ? approved.material : spec.wallStyleMaterial || spec.wallMaterial || 'stone';
   const dimensions = architecture?.dimensions || complexDimensions(spec);
   dungeon.tiles ||= {};
   const tileFor = (shape, mat = material) => {
+    if (genreRoof) { shape = Assets.replacement(shape, approved); mat = approved.material; }
     const tile = `custom_structure_v${VERSION}_${shape}_${mat}`;
     dungeon.tiles[tile] ||= { url: dungeon.tiles.pillar?.url || dungeon.tiles.wall?.url,
-      spriteSpec: { voxelShape: shape, material: mat, profile: 'flat', heightRatio: 1,
+      spriteSpec: { voxelShape: shape, material: mat, ...(genreRoof ? { palette: approved.palette } : {}), profile: 'flat', heightRatio: 1,
         baseWidth: 0.85, gridWidth: 0.85, collisionRadius: 0.43 } };
     return tile;
   };
   const part = (shape, pos, size, role, mat = material) => {
-    parts.push({ tile: tileFor(shape, mat), shape, position: pos, size, role });
+    const tile = tileFor(shape, mat);
+    parts.push({ tile, shape: dungeon.tiles[tile].spriteSpec.voxelShape, position: pos, size, role });
   };
   if (architecture?.variant === 'motte-bailey') for (const c of Object.values(dungeon.cells)) {
     if (c.tile !== 'wall' || c.door || c.exit || c.feature || !['shell', 'keep-curtain'].includes(c.architectureRole)) continue;
@@ -258,9 +263,9 @@ function applySceneRoofs(dungeon, spec = {}) {
     const z = { ...zone };
     const bayIdiom = z.role === 'shrine' && (entrance || /pediment|classical|roman|doric|ionic|corinthian/i.test(text)) ? 'classical' : idiom;
     const bayOrder = ['doric', 'ionic', 'corinthian'].includes(z.columnOrder) ? z.columnOrder : order;
-    const supportShape = bayIdiom === 'gothic' ? 'gothic_pier' : bayIdiom === 'medieval' ? 'timber_post' : `${bayOrder}_column`;
+    const supportShape = genreRoof ? `g_${approved.genre}_support` : bayIdiom === 'gothic' ? 'gothic_pier' : bayIdiom === 'medieval' ? 'timber_post' : `${bayOrder}_column`;
     if (courtyardMentioned && z.role === 'nave') z.height = Math.ceil(z.height / 2);
-    const bayStyle = z.roofStyle || declaredStyle || defaults[z.moduleFamily] || style;
+    const bayStyle = genreRoof ? approved.roofs.includes(z.roofStyle) ? z.roofStyle : declaredStyle : z.roofStyle || declaredStyle || defaults[z.moduleFamily] || style;
     const transitionDome = ['pendentive', 'squinch'].includes(bayStyle) && z.width >= 5 && z.height >= 5 && !z.infill;
     const dome = z.role === 'rotunda' || transitionDome;
     if (transitionDome) z.width = z.height = Math.min(z.width, z.height);
@@ -520,7 +525,7 @@ function applySceneRoofs(dungeon, spec = {}) {
   }
   // Roof dressing is additive: retain earlier exterior gates, masonry and exit markers.
   dungeon.sceneStructures = [...(dungeon.sceneStructures || []), ...parts];
-  if(parts.length)require('./architecturalStonework').applyArchitecturalStonework(dungeon,spec);
+  if(parts.length && !genreRoof)require('./architecturalStonework').applyArchitecturalStonework(dungeon,spec);
   const count = Object.values(dungeon.cells).filter(c => c.roof).length;
   let covered = 0;
   if (coveragePlan?.indoor) for (const [key, c] of Object.entries(dungeon.cells)) {

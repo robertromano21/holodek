@@ -28,7 +28,7 @@
     const provisional = legacyFallback(supplied) || legacyFallback(actor);
     const field = (key, max) => provisional ? '' : clean(supplied[key] || actor[key], max);
     const profile = { version: 1, name, canonical: false,
-      personality: field('personality', 220), voice: field('voice', 140), history: field('history', 600), motivation: field('motivation', 180) };
+      personality: field('personality', 220), voice: field('voice', 140), history: field('history', Infinity), motivation: field('motivation', Infinity) };
     profile.source = complete(profile) ? supplied.source || 'provided' : 'pending';
     return profile;
   }

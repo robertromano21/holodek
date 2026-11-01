@@ -30,7 +30,7 @@
     if (!marker || root.gamePaused || marker.id === lastPreview && Date.now() - previewAt < 5000) return;
     const actor = root.getDungeonLifeContext?.()?.actors?.find(a => a.name === marker.name);
     lastPreview = marker.id; previewAt = Date.now();
-    show(marker.label, marker.kind === 'encounter' ? `${marker.allegiance} Encounter - Last Seen` : 'Known Landmark', 3500,
+    show(marker.notice ? marker.name : marker.label, marker.notice || (marker.kind === 'encounter' ? `${marker.allegiance} Encounter - Last Seen` : 'Known Landmark'), 3500,
       marker.kind === 'encounter' ? iconFor(actor) : '');
   }
   function encounter(actor) {
@@ -39,7 +39,7 @@
   }
   function update(ctx) {
     if (!ctx?.dungeon || !ctx.player || !panel) return;
-    const key = `${root.dungeonRunId}:${ctx.dungeon.geoKey}`;
+    const key = `${root.dungeonRunId}:${root.CityFloorScope?.cacheKey(ctx.dungeon.geoKey, ctx.dungeon) || ctx.dungeon.geoKey}`;
     if (room !== key) {
       room = key; roomAnnounced = false; queue.length = 0; noticed.clear(); active = false;
       panel.hidden = true; lastPreview = '';
@@ -57,7 +57,7 @@
       if (root.DungeonExplorationMap.wasAnnounced(m.id) || Math.hypot(m.x - ctx.player.x, m.y - ctx.player.y) > 10 ||
           !root.DungeonCartography.visible(ctx.dungeon, ctx.player, Math.floor(m.x), Math.floor(m.y))) continue;
       root.DungeonExplorationMap.markLandmark(m.id, true);
-      enqueue({ name: m.label, kind: 'Landmark Discovered', duration: 5000 });
+      enqueue({ name: m.notice ? m.name : m.label, kind: m.notice || 'Landmark Discovered', duration: 5000 });
     }
     if (!active && queue.length) { const next = queue.shift(); show(next.name, next.kind, next.duration, next.icon); }
   }

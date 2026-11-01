@@ -27,6 +27,19 @@ function freeze(value) {
 }
 const evaluate = (task, values) => evaluateTaskRequirements(task, context(values));
 
+test('defeat quests retain verified zero-HP history after healing without accepting other rooms or malformed live sheets', () => {
+  const task = bossTask(), name = 'The Ash Regent', database = { '0,0,0': { name: 'Hall', combatLife: {
+    source: 'engine-combat-life-v1', runId: 'run', defeats: [{ source: 'engine-combat-defeat-v1', runId: 'run', name, roomKey: '0,0,0', at: 4 }] } } };
+  const text = consoleFor({ monsters: sheet(name, 20) });
+  assert.equal(evaluate(task, { consoleText: text, database }).checks.every(c => c.passed), true);
+  assert.equal(verifiedTaskCompletion(task, evaluate(task, { consoleText: text, database })), true);
+  const wrongRoom = structuredClone(database);wrongRoom['0,0,0'].combatLife.defeats[0].roomKey = '1,0,0';
+  assert.equal(evaluate(task, { consoleText: text, database: wrongRoom }).checks[1].passed, false);
+  const bad = text.replace('HP: 20', 'HP: unknown');
+  assert.notEqual(evaluate(task, { consoleText: bad, database }).checks[1].passed, true);
+  const before = JSON.stringify(database);evaluate(task, { consoleText: text, database });assert.equal(JSON.stringify(database), before);
+});
+
 test('partial fetch reports individual gates with stable IDs and detached requirements', () => {
   const task = freeze(fetchTask());
   const result = evaluate(task, { roomKey: '1,0,0' });

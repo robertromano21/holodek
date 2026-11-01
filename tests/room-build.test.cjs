@@ -128,7 +128,8 @@ test('artifact commits merge independent discoveries, reject conflicting geometr
 test('foreground and background share one geometry pass and entry cannot rebuild a valid saved dungeon', () => {
   const source = fs.readFileSync(path.join(root, 'retort/retortWithUserInput.js'), 'utf8');
   assert.equal((source.match(/async function buildGeneratedRoom\(/g) || []).length, 1);
-  assert.equal((source.match(/await buildGeneratedRoom\(/g) || []).length, 2);
+  assert.equal((source.match(/await buildGeneratedRoom\(/g) || []).length, 3);
+  assert.match(source, /!sharedState\.getRoomDungeonForSimulation\(destination\)\?\.cells/);
   assert.match(source, /isNewGeoRoom && !hasRoomDungeon && roomDescription/);
   assert.match(source, /await require\('\.\/roomBuildQueue'\).service\(sharedState\).join\(preparedKey\)/);
 });

@@ -41,8 +41,8 @@ t('world JSON round-trip; Play this world installs built rooms and leaves the re
   assert.equal(B.roomModes(db)['0,0,0'], 'hand'); assert.equal(db['0,0,0'].exits.north, '0,1,0');
 });
 t('undo / redo', () => { const h = B.history(); let s = { a: 1 }; h.push(s); s = { a: 2 }; s = h.undo(s); assert.equal(s.a, 1); s = h.redo(s); assert.equal(s.a, 2); });
-t('homebrew lint flags leaked Children of the Grave terms', () => {
+t('homebrew names may reuse Children of the Grave terms', () => {
   assert.deepStrictEqual(B.lint('Deck 7 of the orbital station hums.'), []);
-  assert.deepStrictEqual(B.lint({ t: 'A shrine to Mortacia under the yellow sky of Tartarus, dated 412 S.R.' }).sort(), ['Mortacia', 'Tartarus', '\\bS\\.R\\.'].sort());
+  assert.deepStrictEqual(B.lint({ t: 'A shrine to Mortacia under the yellow sky of Tartarus, dated 412 S.R.' }).sort(), []);
 });
 console.log(`# ${n - fail}/${n} passed`); process.exitCode = fail ? 1 : 0;

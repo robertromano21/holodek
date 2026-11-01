@@ -14,29 +14,25 @@ function supplementalReadables(context) {
   const roomName = String(context.roomName || 'the archive');
   if (!/\b(temple|library|archive|study|scriptorium|hall|keep|palace|cathedral|basilica|crypt|tomb)\b/i.test(roomName)) return [];
   const world = homebrew();
-  if (world) return Readables.validate([{kind:'book',name:'local history journal',title:('Records of '+roomName).slice(0,90),
-    backstory:('A local keeper preserved this journal in '+roomName+'.').slice(0,350),role:'lore',
-    chapters:[{title:'The Local Record',text:String(world.history || 'The keeper distinguishes established records from rumors and leaves current events for later witnesses.').slice(0,800)}]}]);
+  if (world) return Readables.validate([{kind:'book',name:('journal of '+roomName.toLowerCase().replace(/[^a-z '-]/g,' ').replace(/\s+/g,' ').trim()).slice(0,65),title:('Records of '+roomName).slice(0,90),
+    backstory:'An unread local volume. Its contents have not yet been examined.',role:'lore',chapters:[],bookLore:{version:2,pending:true}}]);
   const place = roomName.toLowerCase().replace(/[^a-z '-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 35) || 'the archive';
   const literary = /\b(library|archive|study|scriptorium)\b/i.test(roomName);
   const definitions = [
-    { kind: 'book', name: 'chronicle of ' + place, title: 'Records of ' + roomName,
-      backstory: 'An anonymous keeper preserved this volume for readers of ' + roomName + ', recording the customs of those who pass through Tartarus.',
-      chapters: [{ title: 'The Keeper and the Threshold', text: 'In Tartarus, a record is a shelter against forgetting. The keeper addresses strangers as well as those who remember these halls: read what survives, distinguish a witness from a rumor, and leave room for what the next traveler may know.' },
-        { title: 'Stone and Memory', text: 'Painted figures and carved names are not the people themselves. An image of a throne is not possession of it; a remembered victory is not a victory won today. The keeper asks each reader to preserve that distinction.' }] },
+    { kind: 'book', name: 'chronicle of ' + place, title: 'Unread local volume',backstory:'An unread local volume.',chapters:[] },
     { kind: 'scroll', name: 'keepers scroll of ' + place, title: 'The Keeper\'s Marginal Notes',
       backstory: 'A rolled commentary kept beside the records of ' + roomName + '. Its author left a practical note for anyone studying the local apparatus.',
       chapters: [{ title: 'On Reading a Mechanism', text: 'Study the marks and the reference diagram before moving a control. A painted vessel need not be a real vessel, and a named lever is not an exit. These notes describe a method of observation, not an additional secret condition for the apparatus.' }] }
   ];
   if (literary) definitions.push(
     { kind: 'spellbook', name: 'grimoire of ' + place, title: 'A Keeper\'s Arcane Index', role: 'spell_reference',
-      backstory: 'A reference grimoire catalogued in ' + roomName + '. Its incomplete formulae are preserved for future study, not as spells ready to cast.',
-      chapters: [{ title: 'Notation Before Practice', text: 'This index distinguishes a name, a symbol and a working formula. Its pages preserve terminology, but no complete casting rite. Reading alone grants neither a spell nor mastery over the power described.' }] },
+      backstory: 'An unread reference volume.',chapters:[] },
     { kind: 'map', name: 'historical map of ' + place, title: 'Notes on the Fiorenan Peninsula',
       backstory: 'A historical atlas leaf preserved in ' + roomName + ', identifying Darkwood, Nappol\'s Sea and Dragon\'s Claw rather than the present dungeon.',
       chapters: [{ title: 'Places Beyond These Halls', text: 'The Fiorenan Peninsula is recorded with Darkwood, Nappol\'s Sea and Dragon\'s Claw. This historical leaf is not a survey of Tartarus. No current room exits, encounter positions or quest routes can be inferred from it.' }] }
   );
-  return Readables.validate(definitions.map(r => ({ ...r, title: r.title.slice(0, 90), backstory: r.backstory.slice(0, 350), role: r.role || 'lore' })));
+  return Readables.validate(definitions.map(r => ({ ...r, title: r.title.slice(0, 90), backstory: r.backstory.slice(0, 350), role: r.role || 'lore',
+    ...(['book','spellbook'].includes(r.kind)?{title:r.name,backstory:'An unread local volume. Its contents have not yet been examined.',chapters:[],bookLore:{version:2,pending:true}}:{}) })));
 }
 
 function addSupplementalReadables(raw, context) {

@@ -18,3 +18,19 @@ test('late manifest replies from the old room cannot start snapshot downloads',a
 test('resource failures remain retryable and never cache fake readiness',async()=>{let fail=true;const f=fixture({loadResources:async()=>{if(fail)throw Error('image unavailable');return{};}});await assert.rejects(f.api.remember('run',f.dungeon),/unavailable/);assert.equal(f.api.size(),0);fail=false;await f.api.remember('run',f.dungeon);assert.ok(f.api.resources('run',f.dungeon));});
 
 test('adjacent GPU warming preserves the live mesh cache and adopts only matching geometry',async()=>{const fs=require('fs'),vm=require('vm'),window={requestIdleCallback:cb=>queueMicrotask(()=>cb({timeRemaining:()=>10}))};vm.runInNewContext(fs.readFileSync('assets/rendererWebGL.js','utf8'),{window,console,performance,setTimeout,clearTimeout});const r=window.webglDungeonRenderer,deleted=[];r.gl={deleteBuffer:b=>deleted.push(b)};const live={old:{vbo:'old-v',ibo:'old-i'}};r.voxelMeshes=live;r.getVoxelMesh=function(name){const mesh={vbo:name+'-v',ibo:name+'-i'};this.voxelMeshes[name]=mesh;return mesh;};r._getItemBillboard=()=>{};const d={geoKey:'0,1,0',_geometryStamp:'stamp',cells:{'1,1':{tile:'custom_column'}},tiles:{custom_column:{spriteSpec:{}}}};await r.prewarmAdjacentRoom(d,'entry');assert.equal(r.voxelMeshes,live);assert.equal(deleted.length,0);assert.equal(r._adoptAdjacentRoom({...d,_geometryStamp:'different'}),0);assert.equal(r._adoptAdjacentRoom(d),1);assert.ok(r.voxelMeshes.custom_column);r.releaseAdjacentRoom('entry');assert.equal(deleted.length,0,'adopted buffers belong to the live renderer');});
+
+test('a room display failure reaches server diagnostics and remains visible until successful rendering',()=>{
+  const fs=require('node:fs'),vm=require('node:vm'),packets=[],frames=[],nodes=[];
+  const window={dungeonRunId:'run',performance:{now:()=>100},console:{info(){}},setInterval(){},
+    requestAnimationFrame:callback=>frames.push(callback),fetch:async(url,options)=>{packets.push({url,...JSON.parse(options.body)});},
+    document:{createElement:()=>({style:{},setAttribute(){},remove(){this.removed=true;}}),body:{appendChild:node=>nodes.push(node)}}};
+  vm.runInNewContext(fs.readFileSync('assets/roomEntry.js','utf8'),{window});
+  const api=window.RoomEntry;api.begin('0,0,0','0,1,0');
+  api.failed(Error('History row missing'),{geoKey:'0,1,0',phase:'prepared-state',dungeon:{_geometryStamp:'saved'}});
+  assert.equal(packets[1].stage,'failed');
+  assert.equal(packets[2].url,'/debug/dungeon-rendering');assert.equal(packets[2].error,'History row missing');
+  assert.equal(packets[2].geometryStamp,'saved');assert.match(nodes[0].textContent,/could not be displayed/);
+  const count=packets.length;api.failed(Error('stale'),{geoKey:'9,9,9'});assert.equal(packets.length,count);
+  api.shown({geoKey:'0,1,0'});while(frames.length)frames.shift()();
+  assert.equal(nodes[0].removed,true);assert.ok(packets.some(p=>p.stage==='first-frame'));
+});

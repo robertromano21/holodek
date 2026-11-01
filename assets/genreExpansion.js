@@ -1,8 +1,8 @@
 (function(root, factory) {
-  const api = factory();
+  const api = factory(typeof module === 'object' && module.exports ? require('./genreFurnishings') : root.GenreFurnishings, typeof module === 'object' && module.exports ? require('./architectureDesigns') : root.ArchitectureDesigns, typeof module === 'object' && module.exports ? require('./genreFixtures') : root.GenreFixtures, typeof module === 'object' && module.exports ? require('./urbanDesigns') : root.UrbanDesigns);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.GenreExpansion = api;
-})(typeof window === 'object' ? window : globalThis, function() {
+})(typeof window === 'object' ? window : globalThis, function(Furnishings, ArchitectureDesigns, Fixtures, Urban) {
   'use strict';
   const VERSION = 'world1-art-expansion-1';
   const family = ['fantasy', 'dark-fantasy', 'mythic'];
@@ -47,11 +47,20 @@
     prehistoric: ['#9a784a','#65513a','#ddc68a','#302c24','#c79a52','#7e9d5b'],
     'desert-fantasy': ['#d6ae7c','#986f52','#f0d897','#483041','#c79a52','#4f9d9b']
   };
+  const WARDROBES = {
+    'gothic-horror': { head:['iron_mask','hooded_cowl','top_hat_hair'],torso:['long_coat_flowing','corset_dress','plate_armor'],legs:['striding_boots'],gear:['chain_censer','bone_charm','satchel'],held:['crossbow','ritual_knife','lantern_hand'] },
+    solarpunk: { head:['sun_hat_hair','normal_human','visor_mask'],torso:['gardener_tunic','work_vest_tunic','jacket_tunic'],legs:['striding_boots'],gear:['solar_pack','seed_satchel','goggles'],held:['scanner','stun_baton','lantern_hand'] },
+    dieselpunk: { head:['goggle_helm','gas_mask','cap_hair'],torso:['greatcoat_flowing','armor_vest','patched_tunic'],legs:['striding_boots'],gear:['radio_shoulder','gauge_belt','goggles'],held:['rifle','pistol','wrench_mace'] },
+    underwater: { head:['sealed_helm','visor_helmet','normal_human'],torso:['dive_suit_tunic','hard_suit_armor','chain_mesh_vest'],legs:['mag_boots'],gear:['oxygen_pack','shoulder_lamp','data_wrist'],held:['harpoon','scanner','lantern_hand'] },
+    prehistoric: { head:['feather_hair','normal_human','bandana_hair'],torso:['hide_tunic','fur_vest_tunic','patched_tunic'],legs:['striding_boots'],gear:['bone_charm','saddle_bag','satchel'],held:['spear','sling','throwing_axe'] },
+    'desert-fantasy': { head:['turban_hair','veil_mask','normal_human'],torso:['flowing_robe','vest_tunic','chain_shirt'],legs:['striding_boots'],gear:['sash','canteen','rune_amulet'],held:['sword_broad','spear','lantern_hand'] }
+  };
   const NEW_GENRES = Object.fromEntries(['gothic-horror','solarpunk','dieselpunk','underwater','prehistoric','desert-fantasy'].map(genre => {
     const p = PROFILES[genre];
+    const wardrobe = WARDROBES[genre];
     return [genre, { palette: PIGMENTS[genre], plans: ['lean','stocky','tall'],
-      clothing: { head: ['normal_human','hooded_cowl'], torso: ['tunic','coat_flowing'], legs: ['striding_boots'] },
-      gear: ['satchel','backpack','goggles'], held: genre === 'dieselpunk' ? ['rifle','pistol','wrench_mace'] : genre === 'underwater' ? ['harpoon','scanner','lantern_hand'] : genre === 'prehistoric' ? ['spear','sling','throwing_axe'] : ['staff_crook','lantern_hand','scanner'],
+      clothing: { head: wardrobe.head, torso: wardrobe.torso, legs: wardrobe.legs },
+      gear: wardrobe.gear, held: wardrobe.held,
       creatures: { 'gothic-horror':['belfry_wraith','crypt_bat','manor_sentinel','grave_hound'], solarpunk:['orchard_keeper','canopy_glider','pollinator_drone','moss_grazer'], dieselpunk:['iron_sentry','engine_crawler','yard_hound','masked_scout'], underwater:['reef_guardian','trench_eel','shell_grazer','kelp_stalker'], prehistoric:['saber_cat','marsh_behemoth','flint_guardian','feathered_hunter'], 'desert-fantasy':['dune_stalker','glass_serpent','sand_sentinel','oasis_guardian'] }[genre],
       props: [`x_${genre}_utility`,`x_${genre}_stall`], building: [`x_${genre}_house`,`x_${genre}_hall`,`x_${genre}_gate`,`x_${genre}_tower`],
       voxel: ['reef','garden'].includes(p.form) ? 'stone' : ['diesel'].includes(p.form) ? 'metal' : 'wood',
@@ -62,8 +71,16 @@
   const SHAPES = Object.fromEntries(Object.keys(PROFILES).flatMap(genre => ROLES.map(role => [`x_${genre}_${role}`, { genre, role, cotg: family.includes(genre), footprint: ['house','hall'].includes(role) ? [3,3] : role === 'gate' ? [3,1] : [1,1], height: ['hall','tower'].includes(role) ? 5 : role === 'house' ? 3.5 : role === 'column' ? 3 : 2.5 }])));
   const COTG = { funerary_stoa:'mythic', ossuary_arcade:'dark-fantasy', sepulchral_pylon:'dark-fantasy', ribbed_buttress:'dark-fantasy', basalt_ziggurat:'dark-fantasy', bone_reliquary:'dark-fantasy', memorial_rotunda:'mythic', mourning_gate:'dark-fantasy' };
   for (const [name,genre] of Object.entries(COTG)) SHAPES[`x_${name}`] = { genre, role:name, cotg:true, footprint:['ribbed_buttress','bone_reliquary'].includes(name)?[1,1]:[3,2], height:4 };
+  if (Furnishings) Object.assign(SHAPES, Furnishings.SHAPES);
+  if (ArchitectureDesigns) Object.assign(SHAPES, ArchitectureDesigns.SHAPES);
+  if (Fixtures) Object.assign(SHAPES, Fixtures.SHAPES);
+  if (Urban) Object.assign(SHAPES, Urban.SHAPES);
   const has = name => Object.prototype.hasOwnProperty.call(SHAPES,name);
   function build(name, size = 24) {
+    if (Fixtures?.has(name)) return Fixtures.build(name, size);
+    if (ArchitectureDesigns?.has(name)) return ArchitectureDesigns.build(name, size);
+    if (Urban?.has(name)) return Urban.build(name, size);
+    if (Furnishings?.has(name)) return Furnishings.build(name, size);
     if (!has(name) || !Number.isInteger(size) || size < 8 || size > 64) return null;
     const { genre,role } = SHAPES[name], form = PROFILES[genre].form, v = new Uint8Array(size ** 3);
     const box = (x0,y0,z0,x1,y1,z1,on=1) => {
@@ -76,7 +93,12 @@
     const roof=(base,top,inset=0)=>{for(let z=base;z<top;z+=1/size){const t=(z-base)/(top-base);box(inset,.02+t*.44,z,1-inset,.98-t*.44,z+1/size);}};
     const arch=(x0,x1,y0,y1,spring,top)=>{box(x0,y0,0,x1,y1,spring,0);for(let z=spring;z<top;z+=1/size){const t=(z-spring)/(top-spring),w=(x1-x0)/2*Math.sqrt(Math.max(0,1-t*t));box(.5-w,y0,z,.5+w,y1,z+1/size,0);}};
     const windows=()=>{for(let x=.16;x<.9;x+=.22)for(let z=.32;z<.72;z+=.25)box(x,0,z,x+.08,.1,z+.13,0);};
-    if(role==='column'){box(.18,.18,0,.82,.82,.1);cyl(.5,.5,.18,.1,.86);box(.12,.12,.86,.88,.88,.98);if(['ossuary','gothic','classical'].includes(form))for(let x=.3;x<.8;x+=.12)box(x,.27,.18,x+.04,.35,.8,0);return v;}
+    if(role==='column'){
+      if(['habitat','arcology','diesel','foundry','civic','deco','reef'].includes(form)) {
+        box(.3,.3,0,.7,.7,1);for(const z of [.12,.78])box(.24,.24,z,.76,.76,z+.08);return v;
+      }
+      box(.18,.18,0,.82,.82,.1);cyl(.5,.5,.18,.1,.86);box(.12,.12,.86,.88,.88,.98);if(['ossuary','gothic','classical'].includes(form))for(let x=.3;x<.8;x+=.12)box(x,.27,.18,x+.04,.35,.8,0);return v;
+    }
     if(role==='stall'){box(.08,.12,0,.14,.86,.8);box(.86,.12,0,.92,.86,.8);box(.12,.5,.28,.88,.86,.4);roof(.8,.98);return v;}
     if(role==='utility'){cyl(.5,.5,.3,.1,.65);box(.42,.42,0,.58,.58,.95);if(['habitat','diesel','foundry'].includes(form)){box(.12,.12,.65,.88,.88,.72);box(.45,.45,.9,.55,.55,1);}else{for(let i=0;i<4;i++){const a=i*Math.PI/2;box(.45+Math.cos(a)*.3,.45+Math.sin(a)*.3,.7,.55+Math.cos(a)*.3,.55+Math.sin(a)*.3,.84);}}return v;}
     if(role==='basalt_ziggurat'){for(let i=0;i<5;i++)box(i*.08,i*.08,i*.17,1-i*.08,1-i*.08,(i+1)*.17);box(.42,.0,0,.58,.5,.86);return v;}
@@ -134,7 +156,15 @@
     return v;
   }
   function color(name,x,y,z,normal) {
+    const furnishing=Furnishings?.color(name,x,y,z,normal,PIGMENTS[SHAPES[name]?.genre]);if(furnishing)return furnishing;
+    if (Fixtures?.has(name)) return Fixtures.color(name,x,y,z,normal);
+    if (ArchitectureDesigns?.has(name)) return ArchitectureDesigns.color(name,x,y,z,normal,PIGMENTS[SHAPES[name].genre]);
+    if (Urban?.has(name)) return Urban.color(name,x,y,z,normal,PIGMENTS[SHAPES[name].genre]);
     const info=SHAPES[name];if(!info)return null;
+    if (info.role === 'light' && z > .79 && z < .91) {
+      const light = Fixtures?.emission(name);
+      if (light) return Fixtures.rgb(light.color).map(v => .28 + .72 * v);
+    }
     const p=PIGMENTS[info.genre], edge=z>.7 || Math.abs(y-.1)<.04, hex=p[edge?2:Math.floor(x*24)%7===0?1:0];
     const shade=normal[2]>.5?1.05:normal[0]+normal[1]>0?.9:.72;
     return [1,3,5].map(i=>Math.max(0,Math.min(1,parseInt(hex.slice(i,i+2),16)/255*shade)));
@@ -216,5 +246,5 @@
     if(!imageVoxels.has(name))imageVoxels.set(name,build(name,24));
     return paintVoxels(ctx,{size:24,voxels:imageVoxels.get(name)},x,y,w,h,colors||PIGMENTS[SHAPES[name].genre]);
   }
-  return {VERSION,PROFILES,PIGMENTS,NEW_GENRES,ALIASES,SHAPES,COTG,ROLES,has,build,color,paint,paintVoxels,MAT,WALL,FLOOR,STYLES,GARB};
+  return {VERSION,PROFILES,PIGMENTS,NEW_GENRES,WARDROBES,ALIASES,SHAPES,COTG,ROLES,has,build,color,paint,paintVoxels,MAT,WALL,FLOOR,STYLES,GARB};
 });

@@ -4,6 +4,7 @@
   const populations = new Map(), queue = [], pendingDialogue = [], seen = new Set();
   const recentSpeakers = new Map();
   const encounterStories = new Set();
+  const attention = new Map();
   let room = null, active = null, panel, portrait, caption, words, pauseButton, status, recoveryButton, recoveryStatus;
   let recoveryPending = false;
   let lastVisit = 0, lastAutonomy = 0, visitPending = false, autonomyPending = false, pausePending = false;
@@ -53,6 +54,7 @@
   }
   function enterRoom(geoKey) {
     if (room === geoKey) return;
+    releaseAttention();
     for (const row of queue) subtitleReport('skipped', row, { reason: 'room-changed-before-display' });
     room = geoKey; queue.length = 0; active = null;
     if (panel) panel.hidden = true;
@@ -110,8 +112,57 @@
   function isWaitingToSpeak(name) {
     const ctx = context();
     if (active?.speaker === name) return false;
-    if (!ctx?.dungeon || !queue.some(row => row.geoKey === ctx.dungeon.geoKey && row.speaker === name)) return false;
+    if (!ctx?.dungeon || !queue.some(row => row.geoKey === ctx.dungeon.geoKey && row.speaker === name && attentionMode(row)!=='passing')) return false;
     return canSpeak(ctx.actors.find(actor => actor.name === name), ctx);
+  }
+  function attentionMode(row) {
+    if(['passing','addressing','question'].includes(row?.attention))return row.attention;
+    if(/\?[\s"'\u201d\u2019]*$/.test(row?.line||''))return 'question';
+    return row?.kind==='canned'?'passing':'addressing';
+  }
+  function releaseAttention(name) {
+    for(const [speaker,entry]of attention){
+      if(name&&name!==speaker)continue;
+      const actor=context()?.actors?.find(a=>a.name===speaker)||entry.actor;
+      if(actor){actor._conversationUntil=0;actor._conversationGoal=null;delete actor._conversationListenerPoint;}
+      attention.delete(speaker);
+    }
+    if(!active&&panel)panel.hidden=true;
+  }
+  function beginAttention(row,actor,ctx,duration) {
+    const mode=attentionMode(row);row.attention=mode;
+    if(!actor||mode==='passing'||!canSpeak(actor,ctx)){releaseAttention(row.speaker);return;}
+    const recipient=I.dialogueRecipient?.(row,ctx.actors)||'PC';
+    attention.set(actor.name,{actor,scope:root.CityFloorScope?.cacheKey(ctx.dungeon.geoKey,ctx.dungeon)||ctx.dungeon.geoKey,
+      runId:root.dungeonRunId,recipient,anchor:{...ctx.player},tracking:{...ctx.player,heading:ctx.heading},
+      awaitingReply:mode==='question'&&recipient==='PC',responding:false});
+    root.focusDungeonSpeaker?.(actor.name,duration,recipient);
+  }
+  function updateAttention(ctx) {
+    const scope=root.CityFloorScope?.cacheKey(ctx.dungeon.geoKey,ctx.dungeon)||ctx.dungeon.geoKey;
+    for(const [name,entry]of attention){
+      const actor=ctx.actors.find(a=>a.name===name),speaking=active?.speaker===name&&active.attention!=='passing';
+      if(!actor||entry.runId!==root.dungeonRunId||entry.scope!==scope||I.isDown(actor)||
+        root.actionDiceState?.active||root._gameOver||root._deathSceneActive||root._playerUnconscious||
+        entry.recipient==='PC'&&(Math.hypot(ctx.player.x-entry.anchor.x,ctx.player.y-entry.anchor.y)>3||!canSpeak(actor,ctx))||
+        !speaking&&!entry.awaitingReply&&!entry.responding){
+        releaseAttention(name);continue;
+      }
+      // Voice synthesis and question waits can outlast estimated text timing.
+      actor._conversationUntil=Date.now()+2000;
+      if(entry.recipient==='PC'&&(Math.hypot(ctx.player.x-entry.tracking.x,ctx.player.y-entry.tracking.y)>.4||
+        Number.isFinite(ctx.heading)&&Math.abs(Math.atan2(Math.sin(ctx.heading-entry.tracking.heading),Math.cos(ctx.heading-entry.tracking.heading)))>.3)){
+        root.focusDungeonSpeaker?.(name,2000,'PC');entry.tracking={...ctx.player,heading:ctx.heading};
+      }
+    }
+  }
+  function finishAttention(row) {
+    const entry=attention.get(row.speaker);
+    if(!entry?.awaitingReply&&!entry?.responding)releaseAttention(row.speaker);
+    else if(entry.awaitingReply&&caption)caption.textContent=row.speaker+' - Waiting for your reply';
+  }
+  function playerResponded() {
+    for(const entry of attention.values())if(entry.awaitingReply){entry.awaitingReply=false;entry.responding=true;}
   }
   function speechHistory(row) {
     const key = `${row.geoKey}|${row.speaker}`;
@@ -191,6 +242,9 @@
     receiveTurnDialogue(event.content, { ...event, source: 'encounter-story' });
   }
   function receiveTurnDialogue(content, event) {
+    if(event?.runId&&event.runId!==root.dungeonRunId)return;
+    if(event?.geoKey&&event.geoKey!==context()?.dungeon?.geoKey)return;
+    for(const [name,entry]of attention)if(entry.responding)releaseAttention(name);
     const names = [...new Set([...I.parseSheets(event.consoleText), ...I.parseSheets(event.consoleText, 'NPCs in Party'),
       ...(context()?.actors || []).filter(a => a.type !== 'pc')].map(a => a.name))];
     const explicit = Array.isArray(event.dialogue) ? event.dialogue : [];
@@ -245,8 +299,7 @@
     seen.add(row.key); if (seen.size > 80) seen.delete(seen.values().next().value);
     showSpeechPart(ctx, now);
     if (row.kind !== 'turn') root.appendDungeonDialogueLog?.(row.speaker, row.line);
-    if (actor) root.focusDungeonSpeaker?.(actor.name, chunks.reduce((ms, line) => ms + speechDuration(line) + 500, 0),
-      I.dialogueRecipient?.(row, ctx.actors));
+    beginAttention(active,actor,ctx,chunks.reduce((ms,line)=>ms+speechDuration(line)+500,0));
   }
   const speechDuration = line => Math.min(18000, Math.max(3500, line.trim().split(/\s+/).length * 300 + 700));
   const SPEECH_WAIT_MS = 10000;
@@ -289,8 +342,7 @@
       // Advance unread sentences on the next UI tick without discarding the speech.
       active.until = time();
     } else {
-      const actor = context()?.actors?.find(a => a.name === active.speaker);
-      if (actor) actor._conversationUntil = Date.now();
+      finishAttention(active);
       active = null;
     }
   }
@@ -350,6 +402,9 @@
     enterRoom(ctx.dungeon.geoKey);
     root.refreshDungeonConsoleStates?.();
     if (root.gamePaused) return;
+    updateAttention(ctx);
+    root.CityCrowdUi?.onFrame?.(ctx.dungeon,ctx.player);
+    if(root.CommerceUi?.invitationPending?.())return;
     if (root.DungeonExplorationMap?.ready?.(ctx.dungeon.geoKey)) for (const actor of ctx.actors) {
       if (actor.type !== 'monster' || !I.isPresent(actor, population()) || !actorVisible(actor, ctx, 8)) continue;
       const observed = root.DungeonExplorationMap.observeResident?.(actor);
@@ -357,24 +412,28 @@
     }
     flushPendingDialogue(ctx);
     if (active) {
-      const actor = ctx.actors.find(a => a.name === active.speaker), nearby = active.kind === 'turn' || canSpeak(actor, ctx) || conversational(active, actor, ctx); // never cut off a reply to the player
+      const actor = ctx.actors.find(a => a.name === active.speaker), nearby = active.kind === 'turn' || canSpeak(actor, ctx) || conversational(active, actor, ctx);
       if (nearby && now >= active.until && active.part + 1 < active.chunks.length) {
         active.part++; showSpeechPart(ctx, now);
       } else if (!nearby || now >= active.until) {
         subtitleReport('dismissed', active, { reason: nearby ? 'duration-complete' : 'speaker-left-hearing-range' });
-        if (!nearby && actor) actor._conversationUntil = Date.now();
+        if (!nearby) releaseAttention(active.speaker);
         if (!nearby) try { root.HolodekSfx?.stopSpeech?.(); } catch {}
+        if(nearby)finishAttention(active);
         active = null; panel.hidden = true;
       }
     }
     showNext(ctx, now);
-    if (ctx.busy || !ctx.actors.some(a=>a.type==='pc'&&(a.hp ?? 1)>0) || drafting(document.activeElement)) return;
+    if (ctx.busy || root.CommerceUi?.hasInteraction?.() || !ctx.actors.some(a=>a.type==='pc'&&(a.hp ?? 1)>0) || drafting(document.activeElement)) return;
     if (!visitPending && now - lastVisit >= 3000) {
       visitPending = true; lastVisit = now;
       const geoKey = ctx.dungeon.geoKey, runId = root.dungeonRunId, epoch = timeline;
-      post('/room-population/visit', { geoKey, runId, player: ctx.player,
+      post('/room-population/visit', { geoKey, runId, geometryStamp:ctx.dungeon._geometryStamp, crowdRevision:ctx.dungeon.cityCrowd?.revision,
+        crowdMovements:root.CityCrowdMotion?.observations(ctx.dungeon),player: ctx.player,
         actors: ctx.actors.map(a => ({ name: a.name, mazeX: a.mazeX, mazeY: a.mazeY, discoveryRevision: a.discoveryRevision, mazePoint: I.dialoguePoint(speakingActor(a)) })) })
         .then(result => { if (result && epoch === timeline && root.dungeonRunId === runId && context()?.dungeon?.geoKey === geoKey) {
+          if(result.cityStream)root.applyLivingEnvironmentDelta?.(result.cityStream);
+          if(result.crowd)root.CityCrowdUi?.receive({geoKey,runId,crowd:result.crowd});
           receivePopulation({ population: result.population, runId });
           if (result.story) receiveEncounter(result.story);
           else receiveDialogue({ dialogue: result.dialogue, geoKey, runId, source: 'room-visit' });
@@ -382,7 +441,7 @@
         } })
         .catch(error => console.warn('[RoomPopulation]', error.message)).finally(() => { if (epoch === timeline) visitPending = false; });
     }
-    if (!autonomyPending && now - lastAutonomy >= I.DIALOGUE_REFRESH_MS) {
+    if (!autonomyPending && ![...attention.values()].some(a=>a.awaitingReply||a.responding) && now - lastAutonomy >= I.DIALOGUE_REFRESH_MS) {
       autonomyPending = true; lastAutonomy = now;
       const runId=root.dungeonRunId, epoch = timeline, geoKey = ctx.dungeon.geoKey;
       post('/room-population/autonomy', { geoKey: ctx.dungeon.geoKey, runId: root.dungeonRunId, liveWorldState: liveState(ctx) })
@@ -404,6 +463,7 @@
     }
   }
   function reset({ paused = false } = {}) {
+    releaseAttention();
     timeline++;
     lastVisit = lastAutonomy = lastTick = 0; visitPending = autonomyPending = pausePending = false;
     if (subtitleReportTimer !== null && typeof clearTimeout === 'function') clearTimeout(subtitleReportTimer);
@@ -437,7 +497,7 @@
   }
   function init() {
     const style = document.createElement('style');
-    style.textContent = '#dungeon-dialogue{position:fixed;z-index:2100;background:rgba(10,10,10,.9);border:1px solid #888;border-radius:8px;padding:10px 14px;color:#eee;display:flex;gap:12px;align-items:center;pointer-events:none;font-family:Georgia,serif;box-sizing:border-box}#dungeon-dialogue[hidden],#dungeon-pause-status[hidden]{display:none}#dungeon-dialogue img{width:48px;height:72px;object-fit:contain;image-rendering:pixelated}#dungeon-dialogue-caption{color:#dfc687;font-size:13px;margin-bottom:5px}#dungeon-dialogue-words{font-size:17px;line-height:1.3}#dungeon-pause-status{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:3200;background:rgba(0,0,0,.8);color:#dfc687;border:1px solid #888;border-radius:6px;padding:8px 16px;font:16px Georgia,serif}';
+    style.textContent = '#dungeon-dialogue{position:fixed;z-index:15100;background:rgba(10,10,10,.9);border:1px solid #888;border-radius:8px;padding:10px 14px;color:#eee;display:flex;gap:12px;align-items:center;pointer-events:none;font-family:Georgia,serif;box-sizing:border-box}#dungeon-dialogue[hidden],#dungeon-pause-status[hidden]{display:none}#dungeon-dialogue img{width:48px;height:72px;object-fit:contain;image-rendering:pixelated}#dungeon-dialogue-caption{color:#dfc687;font-size:13px;margin-bottom:5px}#dungeon-dialogue-words{font-size:17px;line-height:1.3}#dungeon-pause-status{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:3200;background:rgba(0,0,0,.8);color:#dfc687;border:1px solid #888;border-radius:6px;padding:8px 16px;font:16px Georgia,serif}';
     document.head.appendChild(style);
     const dismissStyle = document.createElement('style');
     dismissStyle.textContent = '#dungeon-dialogue{padding-right:44px}#dungeon-dialogue .dungeon-message-close{position:absolute;top:4px;right:4px;width:32px;height:32px;padding:0;margin:0;border:0;border-radius:4px;background:transparent;color:#dfc687;font:16px Georgia,serif;cursor:pointer;pointer-events:auto}#dungeon-dialogue .dungeon-message-close:hover{background:#ffffff1c}#dungeon-dialogue .dungeon-message-close:focus-visible{outline:1px solid #dfc687;outline-offset:1px}';
@@ -478,6 +538,8 @@
     setInterval(tick, 500);
   }
   root.DungeonLife = { population, receivePopulation, restorePopulation, receiveDialogue, receiveEncounter, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
+    playerResponded, releaseAttention, attentionMode,
+    hasPendingSpeech:()=>!!active||queue.length>0||attention.size>0,
     subtitleDiagnostics: () => subtitleHistory.map(report => ({ ...report })),
     actorAllegiance: actor => I.allegiance(population()?.actors?.[actor.name || actor.Name] || actor, root.latestUpdatedData?.monstersState) };
   document.addEventListener('DOMContentLoaded', init);

@@ -25,6 +25,10 @@
   function addCharacterActions(popup, actor) {
     if (root.actionDiceState?.active?.kind !== 'combat') return false;
     const current = prompt;
+    if (root.DungeonInhabitants?.isDown(actor)) {
+      const status = document.createElement('p'); status.textContent = root.CombatLifeUi?.condition(actor) || actor.state;
+      popup.appendChild(status);
+    }
     if (!current) { const message = document.createElement('p'); message.textContent = 'Wait for your turn to choose a combat action.'; popup.appendChild(message); return true; }
     const disabled = submitting || prompt.movement?.busy || root.gamePaused || root.actionDiceState?.paused;
     const before = popup.children.length;
@@ -47,7 +51,7 @@
     }
     for (const care of (prompt.care || []).filter(c => c.target === actor.name)) button(care.label + ' (one turn)', 'care', care.target, care);
     if (popup.children.length === before) {
-      const message = document.createElement('p'); message.textContent = 'No actions available for this character this turn. First aid requires an adjacent living ally.'; popup.appendChild(message);
+      const message = document.createElement('p'); message.textContent = 'No actions available for this character this turn. First aid requires adjacency and clear access; bandaging can save a dying opponent.'; popup.appendChild(message);
     }
     return true;
   }
@@ -151,6 +155,37 @@
     if (incoming?.turnId !== prompt?.turnId) { error = ''; submitting = false; targeting = false; }
     prompt = incoming; render(); root.renderPartyIconDock?.();
   }
-  root.CombatTurnUi = { receive, submit, notice, addCharacterActions, openSpells, renderDockControls };
+  function canChangeEquipment() {
+    return !!(prompt?.equipment?.allowed && root.actionDiceState?.active?.kind === 'combat' && !root.actionDiceState.pending &&
+      !submitting && !prompt.movement?.busy && !root.gamePaused && !root.actionDiceState.paused && !root._characterStartupPending);
+  }
+  async function equipment(kind, item, target) {
+    if (!canChangeEquipment()) { notice('Wait for your turn and finish pending movement or rolls before changing equipment.'); return false; }
+    const current = prompt;
+    if (target && target.replace(/^Name:\s*/i, '').trim().toLowerCase() !== current.combatant.toLowerCase()) {
+      notice('Only ' + current.combatant + ' can change equipment on this turn.'); return false;
+    }
+    submitting = true;
+    try {
+      const response = await fetch('/combat/equipment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        kind, item, target: current.combatant, combatant: current.combatant, actionId: current.actionId, turnId: current.turnId,
+        runId: root.dungeonRunId, geoKey: root.currentDungeon?.geoKey, nonce: root.crypto?.randomUUID?.() || 'equipment:' + Date.now() + ':' + Math.random().toString(36).slice(2) }) });
+      const result = await response.json(); if (!response.ok) throw Error(result.error || 'Equipment could not change.');
+      if (result.runId !== root.dungeonRunId || result.geoKey !== root.currentDungeon?.geoKey) throw Error('The room or game changed during the equipment request.');
+      await root.applyRealtimeCombatResult?.(result);
+      if (prompt?.turnId === current.turnId && result.turn?.turnId === current.turnId) prompt = result.turn;
+      return true;
+    } catch (err) { notice(err.message); return false; }
+    finally { submitting = false; render(); root.renderPartyIconDock?.(); }
+  }
+  async function handleEquipmentCommand(command) {
+    const match = /^(equip|unequip)\s+(.+?)(?:\s+(?:to|from)\s+(.+))?$/i.exec(String(command).trim());
+    if (!match) return false;
+    const accepted = await equipment(match[1].toLowerCase(), match[2], match[3]);
+    const input = document.getElementById('chatuserinput'); if (accepted && input?.value.trim() === String(command).trim()) input.value = '';
+    return true;
+  }
+  root.CombatTurnUi = { receive, submit, notice, addCharacterActions, openSpells, renderDockControls,
+    canChangeEquipment, equipment, handleEquipmentCommand, equipmentActor: () => prompt?.combatant };
   document.addEventListener('DOMContentLoaded', render, { once: true });
 })(window);

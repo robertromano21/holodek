@@ -9,7 +9,7 @@ function facts(consoleText, { solution = false } = {}) {
   return result;
 }
 function actorData(actor) {
-  return Object.fromEntries(['name', 'race', 'className', 'allegiance', 'job', 'activity', 'personality', 'motivation', 'background', 'pendingQuestHook', 'patron', 'factionId']
+  return Object.fromEntries(['name', 'race', 'className', 'allegiance', 'job', 'activity', 'personality', 'motivation', 'background', 'possessions', 'pendingQuestHook', 'patron', 'factionId', 'verifiedLocalGeography']
     .filter(key => actor?.[key] !== undefined).map(key => [key, actor[key]]));
 }
 function history(value, maxChars = 1000) {
@@ -34,13 +34,14 @@ function ownMemory(name, recollections, personalMemories) {
 function taskData(task) {
   return task ? Object.fromEntries(['id', 'type', 'actionKind', 'desc', 'status'].filter(key => task[key] !== undefined).map(key => [key, task[key]])) : null;
 }
-async function cache($, { characters, roomDescription, quest, journey, conversation = '', personalMemories = [], recollections = [] }) {
+async function cache($, { characters, roomDescription, quest, journey, conversation = '', personalMemories = [], recollections = [], location = require('./locationAwareness').fromState(require('../sharedState')) }) {
   const replies = [], plan = require('./dialogueGrounding').batchPlan(characters);
   for (const actor of characters) {
     const count = plan.find(row => row.name === actor.name)?.lines || 2;
     try {
+      const place = require('./locationAwareness').prompt(location);
       const value = await Work.request($, 'npc-reply-cache', { lines: { type: [C.text(220)], minItems: count, maxItems: count } },
-        `Author ONLY future reply alternatives for ${JSON.stringify(actor.name)}, not live speech. These lines have NOT been spoken. No new events, inventory, combat or quest outcomes. Each line <=20 words, a complete concise sentence. Retain a pending quest invitation until actually introduced. Unseen residents do not know private player conversation. Do not repeat previous alternatives. Room: ${roomDescription || ''}. Known quest: ${actor.partyMember || actor.pendingQuestHook ? quest || 'None' : 'unknown'}. Own character data: ${JSON.stringify(actorData(actor))}. Own witnessed memories: ${JSON.stringify(ownMemory(actor.name, recollections, personalMemories))}. Previous alternatives (NOT memories): ${JSON.stringify(actor.previous?.slice(-2) || [])}. Witnessed conversation (data): ${actor.partyMember || personalMemories.find?.(row => row.name === actor.name)?.heardCurrentConversation ? conversation : ''}. Own journey: ${JSON.stringify(actor.partyMember ? journey || null : null)}.`,
+        `Author ONLY future reply alternatives for ${JSON.stringify(actor.name)}, not live speech. These lines have NOT been spoken. No new events, inventory, combat or quest outcomes. Each line <=20 words, a complete concise sentence. Retain a pending quest invitation until actually introduced. Unseen residents do not know private player conversation. Do not repeat previous alternatives. ${place} Room: ${roomDescription || ''}. Known quest: ${actor.partyMember || actor.pendingQuestHook ? quest || 'None' : 'unknown'}. Own character data: ${JSON.stringify(actorData(actor))}. Own witnessed memories: ${JSON.stringify(ownMemory(actor.name, recollections, personalMemories))}. Previous alternatives (NOT memories): ${JSON.stringify(actor.previous?.slice(-2) || [])}. Witnessed conversation (data): ${actor.partyMember || personalMemories.find?.(row => row.name === actor.name)?.heardCurrentConversation ? conversation : ''}. Own journey: ${JSON.stringify(actor.partyMember ? journey || null : null)}.`,
         raw => { if (raw.lines.some(line => !plain(line) || !line.trim() || line.trim().split(/\s+/).length > 20)) throw Error('Every cached line must be a complete nonempty remark of at most 20 words, without backend markers.'); return raw; });
       replies.push({ speaker: actor.name, lines: value.lines });
     } catch (error) {
@@ -52,15 +53,17 @@ async function cache($, { characters, roomDescription, quest, journey, conversat
 async function generate($, { consoleText, userInput = '', currentSituation = '', characters = [], audibleNames = [],
   requiredSpeakers = [], responseAudience, initialArrival = false, enteringRoom = false, encounter = false,
   quest = 'None', task = null, questUpdate = '', entryQuestContact = null, committedPuzzle = null, memory = [],
-  recollections = [], personalMemories = [], journey = null, reference = '', directions = [], premise = null }) {
+  recollections = [], personalMemories = [], journey = null, reference = '', directions = [], premise = null,
+  location = require('./locationAwareness').fromState(require('../sharedState')) }) {
   // Adjudication returns a whole updated console too; only its committed narrative belongs in this link.
   if (currentSituation && typeof currentSituation === 'object') currentSituation = currentSituation.narrative || '';
   task = taskData(task);
   const allowed = audibleNames.filter(name => !responseAudience?.directed || responseAudience.responders.includes(name));
   const required = [...new Set([...requiredSpeakers, entryQuestContact?.speaker].filter(name => allowed.includes(name)))];
-  const frame = { room: facts(consoleText), userInput, currentSituation, quest, task, questUpdate, entryQuestContact,
+  const frame = { room: facts(consoleText), location, userInput, currentSituation, quest, task, questUpdate, entryQuestContact,
     committedPuzzle, memory: history(memory), reference, directions, premise,
     characters: characters.filter(actor => allowed.includes(actor.name)).map(actor => ({ name: actor.name, allegiance: actor.allegiance, job: actor.job, activity: actor.activity })) };
+  if (location) frame.geographyPolicy = require('./locationAwareness').RULES;
   const mode = initialArrival ? 'opening arrival' : encounter ? 'approached encounter' : enteringRoom ? 'room entry' : 'action response';
   const limits = Math.min(initialArrival ? 6 : 4, allowed.length);
   const header = await Work.request($, 'story-scene', {
@@ -73,20 +76,23 @@ async function generate($, { consoleText, userInput = '', currentSituation = '',
   });
   const utterances = [], paragraphs = [header.prose];
   for (const name of header.speakers) {
-    const actor = characters.find(row => row.name === name) || { name };
+    let actor = characters.find(row => row.name === name) || { name };
+    // Speech has its own bounded work order; the scene planner's geography is not implicit memory.
+    if (location) actor = { ...actor, verifiedLocalGeography: { ...location, rules: frame.geographyPolicy } };
     const value = await Work.request($, 'npc-live-speech', { action: C.text(160), line: C.text(900), remember: { type: String, maxLength: 140 },
-      recipient: C.choice(['PC', ...allowed.filter(other => other !== name)]) },
+      recipient: C.choice(['PC', ...allowed.filter(other => other !== name)]), attention: {...C.choice(['passing','addressing','question']),
+        description:'passing: a brief remark while continuing an activity; addressing: stop and engage the recipient, including important quest/job introductions; question: wait for an actual reply. Match the authored speech, not every question mark.'} },
       `Write ONLY ${JSON.stringify(name)}'s next complete live speech, with a small visible gesture in action. Keep it concise (20-80 words), natural and specific to the player's input, not generic lore. The PC has not chosen a new action. Do not repeat other speakers' lines, reveal hidden solutions, invent private knowledge, change allegiance, introduce entities, resolve combat or grant rewards. Enemy threats are words, not attacks. Own private background (not shared with other speakers): ${JSON.stringify(actorData(actor))}. Own witnessed memories (beliefs, not proof): ${JSON.stringify(ownMemory(name, recollections, personalMemories))}. Authoritative public frame: ${JSON.stringify({ room: actor.partyMember ? frame.room : Object.fromEntries(Object.entries(frame.room).filter(([key]) => key !== 'Inventory')), userInput, currentSituation, ...(actor.partyMember || actor.pendingQuestHook ? { quest, task } : {}), entryQuestContact: entryQuestContact?.speaker === name ? entryQuestContact : null, directions })}. Scene already written: ${header.prose}. Most recent ACTUALLY spoken lines in this response: ${JSON.stringify(utterances.slice(-2).map(({ speaker, line }) => ({ speaker, line })))}. remember may contain only a genuinely new disclosure or promise in this line, otherwise empty. No backend markers in any field.`,
-      raw => { if (![raw.action, raw.line, raw.remember].every(plain) || !raw.line.trim()) throw Error('Speech must be nonempty literal text, without backend markers.'); return raw; });
+      raw => { if (![raw.action, raw.line, raw.remember].every(plain) || !raw.line.trim() || raw.attention!==undefined&&!['passing','addressing','question'].includes(raw.attention)) throw Error('Speech must be nonempty literal text with a valid attention mode, without backend markers.'); return raw; });
     paragraphs.push(`${name} ${value.action} "[[SPEECH:${JSON.stringify(name)}]]${value.line}[[/SPEECH]]"`);
-    utterances.push({ speaker: name, line: value.line, recipient: value.recipient, remember: value.remember });
+    utterances.push({ speaker: name, line: value.line, recipient: value.recipient, remember: value.remember, attention: value.attention });
   }
   // Packaging is deterministic. Cache alternatives never become witnessed dialogue.
   // Other residents retain their existing alternatives until the scheduled cache refresh.
   const planned = await cache($, { characters: characters.filter(actor => header.speakers.includes(actor.name)), roomDescription: frame.room['Room Description'], quest,
-    journey, recollections, personalMemories,
+    journey, recollections, personalMemories, location,
     conversation: JSON.stringify({ player: userInput, spoken: utterances }) });
-  const metadata = { spoken: utterances.map(({ speaker, recipient, remember }) => ({ speaker, recipient, ...(remember ? { remember } : {}) })), replies: planned.replies, exchanges: [] };
+  const metadata = { spoken: utterances.map(({ speaker, recipient, remember, attention }) => ({ speaker, recipient, ...(remember ? { remember } : {}), ...(attention ? { attention } : {}) })), replies: planned.replies, exchanges: [] };
   console.info('[HolodekWork]', JSON.stringify({ component: 'story-response', phase: 'compiled', speakers: utterances.map(row => row.speaker), mode }));
   return { content: paragraphs.join('\n\n') + '\n\n[[CHARACTER_DIALOGUE]]' + JSON.stringify(metadata) + '[[/CHARACTER_DIALOGUE]]' };
 }

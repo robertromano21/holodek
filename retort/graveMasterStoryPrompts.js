@@ -17,7 +17,8 @@ function settingOnce($) { // returns the block the first time per conversation o
   return '\n' + SHORT_SETTING;
 }
 function isHolodek1() { try { return require('./gameModels').snapshot().id === 'holodek-1'; } catch { return false; } }
-function appendOriginal($, { full = false } = {}) {
+function appendOriginal($, { full = false, canonical = false } = {}) {
+  if (!canonical && !cotgPlay()) { require('./homebrewStoryPrompts').appendOriginal($); return; }
   if (!full && isHolodek1()) { $.user`${SHORT_GM}${settingOnce($)}`; return; }
   $.user`${require('./underworldLore').GUIDANCE}`;
   $.user`Instructions for the Grave Master:
@@ -90,7 +91,12 @@ Backend Integration: Programmatic vs. Narrative Handling`;
 }
 
 function appendStory($, { roomName, activeTask = null, questUpdate = '', currentSituation = '',
-  questJustSeeded = false, updatedGameConsole = '', sharedState, parseNpcPartyNamesFromConsole, full = false }) {
+  questJustSeeded = false, updatedGameConsole = '', sharedState, parseNpcPartyNamesFromConsole, full = false, canonical = false }) {
+  if (!canonical && !cotgPlay()) {
+    require('./homebrewStoryPrompts').appendStory($, { roomName, activeTask, questUpdate, questJustSeeded,
+      updatedGameConsole, sharedState, parseNpcPartyNamesFromConsole });
+    return;
+  }
   if (!full && isHolodek1()) { // holodek-1 only: compact turn rules; relevant long sections are retrieved by holodekPromptRecall.
     let task = activeTask, party = '';
     try { if (!task && questJustSeeded) task = (sharedState.getCurrentTasks() || [])[sharedState.getCurrentTaskIndex()] || null; } catch {}

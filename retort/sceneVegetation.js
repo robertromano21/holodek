@@ -9,17 +9,24 @@ function prepareSceneVegetation(spec = {}, options = {}) {
     /mire|swamp|marsh|river|stream|wetland/.test(text) ? 'wetland' :
     /lava|volcanic|furnace|ember|scorched/.test(text) ? 'scorched' :
     /sand dune|desert|sandstorm/.test(text) ? 'arid' : 'wasteland';
-  const enabled = options.enabled !== false && spec.indoor === false &&
+  const urban=!!spec.city||spec.biome==='city'||spec.architecture==='city_street';
+  const recipe=require('./biomeRecipes').resolve(spec);
+  if(recipe)spec.biomeRecipe={id:recipe.id,terrain:recipe.terrain,vegetation:recipe.vegetation};
+  const explicitPlants=/\b(tree|trees|grove|forest|planted|garden|gardens|park|parks|overgrown|reeds)\b/.test(text);
+  const enabled = options.enabled !== false && spec.indoor === false && (!urban||explicitPlants) && (!recipe||!['none','arid'].includes(recipe.vegetation)) &&
     !/\b(barren of vegetation|no trees|treeless|no plants|without vegetation)\b/.test(text);
   spec.vegetationPlan = { version: VERSION, enabled, profile,
     evidence: /tree|grove|thorn|bramble|forest|reeds/.test(text) ? 'description' : 'outdoor-biome',
-    species: profile === 'oasis' ? ['willow', 'oak', 'cypress'] : V.deadTrees,
+    species: recipe?.vegetation==='living'||profile === 'oasis' ? ['willow', 'oak', 'cypress'] : recipe?.vegetation==='reeds' ? ['ash_reeds'] : V.deadTrees,
     scrub: profile === 'oasis' ? ['reed_tussock'] : V.scrubShapes, variantsPerSpecies: 4, maxPlants: profile === 'grove' ? 144 : profile === 'arid' ? 64 : 112 };
+  if(recipe?.vegetation==='living')spec.vegetationPlan.profile='oasis';
+  if(recipe?.vegetation==='reeds'){spec.vegetationPlan.profile='wetland';spec.vegetationPlan.scrub=['ash_reeds'];spec.vegetationPlan.maxPlants=48;}
+  if(Array.isArray(spec.landmarks))spec.landmarks=spec.landmarks.filter(l=>!l.fromVegetationPlan);
   if (!enabled) return spec.vegetationPlan;
   spec.landmarks ||= [];
   for (const type of [...spec.vegetationPlan.species, ...spec.vegetationPlan.scrub]) {
     if (!spec.landmarks.some(l => l.type === type)) spec.landmarks.push({ type, label: type.replace(/_/g, ' '),
-      count: 1, condition: [], placement: 'groves', fromVegetation: true });
+      count: 1, condition: [], placement: 'groves', fromVegetation: true, fromVegetationPlan:true });
   }
   return spec.vegetationPlan;
 }
@@ -79,7 +86,7 @@ function applySceneVegetation(dungeon, spec = {}) {
       const x = Math.round(center.x + (rnd() - 0.5) * 24), y = Math.round(center.y + (rnd() - 0.5) * 24);
       if (!safe(x, y)) continue;
       const isTree = rnd() < (plan.profile === 'grove' ? 0.65 : 0.5);
-      const species = isTree ? plan.species : plan.profile === 'oasis' ? plan.scrub : plan.profile === 'wetland' ? ['ash_reeds', 'bramble_patch', 'thorn_bush'] : ['thorn_bush', 'bramble_patch'];
+      const species = isTree ? plan.species : spec.biomeRecipe ? plan.scrub : plan.profile === 'oasis' ? plan.scrub : plan.profile === 'wetland' ? ['ash_reeds', 'bramble_patch', 'thorn_bush'] : ['thorn_bush', 'bramble_patch'];
       // Rotate the first tree in each patch through the seven silhouettes, then vary freely.
       const shape = species[isTree && patch.trees === 0 ? group % species.length : Math.floor(rnd() * species.length)];
       const variant = Math.floor(rnd() * plan.variantsPerSpecies), tile = tileFor(shape, variant);

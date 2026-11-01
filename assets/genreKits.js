@@ -74,6 +74,8 @@
     for (const [genre, kit] of Object.entries(GENRES)) {
       kit.building = [...new Set([...kit.building, ...['house','hall','gate','tower','column','shrine'].map(role => `x_${genre}_${role}`)])];
       kit.props = [...new Set([...kit.props, `x_${genre}_stall`, `x_${genre}_utility`])];
+      kit.building.push(...Object.entries(Expansion.SHAPES).filter(([, info])=>info.genre===genre&&info.architecturalDesign&&!info.furnishing).map(([id])=>id));
+      kit.props.push(...Object.entries(Expansion.SHAPES).filter(([, info]) => info.genre === genre && info.furnishing).map(([id]) => id));
     }
     for (const [name, genre] of Object.entries(Expansion.COTG)) GENRES[genre].building.push(`x_${name}`);
   }
@@ -87,8 +89,8 @@
     const homebrew = !!(setting && setting.seed && setting.genres);
     // Weighted list: homebrew bible (primary first) or the room/realm's own genre; CotG locks to fantasy-family.
     let mix = homebrew ? (setting.genreWeights || setting.genres.map(g => ({ genre: g, weight: 1 / setting.genres.length }))).map(x => ({ genre: genreOf(x.genre), weight: x.weight })).filter(x => x.genre) : [];
-    const own = genreOf(room.genreKit?.genre || room.planarRealm?.genre || room.genre);
-    if (own && (homebrew || COTG_ALLOWED.includes(own))) mix = [{ genre: own, weight: 1 }, ...mix.filter(x => x.genre !== own).map(x => ({ ...x, weight: x.weight * .5 }))];
+    const own = genreOf(room.planarRealm?.genre || room.genre || room.genreKit?.genre);
+    if (own && (homebrew ? mix.some(x => x.genre === own) || !!room.planarRealm?.genre : COTG_ALLOWED.includes(own))) mix = [{ genre: own, weight: 1 }, ...mix.filter(x => x.genre !== own).map(x => ({ ...x, weight: x.weight * .5 }))];
     if (!homebrew) mix = mix.filter(x => COTG_ALLOWED.includes(x.genre));
     if (!mix.length) mix = [{ genre: room.planarRealm && own ? 'dark-fantasy' : 'fantasy', weight: 1 }];
     const total = mix.reduce((t, x) => t + x.weight, 0); mix = mix.map(x => ({ ...x, weight: x.weight / total }));
@@ -161,10 +163,46 @@
     g_desk: [B(.1, .3, .4, .9, .7, .48, 2), B(.12, .32, 0, .2, .4, .4, 2), B(.8, .6, 0, .88, .68, .4, 2), B(.6, .4, .48, .7, .5, .56, 3)], g_hanging_bulb: [B(.49, .49, .7, .51, .51, 1, 2), B(.45, .45, .62, .55, .55, .7, 3)],
     g_blind_window: [B(0, .45, 0, 1, .55, 1, 1), ...[.25, .35, .45, .55, .65].map(z => B(.15, .44, z, .85, .45, z + .05, 3))]
   };
+  // Structural pieces are registered for the base kits too, not only the optional expansion.
+  let structuralIndex = 0;
+  for (const [genre, kit] of Object.entries(GENRES)) {
+    const technical = ['sci-fi', 'cyberpunk', 'modern', 'noir', 'dieselpunk', 'steampunk', 'underwater'].includes(genre);
+    const pieces = {
+      support: technical ? [B(.32,.32,0,.68,.68,1,2), B(.24,.24,.12,.76,.76,.19,1), B(.24,.24,.81,.76,.76,.88,1)] :
+        [B(.3,.3,0,.7,.7,1,2), B(.24,.24,.86,.76,.76,.96,1)],
+      beam: technical ? [B(0,.15,0,1,.85,.17,2), B(0,.4,.17,1,.6,.83,2), B(0,.15,.83,1,.85,1,2)] : [B(0,.1,0,1,.9,1,2)],
+      roof_panel: [B(0,0,.18,1,1,.82,2), B(.1,.1,0,.18,.9,.18,2)],
+      window: [B(.08,.32,.12,.2,.68,.94,2), B(.8,.32,.12,.92,.68,.94,2),
+        B(.08,.3,.12,.92,.7,.23,2), B(.08,.3,.85,.92,.7,.96,2),
+        B(.2,.48,.24,.8,.52,.84,3)],
+      doorframe: [B(.04,.24,0,.2,.76,1,2), B(.8,.24,0,.96,.76,1,2),
+        B(.04,.24,.84,.96,.76,1,2), B(.02,.18,0,.24,.82,.09,1), B(.76,.18,0,.98,.82,.09,1)],
+      canopy: [B(0,0,.76,1,1,.9,2), B(.08,.06,0,.18,.16,.8,2), B(.82,.06,0,.92,.16,.8,2),
+        B(0,.02,.9,1,.12,1,1)],
+      trim: [B(0,.34,.2,1,.66,.35,2), B(0,.24,.35,1,.76,.5,1), B(0,.34,.5,1,.66,.65,2)]
+    };
+    for (const [role, boxes] of Object.entries(pieces)) {
+      const id = `g_${genre}_${role}`;
+      const x = .04 + (structuralIndex % 8) * .1, z = Math.floor(structuralIndex / 8) * .1;
+      // Joined brackets/ribs distinguish related kits without detached marker voxels.
+      if (role === 'support') boxes.push(B(.22, .28 + (structuralIndex % 8) * .05, .02, .4, .36 + (structuralIndex % 8) * .05, .15 + z, 1));
+      else if (role === 'beam') boxes.push(B(x, .04, .05, x + .08, .45, .2 + z, 1));
+      else if (role === 'roof_panel') boxes.push(B(x, .05, .08, x + .08, .95, .25 + z, 1));
+      else if (role === 'window') {
+        const inset = .3 + (structuralIndex % 4) * .1;
+        boxes.push(B(inset, .3, .22, inset + .04, .7, .86, 2));
+        if (!technical) boxes.push(B(.18, .3, .45, .82, .7, .51, 2));
+      } else if (role === 'doorframe') boxes.push(B(.1, .18, .18 + z, .24, .3, .26 + z, technical ? 3 : 1));
+      else if (role === 'canopy') for (let i = 0; i < 4; i++) boxes.push(B(.08 + i * .24, 0, .9, .13 + i * .24, 1, .96, technical ? 3 : 1));
+      else boxes.push(B(x, .18, .3, x + .08, .82, .55, 1));
+      PARTS[id] = boxes; kit.building.push(id);
+    }
+    structuralIndex++;
+  }
   const OWNER = {}; for (const [g, k] of Object.entries(GENRES)) for (const s of [...k.props, ...k.building]) if (PARTS[s]) (OWNER[s] ||= []).push(g);
   // Thin trim strips can collapse into the wall at 16^3; give any colliding piece a small unique relief so every shape keeps distinct geometry.
   { const seen = new Set(), key = sh => { const v = new Uint8Array(4096); for (const b of PARTS[sh]) for (let z = Math.floor(b.z0 * 16); z < Math.max(Math.floor(b.z0 * 16) + 1, Math.ceil(b.z1 * 16)); z++) for (let y = Math.floor(b.y0 * 16); y < Math.max(Math.floor(b.y0 * 16) + 1, Math.ceil(b.y1 * 16)); y++) for (let x = Math.floor(b.x0 * 16); x < Math.max(Math.floor(b.x0 * 16) + 1, Math.ceil(b.x1 * 16)); x++) if (x < 16 && y < 16 && z < 16) v[x + y * 16 + z * 256] = 1; return v.join(''); };
-    let i = 0; for (const sh of Object.keys(PARTS)) { let k = key(sh); while (seen.has(k)) { const x = (i % 12 + 2) / 16, z = (Math.floor(i / 12) % 12 + 2) / 16; PARTS[sh].push(B(x, .3, z, x + .07, .4, z + .07, 3)); i++; k = key(sh); } seen.add(k); } }
+    let i = 0; for (const sh of Object.keys(PARTS)) { let k = key(sh); if (/_(support|beam|roof_panel|window|doorframe|canopy|trim)$/.test(sh)) { seen.add(k); continue; } while (seen.has(k)) { const x = (i % 12 + 2) / 16, z = (Math.floor(i / 12) % 12 + 2) / 16; PARTS[sh].push(B(x, .3, z, x + .07, .4, z + .07, 3)); i++; k = key(sh); } seen.add(k); } }
   if (expanded && Expansion) for (const [name, spec] of Object.entries(Expansion.SHAPES)) OWNER[name] = [spec.genre];
   const SHAPES = [...Object.keys(PARTS), ...(expanded && Expansion ? Object.keys(Expansion.SHAPES) : [])];
   const has = s => !!PARTS[s] || !!(expanded && Expansion?.has(s));
@@ -185,8 +223,18 @@
     const k = (normal[2] > .5 ? 1.08 : normal[0] + normal[1] > 0 ? .92 : .78) * (m === 3 ? 1.15 : 1) * (Math.floor((x + y + z) * 16) % 7 === 0 ? .9 : 1);
     return rgb(hex).map(v => Math.min(1, v / 255 * k));
   }
-  const emissive = shape => (PARTS[shape] || []).some(b => b.m === 3) && /lamp|candle|neon|beacon|rune|crystal|brazier|fire|bulb|sign|eldritch|console|arc/.test(shape);
+  const emissive = shape => Expansion?.SHAPES[shape]?.role === 'light' ||
+    ((PARTS[shape] || []).some(b => b.m === 3) && /lamp|candle|neon|beacon|rune|crystal|brazier|fire|bulb|sign|eldritch|console|arc/.test(shape));
   // Children of the Grave compatibility: a prefab is tagged when every genre that owns it is fantasy-family.
   const COTG_TAGS = SHAPES.filter(s => (OWNER[s] || []).some(g => COTG_ALLOWED.includes(g)) && !/console|neon|vending|cargo|bulkhead|airlock|beacon|pipe|street_lamp|dumpster|bench|storefront|concrete|desk|bulb|blind|scrap|wreck|rebar|barrel_fire|boiler|gear|girder|foundry|arc_lamp|saloon|water_tower|hitching|boardwalk|false_front|cannon|ship_wheel/.test(s));
-  return { GENRES, ALIASES, PLANS, HELD, PARTS, SHAPES, OWNER, COTG_ALLOWED, COTG_TAGS, genreOf, resolve, characterSpec, gearHook, has, build, color, emissive, snap };
+  function paint(ctx, shape, x, y, width, height) {
+    if (!has(shape) || !Expansion?.paintVoxels) return false;
+    const palette = GENRES[OWNER[shape]?.[0]]?.palette || GENRES.fantasy.palette;
+    const frame={size:24,voxels:build(shape,24)};
+    if(Expansion.SHAPES[shape]?.architecturalDesign || Expansion.SHAPES[shape]?.furnishing || Expansion.SHAPES[shape]?.role === 'light'){frame.colors=new Float32Array(24**3*3);for(let z=0;z<24;z++)for(let yy=0;yy<24;yy++)for(let xx=0;xx<24;xx++){const index=xx+yy*24+z*24*24;if(frame.voxels[index])frame.colors.set(Expansion.color(shape,(xx+.5)/24,(yy+.5)/24,(z+.5)/24,[0,0,1]),index*3);}}
+    Expansion.paintVoxels(ctx, frame, x, y, width, height,
+      ['primary','secondary','highlight','shadow','skin','accent'].map(key => palette[key]));
+    return true;
+  }
+  return { GENRES, ALIASES, PLANS, HELD, PARTS, SHAPES, OWNER, COTG_ALLOWED, COTG_TAGS, genreOf, resolve, characterSpec, gearHook, has, build, color, paint, emissive, snap };
 });

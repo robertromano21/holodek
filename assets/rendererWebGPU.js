@@ -329,6 +329,7 @@ struct TorchLitResult {
   shadowBlend : f32,
   primaryDir2D : vec2<f32>,
   primaryStrength : f32,
+  chromatic : vec3<f32>,
 };
 
 struct WorldVsOut {
@@ -887,6 +888,7 @@ fn accumulateTorchLit(
 ) -> TorchLitResult {
   let surfaceIsFloor = abs(surfaceNormal2D.x) < 0.1 && abs(surfaceNormal2D.y) < 0.1;
   var total = 0.0;
+  var chromatic = vec3<f32>(0.0);
   var shadowBlend = 0.0;
   var primaryStrength = -1.0;
   var primaryShadow = 0.0;
@@ -941,7 +943,9 @@ fn accumulateTorchLit(
     if (dirLen > 1e-4) {
       dirSum2D = dirSum2D + (toLxy / dirLen) * rawStrength;
     }
-    total = total + (torchAmbient + ndotl * (1.0 - torchAmbient)) * atten;
+    let contribution = (torchAmbient + ndotl * (1.0 - torchAmbient)) * atten;
+    total = total + contribution;
+    chromatic = chromatic + light.intensityColor.yzw * contribution;
   }
   let combinedShadow = 1.0 - shadowStack;
   shadowBlend = select(primaryShadow, max(primaryShadow, combinedShadow), surfaceIsFloor);
@@ -959,7 +963,8 @@ fn accumulateTorchLit(
     primaryDir2D = normalize(params.lightDirElevIntensity.xy);
     primaryStrengthOut = 0.0;
   }
-  return TorchLitResult(total, shadowBlend, primaryDir2D, primaryStrengthOut);
+  chromatic = select(TORCH_COLOR, chromatic / max(total,0.0001), total > 0.0001);
+  return TorchLitResult(total, shadowBlend, primaryDir2D, primaryStrengthOut, chromatic);
 }
 
 fn globalDirectionalShade(normal : vec3<f32>) -> f32 {
@@ -1060,7 +1065,14 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
           let fracV = fract(worldZ);
           let wallX = select(params.camPos.x + nextDist * rayDir.x, params.camPos.y + nextDist * rayDir.y, steppedXPreview);
           let fracU = fract(wallX);
-          let tex = textureSampleLevel(floorTex, floorSamp, vec2<f32>(fracU, fracV), 0.0);
+          var tex = textureSampleLevel(floorTex, floorSamp, vec2<f32>(fracU, fracV), 0.0);
+          let stepCell = select(nextCell, currCell, currH > nextH);
+          let stepSurface = i32(stepCell.x * 255.0 + 0.5) - 1;
+          if (stepSurface >= 0) {
+            let cols = i32(params.atlasCounts.x); let rows = i32(params.atlasCounts.y);
+            let stepUV = (vec2<f32>(f32(stepSurface % cols), f32(stepSurface / cols)) + vec2<f32>(fracU, fracV)) / vec2<f32>(f32(cols), f32(rows));
+            tex = textureSampleLevel(wallAtlasTex, wallAtlasSamp, stepUV, 0.0);
+          }
           let normal = select(vec3<f32>(0.0, -f32(stepY), 0.0), vec3<f32>(-f32(stepX), 0.0, 0.0), steppedXPreview);
           let normal2D = select(vec2<f32>(0.0, -f32(stepY)), vec2<f32>(-f32(stepX), 0.0), steppedXPreview);
           let worldPos = vec3<f32>(params.camPos + rayDir * nextDist, worldZ);
@@ -1073,7 +1085,7 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
           }
           let torchLight = litSide * TORCH_LIGHT_SCALE;
           let warmShift = 0.75 + 0.45 * torchLight;
-          let torchAdd = TORCH_COLOR * vec3<f32>(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
+          let torchAdd = torch.chromatic * vec3<f32>(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
           var keyShadow = clamp(torch.shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
           keyShadow = keyShadow * smoothstep(0.06, 0.28, torchLight);
           keyShadow = keyShadow * viewShadowFade(nextDist);
@@ -1161,7 +1173,7 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
         let rowShade = litShade * grad;
         let torchLight = litWall * TORCH_LIGHT_SCALE;
         let warmShift = 0.75 + 0.45 * torchLight;
-        let torchAdd = TORCH_COLOR * vec3<f32>(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
+        let torchAdd = torch.chromatic * vec3<f32>(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
         var keyShadow = clamp(torch.shadowBlend * SHADOW_DARKEN, 0.0, SHADOW_DARKEN);
         keyShadow = keyShadow * smoothstep(0.06, 0.28, torchLight);
         keyShadow = keyShadow * viewShadowFade(perpDist);
@@ -1227,7 +1239,14 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
   let sideOccludes = sideHit;
   if (floorHit && (!sideOccludes || floorDist < sideDistClosest) && (!wallOccludes || floorDist < wallDist)) {
     let hitPos = vec3<f32>(params.camPos + rayDir * floorDist, floorH);
-    let tex = textureSampleLevel(floorTex, floorSamp, fract(hitPos.xy), 0.0);
+    var tex = textureSampleLevel(floorTex, floorSamp, fract(hitPos.xy), 0.0);
+    let floorCell = fetchCell(i32(floor(hitPos.x)), i32(floor(hitPos.y)));
+    let surfaceId = i32(floorCell.x * 255.0 + 0.5) - 1;
+    if (surfaceId >= 0 && floorCell.w < 0.999) {
+      let cols = i32(params.atlasCounts.x); let rows = i32(params.atlasCounts.y);
+      let surfaceUV = (vec2<f32>(f32(surfaceId % cols), f32(surfaceId / cols)) + fract(hitPos.xy)) / vec2<f32>(f32(cols), f32(rows));
+      tex = textureSampleLevel(wallAtlasTex, wallAtlasSamp, surfaceUV, 0.0);
+    }
     let torch = accumulateTorchLit(hitPos, vec3<f32>(0.0, 0.0, 1.0), i32(floor(hitPos.x)), i32(floor(hitPos.y)), vec2<f32>(0.0, 0.0));
     let litFloor = clamp(torch.lit * TORCH_FLOOR_BOOST, 0.0, 1.5);
     let shadowFloorVal = mix(0.3, 0.12, shadowStrength);
@@ -1237,7 +1256,7 @@ fn fsMain(@builtin(position) fragPos : vec4<f32>) -> WorldFsOut {
     }
     let torchLight = litFloor * TORCH_LIGHT_SCALE;
     let warmShift = 0.75 + 0.45 * torchLight;
-    let torchAdd = TORCH_COLOR * vec3<f32>(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
+    let torchAdd = torch.chromatic * vec3<f32>(0.35, 0.25 * warmShift, 0.2 * warmShift) * torchLight;
     let primaryStrength = torch.primaryStrength;
     let lightPresence = smoothstep(0.65, 1.5, primaryStrength);
     let shadowFade = smoothstep(0.5, 1.2, torchLight);
@@ -1281,7 +1300,7 @@ struct OverlaySpriteParams {
   lightDirElevIntensity : vec4<f32>, // dirX, dirY, elev, intensity
   spritePosHeight : vec4<f32>,       // x, y, z, height
   misc0 : vec4<f32>,                 // profile, depthAmount, spriteVFlip, depthShadeScale
-  misc1 : vec4<f32>,                 // depth, shadowStrength, torchCount, padding
+  misc1 : vec4<f32>,                 // depth, shadowStrength, torchCount, emissive
 };
 
 struct SpriteVsOut {
@@ -1348,6 +1367,10 @@ fn fsMain(in : SpriteVsOut) -> SpriteFsOut {
     discard;
   }
 
+  if (params.misc1.w > 0.5 && max(tex.r,max(tex.g,tex.b)) > 0.65) {
+    return SpriteFsOut(tex * params.tint, in.depth);
+  }
+
   var normal = vec3<f32>(0.0, 0.0, 1.0);
   if (params.misc0.x > 0.5) {
     let nx = (in.uv.x - 0.5) * 2.0;
@@ -1376,6 +1399,7 @@ fn fsMain(in : SpriteVsOut) -> SpriteFsOut {
 
   let torchCount = min(u32(max(0.0, params.misc1.z)), MAX_SPRITE_TORCH);
   var torchLit = 0.0;
+  var chromatic = vec3<f32>(0.0);
   for (var i : u32 = 0u; i < MAX_SPRITE_TORCH; i = i + 1u) {
     if (i >= torchCount) {
       break;
@@ -1393,11 +1417,13 @@ fn fsMain(in : SpriteVsOut) -> SpriteFsOut {
     let normDist = dist / max(lightRadius, 1e-4);
     let atten = torchLightFalloff(normDist) * light.intensityColor.x;
     let torchAmbient = 0.35;
-    torchLit += (torchAmbient + ndotlTorch * (1.0 - torchAmbient)) * atten;
+    let contribution = (torchAmbient + ndotlTorch * (1.0 - torchAmbient)) * atten;
+    torchLit += contribution;
+    chromatic += light.intensityColor.yzw * contribution;
   }
 
+  let torchColor = select(vec3<f32>(1.0,190.0/255.0,130.0/255.0),chromatic/max(torchLit,0.0001),torchLit>0.0001);
   torchLit = torchLit * 1.3;
-  let torchColor = vec3<f32>(1.0, 190.0 / 255.0, 130.0 / 255.0);
   let distanceShade = max(0.3, 1.0 - in.depth * params.misc0.w);
   let torchLight = torchLit * 0.6;
   let col = (tex.rgb * (shade + torchLight) + torchColor * torchLit * 0.35) * distanceShade;
@@ -3326,7 +3352,7 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         dv.setFloat32(96, Number.isFinite(sprite.depth) ? sprite.depth : 1.0, true);
         dv.setFloat32(100, Number.isFinite(frame.shadowStrength) ? frame.shadowStrength : 0.6, true);
         dv.setFloat32(104, this._torchCount >>> 0, true);
-        dv.setFloat32(108, 0.0, true);
+        dv.setFloat32(108, sprite.emissive ? 1.0 : 0.0, true);
 
         this._device.queue.writeBuffer(paramsBuffer, 0, this._overlaySpriteParamArrayBuffer);
         const useNoDepthWrite = forceNoDepthWrite || !!sprite.noDepthWrite;
@@ -3928,9 +3954,10 @@ fn csMain(@builtin(global_invocation_id) gid : vec3<u32>) {
         out[base + 2] = Number.isFinite(t.z) ? t.z : 0.0;
         out[base + 3] = Number.isFinite(t.radius) ? t.radius : 0.0;
         out[base + 4] = Number.isFinite(t.intensity) ? t.intensity : 0.0;
-        out[base + 5] = r;
-        out[base + 6] = g;
-        out[base + 7] = b;
+        const color=window.GenreLights?.rgb(t,{r:r*255,g:g*255,b:b*255}) || [r,g,b];
+        out[base + 5] = color[0];
+        out[base + 6] = color[1];
+        out[base + 7] = color[2];
       }
       const rectCount = Math.min(rects.length, this._rectCapacity);
       this._rectCount = rectCount;

@@ -1,6 +1,6 @@
 'use strict';
 
-const instructions = 'For NEW character, creature and item names, separate ordinary words and epithets with spaces. Do not join a phrase into CamelCase, a hyphen chain or an underscore identifier. A single invented proper name is fine. Use readable names, not code identifiers. Copy every EXISTING canonical name exactly; never respell or rename a saved character or item.';
+const instructions = 'For NEW character, creature and item names, separate ordinary words and epithets with spaces. Do not join a phrase into CamelCase, a hyphen chain or an underscore identifier. A single invented proper name is fine. Use readable names, not code identifiers. Vary first names, surnames, sound patterns and epithets against the supplied existing names; changing only one part is not a fresh identity. Culture and species inform names, not a fixed fantasy name list. Copy every EXISTING canonical name exactly; never respell or rename a saved character or item.';
 
 // Creation-time cleanup only. Never apply this to saved identity keys or lookups.
 function clean(value) {
@@ -8,4 +8,5 @@ function clean(value) {
     .replace(/[^\p{L}\p{N}\s']/gu, '').replace(/\s+/g, ' ').trim();
 }
 
-module.exports = { instructions, clean };
+const Procedural = require('../assets/proceduralNames');
+module.exports = { instructions, clean, generate: Procedural.generate };

@@ -3,6 +3,26 @@ const I = require('../assets/dungeonInhabitants');
 const Reach = require('./dungeonReach');
 const { randomUUID } = require('node:crypto');
 const norm = value => String(value || '').trim().toLowerCase();
+function attackTarget(state, input) {
+  const name = /^\s*attack\s+(.+?)\s*$/i.exec(String(input))?.[1];
+  if (!name) return null;
+  const coords = state.getLastCoords(), key = I.roomKey(coords && `${coords.x},${coords.y},${coords.z}`);
+  if (!key) return null;
+  let roster; try { roster = JSON.parse(state.getCombatCharactersString() || '[]'); } catch { return null; }
+  if (!Array.isArray(roster)) return null;
+  const population = state.getRoomPopulation?.(key);
+  const actors = roster.filter(a => a.type !== 'pc' && I.roomKey(a.mazeRoomKey) === key &&
+    a.discoveryState !== 'pending' && I.isPresent(a, population));
+  const exact = actors.filter(a => norm(a.name) === norm(name));
+  const matches = exact.length ? exact : actors.filter(a => norm(a.name).startsWith(norm(name)));
+  return matches.length === 1 ? matches[0] : null;
+}
+function friendsOf(actor) {
+  const names = [...(Array.isArray(actor?.friends) ? actor.friends : []), ...(Array.isArray(actor?.allies) ? actor.allies : [])];
+  for (const link of Array.isArray(actor?.relationships) ? actor.relationships : [])
+    if (/^(friend|ally|companion)$/i.test(link?.type || '')) names.push(link.name);
+  return new Set(names.filter(n => typeof n === 'string').map(norm));
+}
 function companionTarget(text, input) {
   const name = /^\s*attack\s+(.+?)\s*$/i.exec(String(input))?.[1];
   if (!name) return false;
@@ -18,7 +38,7 @@ function prepare(state, populations, input) {
   const roster = JSON.parse(state.getCombatCharactersString() || '[]');
   const coords = state.getLastCoords(), geoKey = I.roomKey(coords && `${coords.x},${coords.y},${coords.z}`);
   const dungeon = coords && state.getRoomDungeon(coords), pc = roster.find(a => a.type === 'pc');
-  const candidates = roster.filter(a => a.type !== 'pc' && a.discoveryState !== 'pending' && I.canAct(a));
+  const candidates = roster.filter(a => a.type !== 'pc' && I.roomKey(a.mazeRoomKey) === geoKey && a.discoveryState !== 'pending' && I.canAct(a));
   const exact = candidates.filter(a => norm(a.name) === norm(name));
   const matches = exact.length ? exact : candidates.filter(a => norm(a.name).startsWith(norm(name)));
   if (matches.length !== 1) return null;
@@ -30,7 +50,6 @@ function prepare(state, populations, input) {
       !I.lineClear(dungeon, space.point(pc), space.point(target))) return null;
   const formerCompanion = target.type === 'npc';
   let record = population.actors[target.name];
-  if (!formerCompanion && (record?.allegiance || I.allegiance(target)) === 'Hostile') return null;
   const eol = text.includes('\r\n') ? '\r\n' : '\n';
   if (formerCompanion) {
     const sheets = I.parseSheets(text, 'NPCs in Party'), sheet = sheets.find(a => norm(a.name) === norm(target.name));
@@ -66,15 +85,36 @@ function prepare(state, populations, input) {
     if (group) { group.status = 'discovered'; group.site ||= { x: target.mazeX, y: target.mazeY }; }
     target.type = 'monster';
   }
-  if (!record || record.status !== 'present') return null;
-  Object.assign(record, { allegiance: 'Hostile', state: 'Hostile', provokedBy: pc.name });
-  Object.assign(target, { allegiance: 'Hostile', state: 'Hostile', storedState: 'Hostile', encounterId: record.encounterId });
+  if (!record || record.status !== 'present' || !I.canAct(record)) return null;
+  const group = population.groups.find(g => g.id === record.encounterId), coalition = group?.provokedWith || record.encounterId;
+  const friends = friendsOf(record), defenders = [];
+  for (const ally of candidates) {
+    if (ally === target || ally.type !== 'monster' || !I.isPresent(ally, population)) continue;
+    const other = population.actors[ally.name];
+    if (!other || other.status !== 'present' || other.discoveryState === 'pending' || !I.canAct(other)) continue;
+    const allied = other.encounterId === record.encounterId || friends.has(norm(ally.name)) || friendsOf(other).has(norm(target.name));
+    const witnesses = [target, pc].some(a => space.distance(ally, a) <= (population.indoor ? 8 : 12) &&
+      I.lineClear(dungeon, space.point(ally), space.point(a)));
+    if (allied && witnesses) defenders.push({ actor: ally, record: other });
+  }
+  const changed = [], linked = [];
+  for (const entry of [{ actor: target, record }, ...defenders]) {
+    const actor = entry.actor, saved = entry.record;
+    if (saved.allegiance !== 'Hostile' || formerCompanion && actor === target) changed.push(actor.name);
+    Object.assign(saved, { allegiance: 'Hostile', state: 'Hostile', provokedBy: pc.name });
+    Object.assign(actor, { allegiance: 'Hostile', state: 'Hostile', storedState: 'Hostile', encounterId: saved.encounterId });
+    const team = population.groups.find(g => g.id === saved.encounterId);
+    if (team && team.provokedWith !== coalition) { team.provokedWith = coalition; linked.push(team.id); }
+  }
+  if (!changed.length && !linked.length) return null;
   population.revision++;
   state.setUpdatedGameConsole(I.withStates(text, population));
   state.setCombatCharactersString(JSON.stringify(roster));
   populations.save(population);
   return { type: 'realtime_combat_result', passive: true, eventId: randomUUID(), runId: state.getDungeonRunId(), geoKey,
-    content: `${target.name} becomes hostile after your attack${formerCompanion ? ' and leaves the party' : ''}.`,
+    content: `${target.name} ${changed.includes(target.name) ? 'becomes hostile after your attack' : 'is attacked'}${formerCompanion ? ' and leaves the party' : ''}.` +
+      (defenders.length ? ` ${defenders.map(d => d.actor.name).join(', ')} ${defenders.length === 1 ? 'joins' : 'join'} the fight in their defense.` : ''),
+    provoked: changed, defenders: defenders.map(d => d.actor.name),
     updatedGameConsole: state.getUpdatedGameConsole(), combatCharactersString: state.getCombatCharactersString(), population };
 }
-module.exports = { prepare, companionTarget };
+module.exports = { prepare, companionTarget, attackTarget };

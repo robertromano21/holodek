@@ -13,11 +13,11 @@
   <script defer src="/assets/gameUiPixels.js?v=pixel-chrome-1"></script>
   <script>/* world1: flags load synchronously so modules that read them at load time see them. */try{const x=new XMLHttpRequest();x.open("GET","/world1-flags",false);x.send();window.HolodekFlags=JSON.parse(x.responseText);}catch(e){window.HolodekFlags=window.HolodekFlags||{};}</script>
 <script src="/assets/designCatalog.js?v=world1-2"></script>
-<script src="/assets/libraryBooks.js?v=layout-cache-1"></script>
-<script src="/assets/bookReaderUi.js?v=world1-2"></script>
+<script src="/assets/libraryBooks.js?v=venue-reading-2"></script>
+<script src="/assets/bookReaderUi.js?v=venue-reading-2"></script>
 <script src="/assets/devSandbox.js?v=world1-expansion-1" defer></script>
 <script src="/assets/builderPaint.js?v=world1-1" defer></script>
-<script src="/assets/campaignBuilderUi.js?v=world1-expansion-1" defer></script>
+<script src="/assets/campaignBuilderUi.js?v=world1-expansion-1-window-reset-1" defer></script>
 <script src="/assets/consoleFontUi.js?v=font-choice-1"></script>
  <script src="/assets/gameSessionUi.js"></script>
  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
@@ -41,98 +41,123 @@
   <script src="/assets/frescoFigures.js"></script>
  <script src="/assets/mosaicDesigns.js"></script>
  <script src="/assets/surfaceArt.js?v=world1-1"></script>
- <script src="/assets/genreExpansion.js?v=world1-expansion-1"></script>
+<script src="/assets/genreFixtures.js?v=genre-fixtures-1"></script>
+<script src="/assets/cityBuildingFootprints.js?v=shared-envelopes-1"></script>
+<script src="/assets/genreFurnishings.js?v=genre-life-4"></script>
+<script src="/assets/architectureDesigns.js?v=architecture-designs-2"></script>
+<script src="/assets/urbanDesigns.js?v=urban-designs-1"></script>
+<script src="/assets/genreExpansion.js?v=urban-biomes-1-fixtures-2"></script>
  <script src="/assets/roomIllustration.js?v=world1-expansion-1"></script>
  <script src="/assets/artViewerUi.js?v=world1-1"></script>
  <script src="/assets/roomArtUi.js?v=remote-room-art-3"></script>
- <script src="/assets/artPresentation.js"></script>
- <script src="/assets/readableItems.js"></script>
+ <script src="/assets/artPresentation.js?v=genre-fixtures-1"></script>
+ <script src="/assets/readableItems.js?v=venue-reading-2"></script>
  <script src="/assets/physicalPuzzles.js"></script>
  <script src="/assets/commandIntent.js?v=planar-portals-1"></script>
  <script src="/assets/livingEnvironments.js"></script>
- <script defer src="/assets/worldInteractionUi.js?v=pickup-snapshot-2"></script>
+ <script defer src="/assets/worldInteractionUi.js?v=service-counter-1"></script>
  <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js?v=world1-expansion-1"></script>
- <script src="/assets/combatCharacterUi.js?v=downed-aid-2"></script>
+ <script src="/assets/combatCharacterUi.js?v=service-invitation-1"></script>
  <script src="/assets/itemGiveUi.js"></script>
 <script src="/assets/questSceneUi.js"></script>
  <script src="/assets/objectDiscovery.js?v=exploration-icons-1"></script>
  <script src="/assets/gameLogContent.js"></script>
 <script src="/assets/writingDiscovery.js"></script>
  <script src="/assets/partyRoster.js"></script>
- <script src="/assets/combatTurnUi.js?v=combined-20261022"></script>
+  <script src="/assets/combatTurnUi.js?v=turn-equipment-1"></script>
  <script src="/assets/combatFootprint.js?v=centered-2"></script>
- <script src="/assets/combatTacticalUi.js?v=downed-aid-ledger-9"></script>
+ <script src="/assets/windowUi.js?v=owned-cancel-cleanup-3"></script>
+ <script src="/assets/combatTacticalUi.js?v=compact-resize-fill-1-team-edges-5-room-ids"></script>
  <script src="/assets/actionDiceUi.js?v=turn-choice-prompt-5"></script>
  <script src="/assets/roomDatabaseSync.js"></script>
  <script src="/assets/characterStartup.js"></script>
- <script src="/assets/cityKit.js?v=world1-1"></script>
-<script src="/assets/genreKits.js?v=world1-expansion-1"></script>
-<script src="/assets/genreLights.js?v=world1-1"></script>
+ <script src="/assets/cityKit.js?v=native-dome-profile-2"></script>
+<script src="/assets/cityArchitectureStyles.js?v=native-classical-facades-3"></script>
+<script src="/assets/genreKits.js?v=architecture-designs-1-fixtures-2"></script>
+<script src="/assets/genreLights.js?v=genre-fixtures-2"></script>
 <script src="/assets/genreArchitecture.js?v=world1-expansion-1"></script>
-<script src="/assets/scenePropVoxels.js?v=world1-expansion-1"></script>
+<script src="/assets/scenePropVoxels.js?v=native-classical-roofs-2"></script>
  <script src="/assets/sceneExteriorDetails.js"></script>
 <script src="/assets/voxelCollision.js"></script>
 <script src="/assets/terrainCamera.js"></script>
 
-<script src="/assets/dungeonExits.js?v=world1-2"></script>
+<script src="/assets/dungeonExits.js?v=finalized-exits-2"></script>
 <script src="/assets/outdoorRoutes.js?v=planar-portals-1"></script>
-<script src="/assets/dungeonCartography.js?v=discovered-items-1"></script>
-<script src="/assets/landmarkCatalog.js"></script>
-<script src="/assets/areaTitleUi.js"></script>
+<script src="/assets/dungeonCartography.js?v=city-levels-1"></script>
+<script src="/assets/cityEstablishments.js?v=service-capabilities-2"></script>
+<script src="/assets/cityServiceCounters.js?v=service-counter-2"></script>
+<script src="/assets/landmarkCatalog.js?v=service-capabilities-2"></script>
+<script src="/assets/areaTitleUi.js?v=service-landmarks-1"></script>
 <script src="/assets/compassUi.js"></script>
-<script src="/assets/questMap.js?v=world1-1"></script>
+<script src="/assets/dungeonPerformance.js?v=city-caches-1"></script>
+<script src="/assets/questMap.js?v=city-caches-1"></script>
 <script src="/assets/roomArrival.js?v=entry-anchor-1"></script>
-<script src="/assets/explorationMapUi.js?v=readable-map-2"></script>
-<script src="/assets/inventoryUi.js"></script>
-<script src="/assets/adventureJournalUi.js"></script>
+<script src="/assets/cityLevelMap.js?v=city-levels-1"></script>
+<script src="/assets/explorationMapUi.js?v=city-levels-1"></script>
+<script src="/assets/inventoryUi.js?v=turn-equipment-1"></script>
+<script src="/assets/adventureJournalUi.js?v=window-reset-1"></script>
 <script src="/assets/rangedRules.js?v=world1-1"></script>
 <script src="/assets/rangedFx.js?v=world1-1" defer></script>
-<script src="/assets/resourceLabelUi.js?v=world1-1" defer></script>
+<script src="/assets/currencyLanguage.js?v=world-currency-1"></script>
+<script src="/assets/resourceLabelUi.js?v=genre-resources-4" defer></script>
 <script src="/assets/equipmentRules.js"></script>
 <script src="/assets/economyRules.js"></script>
-<script src="/assets/commerceUi.js?v=pickup-snapshot-2"></script>
-<script src="/assets/combatLifeUi.js"></script>
+<script src="/assets/commerceUi.js?v=service-handoff-2"></script>
+<script src="/assets/gameOverStartUi.js?v=ended-run-start-menu-1"></script>
+<script src="/assets/combatLifeUi.js?v=game-over-start-menu-3"></script>
 <script src="/assets/secretDoorsUi.js"></script>
 <script src="/assets/spellRules.js"></script>
-<script src="/assets/spellUi.js?v=combined-20261022"></script>
-<script src="/assets/partySpellbookUi.js?v=combined-20261022"></script>
-<script src="/assets/itemInteractionUi.js?v=pickup-snapshot-4"></script>
+<script src="/assets/abilityLanguage.js?v=genre-abilities-1"></script>
+<script src="/assets/spellUi.js?v=genre-abilities-1-resident-healing-2"></script>
+<script src="/assets/partySpellbookUi.js?v=genre-abilities-1-window-reset-1"></script>
+<script src="/assets/itemInteractionUi.js?v=pickup-retry-5"></script>
 <link rel="stylesheet" href="/assets/playerControls.css?v=graphics-layout-1">
-<script src="/assets/playerControls.js?v=controller-default-off-1"></script>
+<script src="/assets/playerControls.js?v=command-walking-1"></script>
 <script src="/assets/mapShortcutUi.js"></script>
 <script src="/assets/gameMenuUi.js?v=retro-choices-1"></script>
 <script src="/assets/retroDetails.js?v=retro-ink-3"></script>
 <script src="/assets/retroGraphics.js?v=retro-widescreen-1"></script>
 <script src="/assets/graphicsSettings.js?v=combined-20261022"></script>
 <script src="/assets/gameModelUi.js?v=combined-20261022"></script>
-<script src="/assets/websiteAiUi.js?v=website-room-pool-2"></script>
-<script src="/assets/roomEntry.js?v=seamless-1"></script>
+<script src="/assets/websiteAiUi.js?v=local-room-helpers-1"></script>
+<script src="/assets/roomEntry.js?v=room-entry-recovery-1"></script>
+<script src="/assets/dungeonGeometryStamp.js?v=shared-geometry-1"></script>
 <script src="/assets/websiteRoomReady.js?v=prefetch-stamp-2"></script>
 <script src="/assets/modelSelectUi.js?v=combined-20261022"></script>
-<script src="/assets/characterProfiles.js"></script>
-<script src="/assets/dialogueAudience.js"></script>
-<script src="/assets/dungeonInhabitants.js?v=dialogue-packaging-1"></script>
+<script src="/assets/characterProfiles.js?v=resident-history-2"></script>
+<script src="/assets/dialogueAudience.js?v=mode4-isolation-1"></script>
+<script src="/assets/dungeonInhabitants.js?v=service-counter-placement-1"></script>
 <script src="/assets/questWritings.js"></script>
 <script src="/assets/dialogueHistory.js"></script>
-<script src="/assets/campaignMemory.js"></script>
+<script src="/assets/campaignMemory.js?v=resident-history-2"></script>
 <script src="/assets/campaignMemoryUi.js"></script>
-<script src="/assets/dungeonLifeUi.js?v=entry-anchor-1"></script>
-<script src="/assets/actionNoticeUi.js?v=manual-readings-2"></script>
-<script src="/assets/commandGate.js?v=combat-targeting-2"></script>
-<script src="/assets/outdoorDiscovery.js?v=settlement-anchors-1"></script>
+<script src="/assets/dungeonLifeUi.js?v=conversation-attention-1"></script>
+<script src="/assets/actionNoticeUi.js?v=quest-seeding-notice-1"></script>
+<script src="/assets/cityFloorScope.js?v=host-local-floors-1"></script>
+<script src="/assets/cityCrowdCache.js?v=city-cache-1"></script>
+<script src="/assets/commandGate.js?v=combat-targeting-3-turn-equipment-1"></script>
+<script src="/assets/outdoorDiscovery.js?v=party-cohort-discovery-1"></script>
 <script src="/assets/monsterRaces.js?v=shared-catalog-1"></script>
-<script src="/assets/game.js?v=seamless-4"></script>
+<script src="/assets/proceduralNames.js?v=shared-names-1"></script>
+<script src="/assets/cityCrowdMotion.js?v=native-wander-1"></script>
+<script src="/assets/cityCrowdUi.js?v=service-handoff-2"></script>
+<script src="/assets/cityParcels.js?v=city-doorways-1"></script>
+<script src="/assets/cityBuildingStyle.js?v=native-settlement-palettes-2"></script>
+<script src="/assets/citySkyline.js?v=native-classical-facades-6"></script>
+<script src="/assets/cityBuildingUi.js?v=street-lobby-no-transition-2"></script>
+<script src="/assets/cityCirculationUi.js?v=full-width-stair-landings-2"></script>
+<script src="/assets/game.js?v=room-entry-recovery-1"></script>
 <script src="/assets/sidPlayer.js?v=processor-retirement-1"></script>
 <script src="/assets/sfx.js?v=audio-lifecycle-diagnostics-1"></script>
 <script src="/assets/saveGameTranscript.js"></script>
-<script src="/assets/saveGameUi.js"></script>
+<script src="/assets/saveGameUi.js?v=host-local-floors-1"></script>
 <script src="/assets/quitGameUi.js"></script>
  <script src="/assets/masonryPatterns.js"></script>
  <script src="/assets/voxelMaterials.js"></script>
  <script src="/assets/characterMotion3d.js"></script>
- <script src="/assets/rendererWebGL.js?v=retro-widescreen-1"></script>
- <script src="/assets/rendererWebGPU.js?v=c64-materials-5"></script>
+ <script src="/assets/rendererWebGL.js?v=city-caches-1"></script>
+ <script src="/assets/rendererWebGPU.js?v=c64-materials-5-genre-fixtures-2-city-surfaces-1"></script>
    <script>
    
    // Enhanced playRoomMusic with status feedback
@@ -1789,7 +1814,7 @@ function toggleCombatMode() {
     color: white;
     border: 1px solid white;
     border-radius: 8px;
-    z-index: 2000;
+    z-index: 1000;
     box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
     resize: both;
     overflow: hidden;
@@ -1844,15 +1869,15 @@ function toggleCombatMode() {
   #combat-popup.combat-expanded #combat-turn-popup h2 { font-size: 17px; }
   #combat-popup.combat-expanded #combat-turn-popup[hidden] { display: none; }
   #combat-popup.combat-expanded #combat-turn-popup .popup-button { font-size: 13px; padding: 7px; margin: 5px 0; }
-  #combat-popup.combat-stacked #combat-container { width: 100%; height: calc(50% - 20px); }
-  #combat-popup.combat-stacked #combat-ledger { top: calc(50% + 20px); left: 0; width: 100%; display: block; border-left: 0; border-top: 1px solid #796b53; }
-  #combat-popup.combat-stacked #combat-ledger-entries { overflow: visible; }
+  #combat-popup.combat-expanded.combat-stacked #combat-container { width: 100%; height: calc(50% - 20px); }
+  #combat-popup.combat-expanded.combat-stacked #combat-ledger { top: calc(50% + 20px); left: 0; width: 100%; display: block; border-left: 0; border-top: 1px solid #796b53; }
+  #combat-popup.combat-expanded.combat-stacked #combat-ledger-entries { overflow: visible; }
   .combat-map-active #party-popup { z-index: 17000; }
+  .combat-map-active #party-icon-dock { z-index: 1210; }
   .combat-end-controls { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
   .combat-end-controls .popup-button { flex: 1 1 0; min-width: 0; font-size: 11px; padding: 5px 3px; margin: 0; }
   .combat-end-controls .awaiting-action { background: #e5bd72; color: #17120c; border-color: #f4dda9; box-shadow: 0 0 8px #e5bd7255; }
   .party-roll-status.awaiting-action { box-sizing: border-box; border-left: 2px solid #e5bd72; padding: 4px; color: #f4dda9; }
-  .combat-compact-map #phaser-popup, .combat-compact-map #game-log-popup { visibility: hidden; }
   .combat-map-zoom { display: inline-flex; gap: 3px; margin-left: auto; }
   .combat-map-zoom button { font: 11px monospace; padding: 3px; background: #222; border: 1px solid #888; color: white; cursor: pointer; }
   .combat-map-zoom button[aria-pressed="true"] { background: #e5bd72; color: #111; }
@@ -2115,7 +2140,7 @@ function toggleCombatMode() {
       <button id="environment-lab-button" class="game-menu-button" onclick="window.open('/assets/environment-lab.html', '_blank', 'noopener')">Environment Lab</button>
       <button id="sid-music-archive-button" class="game-menu-button" onclick="window.open('/sid-to-wav.html', '_blank', 'noopener')">SID Player / WAV Export</button>
       <button id="open-game-model-button" class="game-menu-button" aria-expanded="false" aria-controls="game-model-popup">Game Model</button>
-      <button id="open-website-ai-button" class="game-menu-button" aria-haspopup="dialog">Website AI</button>
+      <button id="open-website-ai-button" class="game-menu-button" aria-haspopup="dialog">Helpers / Website AI</button>
       <button id="retro-graphics-toggle" class="game-menu-button" aria-pressed="false" aria-describedby="retro-graphics-status">Retro Mode: OFF</button>
       <button id="console-font-toggle" class="game-menu-button" aria-pressed="false" title="Switch only the Game Console and Game Log text between pixel and original monospace fonts">Console / Log Font: Retro</button>
       <span id="retro-graphics-status" hidden role="status" aria-live="polite"></span>
@@ -2141,6 +2166,7 @@ function toggleCombatMode() {
         <button id="exploration-map-zoom-out" aria-label="Zoom out">-</button>
         <button id="exploration-map-follow">Follow</button>
         <button id="exploration-map-whole">Whole Level</button>
+        <button id="exploration-map-level" aria-pressed="false" title="Follow the current building floor" disabled>Level</button>
       </div>
       <canvas id="exploration-map-canvas" width="640" height="640" aria-label="North-up map of explored terrain"></canvas>
       <p id="exploration-map-caption">Explore a dungeon to begin mapping.</p>
@@ -2386,6 +2412,7 @@ function toggleCombatMode() {
       ].join('\n');
 
       if (detailsEl) detailsEl.textContent = stats;
+      window.ResourceLabelUi?.relabel(detailsEl);
 
       panel.style.display = 'block';
       window._awaitingSpriteSave = true; // ensure the guard stays on

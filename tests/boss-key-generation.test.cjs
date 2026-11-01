@@ -14,8 +14,12 @@ function compile(start, end, name, dependencies) {
 }
 function harness(database, response) {
   const tag = () => {};
-  return { agent: { user: tag, assistant: Object.assign(tag, { generation: async () => response }) },
+  const reply = response.result ? response : { content: JSON.stringify({ items: [{ name: response.content, type: 'weapon',
+    attack_modifier: 3, damage_modifier: 4, ac: 0, magic: 0, consumable_kind: 'none', description: 'An iron blade with a wrapped grip.' }] }) };
+  return { agent: { user: tag, assistant: Object.assign(tag, { generation: async () => reply }) },
     dependencies: { console: { log() {}, warn() {} }, isReservedBossKeyName, GeneratedNames: require('../retort/generatedNames'),
+      require: id => require('../retort/' + id.slice(2)),
+      WorldSetting: { current: () => null },
       sharedState: { getRoomNameDatabase: () => JSON.stringify(database) },
       coordinatesToString: c => `${c.x},${c.y},${c.z}`,
       Math: Object.assign(Object.create(Math), { random: () => 0 }),
@@ -47,18 +51,20 @@ test('real room-object generator rejects a seal disguised as a weapon without cr
   const h = harness(database, { content: seal });
   const generate = compile('async function generateRoomObjects(', 'async function generateObjectModifiers(', 'generateRoomObjects', h.dependencies);
   const original = JSON.stringify(database);
-  assert.deepEqual(await generate(h.agent, 'Hall', 'An existing hall.'), []);
+  await assert.rejects(generate(h.agent, 'Hall', 'An existing hall.'), /reserved quest key/);
   assert.equal(JSON.stringify(database), original);
 });
 
-test('real room-object generator keeps normal names and original item-type selection', async () => {
+test('real room-object generator retains authored names and types with the current game modifiers', async () => {
   const h = harness({}, { content: 'Iron Sword' });
   const generate = compile('async function generateRoomObjects(', 'async function generateObjectModifiers(', 'generateRoomObjects', h.dependencies);
-  assert.deepEqual(await generate(h.agent, 'Hall', 'An existing hall.'), [{ name: 'iron sword', type: 'weapon' }]);
+  const [item] = await generate(h.agent, 'Hall', 'An existing hall.');
+  assert.equal(item.name, 'iron sword'); assert.equal(item.type, 'weapon'); assert.equal(item.attack_modifier, 3); assert.equal(item.damage_modifier, 4);
 });
 
 test('real room-object generator preserves word boundaries before storing item names', async () => {
   const h = harness({}, { content: 'Bone-rib Spear' });
   const generate = compile('async function generateRoomObjects(', 'async function generateObjectModifiers(', 'generateRoomObjects', h.dependencies);
-  assert.deepEqual(await generate(h.agent, 'Hall', 'An existing hall.'), [{ name: 'bone rib spear', type: 'weapon' }]);
+  const [item] = await generate(h.agent, 'Hall', 'An existing hall.');
+  assert.equal(item.name, 'bone rib spear'); assert.equal(item.type, 'weapon');
 });

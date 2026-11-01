@@ -43,6 +43,19 @@ test('a stuck flush cannot cancel the hard shutdown deadline or leave the port o
   await reusable(t, f.port);
 });
 
+test('shutdown awaits asynchronous worker cancellation before flushing logs and exiting, exactly once',async t=>{
+  const order=[];let release;
+  const f=await fixture(t,{beforeClose:()=>{order.push('cancel');return new Promise(resolve=>{release=resolve;});},flush:()=>{order.push('flush');}});
+  const stopped=f.lifecycle.shutdown('window');f.processRef.emit('SIGTERM');
+  await new Promise(resolve=>setImmediate(resolve));assert.deepEqual(order,['cancel']);assert.deepEqual(f.exits,[]);
+  release();await stopped;assert.deepEqual(order,['cancel','flush']);assert.deepEqual(f.exits,[0]);
+});
+
+test('a hung worker cancellation still reaches the bounded shutdown deadline',async t=>{
+  const f=await fixture(t,{timeoutMs:40,beforeClose:()=>new Promise(()=>{})});
+  await f.lifecycle.shutdown('window');assert.deepEqual(f.exits,[0]);await reusable(t,f.port);
+});
+
 test('stale adventures, missing confirmation and foreign origins cannot stop the server', async t => {
   const f = await fixture(t);
   for (const [body, headers, status] of [[{ runId: 'old', confirm: true }, {}, 409],
@@ -56,6 +69,16 @@ test('in-flight commands and character generation block shutdown without losing 
   const f = await fixture(t, { isBusy: () => true });
   const response = await f.post({ runId: 'run', confirm: true }); assert.equal(response.status, 409);
   assert.match((await response.json()).error, /Finish/); assert.deepEqual(f.exits, []);
+});
+
+test('launcher Quit rejects a stale process PID or a newly connected window atomically',async t=>{
+  const f=await fixture(t);
+  const wrong=await f.post({runId:'run',confirm:true,expectedPid:999,requireNoWindows:true});
+  assert.equal(wrong.status,409);await wrong.json();
+  const window=await windowConnection(f);
+  const opened=await f.post({runId:'run',confirm:true,expectedPid:123,requireNoWindows:true});
+  assert.equal(opened.status,409);await opened.json();
+  assert.deepEqual(f.exits,[]);assert.equal(f.lifecycle.isStopping(),false);window.destroy();
 });
 
 test('PM2 shutdown messages are handled once and ordinary exit does not restart through the ecosystem config', async t => {
@@ -103,6 +126,13 @@ test('closing the last game window shuts down after the refresh grace period and
   assert.equal((await (await fetch(f.url + '/game/lifecycle')).json()).connectedWindows, 1);
   const exited = once(f.processRef, 'exited'); window.destroy(); await exited;
   assert.deepEqual(f.exits, [0]); await reusable(t, f.port);
+});
+
+test('closing during startup grace schedules eventual cleanup instead of leaking a headless server',async t=>{
+  const old=process.env.HOLODEK_STARTUP_GRACE_MS;process.env.HOLODEK_STARTUP_GRACE_MS='60';
+  t.after(()=>{if(old===undefined)delete process.env.HOLODEK_STARTUP_GRACE_MS;else process.env.HOLODEK_STARTUP_GRACE_MS=old;});
+  const f=await fixture(t,{autoQuitDelayMs:10}),window=await windowConnection(f),exited=once(f.processRef,'exited');
+  window.destroy();await sleep(15);assert.deepEqual(f.exits,[]);await exited;assert.deepEqual(f.exits,[0]);
 });
 
 test('refreshing or restoring from the back-forward cache cancels pending last-window shutdown', async t => {

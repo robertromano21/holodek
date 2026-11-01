@@ -80,7 +80,8 @@ test('unconscious allies offer published healing spells, while out-of-range and 
   assert.equal(f.popup().children.some(n => /^Bandage/.test(n.textContent)), false);
   f.window.CombatTurnUi.receive({ ...f.turn, care: [], spells: [] });
   f.window.CombatCharacterUi.open({ name: 'Tallow' });
-  assert.match(f.popup().textContent, /First aid requires an adjacent living ally/);
+  assert.match(f.popup().textContent, /First aid requires adjacency and clear access/);
+  assert.match(f.popup().textContent, /bandaging can save a dying opponent/);
   f.window.CombatTurnUi.receive(f.turn); f.window.CombatCharacterUi.open({ name: 'Tallow' });
   const old = f.popup().children.find(n => /^Bandage/.test(n.textContent));
   f.window.CombatTurnUi.receive({ ...f.turn, turnId: 'turn-2' }); old.click();

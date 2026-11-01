@@ -75,7 +75,7 @@ async function readCompletion(response, controller) {
 function createHost({ fetchImpl = (...args) => globalThis.fetch(...args), url = localOllamaURL, maxQueued = 32, timeoutMs = 600000 } = {}) {
   if (!Number.isInteger(maxQueued) || maxQueued < 0 || !Number.isInteger(timeoutMs) || timeoutMs <= 0)
     throw problem('CONFIG', 'Invalid PC inference queue bounds.', 400);
-  const waiting = []; let active = null;
+  const waiting = []; let active = null, closed = false;
   function settle(job, error, value) {
     if (job.finished) return;
     job.finished = true; clearTimeout(job.timer); job.signal?.removeEventListener('abort', job.abort);
@@ -107,11 +107,12 @@ function createHost({ fetchImpl = (...args) => globalThis.fetch(...args), url = 
     }
   }
   function pump() {
-    if (active || !waiting.length) return;
+    if (closed || active || !waiting.length) return;
     const foreground = waiting.findIndex(job => !job.background);
-    active = waiting.splice(foreground < 0 ? 0 : foreground, 1)[0]; void run(active);
+    active = waiting.splice(foreground < 0 ? 0 : foreground, 1)[0]; active.execution = run(active);
   }
   async function complete(body, { signal, background = false } = {}) {
+    if (closed) throw cancelled();
     const serialized = request(body);
     const endpoint = localOllamaURL({ HOLODEK_OLLAMA_URL: typeof url === 'function' ? url() : url });
     if (signal != null && (typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function'))
@@ -126,7 +127,14 @@ function createHost({ fetchImpl = (...args) => globalThis.fetch(...args), url = 
       if (signal?.aborted) job.abort(); else pump();
     });
   }
-  return { complete };
+  async function close() {
+    closed = true;
+    const running = active;
+    for (const job of [...waiting]) cancel(job, cancelled());
+    if (running) cancel(running, cancelled());
+    await running?.execution;
+  }
+  return { complete, close };
 }
 function modelClient(host = service) {
   return { chat: { completions: { create: async (body, options = {}) => {
@@ -144,4 +152,4 @@ function modelClient(host = service) {
   } } } };
 }
 const service = createHost();
-module.exports = { complete: service.complete, createHost, modelClient, localOllamaURL, MODEL };
+module.exports = { complete: service.complete, close: service.close, createHost, modelClient, localOllamaURL, MODEL };

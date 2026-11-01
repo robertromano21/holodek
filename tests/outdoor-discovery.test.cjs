@@ -34,6 +34,31 @@ function walk(f, dx = 1, dy = 0) {
   }
   return { event, player };
 }
+for(const size of [5,6])test(`a saved ${size}-member hostile group can actually be discovered together`,()=>{
+  const f=fixture();
+  f.p=I.createPopulation(f.d.geoKey,Array.from({length:size},(_,i)=>({name:'Pack '+i,allegiance:'Hostile',routine:'patrol',encounterId:'pack'})),{indoor:false,groupLimit:6});
+  f.p.groups[0].site={x:20,y:20};
+  for(const a of Object.values(f.p.actors))a.position=a.home={x:20,y:20};
+  D.setup(f.d,f.p,{fresh:true});f.roster=[];
+  let event,player;
+  for(let n=0;n<25&&!event;n++){
+    player={x:128.5+n*4,y:128.5};
+    event=D.tick(f.d,f.p,f.roster,player,{now:1000+n*3000,consoleText:'Objects in Room: None'}).discoveries[0];
+  }
+  assert.ok(event);assert.equal(event.kind,'people');
+  const group=f.p.groups.find(g=>g.id===event.groupId);assert.equal(group.members.length,size);
+  const spaces=group.members.map(name=>f.p.actors[name].position);
+  assert.equal(new Set(spaces.map(p=>`${p.x},${p.y}`)).size,size);
+  assert.ok(spaces.every(p=>I.walkable(f.d,p.x,p.y)&&I.lineClear(f.d,player,{x:p.x+.5,y:p.y+.5})));
+});
+
+test('pack placement never crosses walls, occupied tiles, props, doors, stairs or cliffs to fill a group',()=>{
+  const f=fixture(),center={x:20,y:20};
+  f.d.cells={...f.d.cells,'21,20':{...floor,tile:'wall'},'19,20':{...floor,door:true},
+    '20,21':{...floor,exitMarker:true},'20,19':{...floor,floorHeight:20}};
+  assert.equal(D.groupSpaces(f.d,center,6,new Set()).length,1);
+  assert.equal(D.groupSpaces(f.d,center,6,new Set(['20,20'])).length,0);
+});
 for (const [label, dx, dy] of [['east', 1, 0], ['west', -1, 0], ['north', 0, -1], ['south', 0, 1]]) test(`outdoor discoveries follow ${label} travel without any model calls or geometry changes`, () => {
   const f = fixture(), before = JSON.stringify(f.d), { event, player } = walk(f, dx, dy);
   assert.ok(event); assert.equal(event.kind, 'people');

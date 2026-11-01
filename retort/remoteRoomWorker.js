@@ -4,7 +4,7 @@ const fs = require('node:fs'), path = require('node:path');
 const ARCHIVE_FILES = ['8580.sid', '10582.sid', 'manifest.json', 'score.json', 'song.asm', 'song_sid.asm', 'README.txt'];
 async function main() {
   const { job, snapshot, flags, gateway, credential, provider, pcSession } = workerData;
-  if (!['population', 'geometry', 'music', 'art'].includes(job?.stage) || !/^[a-f0-9-]{36}$/.test(job.id || '')) throw Error('Invalid remote room stage.');
+  if (!['population', 'geometry', 'music', 'art', 'quest'].includes(job?.stage) || !/^[a-f0-9-]{36}$/.test(job.id || '')) throw Error('Invalid remote room stage.');
   const allowedFlags = new Set(Object.keys(require('./worldFlags').DEFAULTS).map(name => 'HOLODEK_' + name));
   for (const [flag, on] of Object.entries(flags || {})) if (allowedFlags.has(flag) && ['0', '1'].includes(on)) process.env[flag] = on;
   process.env.HOLODEK_REMOTE_ENGINE = '1';
@@ -26,7 +26,8 @@ async function main() {
   const state = require('../sharedState'), models = require('./gameModels');
   state.importSaveState(snapshot, { graphicsReady: Object.keys(snapshot.roomDungeonDatabase) }); require('./settingLayer').attach(state); models.restore(job.model);
   await models.withSnapshot(() => require('./retortWithUserInput').retortWithUserInput('', () => {}, state.getCombatMode(), {
-    prepareRoom: { ...job, baseRooms: JSON.parse(snapshot.roomNameDatabaseString) }, onBuildCheckpoint: artifact => {
+    [job.stage === 'quest' ? 'prepareOpeningQuest' : 'prepareRoom']: { ...job, baseRooms: JSON.parse(snapshot.roomNameDatabaseString) }, onBuildCheckpoint: artifact => {
+      if (artifact.dungeon) require('./roomVisualAssets').inline(artifact.dungeon);
       if (job.stage === 'art') {
         const record = artifact.rooms[job.key].illustration, Art = require('../assets/roomIllustration');
         const { createCanvas } = require('canvas'), canvas = createCanvas(Art.width, Art.height), ctx = canvas.getContext('2d');

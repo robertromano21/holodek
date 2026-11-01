@@ -1,7 +1,7 @@
 'use strict';
 // Only the displayed, authoritative room can unlock background preparation.
 function install(app, sharedState, { adjacent = null, models = require('./gameModels'),
-  website = require('./websiteAi').service() } = {}) {
+  website = require('./websiteAi').service(), isBusy = () => false } = {}) {
   const full = !adjacent;
   adjacent ||= require('./roomBuildQueue').service(sharedState);
   require('./adjacentRoomSnapshots').install(app, sharedState, { models, adjacent });
@@ -23,8 +23,10 @@ function install(app, sharedState, { adjacent = null, models = require('./gameMo
       }
       return res.status(409).json({ error: 'That room is not the active constructed room.' });
     }
-    if (!website.backgroundEnabled()) return res.json({ queued: [], enabled: false });
-    const identity = `${key}|${body.geometryStamp}|${website.view().revision}`;
+    if (isBusy()) return res.status(409).json({ error: 'Room entry is finishing; retry preparation after the current action.', code: 'PREFETCH_BUSY' });
+    const helpers = require('./roomHelpers').policy(website);
+    if (!helpers.enabled) return res.json({ queued: [], enabled: false });
+    const identity = `${key}|${body.geometryStamp}|${helpers.revision}|${website.view().revision}`;
     if (seen.has(identity)) return res.json({ queued: [], duplicate: true });
     try {
       const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}'), room = db[key];
@@ -36,10 +38,16 @@ function install(app, sharedState, { adjacent = null, models = require('./gameMo
       }
       const queued = models.withSnapshot(() => adjacent.queueNeighbors({ db, currentKey: key, exits: Object.keys(room.exits || {}),
         runId: activeRun, context: room.description || room.roomDescription || room.sceneSpec?.source?.description || '' }));
+      // Read the quest snapshot after the queue has reserved its initial topology.
+      if (full && key === '0,0,0') setImmediate(() => {
+        if (sharedState.getDungeonRunId() !== activeRun) return;
+        try { models.withSnapshot(() => require('./openingQuestPreparation').service(sharedState).begin()); }
+        catch (error) { console.warn('[OpeningQuestPreparation]', error.message); }
+      });
       seen.add(identity); while (seen.size > 64) seen.delete(seen.values().next().value);
       console.info('[RoomPrefetch]', JSON.stringify({ phase: 'accepted', geoKey: key, runId: activeRun,
         model: models.current?.().id || null, queued, preparation: full ? 'complete-rooms' : 'descriptions' }));
-      res.json({ queued, enabled: true, preparation: full ? 'complete-rooms' : 'descriptions' });
+      res.json({ queued, enabled: true, location: helpers.location, preparation: full ? 'complete-rooms' : 'descriptions' });
     } catch { res.status(503).json({ error: 'Background preparation unavailable; room entry remains available.' }); }
   });
 }

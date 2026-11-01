@@ -10,16 +10,24 @@ const BUILDINGS = new Set(['temple', 'basilica', 'castle', 'rotunda', 'bathhouse
 // Supplement omissions only. Authored placements and saved campaign blueprints win.
 function enrich(blueprint, { classification = {}, size = 512, generation, sceneSpec, description = '' } = {}) {
   if (!blueprint || typeof blueprint !== 'object' || Array.isArray(blueprint) || blueprint.designContract || !Number.isFinite(size) || size < 32) return blueprint;
+  const approved = require('./genreAssetPolicy').catalog(sceneSpec);
+  blueprint = require('./genreAssetPolicy').scopeBlueprint(blueprint, sceneSpec);
   const seed = generation?.seed || blueprint.seed || sceneSpec?.textHash || 'blueprint';
   const rng = random(`${seed}:design-contract`);
   const text = `${description} ${sceneSpec?.source?.roomName || ''} ${sceneSpec?.architecture || ''}`.toLowerCase();
   const result = { ...blueprint }, added = [], rejected = [];
   if (classification.indoor === true) {
-    const plan = blueprint.indoorPlan, rooms = Array.isArray(plan?.rooms) ? plan.rooms : [];
+    const Design = require('./genreLevelDesign'), profile = Design.forRoom(sceneSpec || {}, { seed });
+    if (profile && !blueprint.indoorPlan?.rooms?.length && !blueprint.rooms?.length &&
+        !isNaturalUnderground({ ...sceneSpec, indoor: true, biome: classification.biome })) {
+      result.indoorPlan = { ...blueprint.indoorPlan, ...Design.plan(profile, { roof: approved.roofs[0] }) };
+      added.push({ kind: 'genre-floorplan', profile: profile.id });
+    }
+    const plan = result.indoorPlan, rooms = Array.isArray(plan?.rooms) ? plan.rooms : [];
     const modules = Array.isArray(plan?.modules) ? plan.modules : [];
     if (!isNaturalUnderground({ ...sceneSpec, indoor: true, biome: classification.biome }) &&
         !modules.length && !rooms.some(r => ['shrine', 'sanctum', 'rotunda'].includes(r?.role))) {
-      const types = /crypt|catacomb|cave|sewer/.test(text) ? ['vaulted_bay', 'staircase', 'switchback_stair'] :
+      const types = approved.strict && !approved.classical ? ['raised_gallery', 'staircase', 'switchback_stair'] : /crypt|catacomb|cave|sewer/.test(text) ? ['vaulted_bay', 'staircase', 'switchback_stair'] :
         /castle|keep|fort/.test(text) ? ['staircase', 'raised_gallery', 'vaulted_bay', 'split_raised_gallery'] :
         ['portico', 'rotunda_section', 'colonnade', 'sanctuary', 'cloister', 'apsidal_chapel'];
       const choices = rooms.flatMap((r, room) => {
@@ -43,7 +51,7 @@ function enrich(blueprint, { classification = {}, size = 512, generation, sceneS
     const buildings = Array.isArray(blueprint.buildings) ? blueprint.buildings : [];
     const hasBuilding = buildings.some(b => b && BUILDINGS.has(b.type) && [b.x, b.y, b.w, b.h].every(Number.isFinite) && b.w * size >= 21 && b.h * size >= 25);
     const natureOnly = /\b(no buildings|no ruins|untouched|unspoiled)\b/.test(text);
-    const relevant = /ruin|temple|fort|keep|castle|watchtower/.test(text) || /wasteland|ruins/.test(classification.biome || '');
+    const relevant = !(approved.strict && !approved.classical) && (/ruin|temple|fort|keep|castle|watchtower/.test(text) || /wasteland|ruins/.test(classification.biome || ''));
     if (!hasBuilding && buildings.length < 4 && relevant && !natureOnly) {
       const options = /temple/.test(text) ? [{ type: 'temple' }, { type: 'rotunda' }, { type: 'ruins' }] :
         [{ type: 'ruins' }, { type: 'castle', variant: 'watchtower' }, { type: 'castle', variant: 'stone-keep' }, { type: 'castle', variant: 'gatehouse' }];

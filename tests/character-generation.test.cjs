@@ -28,10 +28,12 @@ function agent(reply) {
     } } };
 }
 
-test('party biography-writing prompt is identical to the pre-Luna source', () => {
-  const text = fs.readFileSync(require.resolve('../retort/characterProfiles'), 'utf8').replace(/\r\n/g, '\n');
-  const prompt = text.match(/await \$\.user`(Create compact[\s\S]*?)`;/)[1];
-  assert.equal(crypto.createHash('sha256').update(prompt).digest('hex'), '91bb5fbae9fdab5e9f1a2202ec52f60a2baff3a125b1eb2526d4ca58a7dc82b3');
+test('party biography-writing prompt permits detailed histories while preserving canonical and knowledge constraints', () => {
+  const text = fs.readFileSync(require.resolve('../retort/characterProfiles'), 'utf8');
+  assert.match(text, /History has no word-count limit/);
+  assert.doesNotMatch(text, /History <=70|two short sentences/);
+  assert.match(text, /Mortacia and Suzerain have established canon and must not be rewritten/);
+  assert.match(text, /knowledge of encounters they have not witnessed/);
 });
 
 test('actual Ruined Temple creation delegates to the regional generator, while party opening and boss exceptions remain', async () => {
@@ -173,3 +175,16 @@ test('4.1 Mini and Luna send identical character-writing prompts and inputs for 
     assert.deepEqual(captures[0], captures[1], 'Only the model-specific backend role adapter may differ, never character instructions or world data.');
   }
 });
+
+ test('long authored motivations survive generation, population and saved memory without truncation', async () => {
+ const motivation = ('She wants to find the missing witnesses and understand their choices before deciding her own future. ').repeat(8).trim();
+ const a=agent({profiles:[{...authored('Mason'),motivation}]});
+ const [profile]=await Authorship.generateProfiles(a,[{Name:'Mason',Race:'Dwarf',Class:'Mason'}],'run');
+ assert.equal(profile.motivation,motivation);
+ const population=I.createPopulation('0,0,0',[{name:'Mason',profile}]);
+ assert.equal(population.actors.Mason.profile.motivation,motivation);
+ const M=require('../assets/campaignMemory');
+ const saved=M.normalize({id:'motivation',runId:'run',roomKey:'0,0,0',kind:'biography',text:motivation,profile},'run');
+ assert.equal(saved.profile.motivation,motivation);
+ await assert.rejects(Authorship.generateProfiles(agent({profiles:[{...authored('Mason'),motivation:' '}]}),[{Name:'Mason'}],'run'),/motivation/);
+ });

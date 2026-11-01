@@ -1,4 +1,4 @@
-(function(root, factory) { const api = factory(); if (typeof module === 'object' && module.exports) module.exports = api; else root.GenreLights = api; })(typeof window === 'object' ? window : globalThis, function() {
+(function(root, factory) { const api = factory(typeof module === 'object' && module.exports ? require('./genreFixtures') : root.GenreFixtures); if (typeof module === 'object' && module.exports) module.exports = api; else root.GenreLights = api; })(typeof window === 'object' ? window : globalThis, function(Fixtures) {
   'use strict';
   // world1 GENRE_LIGHTS: light types beyond the torch, fed into the renderer's existing torch-light list (same falloff
   // shader, shadows and occlusion). The existing torchFlicker is untouched; 'torch' maps straight to it.
@@ -26,6 +26,7 @@
     blind_shafts: { label: 'Venetian-blind shafts', curve: () => 1, radius: 1.5, falloff: 'linear', kelvin: 5200, genres: ['noir'], prop: 'g_blind_window', shafts: 5 },
     bulb_sway: { label: 'Swaying bare bulb', curve: (q, t) => .85 + .05 * s(t * 8 + q), radius: 1.1, falloff: 'torch', kelvin: 2700, genres: ['noir'], prop: 'g_hanging_bulb', sway: true }
   };
+  Object.assign(TYPES, Fixtures?.TYPES);
   for (const t of Object.values(TYPES)) t.color ||= kelvin(t.kelvin);
   const FALLOFF = { torch: 1, soft: 1.15, linear: .9 };
   // Record for the renderer's torch list. base = renderer's TORCH_LIGHT_RADIUS_FLOOR; torchFlicker passed in so 'torch' is unchanged.
@@ -39,5 +40,21 @@
   const COTG_TAGS = Object.keys(TYPES).filter(k => TYPES[k].cotg);
   // Sample a curve for previews/tests.
   const sample = (type, seed = .3, seconds = 4, n = 80) => Array.from({ length: n }, (_, i) => light(type, 0, 0, 0, seed, i * seconds * 1000 / n, 1, null).intensity);
-  return { TYPES, light, forGenre, sample, kelvin, COTG_TAGS };
+  const colors = new Map(), defaults=new WeakMap(), defaultColor={r:255,g:190,b:130};
+  function rgb(light, fallback = defaultColor) {
+    if (!/^#[0-9a-f]{6}$/i.test(light?.color || '')) {
+      if(!defaults.has(fallback))defaults.set(fallback,[fallback.r/255,fallback.g/255,fallback.b/255]);
+      return defaults.get(fallback);
+    }
+    if(!colors.has(light.color)){
+      if(colors.size>=128)colors.delete(colors.keys().next().value);
+      colors.set(light.color,[1,3,5].map(i=>parseInt(light.color.slice(i,i+2),16)/255));
+    }
+    return colors.get(light.color);
+  }
+  const nativeEmitters=Object.create(null);
+  for(const [type,info] of Object.entries(TYPES))if(type!=='torch'&&!type.startsWith('fixture_')&&!nativeEmitters[info.prop])
+    nativeEmitters[info.prop]=Object.freeze({type,z:.8,color:info.color});
+  const emission = spec => Fixtures?.emission(spec?.voxelShape) || nativeEmitters[spec?.voxelShape] || null;
+  return { TYPES, light, forGenre, sample, kelvin, COTG_TAGS, rgb, emission };
 });

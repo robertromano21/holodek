@@ -44,3 +44,14 @@ for (const dialogue of [['One.', 'Two.'], ['One.', 'Two.', '   '], ['One.', null
     assert.equal(a.requests.length, 4, 'Initial attempt plus three shared retries; malformed dialogue stays rejected.');
   });
 }
+
+test('long resident histories survive authoring and population reconstruction without retries or truncation', async () => {
+  const history = 'She trained as a map restorer and kept journals about each journey. '.repeat(85) + 'Her mentor was named Mirabel Cobalt.';
+  const rows = fixtures(16, [{ slot: 0, name: 'Sella Ashline', history }]);
+  const a = agent(rows), result = await generateInhabitants(a, context, rules);
+  assert.equal(a.requests.length, 4);
+  const actor = result.population.actors['Sella Ashline'];
+  assert.equal(actor.history, history); assert.equal(actor.profile.history, history);
+  assert.equal(Inhabitants.normalizeDescriptors([{ ...rows[0], history }])[0].history, history);
+  assert.doesNotMatch(a.prompts.join(' '), /History <=55|at most 55 words/);
+});

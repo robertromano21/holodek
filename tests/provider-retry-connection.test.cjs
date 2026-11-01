@@ -66,7 +66,7 @@ function connection(t,{busy=true,compatible=true,race=false,permanent=false}={})
   };
   const service=Website.createService({directory,source:path.join(source,'worker.cjs'),engineRoot,run,connectionWaitMs:2000,now:()=>time,
     delay:async ms=>{time+=ms;},logger:{info:(...row)=>logs.push(row)}});
-  return{config,service,logs,get statusCalls(){return statusCalls;},get installs(){return installs;},get bootstraps(){return bootstraps;},get elapsed(){return time;}};
+  return{config,service,logs,source,get statusCalls(){return statusCalls;},get installs(){return installs;},get bootstraps(){return bootstraps;},get elapsed(){return time;}};
 }
 test('a pinned compatible three-worker pool is reused while busy, without any installation or restart',async t=>{
   const f=connection(t);const result=await f.service.connect(f.config,{deploy:true});
@@ -90,6 +90,16 @@ test('a status-only cache cannot bypass connection source compatibility checks',
   const f=connection(t,{compatible:false,permanent:true});
   await f.service.connect(f.config);assert.equal((await f.service.status()).connected,true);
   await assert.rejects(f.service.ensureConnected(),e=>e.code==='ROOM_ENGINE_MISMATCH');assert.equal(f.installs,0);assert.equal(f.bootstraps,0);
+});
+
+test('pending worker edits neither break the running release nor get deployed during its reconnect',async t=>{
+  const f=connection(t);await f.service.connect(f.config,{deploy:true});
+  const hash=f.service.view().worker.bundleHash;
+  fs.appendFileSync(path.join(f.source,'worker.cjs'),'\n// pending next release');
+  await f.service.status();await f.service.ensureConnected();
+  await f.service.connect(f.config,{deploy:true});
+  assert.equal(f.service.view().release.bundleHash,hash);
+  assert.equal(f.installs,0);assert.equal(f.bootstraps,0);
 });
 test('a job starting between idle check and bootstrap is deferred and rechecked, not interrupted',async t=>{
   const f=connection(t,{busy:false,compatible:false,race:true});const result=await f.service.connect(f.config,{deploy:true});

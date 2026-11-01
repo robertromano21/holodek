@@ -497,6 +497,7 @@ function drawSceneSurface(ctx, createCanvas, kind, opts = {}) {
 
 // Undersides use subdued masonry/grain, not the bright decorated floor tile.
 function drawRoofSurface(ctx, createCanvas, opts = {}) {
+  if (opts.genre && require('./genreCeilings').paint(ctx, opts.genre, opts.seed)) return;
   const small = createCanvas(BASE, BASE), P = painter(small.getContext('2d'));
   const material = opts.material || 'stone';
   const colors = materialColors(MAT[material] ? material : 'stone', opts.palette, 0.65)

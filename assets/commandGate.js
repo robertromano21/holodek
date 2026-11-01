@@ -10,7 +10,8 @@
   const route = url => String(url || '').split('?')[0];
   function refresh() {
     if (typeof document === 'undefined' || !document.body) return;
-    const loading = busy();
+    const gearReady = root.CombatTurnUi?.canChangeEquipment?.() && /^(?:equip|unequip)\s+/i.test(document.getElementById?.('chatuserinput')?.value || '');
+    const loading = busy() && !gearReady;
     document.body.classList.toggle('game-command-loading', loading);
     document.body.classList.toggle('game-combat-targeting', root.actionDiceState?.active?.kind === 'combat');
     for (const button of document.querySelectorAll('#chatbotcontainer button')) {
@@ -41,6 +42,10 @@
   }
   function wrap(submit) {
     return async function(input) {
+      const command = typeof document === 'object' ? document.getElementById?.('chatuserinput')?.value?.trim() : '';
+      if (!input?.completedStartResult && root.actionDiceState?.active?.kind === 'combat' && /^(?:equip|unequip)\s+/i.test(command) && root.CombatTurnUi?.handleEquipmentCommand) {
+        return root.CombatTurnUi.handleEquipmentCommand(command);
+      }
       if ((submitting || busy()) && !input?.completedStartResult) return;
       if (input?.completedStartResult) return submit.apply(this, arguments);
       submitting = true; refresh();
@@ -57,6 +62,8 @@
         event.preventDefault(); event.stopImmediatePropagation(); return;
       }
       if (event.target.closest?.('[data-read-only-reference]')) return;
+      if (root.CombatTurnUi?.canChangeEquipment?.() && event.target.closest?.('#phaser-container .clickable-inventory, #phaser-container .clickable-equipped')) return;
+      if (root.CombatTurnUi?.canChangeEquipment?.() && /^(?:equip|unequip)\s+/i.test(document.getElementById?.('chatuserinput')?.value || '') && event.target.closest?.('#chatbotcontainer button')) return;
       if (!busy() || !event.target.closest?.('#phaser-container a, #phaser-container [class*="clickable-"], #chatbotcontainer button')) return;
       event.preventDefault(); event.stopImmediatePropagation();
     }, true);

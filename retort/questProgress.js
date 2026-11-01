@@ -5,12 +5,13 @@ const { parseSheets } = require('../assets/partyRoster');
 const Inhabitants = require('../assets/dungeonInhabitants');
 const PhysicalPuzzles = require('../assets/physicalPuzzles');
 const { isReservedBossKeyName } = require('./bossGate');
+const Defeats = require('./questDefeatEvidence');
 
 const MAX_CHECKS = 64;
 const MAX_JSON_CHARS = 16384;
 const PHASES = { hard: 'hardRequirements', action: 'actionRequirements' };
 const SUPPORTED = { hard: ['at_coords', 'inventory_contains', 'inventory_magic_min', 'monster_hp_zero', 'quest_story_complete'],
-  action: ['exit_open', 'monster_hp_zero', 'puzzle_solved', 'item_delivered'] };
+  action: ['exit_open', 'monster_hp_zero', 'puzzle_solved', 'item_delivered','book_chapter_read'] };
 const SECTION = /^(?:PC|NPCs(?: in Party)?|Monsters in Room|Monsters Equipped Properties|Monsters State|Objects in Room(?: Properties)?|Rooms Visited|Inventory(?: Properties)?|Room Name|Room Description|Coordinates(?: of Connected Rooms)?|Exits|Adjacent Rooms|Score|Turns|Puzzle in Room|Puzzle Solution|Artifacts Found|Quests Achieved|Next Artifact|Next Boss(?: Room)?|Boss Room Coordinates|Current Quest|Quest Progress|Quest Requirements|Party Status):/i;
 const STAT = /^(?:Sex|Race|Class|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic|State):/i;
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -140,8 +141,9 @@ function checkMonster(task, name, currentRoomKey, consoleText, database) {
     result = monsterHp(hasCurrentSheets ? monsters.inRoom : monsters?.consoleBlock, name, true);
     source = hasCurrentSheets ? 'database.monsters.inRoom' : 'database.monsters.consoleBlock';
   }
-  return { passed: result.hp === null ? null : result.hp <= 0,
-    evidence: { source, roomKey: placement, monster: name, hp: result.hp, reason: result.reason } };
+  const defeat = !['invalid_monster_sheet', 'ambiguous_monster'].includes(result.reason) && Defeats.evidence(database, placement, name);
+  return { passed: defeat ? true : result.hp === null ? null : result.hp <= 0,
+    evidence: { source, roomKey: placement, monster: name, hp: result.hp, reason: result.reason, ...(defeat ? { defeat } : {}) } };
 }
 
 function summarize(checks) {
@@ -152,8 +154,12 @@ function summarize(checks) {
 
 /** Read-only gates only. Eligibility is not narrative completion and never grants rewards. */
 function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {}) {
+  const liveDatabase=database;
+  const Floors=require('./hostLocalFloors'),physicalKey=coordKey(roomKey),active=database?.[physicalKey]?.cityFloorContext;
+  const scope=task?.roomScopes?.[physicalKey],wrongFloor=scope!==undefined&&Floors.identity(scope)!==Floors.identity(active);
+  database=Floors.forTask(database,task);
   const hardFails = [], actionFails = [], checks = [];
-  const currentRoomKey = coordKey(roomKey);
+  const currentRoomKey = wrongFloor ? null : coordKey(roomKey);
   const validTask = isRecord(task);
   const lists = Object.entries(PHASES).map(([phase, field]) => {
     if (!validTask) return [phase, phase === 'hard' ? [null] : [], 'Invalid task'];
@@ -183,6 +189,12 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
       diagnostic = 'Resolve the stored quest stages through their verified interactions';
       result = { passed: !!bound && require('./questScenes').isComplete(task, database),
         evidence: { source: 'database.questScenes', storyId: r.value, roomKey: coordKey(r.coords) } };
+    } else if(check==='book_chapter_read'){
+      const book=roomAt(database,coordKey(r.coords))?.readables?.find(b=>b.id===r.bookId&&b.name===r.value);
+      const bound=task.requiredElements?.some(e=>e.type!=='monster'&&e.name===r.value&&coordKey(e.placement)===coordKey(r.coords));
+      const valid=bound&&book&&Number.isInteger(r.chapter)&&r.chapter>=1&&r.chapter<=(book.chapters?.length|| (book.bookLore?.pending?1:0));
+      diagnostic=`Read chapter ${r.chapter} of "${r.value}" at ${r.coords}`;
+      result=valid?require('./bookResearch').reading(database,{...r,coords:coordKey(r.coords)}):{passed:false,evidence:{reason:'invalid_book_binding'}};
     } else if (check === 'item_delivered') {
       const target = coordKey(r.coords), item = r.item, recipient = r.recipient;
       const bound = deliveryBindings(task).find(b => b.item === item && b.recipient === recipient && b.coords === target);
@@ -212,7 +224,7 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
     } else if (check === 'at_coords') {
       const targetRoomKey = coordKey(r.value);
       diagnostic = targetRoomKey ? `Be at ${targetRoomKey}` : 'at_coords requires valid coordinates';
-      result = { passed: !targetRoomKey ? false : !currentRoomKey ? null : currentRoomKey === targetRoomKey,
+      result = { passed: !targetRoomKey ? false : !currentRoomKey ? null : require('./hostLocalFloors').matches(liveDatabase,targetRoomKey,currentRoomKey,task),
         evidence: { roomKey: currentRoomKey, targetRoomKey } };
     } else if (check === 'inventory_contains' || check === 'monster_hp_zero') {
       if (!validName(r.value)) {
@@ -220,7 +232,7 @@ function evaluateTaskRequirements(task, { roomKey, consoleText, database } = {})
         result = { passed: false, evidence: { reason: 'invalid_requirement' } };
       } else {
         const name = r.value.trim();
-        diagnostic = check === 'inventory_contains' ? `Have "${name}" in Inventory` : `${name} HP must be 0`;
+        diagnostic = check === 'inventory_contains' ? `Have "${name}" in Inventory` : `Defeat ${name}; verified defeat remains credited after healing`;
         result = check === 'inventory_contains' ? inventoryContains(consoleText, name) :
           checkMonster(task, name, currentRoomKey, consoleText, database);
       }
@@ -298,7 +310,7 @@ function mergeTaskProgress(previous, assessment) {
 function taskBinding(task) {
   if (!task) return null;
   // A success belongs to the entire immutable task, not just its prose or gates.
-  const identity = Object.fromEntries(Object.entries(task).filter(([key]) => key !== 'status' && key !== 'progress'));
+  const identity = Object.fromEntries(Object.entries(task).filter(([key]) => !['status', 'progress', 'roomScopes', 'seedNoticeId'].includes(key)));
   return JSON.stringify(snapshot(identity));
 }
 /** Completion is an engine decision; eligibility alone only proves prerequisites. */
@@ -311,6 +323,11 @@ function verifiedTaskCompletion(task, assessment) {
   const kind = String(task.actionKind || '').toLowerCase(), type = String(task.type || '').toLowerCase();
   if (type === 'regional' && kind === 'resolve_regional_adventure') return task.story?.family === 'regional-v1' &&
     has('at_coords') && has('quest_story_complete', task.story.id);
+  if(type==='research'&&kind==='read_book'){
+    const books=(task.requiredElements||[]).filter(e=>e.type!=='monster');
+    return books.length>0&&books.every(e=>checks.some(c=>c.phase==='action'&&c.requirement.check==='book_chapter_read'&&
+      c.requirement.value===e.name&&coordKey(c.requirement.coords)===coordKey(e.placement)));
+  }
   if (kind === 'deliver_item' || type === 'deliver') {
     const bindings = deliveryBindings(task);
     return bindings.length > 0 && bindings.every(b => checks.some(c => c.phase === 'action' &&
@@ -426,7 +443,7 @@ function compileGeneratedDeliveryTask(task, database) {
 
 /** Compile new objectives from existing world records, never model-supplied gates. */
 function compileGeneratedTask(task, database, roomKey) {
-  if (!isRecord(task) || !['fetch', 'defeat', 'deliver', 'puzzle'].includes(String(task.type).toLowerCase()) ||
+  if (!isRecord(task) || !['fetch', 'defeat', 'deliver', 'puzzle','research'].includes(String(task.type).toLowerCase()) ||
       !Array.isArray(task.requiredElements) || task.requiredElements.length > MAX_CHECKS) return null;
   const elements = [], seen = new Set();
   for (const e of task.requiredElements) {
@@ -460,6 +477,15 @@ function compileGeneratedTask(task, database, roomKey) {
     if (!['fetch', 'deliver'].includes(type)) return null;
     next = compileGeneratedDeliveryTask(next, database);
     if (!next) return null;
+  } else if(type==='research'){
+    if(kind!=='read_book'||!items.length||monsters.length>1||monsters.some(m=>m.allegiance==='Hostile'))return null;
+    const bindings=items.map(e=>{const b=roomAt(database,e.placement)?.readables?.find(b=>b.name===e.name);
+      return b&&['book','spellbook'].includes(b.kind)&&(b.chapters?.length||b.bookLore?.pending)?{check:'book_chapter_read',value:b.name,bookId:b.id,coords:e.placement,chapter:1}:null;});
+    if(bindings.some(b=>!b))return null;
+    next.actionRequirements=bindings;
+    next.hardRequirements=[{check:'at_coords',value:monsters[0]?.placement||items[0].placement}];
+    if(monsters[0])next.researchReturn={actor:monsters[0].name,roomKey:monsters[0].placement};
+    next.desc=`Read chapter 1 of ${sources}.`+(monsters[0]?` Report to ${monsters[0].name} in ${place(monsters[0].placement)}.`:' Record the findings through the quest conversation.');
   } else if (type === 'defeat') {
     if (kind !== 'defeat_monster' || !monsters.length || items.length || monsters.some(e => e.allegiance !== 'Hostile')) return null;
     next.hardRequirements = monsters.map(e => ({ check: 'monster_hp_zero', value: e.name }));
@@ -497,7 +523,7 @@ function compileGeneratedTask(task, database, roomKey) {
 }
 
 function generatedTaskTypes(elements, database, roomKey) {
-  return [['fetch', 'other'], ['defeat', 'defeat_monster'], ['deliver', 'deliver_item'], ['puzzle', 'solve_puzzle']]
+  return [['fetch', 'other'], ['defeat', 'defeat_monster'], ['deliver', 'deliver_item'], ['puzzle', 'solve_puzzle'],['research','read_book']]
     .filter(([type, actionKind]) => compileGeneratedTask({ id: 'candidate', type, actionKind, requiredElements: elements }, database, roomKey))
     .map(([type]) => type);
 }
@@ -556,6 +582,9 @@ function describeQuestRequirements(task, database) {
         text = `Have "${name}" in your inventory.${source(name)}`;
       } else if (check === 'inventory_magic_min') {
         text = `Keep at least ${r.minimumMagic} Magic remaining in "${r.value}".${source(r.value)}`;
+      } else if(check==='book_chapter_read'){
+        text=`Read chapter ${r.chapter} of "${r.value}" (open the chapter, not just the cover). Source: ${place(r.coords)}. Reading is recorded for later recall.`;
+        referencedItems.add(r.value);
       } else if (check === 'item_delivered') {
         const name = validName(r.item) ? r.item.trim() : '[unverified item]';
         referencedItems.add(name);
@@ -563,7 +592,7 @@ function describeQuestRequirements(task, database) {
         text = `Give "${name}" to ${validName(recipient.name) ? recipient.name.trim() : '[unverified recipient]'}${recipient.predecessor ? ` (taking over for ${recipient.predecessor})` : ''} in ${place(r.coords)}.${source(name)}${r.minimumMagic ? ` Keep at least ${r.minimumMagic} Magic in the item for this handoff.` : ''} Dropping it or mentioning it does not count.`;
       } else if (check === 'monster_hp_zero') {
         const name = validName(r.value) ? r.value.trim() : '[unverified target]';
-        text = `Defeat ${name} in ${place(monsterBinding(task, name))} (HP must be 0 or below).`;
+        text = `Defeat ${name} in ${place(monsterBinding(task, name))} (reach 0 HP; recorded defeat still counts after healing).`;
       } else if (check === 'puzzle_solved') {
         const mechanism = roomAt(database, coordKey(r.value))?.puzzleMechanism;
         const title = mechanism && (!r.mechanismId || r.mechanismId === mechanism.id) && validName(mechanism.title) ? ` "${mechanism.title.trim()}"` : '';
@@ -630,6 +659,7 @@ function refreshCombatQuestProgress(state, consoleText) {
     consoleText.replace(/^Current Quest:[^\r\n]*/m, line => `${line}\nQuest Progress: ${text}`);
   const next = writeQuestRequirements(progressText, task, database);
   state.setUpdatedGameConsole(next);
+  if (pureDefeat && task.status === 'Completed') require('./completionFeedback').task(state, task, index);
   return next;
 }
 module.exports = { evaluateTaskRequirements, mergeTaskProgress, taskBinding, verifiedTaskCompletion,

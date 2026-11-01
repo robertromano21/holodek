@@ -3,7 +3,7 @@ const Contracts = require('./generationContracts');
 const Diagnostics = require('./generationDiagnostics');
 const { randomUUID, randomInt } = require('node:crypto');
 const I = require('../assets/dungeonInhabitants'), Inventory = require('../assets/inventoryUi');
-const Rules = require('../assets/spellRules'), Reach = require('./dungeonReach');
+const Rules = require('./genreAbilities').rules, Reach = require('./dungeonReach');
 const Pantheon = require('../assets/pantheonCharacters');
 const Life = require('./combatLife');
 const field = (s, k) => String(s || '').match(new RegExp('^' + k + ':[ \\t]*([^\\r\\n]*)', 'm'))?.[1]?.trim() || '';
@@ -93,7 +93,7 @@ async function developRecipes($, state, { constructionKey } = {}) {
   if (!pending.length) return;
   let rows = [];
     $.model = 'gpt-4.1-mini'; $.temperature = .9;
-    await $.user`Invent original underworld spell names and brief lore for the magical equipment below, consistent with the Children of the Grave system prompt. Return JSON only: {"items":[{"name":"exact item name","spells":[{"id":"exact supplied effect id","name":"short spell name","lore":"<=35 words"}]}]}. Mechanics, charge costs, ranges, targets and dice are FIXED by the engine. Name and describe only the supplied effects; no summons, resurrection, teleportation, new items, quest completion or arbitrary mechanics. Do not use a name shared by another spell on the same item. Equipment and effects: ${JSON.stringify(pending.map(o => ({ name: o.name, magic: o.magic, spells: Rules.recipe(o) })))}`;
+    await $.user`${require('./genreAbilities').language() ? 'Invent original ability names and brief lore for this world’s equipment, consistent with its saved ability system and setting. '+JSON.stringify(require('./genreAbilities').language()) : 'Invent original underworld spell names and brief lore for the magical equipment below, consistent with the Children of the Grave system prompt.'} Return JSON only: {"items":[{"name":"exact item name","spells":[{"id":"exact supplied effect id","name":"short spell name","lore":"<=35 words"}]}]}. Mechanics, charge costs, ranges, targets and dice are FIXED by the engine. Name and describe only the supplied effects; no summons, resurrection, teleportation, new items, quest completion or arbitrary mechanics. Do not use a name shared by another spell on the same item. Equipment and effects: ${JSON.stringify(pending.map(o => ({ name: o.name, magic: o.magic, spells: Rules.recipe(o) })))}`;
     const effects = [...new Set(pending.flatMap(item => Rules.recipe(item).map(spell => spell.id)))];
     const result = await Contracts.request($, { component: 'spell-flavor', context: { runId: pool.runId, geoKey: key }, maxTokens: Math.min(3000, 200 * pending.length),
       parameters: { items: Contracts.list({ name: Contracts.choice(pending.map(o => o.name)), spells: Contracts.list({
@@ -164,7 +164,7 @@ function advance(state) {
 }
 function view(state, casterName, options = {}) {
   const { pool } = synchronize(state), actors = (options.monster ? allActors(state.getUpdatedGameConsole()) : party(state.getUpdatedGameConsole())).filter(a => a.hp > 0 && (!casterName || a.name === casterName));
-  return { revision: pool.revision, clock: pool.clock, casters: actors.map(a => ({ name: a.name, type: a.type, items:
+  return { abilitySystem: require('./genreAbilities').language(), revision: pool.revision, clock: pool.clock, casters: actors.map(a => ({ name: a.name, type: a.type, items:
     Object.entries(I.parseEquipment(a.lines[9])).flatMap(([slot, name]) => {
       const entry = pool.items[pool.bindings[a.name + ':' + slot]];
       return entry && entry.status !== 'ash' && Rules.key(name) === Rules.key(entry.name) ? [{ id: entry.id, name, slot,
@@ -192,10 +192,12 @@ function context(state, input, options = {}) {
   const actors = allActors(text), target = actors.find(a => a.name === input.target && (I.canAct(a) || spell.effect === 'heal' && I.isDown(a)));
   const a = roster.find(a => a.name === caster.name), t = roster.find(a => a.name === target?.name);
   const from = Reach.position(a, geoKey), to = Reach.position(t, geoKey);
-  if (!target || !dungeon || !from || !to || !Reach.lineClear(dungeon, from, to)) throw Error('Choose a living target in the same room with a clear line of sight.');
+  if (!target || !dungeon || !from || !to || t.discoveryState === 'pending' || !Reach.lineClear(dungeon, from, to)) throw Error('Choose a living target in the same room with a clear line of sight.');
   const friendly = ['heal', 'ward'].includes(spell.effect);
   const team = a => ['pc', 'npc'].includes(a.type) ? 'Friendly' : I.allegiance(a);
-  if (friendly ? team(target) !== team(caster) : team(target) === team(caster) || !options.monster && I.allegiance(target) !== 'Hostile') throw Error(friendly ? 'Choose a living ally.' : 'Choose an enemy.');
+  // A player may deliberately spare an opponent; autonomous healing remains team-only.
+  const mercyHealing = spell.effect === 'heal' && !options.monster;
+  if (friendly ? !mercyHealing && team(target) !== team(caster) : team(target) === team(caster) || !options.monster && I.allegiance(target) !== 'Hostile') throw Error(friendly ? 'Choose a living ally.' : 'Choose an enemy.');
   if (!friendly && (t.discoveryState === 'pending' || !options.combat)) throw Error('Offensive spells must be cast during an initiative turn.');
   if (options.allowedTargets && !friendly && !options.allowedTargets.includes(target.name)) throw Error('That enemy is not in this encounter.');
   if (spell.effect === 'heal' && target.hp >= target.maxHp) throw Error('That character is already at full health.');
@@ -365,6 +367,7 @@ function cast(state, service, input, options = {}) {
       changes.map(a => `${a.name}: ${a.effect === 'heal' ? '+' : a.amount === undefined ? '' : '-'}${a.amount ?? a.effect} (${a.hp} HP${I.isDown(a) ? '; ' + a.state : ''})`).join('; ') +
       `\n${entry.remaining}/${entry.capacity} Magic remaining.` + (ash ? ` ${entry.name} turns to ash.` : entry.remaining === 0 && entry.artifact ? ` Artifact recharges in ${Rules.ARTIFACT_RECHARGE_TURNS} turns.` : ''),
       caster: caster.name, target: target.name, spell: spell.name, item: entry.name, ash, artifact: entry.artifact, changes, rolls };
+    result.content = require('../assets/abilityLanguage').text(result.content, require('./genreAbilities').language());
     pool.receipts.push({ nonce: input.nonce, request: [input.runId, input.geoKey, input.caster, input.itemId, input.spellId, input.target], result }); if (pool.receipts.length > 512) pool.receipts.shift();
     state.setRoomNameDatabase(JSON.stringify(db));
     if (service) { const population = service.get(geoKey, state.getUpdatedGameConsole()); I.sync(population, I.parseSheets(state.getUpdatedGameConsole())); service.save(population); }

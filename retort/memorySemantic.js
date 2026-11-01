@@ -20,7 +20,7 @@ function passages(row) {
 
 function createService({ modelDir = path.join(__dirname, '..', 'models', 'memory'),
   cacheDir = path.join(__dirname, '..', '.retort-data', 'memory-vectors'), embed, logger = console } = {}) {
-  let worker, ready, sequence = 0, status, chain = Promise.resolve();
+  let worker, ready, sequence = 0, status, chain = Promise.resolve(), closed = false;
   const pending = new Map(), vectors = new Map();
   const manifestPath = path.join(modelDir, 'manifest.json');
   const configured = !!embed || fs.existsSync(manifestPath);
@@ -30,6 +30,7 @@ function createService({ modelDir = path.join(__dirname, '..', 'models', 'memory
     status = value; logger.info('[SemanticMemory]', JSON.stringify({ status: value, ...extra }));
   }
   function start() {
+    if (closed) return Promise.reject(Error('Game memory worker stopped.'));
     if (ready) return ready;
     ready = (async () => {
       if (!configured) { report('not-installed'); return; }
@@ -65,6 +66,7 @@ function createService({ modelDir = path.join(__dirname, '..', 'models', 'memory
     return ready;
   }
   async function encode(texts) {
+    if (closed) throw Error('Game memory worker stopped.');
     if (embed) return embed(texts);
     return new Promise((resolve, reject) => {
       const id = ++sequence;
@@ -136,8 +138,12 @@ function createService({ modelDir = path.join(__dirname, '..', 'models', 'memory
     };
     const result = chain.then(work); chain = result.catch(() => {}); return result;
   }
-  return { rank, close: async () => { if (worker) await worker.terminate(); }, configured };
+  return { rank, close: async () => {
+    closed = true;
+    for (const task of pending.values()) { clearTimeout(task.timer); task.reject(Error('Game memory worker stopped.')); }
+    pending.clear(); if (worker) await worker.terminate();
+  }, configured };
 }
 
 let service;
-module.exports = { createService, passages, rank: (query, records) => (service ||= createService()).rank(query, records) };
+module.exports = { createService, passages, rank: (query, records) => (service ||= createService()).rank(query, records), close: () => service?.close() };

@@ -35,6 +35,47 @@ async function runtime(work, answer) {
 }
 function size(body) { return Budget.tally(body.messages, body.tools?.length ? body.tools : [{ response_format: body.response_format }]).total; }
 
+test('local quest chunks retain their original world and exact bindings without importing the parent campaign', async () => {
+  const Setting = require('../retort/settingLayer'), previous = Setting.current();
+  const world = Setting.localBible('an orbital repair station', ['sci-fi']);
+  world.name = 'Meridian Station'; world.topology.goal = 'The Observation Deck';
+  world.abilitySystem = { resource: 'Tech' };
+  world.masterPrompt = Setting.masterText(Setting.masterLocal(world), world); Setting.setActive(world);
+  try {
+    const { result, requests } = await runtime(async $ => {
+      await $.user('UNRELATED PARENT TRANSCRIPT '.repeat(2000));
+      return require('../retort/holodekRoomWork').questReply($, 'quest-name', { name: C.text(60) },
+        { artifact: 'Signal Token', coordinates: '1,1,0' }, 'Name the bound destination.');
+    }, () => ({ name: 'Relay Station' }));
+    assert.equal(result.result.name, 'Relay Station'); assert.equal(requests.length, 1);
+    const raw = requests.flatMap(body => body.messages.map(row => row.content)).join('\n');
+    for (const fact of ['Meridian Station', 'The Observation Deck', 'Tech', 'Signal Token', '1,1,0', 'MODE-4 QUEST']) assert.ok(raw.includes(fact), fact);
+    assert.doesNotMatch(raw, /Tartarus|Children of the Grave|hellish sandstorms|UNRELATED PARENT TRANSCRIPT/);
+    assert.ok(requests.every(body => size(body) <= Budget.CEILING));
+  } finally { Setting.setActive(previous); }
+});
+
+test('quest name validation rejects reserved missing-data answers without supplying replacement content', () => {
+  const { questName, questDescription } = require('../retort/holodekRoomWork');
+  for (const name of ['None', ' none ', 'null', 'undefined', 'unknown', 'Unassigned Boss', 'N/A', '',
+    'one two three four five six', 'bad\nname']) assert.throws(() => questName(name), /name:/, name);
+  assert.equal(questName('Floodgate Signal Key'), 'Floodgate Signal Key');
+  assert.equal(questName('Relay Warden'), 'Relay Warden');
+  for (const description of ['None', '', 'undefined', 'Unknown', 'first\nsecond'])
+    assert.throws(() => questDescription(description), /description:/);
+});
+
+test('native quest work retries rejected placeholders through the model rather than accepting or substituting them', async () => {
+  for (const component of ['quest-artifact-name', 'quest-boss-name', 'quest-boss-location']) {
+    const { result, requests } = await runtime($ => require('../retort/holodekRoomWork').questReply($, component,
+      { name: C.text(70) }, { previousQuest: 'None' }, 'Author one concrete new name, not a missing-data placeholder.'),
+    (_body, attempt) => ({ name: attempt === 1 ? 'None' : 'Signal Vault' }));
+    assert.equal(result.result.name, 'Signal Vault');
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every(body => size(body) <= Budget.CEILING));
+  }
+});
+
 test('installed 4096 context reserves input, answer and framing space together', () => {
   assert.equal(Budget.CONTEXT, 4096); assert.equal(Budget.ANSWER, 1024);
   assert.equal(Budget.CEILING + Budget.ANSWER + Budget.SAFETY, Budget.CONTEXT);
@@ -208,4 +249,16 @@ test('dungeon authoring separates concept, room batches, indexed connections and
   for (const link of result.indoorPlan.corridors) {
     assert.ok(link.fromRoom >= 0 && link.fromRoom < 6); assert.ok(link.toRoom >= 0 && link.toRoom < 6);
   }
+});
+
+test('indoor authoring requires a distinct authored entrance even when every other room chooses a hall', async () => {
+  const { result } = await runtime($ => require('../retort/holodekBlueprint').generate($, {
+    roomDescription: 'Six connected halls.', classification: { indoor: true }, size: 64,
+    customTiles: [], generation: { seed: 'entrance-regression' }, sceneSpec: { architecture: 'roman' }
+  }));
+  const rooms = result.indoorPlan.rooms;
+  assert.equal(rooms.length, 6); assert.equal(rooms[0].role, 'entrance');
+  assert.equal(rooms.filter(room => room.role === 'entrance').length, 1);
+  assert.ok(rooms.slice(1).every(room => room.role === 'hall'));
+  assert.ok(rooms[0].w > 0 && rooms[0].h > 0);
 });

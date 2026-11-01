@@ -6,6 +6,8 @@
 //   1) underworldLore.GUIDANCE resolves through guidance() at call time, and
 //   2) modelTransport passes every request body through applyBody(), which swaps setting nouns in all prompts.
 const Flags = require('./worldFlags');
+const DeathStory = require('./deathStory');
+const authoringScope = new (require('node:async_hooks').AsyncLocalStorage)();
 let active = null;
 const GENRES = ['fantasy', 'dark-fantasy', 'sci-fi', 'cyberpunk', 'post-apocalyptic', 'steampunk', 'western', 'modern', 'cosmic-horror', 'nautical', 'mythic', 'noir'];
 const ExpandedWorlds = require('./expandedWorlds');
@@ -37,30 +39,38 @@ const COTG_SLOTS = { 'the Grave Master': () => gmName(), 'The Grave Master': () 
   Dyanetzia: b => b.powers[1]?.name || b.factions[1]?.name, Ronalde: b => b.antagonist, Earthdragon: b => b.powers[1]?.name || 'the old power',
   'dragon deities': () => 'old powers', 'dragon gods': () => 'old powers', underworld: b => b.realm, 'the dead': b => b.peoples, 'yellow sky': b => b.sky, 'ash wastes': b => b.wilds
 };
-// The homebrew first room (0,0,0), drawn from the bible; replaces the Children of the Grave Ruined Temple Entrance at Start.
+// Offline fixtures only. Production opening names are authored with the campaign, not chosen from this table.
 const START_NOUN = { western: 'Main Street', 'cosmic-horror': 'Chapel Steps', fantasy: 'Gate', 'dark-fantasy': 'Lychgate', 'sci-fi': 'Docking Ring', cyberpunk: 'Night Market', 'post-apocalyptic': 'Checkpoint',
   steampunk: 'Boiler Square', modern: 'Station Concourse', nautical: 'Harbour Quay', mythic: 'Sacred Way', noir: 'Corner Diner' };
 function firstRoom(b) { if (!b?.topology?.start) throw new Error('homebrew world has no starting place (bible.topology.start missing)');
-  const start = b.topology.start.replace(/^the /i, 'The '), noun = START_NOUN[b.genres?.[0]] || 'Crossing';
-  return { name: `${start} ${noun}`, description: `You stand at the ${noun.toLowerCase()} of ${b.topology.start}, in ${b.realm || 'this land'}, under ${b.sky || 'an open sky'}. ${b.peoples ? `Around you are ${b.peoples}. ` : ''}${b.arc || ''}`.trim() }; }
+  // A missing description goes through RoomDescription.generate, exactly like the canonical campaign.
+  // Legacy worlds retain their authored starting-place name; never append a genre-specific stock noun.
+  return { name: b.opening?.name || b.topology.start, description: '' }; }
 const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function setActive(bible) { active = bible && bible.kind === 'homebrew' ? bible : null; return active; }
 function attach(sharedState) { try { setActive(JSON.parse(sharedState.getRoomNameDatabase() || '{}')['0,0,0']?.setting || null); } catch { setActive(null); } return active; }
-let draft = null; // a world being drafted in the builder: its calls are translated/linted like the live world's
-const current = () => (Flags.on('HOMEBREW') ? (active || draft) : null);
+// An explicit null scope isolates a fresh world from the running game's lore.
+const current = () => Flags.on('HOMEBREW') ? (authoringScope.getStore() ? authoringScope.getStore().bible : active) : null;
 function startRoomProfile(b = current()) {
   if (!b) return null;
   const genre = module.exports.genreOf(b.genres?.[0]);
   if (!genre) throw Error('This world has no supported starting genre.');
-  const indoor = ['sci-fi','underwater','noir','modern'].includes(genre);
-  return { ...firstRoom(b), indoor, classification:{indoor,size:64,biome:indoor?'fortress':'wasteland',architecture:indoor?'hall':'open',features:[]} };
+  const indoor = typeof b.opening?.indoor==='boolean'?b.opening.indoor:['sci-fi','underwater','noir','modern'].includes(genre);
+  const cityIndex=(b.cities||[]).findIndex(c=>c.name?.trim().toLowerCase()===b.topology.start.trim().toLowerCase());
+  const city=cityIndex<0||b.opening?.city===false?null:{id:`world-city-${cityIndex}`,name:b.cities[cityIndex].name,role:'starting',genre,
+    utilities:['transport','storage'],guilds:[],districts:['market ward','tenements'],population:12000,
+    site:{key:'0,0,0',coords:{x:0,y:0,z:0},underground:false,template:'market'}};
+  return { ...firstRoom(b), indoor, city, classification:{indoor,size:64,biome:city?'city':indoor?'fortress':'wasteland',architecture:indoor?'hall':city?'city_street':'open',features:[]} };
 }
 function applyStartRoom(room, b = current()) {
+  if(room?.cityFloorContext)return room;
+  if(room?.sceneSpec||room?.visited)return room; // Future generation only; never redraw a visited map.
   const p = startRoomProfile(b); if (!p || !room) return room;
   room.name = p.name; room.indoor = room.isIndoor = p.indoor; room.isOutdoor = !p.indoor;
   room.classification = {...room.classification,...p.classification};
   delete room.classification.world1Temple; delete room.classification.templeComplex;
   delete room.complexId;
+  if(p.city)room.environmentIntent={template:'market',indoor:p.indoor,biome:'city',architecture:p.classification.architecture,citySite:p.city,mapRole:`city:${p.city.id}`};
   return room;
 }
 function campaignPlan(runId, b = current()) {
@@ -73,7 +83,7 @@ function campaignPlan(runId, b = current()) {
 }
 function campaignCommunity(input, b = current()) {
   if (!b) return null;
-  const key=String(input.targetKey),c=key.split(',').map(Number),h=hash(`${b.seed}:${key}`),atlas=input.database?.['0,0,0']?.campaignAtlas || campaignPlan(input.seed,b);
+  const key=String(input.targetKey),c=key.split(',').map(Number),h=hash(`${b.seed}:${key}`),savedAtlas=input.database?.['0,0,0']?.campaignAtlas,atlas=savedAtlas?.kind==='homebrew'?savedAtlas:campaignPlan(input.seed,b);
   const stage=Math.min(3,Math.floor(Math.max(Math.abs(c[0]),Math.abs(c[1]))/12)),region=atlas.regions[stage],f=atlas.factions[h%atlas.factions.length];
   const city=b.cities?.[h%Math.max(1,b.cities.length)],siteKind=input.template || 'wasteland';
   return {version:1,kind:'homebrew',regionId:region.id,region:region.name,chapter:stage,ecology:region.ecology,
@@ -83,12 +93,20 @@ function campaignCommunity(input, b = current()) {
     faction:{...f},neighboringFactions:atlas.factions.filter(x=>x.id!==f.id),religion:{patron:null,allegiance:'Neutral',practice:'Beliefs and powers follow the active world bible.'},
     journey:`${b.topology.start} to ${b.topology.goal}; geography never completes quests or grants rewards.`};
 }
-async function withDraft(b, work) { const prev = draft; draft = b && b.kind === 'homebrew' ? b : null; try { return await work(); } finally { draft = prev; } }
+function withDraft(b, work) { return authoringScope.run({bible:b?.kind==='homebrew'?b:null},work); }
 // GM persona: 'Grave Master' in Children of the Grave; 'Holodek' for Campaign Builder readouts and TEST MODE;
 // a finished homebrew world uses its own invented gmName (stored in the bible / world file).
 let testMode = false, lastLeak = null;
 function setTestMode(on) { testMode = !!on; return testMode; }
-function gmName() { if (testMode) return 'Holodek'; const b = current(); return b ? (b.gmName || 'Holodek') : 'Grave Master'; }
+function gmName(b = current()) { if (testMode) return 'Holodek'; return b ? (b.gmName || 'Holodek') : 'Grave Master'; }
+function promptGm(text) {
+  const name = gmName();
+  return typeof text === 'string' && name !== 'Grave Master' ? translate(text.replace(/\b(?:[Tt]he )?Grave Master\b/g, () => name)) : text;
+}
+function roleGm(text, b = current()) {
+  const name = gmName(b);
+  return typeof text === 'string' && name !== 'Grave Master' ? text.replace(/((?:You are|You're|you are|you’re|Instructions for|instructions for|as)\s+(?:the\s+)?)Grave Master\b/g, (_, lead) => lead.replace(/the\s+$/, '') + name) : text;
+}
 const GM_TITLES = { fantasy: ['Loremaster', 'Warden of Tales'], 'dark-fantasy': ['Candle-Keeper', 'Bell Warden'], 'sci-fi': ['Overseer', 'Flight Controller'], cyberpunk: ['Fixer', 'Signal Broker'],
   'post-apocalyptic': ['Road Caller', 'Dust Herald'], steampunk: ['Chief Engineer', 'Gauge Master'], western: ['Trail Boss', 'Marshal'], modern: ['Dispatcher', 'Handler'], 'cosmic-horror': ['Archivist', 'Lamp-Bearer'],
   nautical: ['Quartermaster', 'Tide Caller'], mythic: ['Oracle', 'Chorus'], noir: ['Narrator', 'Night Clerk'] };
@@ -96,24 +114,24 @@ function inventGmName(b) { const g = b.genres?.[0] || 'fantasy', h = hash(b.seed
   const nm = syl[h % 15] + syl[(h >>> 4) % 15] + (h % 3 ? syl[(h >>> 8) % 15] : ''); const t = (GM_TITLES[g] || GM_TITLES.fantasy)[(h >>> 12) % 2]; return `${t} ${nm[0].toUpperCase()}${nm.slice(1)}`; }
 function guidance(defaultText) {
   const b = current(); if (!b) return defaultText;
-  if (b.masterPrompt) return b.masterPrompt;
+  if (b.masterPrompt) return b.masterPrompt + (b.abilitySystem ? '\nWORLD ABILITIES: '+JSON.stringify(b.abilitySystem)+'. Internal Magic is only the numeric resource field; use this world’s terms and mechanisms.' : '') + (b.deathStory ? '\nTHREE-LIFE RULE: confirmed death spends one of two returns immediately, then the third death is permanent game over. Each return includes a separate reviver scene and returns the player alone to the current map’s original spawn. Unconsciousness spends no life: companions keep fighting and attempt available aid. Recovery explanation: '+b.deathStory.reason : '');
   return `[SETTING: ${b.name}]\nTone: ${b.tone}. Genre: ${b.genres.join(', ')}. The journey runs from ${b.topology.start} to ${b.topology.goal} through ${b.topology.layers.join(', ')}.\n` +
     `Factions: ${b.factions.map(f => `${f.name} (${f.aim})`).join('; ')}. Powers: ${b.powers.length ? b.powers.map(p => `${p.name}, ${p.domain}`).join('; ') : 'none; no gods are real here'}.\n` +
     `History: ${b.history}\nCalendar: years are counted ${b.calendar.name} (${b.calendar.abbr}); now is ${b.calendar.now} ${b.calendar.abbr}.\nNaming style: ${b.naming}. Peoples: ${b.peoples}.\n` +
+    `Currency: ${require('../assets/currencyLanguage').forWorld(b).plural}; Silver Pieces is only the numeric compatibility field.\n` +
     `Main arc: ${b.arc}\nThis world has NO connection to any other setting. Never mention gods, places, calendars or heroes that are not in this bible.\n[/SETTING]`;
 }
 function visualDirection(room = {}) {
-  if (!Flags.on('ARCHITECTURE_EXPANSION')) return '';
+  if (!Flags.on('GENRE_KITS')) return '';
   const b = current(), kit = require('../assets/genreKits').resolve(room, b), art = require('../assets/genreExpansion');
-  const shapes = Object.entries(art.SHAPES).filter(([, info]) => kit.locked ? info.cotg : info.genre === kit.genre).map(([name]) => name);
-  return `WORLD VISUAL DIRECTION (authoritative): ${JSON.stringify({ genre:kit.genre, style:art.PROFILES[kit.genre]?.label, shapes, wall:`x_${kit.genre}_wall`, floor:`x_${kit.genre}_floor`, door:`x_${kit.genre}_door` })}. ` +
+  return require('./genreAssetPolicy').directive(room, b) + ` WORLD VISUAL DIRECTION: ${art.PROFILES[kit.genre]?.label || kit.genre}. ` +
     (b ? `Use only this world's bible, peoples, technology, history and powers. ${b.peoples || ''} Generic ancient/medieval schema examples are geometry examples, not mandatory setting content: frontier buildings have timber false fronts and porches; space installations have pressure walls, airlocks and service equipment. Match the selected genre, including contemporary and future mechanisms where appropriate. Never import another campaign's pantheon or sacred imagery. ` : 'Keep the established Children of the Grave setting and canonical pantheon. ') +
     'Keep the room description authoritative; do not invent actors, equipment, quests, exits or new interaction rules to justify scenery. Native shapes are alternatives to legacy primitives, not a checklist for every room.';
 }
 function translate(text, b = current()) {
   if (!b || typeof text !== 'string') return text;
-  let out = text; const own = new Set(require('./campaignBuilder').playerTerms()); // player-chosen names (e.g. a PC called Mortacia) are never renamed
-  for (const [term, slot] of Object.entries(COTG_SLOTS).filter(([t]) => !own.has(t)).sort((a, c) => c[0].length - a[0].length)) out = out.replace(new RegExp(`\\b${esc(term)}(?![\\w])`, 'g'), slot(b) || 'the old order');
+  let out = roleGm(text, b); const own = new Set([...require('./campaignBuilder').playerTerms(), ...require('./campaignBuilder').templateTerms(b)]); // player-chosen names (e.g. a PC called Mortacia) are never renamed
+  for (const [term, slot] of Object.entries(COTG_SLOTS).filter(([t]) => !own.has(t) && !t.endsWith('Grave Master')).sort((a, c) => c[0].length - a[0].length)) out = out.replace(new RegExp(`\\b${esc(term)}(?![\\w])`, 'g'), () => slot(b) || 'the old order');
   return out;
 }
 function applyBody(body) {
@@ -125,8 +143,19 @@ function applyBody(body) {
     if (/^Place these cities on the Tartarus-to-Hades/.test(m.content)) m.content=`Place the world's supplied cities on its own campaign grid (origin 0,0,0, north +y). For each city in order give {bearing:north|south|east|west|northeast|northwest|southeast|southwest,distance:integer,underground:boolean,template:village|oasis|market|hamlet|cavern_village}. First distance 2-5; subsequent city i has minimum 4+6*(i-1), maximum 60. Use the world's own technology and geography. Cities: ${JSON.stringify(b.cities)}.`;
     if (/^\[START-ROOM\]/.test(m.content)) { const p=startRoomProfile(b); m.content=`[START-ROOM] ${p.name}: ${p.indoor?'covered interior':'open-air setting'}. ${p.description} Follow this world, not an inherited temple premise. [/START-ROOM]`; }
   }
-  const LORE = /^\s*(?:Hereafter, 'You' refers|Write an interactive fiction adventure|CHILDREN OF THE GRAVE|The following is some backstory)/;
-  if (b.masterPrompt) for (const m of body.messages) if (typeof m.content === 'string' && ((m.role === 'system' && /Children of the Grave|Grave Master/.test(m.content)) || LORE.test(m.content))) m.content = b.masterPrompt;
+  const LORE = /^\s*(?:Instructions for the Grave Master:|Hereafter, 'You' refers|Write an interactive fiction adventure|CHILDREN OF THE GRAVE|\[CHILDREN-OF-THE-GRAVE\]|The following is some backstory)/;
+  for (const m of body.messages) {
+    const replace = text => ((m.role === 'system' && /Children of the Grave|Grave Master/.test(text)) || LORE.test(text)) ? guidance() : text;
+    if (typeof m.content === 'string') m.content = replace(m.content);
+    else if (Array.isArray(m.content)) for (const part of m.content) if (typeof part.text === 'string') part.text = replace(part.text);
+  }
+  // Backstop for saved conversations and adapters which predate named prompt fields.
+  for (const message of body.messages) {
+    if (typeof message.content === 'string') message.content = roleGm(message.content);
+    else if (Array.isArray(message.content)) for (const part of message.content) if (typeof part.text === 'string') part.text = roleGm(part.text);
+  }
+  const system=body.messages.find(m=>m.role==='system'&&typeof m.content==='string');
+  if(system&&b.deathStory&&!system.content.includes('THREE-LIFE RULE:'))system.content+='\nTHREE-LIFE RULE: the engine permits exactly two recoveries, then permanent game over. Reason: '+b.deathStory.reason+' Follow engine-reported deaths and recoveries; do not award extra lives.';
   for (const m of body.messages) if (typeof m.content === 'string') m.content = translate(m.content, b);
   else if (Array.isArray(m.content)) for (const part of m.content) if (typeof part.text === 'string') part.text = translate(part.text, b);
   try { const txt = body.messages.map(m => typeof m.content === 'string' ? m.content : '').join('\n'), own = new Set(require('./campaignBuilder').playerTerms()), hit = require('./campaignBuilder').COTG_TERMS.filter(t => !own.has(t) && new RegExp(`\\b${esc(t)}\\b`).test(txt)); /* case-sensitive: lowercase internal keys (music moods) are not prose */ if (hit.length) { lastLeak = hit; const all = txt, at = all.search(new RegExp(hit[0])); console.error(`[homebrew] ERROR Children of the Grave terms still in a model request after translation: ${hit.join(', ')} near: ${JSON.stringify(all.slice(Math.max(0, at - 100), at + 60))}`); } } catch {}
@@ -183,7 +212,8 @@ function localBible(seed, picked = null, worldSeed = '') {
   if (worldSeed) { const fresh = placeName(g, h), oldBare = T.start.replace(/^the /i, ''); // per-world variety: a fresh starting place each world
     T.layers = T.layers.map(l => l === T.start ? fresh : l); T.name = T.name.includes(oldBare) ? T.name.replace(oldBare, fresh) : `${T.name.replace(/^The /, 'The ')} of ${fresh}`; T.start = fresh; }
   const scifi = /sci-fi|cyberpunk|post/.test(g) || !!ExpandedWorlds.rows[g]?.tech;
-  return { kind: 'homebrew', version: 1, worldSeed: String(worldSeed || ''), seed: String(seed).slice(0, 120), name: T.name, genres, genreWeights: weights, genresPicked: !!normalizePicked(picked), tone: /dystop/i.test(seed) ? 'oppressive, rationed, quietly defiant' : 'tense and wondering',
+  return { kind: 'homebrew', version: 1, source:'offline-fixture', worldSeed: String(worldSeed || ''), seed: String(seed).slice(0, 120), name: T.name, genres, genreWeights: weights, genresPicked: !!normalizePicked(picked), tone: /dystop/i.test(seed) ? 'oppressive, rationed, quietly defiant' : 'tense and wondering',
+    opening:{name:`${T.start} ${START_NOUN[g]||'Crossing'}`,indoor:['sci-fi','underwater','noir','modern'].includes(g)},
     topology: { start: T.start, goal: T.goal, layers: T.layers }, realm: T.realm, peoples: T.peoples, sky: T.sky, wilds: T.wilds,
     factions: scifi ? [{ name: 'the Directorate', aim: 'keep order through rationing and surveillance' }, { name: 'the Ventline Union', aim: 'win air and water for the lower decks' }, { name: 'the Quiet Choir', aim: 'wake the station mind' }]
       : [{ name: 'the Wardens', aim: 'hold the roads' }, { name: 'the Ash Guild', aim: 'control trade' }, { name: 'the Unbound', aim: 'tear down the old seat' }],
@@ -210,25 +240,57 @@ function validateBible(b) {
   b.genres = (b.genreWeights?.length ? b.genreWeights.map(g => g.genre) : b.genres.map(g => module.exports.genreOf(g) || g)).filter(g => GENRES.includes(g)); if (!b.genres.length) throw Error('World bible has no supported genre; refusing a fallback world.');
   if (!b.genreWeights?.length) b.genreWeights = b.genres.map((g, i, a) => ({ genre: g, weight: Math.round(100 / a.length) / 100 }));
   b.resourceName ||= require('../assets/rangedRules').resourceLabel(b.genres[0], {});
+  b.currency = require('../assets/currencyLanguage').forWorld({ ...b, kind: 'homebrew' });
+  b.currencyName = b.currency.plural;
   return b;
 }
-async function generate(seed, { runner, picked = null, worldSeed = '' } = {}) {
+function generate(seed,options={}) { return withDraft(null,()=>generateWorld(seed,options)); }
+async function generateWorld(seed, { runner, offline = false, picked = null, worldSeed = '', prompt = '', instructions = '', recentWorlds } = {}) {
   seed = String(seed || '').trim().slice(0, 200); if (!seed) throw Error('Type a short seed, e.g. "space station dystopian setting".');
   worldSeed = worldSeed || require('crypto').randomBytes(6).toString('hex'); // per-world: a fresh setting every time, even for identical inputs
-  const base = localBible(seed, picked, worldSeed), locked = normalizePicked(picked);
-  if (!runner) return validateBible(base);
+  const locked = normalizePicked(picked);
+  if (!runner) {
+    if(offline===true)return validateBible(localBible(seed,picked,worldSeed));
+    throw Error('World creation requires a model authoring runner; offline fixtures must be explicitly requested.');
+  }
+  const History=require('./worldAuthoringHistory'),brief=[seed,prompt,instructions].join('\n');
+  const weights=locked||weightedGenres(seed),genres=weights.map(g=>g.genre),metadata={kind:'homebrew',version:2,source:'model-authored',
+    seed,worldSeed,genres,genreWeights:weights,genresPicked:!!locked,
+    art:{kits:genres.map(g=>KIT_MAP[g]?.voxel||'stone'),themes:[...new Set(genres.flatMap(g=>KIT_MAP[g]?.themes||[]))],
+      palettes:[...new Set(genres.flatMap(g=>KIT_MAP[g]?.palettes||[]))],spriteKits:genres}};
+  const validateAuthored=value=>{
+    for(const field of ['opening','calendar','protagonist','antagonist','resourceName','currency','realm','sky','wilds','peoples'])
+      if(!value?.[field])throw Error('Author bible.'+field+'; no stock value will be substituted.');
+    if(!value.opening.name?.trim()||typeof value.opening.indoor!=='boolean'||typeof value.opening.city!=='boolean')throw Error('Author the opening room name and its indoor/city flags.');
+    if(value.opening.city&&!value.cities?.some(c=>c.name?.trim().toLowerCase()===value.topology?.start?.trim().toLowerCase()))throw Error('The opening city must match a named city in this authored world.');
+    if(!value.currency.singular?.trim()||!value.currency.plural?.trim()||!Number.isSafeInteger(value.calendar.now))throw Error('Author the currency and calendar.');
+    const result=validateBible({...value,...metadata,deathStory:DeathStory.validate(value.deathStory)});
+    History.validate(result,recentWorlds,{brief});
+    return result;
+  };
   try {
     const Contracts = require('./generationContracts');
-    const value = await runner(async $ => { await $.user(`Expand this seed into an ORIGINAL game setting bible: ${JSON.stringify(seed)}. World seed ${worldSeed}: take an unusual angle and invent fresh names; do not reuse any of these recently used names: ${JSON.stringify(recentNames())}. It must be self-contained: no references to any existing game, book, film or real person, and no gods unless the seed implies them. Use this skeleton and improve every field: ${JSON.stringify(base)}`);
-      const r = await Contracts.request($, { component: 'setting-bible', maxTokens: 3000, parameters: { name: Contracts.text(80), tone: Contracts.text(120), history: Contracts.text(600), arc: Contracts.text(400), naming: Contracts.text(160), music: Contracts.text(160),
+    const value = await runner(async $ => {
+      const naming=History.direction(recentWorlds,{worldSeed,brief});if(naming)await $.user(naming);
+      await $.user(`Author the complete ORIGINAL campaign and setting bible from the player's brief, not a sample world. Seed (player text): ${JSON.stringify(seed)}. Full game prompt: ${JSON.stringify(String(prompt||seed).slice(0,2000))}. Additional player instructions (authoritative): ${JSON.stringify(String(instructions||'').slice(0,3000))}. Selected genres and weights are authoritative: ${JSON.stringify(weights)}. World seed ${worldSeed} is only a variation key, not lore. Invent this world's own geography, peoples, history, factions, beliefs, culture, calendar, conflicts, mysteries, journey and quest possibilities. Derive geography and conflicts from the player's theme, without a preset plot. Author all names yourself, including the opening room, resources and money. No example names or prewritten campaign are supplied. Use varied names fitting the cultures and geography you create. Established player-provided names remain authoritative. topology.start is the opening settlement or region; opening.name is the specific first room there. opening.indoor records its actual physical enclosure and opening.city says whether it is an urban start. Include a matching city entry when it is urban. The normal room construction pass will write the opening room's descriptive prose later. Write complete, grammatical sentences in prose fields, not fragments intended for concatenation. Keep the world self-contained; no references to another game, book, film or real person, and no gods unless the player's premise supports them. ${DeathStory.INSTRUCTIONS} Return deathStory with reason, firstReturn, secondReturn and finalDeath.`);
+      const r = await Contracts.request($, { component: 'setting-bible', context:{worldSeed,authorship:'model',contentFallback:false,scope:'fresh-world'},
+        retryGuidance:History.retryGuidance,
+        maxTokens: 4000, parameters: { deathStory: DeathStory.parameters(Contracts), name: Contracts.text(80), tone: Contracts.text(120), history: Contracts.text(600), arc: Contracts.text(400), naming: Contracts.text(160), music: Contracts.text(160),
         realm:Contracts.text(180),sky:Contracts.text(180),wilds:Contracts.text(300),peoples:Contracts.text(350),
+        protagonist:Contracts.text(100),antagonist:Contracts.text(100),resourceName:Contracts.text(40),
+        currency:Contracts.object({singular:Contracts.text(40),plural:Contracts.text(40)}),
+        calendar:Contracts.object({name:Contracts.text(70),abbr:Contracts.text(12),now:{type:Number,minimum:0,maximum:1000000000,multipleOf:1}}),
+        opening:Contracts.object({name:Contracts.text(80),indoor:Boolean,city:Boolean}),
         topology:Contracts.object({start:Contracts.text(80),goal:Contracts.text(80),layers:[String]}),cities:Contracts.list({name:Contracts.text(60),role:Contracts.text(40)}),
         powers:Contracts.list({name:Contracts.text(60),domain:Contracts.text(120)}),
-        quests: [{ type: String, maxLength: 160 }], factions: Contracts.list({ name: Contracts.text(60), aim: Contracts.text(160) }) }, validate: v => validateBible({ ...base, ...v, kind: 'homebrew' }) });
-      if(!r.value)throw Error(r.error?.message || 'No valid world bible returned.');return r.value; });
+        quests: [{ type: String, maxLength: 160 }], factions: Contracts.list({ name: Contracts.text(60), aim: Contracts.text(160) }) }, validate: v => {
+          return validateAuthored(v);
+        } });
+      if(!r.value)throw Error(r.error?.message || 'No valid world bible returned.');
+      if(require('./settingEcology').enabled())r.value.ecology=await require('./settingEcology').author($,{world:r.value,seed:worldSeed});
+      return r.value; });
     if (!value) throw Error('No valid world bible returned.');
-    const out = { ...base, ...value, kind: 'homebrew' }; if (locked) { out.genres = locked.map(g => g.genre); out.genreWeights = locked; out.genresPicked = true; }
-    return validateBible(out);
+    return validateAuthored(value);
   } catch (e) { throw Error('World creation failed: '+e.message); }
 }
 // ---- Recently used names (per player, across worlds) so new worlds avoid repeating them.
@@ -237,7 +299,7 @@ function recentNames() { try { return JSON.parse(require('fs').readFileSync(RECE
 function rememberNames(b) { try { const names = [b.name, b.topology?.start, b.gmName, ...(b.classes || []).map(c => c.name), ...(b.races || []).map(r => r.name), ...(b.factions || []).map(f => f.name)].filter(Boolean);
   require('fs').mkdirSync(require('path').dirname(RECENT_FILE), { recursive: true }); require('fs').writeFileSync(RECENT_FILE, JSON.stringify([...new Set([...recentNames(), ...names])].slice(-80))); } catch (e) { console.error('[Setting] could not save recent names:', e.message); } }
 // ---- World classes and races: generated per world by the model (structured, validated, clamped to engine ranges, denylisted,
-// cached in the bible / world file). The small per-genre lists below are ONLY prompt examples and the mock/offline fallback.
+// cached in the bible / world file). The small per-genre lists below are ONLY mock/offline demonstration data, never production prompt examples.
 const BODY_PLANS = ['humanoid', 'beast', 'serpent', 'insectoid', 'spider', 'ooze', 'elemental', 'spectral', 'skeletal', 'draconic', 'giant'];
 const ROSTER_EXAMPLES = {
   western: { roles: ['Gunhand', 'Lawkeeper', 'Card Sharp', 'Prospector', 'Circuit Preacher', 'Trail Scout', 'Snake-Oil Doctor'], kin: ['Frontier-born', 'Hill folk', 'Rail-camp kin'], adj: ['Dust', 'Iron', 'Lonesome', 'Ember', 'Bitter', 'Sundown', 'Brass', 'Rattler'] },
@@ -279,10 +341,15 @@ function localRoster(b) { // mock / offline fallback only; seeded by the world s
       if (!races.some(r => r.name === nm)) races.push({ name: nm, description: `${k} of ${b.name}.`, stats: { Magic: gi ? 1 : 0 }, hpBonus: gi ? 0 : 1, bodyPlan: 'humanoid' }); } });
   return validateRoster({ classes, races });
 }
-async function generateRoster(b, { runner } = {}) {
-  if (!runner) return localRoster(b);
-  const Contracts = require('./generationContracts'), ex = (b.genreWeights || []).map(w => ({ genre: w.genre, roles: ROSTER_EXAMPLES[w.genre]?.roles.slice(0, 3), kin: ROSTER_EXAMPLES[w.genre]?.kin.slice(0, 2) }));
-  try { const v = await runner(async $ => { await $.user(`Invent the playable CLASSES (4-8) and RACES or kinds (2-6) for this ORIGINAL world, blending its genres by weight. World seed ${b.worldSeed}: take unusual angles; names must be fresh and must not repeat any of: ${JSON.stringify(recentNames())}. Examples of the kind of thing only (do not copy): ${JSON.stringify(ex)}. World: ${JSON.stringify({ name: b.name, genres: b.genreWeights, premise: b.gamePrompt, resource: b.resourceName, factions: b.factions })}. Stats are small modifiers (-2..3) to Attack, Damage, Armor, Magic (Magic is the world's ${b.resourceName || 'Luck'} stat). Abilities spend ${b.resourceName || 'Luck'} (cost 1-5). hitDie is 6, 8, 10 or 12. bodyPlan is one of ${BODY_PLANS.join('/')}. Give starting gear and ammo where it fits.`);
+function generateRoster(b,options={}) { return withDraft(b,()=>authorRoster(b,options)); }
+async function authorRoster(b, { runner, offline = false } = {}) {
+  if (!runner) {
+    if(offline===true)return localRoster(b);
+    throw Error('World roster creation requires a model authoring runner; offline fixtures must be explicitly requested.');
+  }
+  const Contracts = require('./generationContracts');
+  try { const v = await runner(async $ => { await $.user(require('./genreCharacterPalette').direction(b));
+      await $.user(`Author the playable CLASSES (4-8) and RACES or kinds (2-6) for this ORIGINAL world, blending its genres by weight. They are persistent world data, not a canned genre menu. World seed ${b.worldSeed}: vary origins, methods, abilities and starting equipment. Common genre labels may recur when they fit the authored peoples and cultures. World: ${JSON.stringify({ name: b.name, genres: b.genreWeights, premise: b.gamePrompt, history:b.history, peoples:b.peoples, technology:b.technology, instructions:b.instructions||b.additionalInstructions, resource: b.resourceName, factions: b.factions })}. Each class needs a distinct practical play style; ancestry is not profession. Stats are small modifiers (-2..3) to Attack, Damage, Armor, Magic (Magic is the world's ${b.resourceName || 'Luck'} stat). Abilities spend ${b.resourceName || 'Luck'} (cost 1-5). hitDie is 6, 8, 10 or 12. bodyPlan is one of ${BODY_PLANS.join('/')}. Give starting gear and ammo where it fits. Do not silently substitute a stock roster if authoring fails.`);
       const num = (lo, hi) => ({ type: Number, minimum: lo, maximum: hi }), st = { Attack: num(-2, 3), Damage: num(-2, 3), Armor: num(-2, 3), Magic: num(-2, 3) };
       const r = await Contracts.request($, { component: 'world-roster', context: { worldSeed: b.worldSeed }, maxTokens: 3000, parameters: {
         classes: Contracts.list({ name: Contracts.text(40), description: Contracts.text(200), hitDie: Contracts.choice(['6', '8', '10', '12']), stats: st, abilities: Contracts.list({ name: Contracts.text(40), cost: num(1, 5), effect: Contracts.text(160) }), gear: [{ type: String, maxLength: 40 }], ammo: Contracts.text(30), bodyPlan: Contracts.choice(BODY_PLANS) }),
@@ -303,32 +370,50 @@ const CORE = `You are the Game Master of a turn-based exploration role-playing g
 const SECTIONS = ['premise', 'tone', 'rules', 'factions', 'npcs', 'places', 'conflict', 'mysteries', 'start'];
 function masterLocal(b, gamePrompt = '') {
   const g = b.genreWeights || b.genres.map(x => ({ genre: x, weight: 1 })), ammo = [...new Set(g.flatMap(x => require('../assets/rangedRules').forGenre(x.genre).filter(w => w.ammo).map(w => w.ammo)))];
-  return { premise: `${b.name}: ${gamePrompt || b.seed}. ${b.history}`, tone: b.tone, rules: `Genres: ${g.map(x => `${x.genre} ${Math.round(x.weight * 100)}%`).join(', ')}. The character stat is called ${b.resourceName}. Ammunition in use: ${ammo.join(', ') || 'none'}. No gods are real unless named in this world.`,
+  return { premise: `${b.name}: ${gamePrompt || b.seed}. ${b.history}`, tone: b.tone, rules: `Genres: ${g.map(x => `${x.genre} ${Math.round(x.weight * 100)}%`).join(', ')}. The character stat is called ${b.resourceName}. Ammunition in use: ${ammo.join(', ') || 'none'}. No gods are real unless named in this world. Three lives: two returns, then permanent game over. Authored reason: ${b.deathStory?.reason || 'must be authored before play'}.`,
     factions: b.factions.map(f => `${f.name}: ${f.aim}`).join('; '), npcs: `${b.protagonist} (the player's role); ${b.antagonist} (the opposition).`, places: b.topology.layers.join(' -> '),
     conflict: b.arc, mysteries: (b.quests || []).slice(-2).join('; '), start: `The story opens in ${b.topology.start}, ${b.calendar.now} ${b.calendar.abbr}.`, gmName: b.gmName || inventGmName(b), resourceName: b.resourceName, ammo, era: `${b.calendar.name} (${b.calendar.abbr})` };
 }
 function masterText(m, b) { return `${CORE.replace('You are the Game Master', `You are ${m.gmName}, the Game Master`)}\n\n[WORLD: ${b.name}]\n${SECTIONS.map(k => `${k.toUpperCase()}: ${m[k]}`).join('\n')}\nRESOURCE STAT: ${m.resourceName}. ERA: ${m.era}. AMMO: ${(m.ammo || []).join(', ') || 'none'}.\n[/WORLD]`; }
 function lintMaster(m) { return require('./campaignBuilder').lint({ m }); }
-async function generateMaster(b, gamePrompt = '', { runner } = {}) {
-  const base = masterLocal(b, gamePrompt); let m = base;
+function validGmName(name) { return typeof name==='string'&&name.length>=3&&name.length<=80&&/^[\p{L}][\p{L}\p{M}\p{N} ,'’:.\-]*$/u.test(name)&&name.trim()===name; }
+function generateMaster(b,gamePrompt='',options={}) { return withDraft(b,()=>authorMaster(b,gamePrompt,options)); }
+async function authorMaster(b, gamePrompt = '', { runner, offline = false, recentWorlds } = {}) {
+  if(!runner&&offline!==true)throw Error('Master prompt creation requires a model authoring runner; offline fixtures must be explicitly requested.');
+  const base = runner?{resourceName:b.resourceName,era:`${b.calendar.name} (${b.calendar.abbr})`,
+    ammo:[...new Set((b.genreWeights||b.genres.map(genre=>({genre}))).flatMap(g=>require('../assets/rangedRules').forGenre(g.genre).filter(w=>w.ammo).map(w=>w.ammo)))]}:masterLocal(b,gamePrompt);
+  let m = base;
   if (runner) try {
-    const Contracts = require('./generationContracts');
-    const v = await runner(async $ => { await $.user(`Write the MASTER SYSTEM PROMPT sections for an ORIGINAL game world. World seed ${b.worldSeed || ''}: pick unusual angles; every name must be fresh and must not repeat any of: ${JSON.stringify(recentNames())}. Genres (authoritative, weighted): ${JSON.stringify(b.genreWeights)}. Player's game prompt: ${JSON.stringify(gamePrompt)}. Setting bible (data): ${JSON.stringify({ name: b.name, tone: b.tone, factions: b.factions, topology: b.topology, history: b.history, calendar: b.calendar, resourceName: b.resourceName })}. Also invent an original name and title for the game-master persona (gmName) that suits the genres. Invent everything fresh; no references to any existing game, book, film, real person or artist. Return the sections only.`);
-      const r = await Contracts.request($, { component: 'master-prompt', maxTokens: 2500, parameters: { ...Object.fromEntries(SECTIONS.map(k => [k, Contracts.text(700)])), gmName: Contracts.text(40) },
-        validate: x => { const leaks = lintMaster(x); if (leaks.length) throw Error('leaked terms: ' + leaks.join(', ')); return x; } }); return r.value; });
+    const Contracts = require('./generationContracts'),History=require('./worldAuthoringHistory');
+    const v = await runner(async $ => {
+      const naming=History.direction(recentWorlds,{worldSeed:b.worldSeed,brief:[gamePrompt,b.instructions?.verbatim].filter(Boolean).join('\n'),gmOnly:true});if(naming)await $.user(naming);
+      await $.user(require('./genreStoryPalette').direction(b));
+      await $.user(`Write the MASTER SYSTEM PROMPT sections for this ORIGINAL campaign. Develop the authored bible into a coherent playable campaign, preserving its existing names, history, peoples, geography, factions, premise and conflicts. Do not replace it with another plot or rename its places. World seed ${b.worldSeed || ''} is only a variation key. Genres (authoritative, weighted): ${JSON.stringify(b.genreWeights)}. Player's game prompt: ${JSON.stringify(gamePrompt)}. Player instructions: ${JSON.stringify(b.instructions)}. Setting bible (data): ${JSON.stringify({name:b.name,tone:b.tone,realm:b.realm,sky:b.sky,wilds:b.wilds,peoples:b.peoples,factions:b.factions,powers:b.powers,topology:b.topology,opening:b.opening,history:b.history,calendar:b.calendar,arc:b.arc,quests:b.quests,naming:b.naming,protagonist:b.protagonist,antagonist:b.antagonist,resourceName:b.resourceName,currency:b.currency})}. Also author a name and title for the game-master persona (gmName). Supplied player and bible names are authoritative; invent only the remaining names. No references to another game, book, film, real person or artist. Return the requested sections only.`);
+      const r = await Contracts.request($, { component: 'master-prompt',context:{worldSeed:b.worldSeed,authorship:'model',contentFallback:false,scope:'draft-world'},retryGuidance:History.retryGuidance,
+        maxTokens: 2500, parameters: { ...Object.fromEntries(SECTIONS.map(k => [k, Contracts.text(700)])), gmName: Contracts.text(80,'An original name and optional title; punctuation such as a comma is allowed.') },
+        validate: x => { const leaks = lintMaster(x); if (leaks.length) throw Error('leaked terms: ' + leaks.join(', '));
+          for(const k of SECTIONS)if(typeof x[k]!=='string'||!x[k].trim())throw Error('Author the campaign section '+k+'.');
+          if(!validGmName(x.gmName))throw Error('Author a valid gmName, 3-80 characters; a name with a punctuated title is allowed.');
+          require('./worldAuthoringHistory').validate({...b,gmName:x.gmName},recentWorlds,{brief:[gamePrompt,b.instructions?.verbatim].filter(Boolean).join('\n'),gmOnly:true});
+          return x; } }); return r.value; });
     if (!v) throw Error('No valid master prompt returned.');
+    for(const k of SECTIONS)if(typeof v[k]!=='string'||!v[k].trim())throw Error('Author the campaign section '+k+'.');
     if (v) m = { ...base, ...v };
   } catch (e) { throw Error('Master prompt creation failed: '+e.message); }
   const leaks = lintMaster(m); if (leaks.length) throw Error('Master prompt mentions other-setting terms: '+leaks.join(', '));
-  if (!/^[A-Za-z][\w' -]{2,39}$/.test(m.gmName || '') || /grave master|holodek/i.test(m.gmName)) m.gmName = base.gmName;
+  if (!validGmName(m.gmName)) {if(runner)throw Error('Master prompt has no valid authored GM name.');m.gmName = base.gmName;}
+  if(runner)require('./worldAuthoringHistory').validate({...b,gmName:m.gmName},recentWorlds,{brief:[gamePrompt,b.instructions?.verbatim].filter(Boolean).join('\n'),gmOnly:true});
   return { sections: m, text: masterText(m, b), leaks, gmName: m.gmName };
 }
 // Additional instructions: verbatim (authoritative) + one-call expansion appended as 'Expanded:'.
 function expandLocal(text, b) { const t = String(text || '').trim(); if (!t) return '';
   const lines = t.split(/[.;\n]+/).map(x => x.trim()).filter(Boolean).slice(0, 6);
   return lines.map((l, i) => `- ${l}. In play: ${['make it a standing rule NPCs remember', 'show it in at least one early place and one faction', 'let it shape prices, rumours and patrols', 'reflect it in names and signage', 'give it one complication the party can discover', 'keep it consistent across rooms and books'][i % 6]}${b?.topology ? ` (first seen in ${b.topology.layers[Math.min(i, b.topology.layers.length - 1)]})` : ''}.`).join('\n'); }
-async function expandInstructions(text, b, { runner } = {}) {
-  const t = String(text || '').trim().slice(0, 3000); if (!t) return { verbatim: '', expanded: '' }; let expanded = expandLocal(t, b);
+function expandInstructions(text,b,options={}) { return withDraft(b,()=>authorInstructions(text,b,options)); }
+async function authorInstructions(text, b, { runner, offline = false } = {}) {
+  const t = String(text || '').trim().slice(0, 3000); if (!t) return { verbatim: '', expanded: '' };
+  if(!runner&&offline!==true)throw Error('Instruction expansion requires a model authoring runner; offline fixtures must be explicitly requested.');
+  let expanded = runner?'':expandLocal(t,b);
   if (runner) try { const Contracts = require('./generationContracts');
     const v = await runner(async $ => { await $.user(`Expand these player instructions for an ORIGINAL game world into fuller, consistent detail: concrete rules, NPCs, places and tone they imply. Do not contradict them; the verbatim text is authoritative. World (data): ${JSON.stringify({ name: b?.name, genres: b?.genreWeights, tone: b?.tone })}. Instructions: ${JSON.stringify(t)}. No references to existing games, books, films or real people.`);
       const r = await Contracts.request($, { component: 'instructions-expand', maxTokens: 1500, parameters: { expanded: Contracts.text(2400) }, validate: x => { if (lintMaster(x).length) throw Error('leaked terms'); return x; } }); return r.value; });
@@ -343,9 +428,27 @@ if (Flags.on('GENRE_EXPANSION')) for (const [genre, row] of Object.entries(Expan
   PLACE_PARTS[genre] = [row.adj, [' Haven',' Reach',' Ward',' Landing']];
 }
 function setMaster(b, text) { const leaks = lintMaster({ text }); if (leaks.length) throw Error('Master prompt mentions other-setting terms: ' + leaks.join(', ')); b.masterPrompt = String(text).slice(0, 12000); return b; }
-module.exports = { withDraft, validateRoster, localRoster, generateRoster, recentNames, rememberNames, ROSTER_EXAMPLES, leaks: () => lastLeak, firstRoom, expandInstructions, expandLocal, withInstructions, gmName, setTestMode, inventGmName, CORE, masterLocal, masterText, generateMaster, setMaster, weightedGenres, normalizePicked, GENRE_ALIASES, genreOf: g => { const k = String(g || '').toLowerCase().trim(); return GENRES.includes(k) ? k : GENRE_ALIASES[k] || null; }, GENRES, KIT_MAP, COTG_SLOTS, setActive, attach, current, guidance, translate, applyBody, localBible, validateBible, generate, defaultRunner, genresFor };
+module.exports = { withDraft, validateRoster, localRoster, generateRoster, recentNames, rememberNames, ROSTER_EXAMPLES, leaks: () => lastLeak, firstRoom, expandInstructions, expandLocal, withInstructions, gmName, promptGm, roleGm, setTestMode, inventGmName, CORE, masterLocal, masterText, generateMaster, setMaster, weightedGenres, normalizePicked, GENRE_ALIASES, genreOf: g => { const k = String(g || '').toLowerCase().trim(); return GENRES.includes(k) ? k : GENRE_ALIASES[k] || null; }, GENRES, KIT_MAP, COTG_SLOTS, setActive, attach, current, guidance, translate, applyBody, localBible, validateBible, generate, defaultRunner, genresFor };
 // True only while the running campaign is Children of the Grave itself: no homebrew world (live or builder draft) and not TEST MODE.
 // Use it to gate CotG lore, the Grave Master persona, the premade-party gate and Mortacia wiring to actual CotG play.
-module.exports.isCotGPlay = () => !current() && !draft && !testMode;
+module.exports.isCotGPlay = () => !current() && !authoringScope.getStore() && !testMode;
 module.exports.visualDirection = visualDirection;
 Object.assign(module.exports,{startRoomProfile,applyStartRoom,campaignPlan,campaignCommunity});
+module.exports.validGmName=validGmName;
+
+// Legacy saves author their explanation once, before gameplay can spend a life.
+const deathStoryFlights = new WeakMap();
+async function ensureDeathStory(state, { runner = defaultRunner } = {}) {
+ const db=JSON.parse(state.getRoomNameDatabase()||'{}'),b=db['0,0,0']?.setting;
+ if(b?.kind!=='homebrew')return null;
+ if(b.deathStory && DeathStory.hasScene(b.deathStory))return DeathStory.validate(b.deathStory);
+ if(deathStoryFlights.has(state))return deathStoryFlights.get(state);
+ const run=state.getDungeonRunId(),original=JSON.stringify(b);
+ const work=withDraft(b,()=>DeathStory.generate(b,runner)).then(story=>{
+  const next=JSON.parse(state.getRoomNameDatabase()||'{}');
+  if(state.getDungeonRunId()!==run||JSON.stringify(next['0,0,0']?.setting)!==original)throw Error('World changed while authoring the recovery explanation.');
+  next['0,0,0'].setting.deathStory=story;state.setRoomNameDatabase(JSON.stringify(next));attach(state);return story;
+ });
+ deathStoryFlights.set(state,work);try{return await work;}finally{deathStoryFlights.delete(state);}
+}
+Object.assign(module.exports,{ensureDeathStory,deathPolicy:b=>DeathStory.policy(b)});

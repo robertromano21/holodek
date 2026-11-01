@@ -591,7 +591,7 @@ function sceneInputFromConsole(gameConsole, extra = {}) {
 function applySceneSpecToClassification(spec, classification) {
   const c = { ...(classification || {}) };
   if (!spec) return c;
-  if (spec.biome && ['wasteland', 'temple', 'ruins', 'cave', 'fortress', 'palace', 'crypt'].includes(spec.biome)) {
+  if (spec.biome && ['city', 'wasteland', 'temple', 'ruins', 'cave', 'fortress', 'palace', 'crypt'].includes(spec.biome)) {
     c.biome = spec.biome;
   }
   if (typeof c.indoor !== 'boolean' && typeof spec.indoor === 'boolean') c.indoor = spec.indoor;

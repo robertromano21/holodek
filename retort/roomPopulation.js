@@ -47,18 +47,22 @@ function createPopulationService(state) {
       try { saved = JSON.parse(state.getRoomNameDatabase() || '{}')[geoKey]?.inhabitants; } catch {}
       const sheets = Inhabitants.parseSheets(consoleText);
       const fallback = consoleText?.match(/^Monsters State:\s*(\w+)/m)?.[1] || 'Neutral';
-      const starting = geoKey === '0,0,0';
+      const starting = geoKey === '0,0,0' && !dungeon?.cityFloorContext && !state.getActiveCityFloor?.();
       population = saved?.version === Inhabitants.VERSION ? saved : Inhabitants.createPopulation(geoKey,
         sheets.map(a => ({ ...a, allegiance: starting ? 'Friendly' : Inhabitants.allegiance(a, fallback), encounterId: 'legacy' })),
         { starting, indoor: dungeon?.classification?.indoor !== false });
       state.setRoomPopulation(geoKey, population);
     }
-    try { Divinity.reconcile(JSON.parse(state.getRoomNameDatabase() || '{}'), population); } catch {}
+    try {
+      const db=JSON.parse(state.getRoomNameDatabase() || '{}');Divinity.reconcile(db,population);
+      const providers=require('./serviceEncounters').providers(db[geoKey],population,db);
+      if(providers.length||population.serviceProviders)population.serviceProviders=providers;
+    } catch {}
     const sheets = Inhabitants.parseSheets(consoleText);
     const missing = sheets.filter(a => !population.actors[a.name]);
     for (const actor of missing) {
       const fallback = consoleText?.match(/^Monsters State:\s*(\w+)/m)?.[1] || 'Neutral';
-      const extra = Inhabitants.createPopulation(geoKey, [{ ...actor, allegiance: geoKey === '0,0,0' ? 'Friendly' :
+      const extra = Inhabitants.createPopulation(geoKey, [{ ...actor, allegiance: population.starting ? 'Friendly' :
         Inhabitants.allegiance(actor, fallback === 'Mixed' ? 'Hostile' : fallback), encounterId: `arrival-${Inhabitants.hash(actor.name)}` }],
         { indoor: population.indoor, starting: population.starting });
       Object.assign(population.actors, extra.actors); population.groups.push(...extra.groups);
@@ -212,7 +216,9 @@ function createPopulationService(state) {
       for (const resident of near) if (!resident.encounteredAt) {
         resident.encounteredAt = Date.now(); persistentChange = true;
       }
+      // Seeing a service provider offers a choice; only acceptance spends its encounter/dialogue.
       const speakers = group.members.map(name => population.actors[name]).filter(a => a?.status === 'present' && a.encounteredAt > 0 &&
+        (!population.serviceProviders?.includes(a.name)||a.servicesAcceptedAt) &&
         Inhabitants.dialogueReach(dungeon, speakerActor(a), player).canSpeak);
       if (!deferIntroductions || group.introPlayed) candidates.push(...speakers.filter(a=>a.dialogueIndex<a.dialogue.length));
       if (near.length && group.status === 'unseen') { group.status = 'discovered'; population.revision++;persistentChange=true; Discovery.release(population, group.id);

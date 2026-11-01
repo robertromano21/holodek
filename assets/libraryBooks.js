@@ -18,10 +18,10 @@
     if (!entry || entry.stamp !== dungeon._geometryStamp || entry.cells !== dungeon.cells ||
         entry.tiles !== dungeon.tiles || entry.landmarks !== dungeon.sceneLandmarks ||
         entry.name !== dungeon.roomName || entry.sourceName !== dungeon.sceneSpec?.source?.roomName ||
-        entry.scale !== dungeon.libraryScale) {
+        entry.scale !== dungeon.libraryScale||entry.structures!==dungeon.sceneStructures) {
       entry = { stamp: dungeon._geometryStamp, cells: dungeon.cells, tiles: dungeon.tiles,
         landmarks: dungeon.sceneLandmarks, name: dungeon.roomName,
-        sourceName: dungeon.sceneSpec?.source?.roomName, scale: dungeon.libraryScale };
+        sourceName: dungeon.sceneSpec?.source?.roomName, scale: dungeon.libraryScale,structures:dungeon.sceneStructures };
       layouts.set(dungeon, entry);
     }
     return entry;
@@ -32,6 +32,11 @@
     const out = [], seen = new Set();
     const add = (x, y, label) => { const k = `${x},${y}`; if (seen.has(k)) return; seen.add(k); out.push({ x, y, key: k, label }); };
     for (const l of dungeon?.sceneLandmarks || []) if (/bookshel|bookcase/i.test(`${l.type} ${l.label}`)) add(l.x, l.y, l.label || 'bookshelf');
+    for(const p of dungeon?.sceneStructures||[])if(/_bookshelf$/.test(p.shape||'')&&p.position&&p.size){
+      add(Math.floor(p.position.x),Math.floor(p.position.y),'bookshelf');
+      const shelf=out.find(s=>s.key===`${Math.floor(p.position.x)},${Math.floor(p.position.y)}`);
+      Object.assign(shelf,{position:p.position,size:p.size});
+    }
     for (const [k, c] of Object.entries(dungeon?.cells || {})) {
       const t = dungeon.tiles?.[c?.tile], spec = t?.spriteSpec || {};
       if (/bookshel|bookcase/i.test(`${t?.landmark?.type || ''} ${spec.type || ''} ${spec.voxelShape || ''} ${c.tile || ''}`)) { const [x, y] = k.split(',').map(Number); add(x, y, t?.landmark?.label || 'bookshelf'); }
@@ -61,13 +66,14 @@
     const list = [];
     shelfCells(dungeon).forEach((shelf, s) => {
       const sc = scale(dungeon, shelf), SH = sc.rows, PS = sc.per, sec = section(shelf, s);
-      const cell = dungeon.cells[shelf.key] || {}, floor = cell.floorHeight || 0, height = Math.max(1.2, Math.min(2.2, cell.structureHeight ?? ((cell.ceilHeight ?? 2) - floor)));
-      const face = facing(dungeon, shelf.x, shelf.y), w = .8 / PS, rowH = height / (SH + .4);
+      const cell = dungeon.cells[shelf.key] || {}, floor = shelf.position?.z??cell.floorHeight??0,
+        height=shelf.size?.z??Math.max(1.2,Math.min(2.2,cell.structureHeight??((cell.ceilHeight??2)-floor)));
+      const face = shelf.position?{axis:'y',sign:-1}:facing(dungeon,shelf.x,shelf.y),span=shelf.size?.x||1,w=span*.8/PS,rowH=height/(SH+.4);
       for (let r = 0; r < SH; r++) for (let b = 0; b < PS; b++) {
         const n = r * PS + b + 1; if (sc.kind === 'ruin' && !survives(s, n)) continue;
-        const along = .1 + b * w + w * .1, z = floor + .12 + r * rowH, bh = rowH * (.62 + ((s * 7 + n * 13) % 5) * .05);
-        const front = face.sign > 0 ? .78 : .2;
-        const position = face.axis === 'y' ? { x: shelf.x + along, y: shelf.y + front, z } : { x: shelf.x + front, y: shelf.y + along, z };
+        const along = span*.1+b*w+w*.1,z=floor+height*.04+r*rowH,bh=rowH*(.62+((s*7+n*13)%5)*.05);
+        const front = shelf.position?0:face.sign>0?.78:.2,origin=shelf.position||shelf;
+        const position = face.axis === 'y' ? { x: origin.x + along, y: origin.y + front, z } : { x: origin.x + front, y: origin.y + along, z };
         const size = face.axis === 'y' ? { x: w * .8, y: .03, z: bh } : { x: .03, y: w * .8, z: bh };
         list.push({ id: `shelf${s + 1}_book${n}`, name: `tome ${n} of shelf ${s + 1}`, shelf: s + 1, shelfKey: shelf.key, row: r + 1, slot: b + 1, position, size, axis: face.axis, sign: face.sign, subject: sec.subject, era: sec.era, condition: sc.kind === 'ruin' ? 'damaged' : 'intact' });
       }

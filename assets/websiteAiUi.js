@@ -1,6 +1,7 @@
 (function(root) {
   'use strict';
   let panel, status, form, key, busy = false;
+  let helperLocation, helperEnabled;
   const fields = {};
   const el = (tag, values = {}, children = []) => {
     const node = Object.assign(document.createElement(tag), values);
@@ -38,6 +39,17 @@
     close.addEventListener('click', () => panel.close());
     panel.append(el('div', { className: 'inventory-header' }, [el('span', { id: 'website-ai-title', textContent: 'Website AI' }), close]));
     form = el('form'); form.addEventListener('submit', event => event.preventDefault());
+    helperLocation = el('select', { ariaLabel: 'Room helper location' }, [
+      el('option', { value: 'local', textContent: 'This PC (default)' }), el('option', { value: 'website', textContent: 'Website (verified SSH)' })]);
+    helperEnabled = el('input', { type: 'checkbox', checked: true });
+    const saveHelpers = el('button', { type: 'button', className: 'popup-button', textContent: 'Apply Helper Settings' });
+    saveHelpers.addEventListener('click', () => action(async () => {
+      const value = await request('/room-helpers', { enabled: helperEnabled.checked, location: helperLocation.value });
+      status.textContent = value.enabled ? 'Room and opening-quest helpers will run on ' + (value.location === 'local' ? 'this PC.' : 'the authenticated website.') : 'Background helpers are disabled.';
+      root.dispatchEvent(new CustomEvent('holodek:website-ai-changed'));
+    }));
+    form.append(el('p', { textContent: 'Room helpers run locally by default, with at most three isolated workers shared between adjacent rooms and opening-quest preparation. The selected game model is unchanged; paid API models still incur charges. Website execution is optional and uses the existing SSH authentication below.' }),
+      el('label', {}, [helperEnabled, ' Prepare adjacent rooms and the opening quest']), el('label', {}, ['Run helpers on', helperLocation]), saveHelpers);
     form.append(el('p', { textContent: 'Three private website workers can build geometry, textures, procedural art and music while the PC runs the game. Independent stages overlap after their room facts are established. Adjacent rooms are built only after their parent is visited. The PC retains authoritative game state and the renderer. API calls still incur charges; extra ports do not speed up an individual model response. Settings stay on this PC, outside Git.' }));
     for (const [name, label, type, placeholder] of [
       ['host', 'Insert website IP address or hostname', 'text', 'Your server address'],
@@ -73,7 +85,8 @@
   }
   async function open() {
     if (!panel) build(); root.GameMenuUi?.setOpen(false); if (!panel.open) panel.showModal();
-    await action(async () => render(await request('/website-ai')));
+    await action(async () => { render(await request('/website-ai')); const helpers = await request('/room-helpers');
+      helperLocation.value = helpers.location; helperEnabled.checked = helpers.enabled; });
   }
   root.WebsiteAiUi = { open };
   document.addEventListener('DOMContentLoaded', () => document.getElementById('open-website-ai-button')?.addEventListener('click', open), { once: true });

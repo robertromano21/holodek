@@ -169,12 +169,20 @@ async function status(options = {}) {
     computeActive: clean.reduce((n, node) => n + node.computeActive, 0), computeQueued: clean.reduce((n, node) => n + node.computeQueued, 0) };
 }
 async function stream(packet, options = {}) {
-  const response = await route(packet, options);
-  if (!response.ok || !response.headers.get('content-type')?.includes('ndjson')) {
-    const result = await response.json(); throw Error(result.error || 'Website room stage failed.');
-  }
-  for await (const chunk of response.body) {
-    if (options.write) await options.write(Buffer.from(chunk)); else process.stdout.write(Buffer.from(chunk));
+  const controller = new AbortController(), output = options.output || (!options.write ? process.stdout : null);
+  const abort = () => controller.abort();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  output?.on('error', abort); output?.on('close', abort);
+  try {
+    const response = await route(packet, { ...options, signal });
+    if (!response.ok || !response.headers.get('content-type')?.includes('ndjson')) {
+      const result = await response.json(); throw Error(result.error || 'Website room stage failed.');
+    }
+    for await (const chunk of response.body) {
+      if (options.write) await options.write(Buffer.from(chunk)); else output.write(Buffer.from(chunk));
+    }
+  } finally {
+    controller.abort(); output?.removeListener('error', abort); output?.removeListener('close', abort);
   }
 }
 module.exports = { directory, runtimePath, registry, call, inspect, route, status, stream };

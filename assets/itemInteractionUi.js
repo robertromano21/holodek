@@ -25,11 +25,12 @@
     return (items || []).filter(item => item?.name && (!(item.geoKey ?? item.roomKey) || (item.geoKey ?? item.roomKey) === dungeon.geoKey) && reachable(dungeon, player, item, radius))
       .sort((a, b) => Math.hypot(a.x + 0.5 - player.x, a.y + 0.5 - player.y) - Math.hypot(b.x + 0.5 - player.x, b.y + 0.5 - player.y))[0] || null;
   }
-  let room = null, prompted = null, pending = false;
-  async function take(name) {
+  let room = null, prompted = null, pending = false,retryAt=0;
+  const attempts=new Map();
+  async function take(name,options) {
     if (pending || !root.CommerceUi?.handleCommand) return false;
     pending = true;
-    try { return await root.CommerceUi.handleCommand('take ' + name); }
+    try { return await (root.CommerceUi.takeItem?root.CommerceUi.takeItem(name,options):root.CommerceUi.handleCommand('take ' + name)); }
     finally { pending = false; }
   }
   function prompt(name) {
@@ -52,24 +53,32 @@
     if (!dungeon) return;
     const allItems = items || [];
     if (room !== dungeon) {
-      room = dungeon; prompted = null;
+      room = dungeon; prompted = null;retryAt=0;attempts.clear();
       document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove();
     }
     // Outdoor placement returns fresh projections each frame; object identity is not loot identity.
     if (prompted && !allItems.some(item => itemKey(item) === prompted && reachable(dungeon, player, item, 1.5))) {
+      attempts.delete(prompted);
       prompted = null; document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove();
     }
     if(root.ObjectDiscovery)items=allItems.filter(item=>root.ObjectDiscovery.isVisible(dungeon,item.name));
-    if (pending || root.PlayerControls?.blocked?.() || root.gamePaused || root._gameOver || document.hidden || root.GameCommandGate?.busy() || root.InventoryUi?.isOpen() || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
+    if (pending || Date.now()<retryAt || root.CommerceUi?.isBusy?.() || root.PlayerControls?.blocked?.() || root.gamePaused || root._gameOver || document.hidden || root.GameCommandGate?.busy() || root.InventoryUi?.isOpen() || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
         root._combatRoundActiveUntil > Date.now() || document.activeElement?.id === 'chatuserinput' || document.querySelector('.popup-container')) return;
     const automatic = root.PlayerControls?.autoTake() === true;
     const near = nearby(dungeon, items, player, PROXIMITY_RANGE);
     if (!near || itemKey(near) === prompted) return;
-    if (automatic) { prompted = itemKey(near); take(near.name); return; }
+    if (automatic) {
+      const selected=itemKey(near);prompted=selected;
+      if(!attempts.has(selected))attempts.set(selected,root.crypto?.randomUUID?.()||'pickup:'+Date.now()+':'+Math.random().toString(36).slice(2));
+      take(near.name,{nonce:attempts.get(selected)}).then(result=>{
+        if(result?.retryable&&room===dungeon&&prompted===selected){prompted=null;retryAt=Date.now()+600;}
+      }).catch(()=>{if(room===dungeon&&prompted===selected){prompted=null;retryAt=Date.now()+1000;}});
+      return;
+    }
     if (!prompt(near.name)) return;
     const popup = document.querySelector('.popup-container[data-dungeon-item]');
     if (popup) { popup.dataset.dungeonItemProximity = 'true'; prompted = itemKey(near); }
   }
-  function reset() { room = prompted = null; if (typeof document !== 'undefined') document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove(); }
+  function reset() { room = prompted = null;retryAt=0;attempts.clear(); if (typeof document !== 'undefined') document.querySelector('.popup-container[data-dungeon-item-proximity]')?.remove(); }
   return { isTaking: () => pending, TAKE_RANGE, PROXIMITY_RANGE, nearby, reachable, update, reset, take, prompt };
 });

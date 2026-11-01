@@ -12,3 +12,11 @@ test('remote Retort logs tag jobs and redact secrets split across stream chunks'
 test('remote Retort logs omit oversized lines without leaking partial credentials',async()=>{const Task=require('../tools/website-worker/roomTask.cjs'),stream=new PassThrough(),lines=[];Task.forwardLog(stream,{job:{id:'j',key:'0,0,0',stage:'art'},credential:'secret',channel:'stderr',write:l=>lines.push(l)});stream.write('x'.repeat(70000));stream.end('secret\nnext\n');await new Promise(r=>stream.on('end',r));assert.equal(lines.length,2);assert.ok(lines[0].includes('omitted'));assert.ok(lines[1].includes('next'));});
 
 test('proximity prompts allow walking while manual menus and combat still block',()=>{let selector='';const window={document:{addEventListener(){},hidden:false,activeElement:{tagName:'BODY'},querySelectorAll:s=>{selector=s;return[];}},GameCommandGate:{busy:()=>true},ItemInteractionUi:{isTaking:()=>true}};vm.runInNewContext(fs.readFileSync('assets/playerControls.js','utf8'),{window,document:window.document});assert.equal(window.PlayerControls.blocked(true),false);assert.equal(window.PlayerControls.blocked(),true);assert.ok(selector.includes(':not([data-dungeon-proximity])'));window._combatCommandPending=true;assert.equal(window.PlayerControls.blocked(true),true);});
+
+test('ordinary pending commands allow walking while actions and combat remain gated',()=>{
+ const window={document:{addEventListener(){},hidden:false,activeElement:{tagName:'BODY'},querySelectorAll:()=>[]},GameCommandGate:{busy:()=>true}};vm.runInNewContext(fs.readFileSync('assets/playerControls.js','utf8'),{window,document:window.document});const c=window.PlayerControls;
+ assert.equal(c.blocked(true),false);assert.equal(c.blocked(),true);
+ for(const flag of ['gamePaused','_gameOver','_characterStartupPending','_combatCommandPending']){window[flag]=true;assert.equal(c.blocked(true),true,flag);window[flag]=false;}
+ window.actionDiceState={active:{kind:'combat'}};assert.ok(c.blocked(true));window.actionDiceState=null;
+ window.document.querySelectorAll=()=>[{getClientRects:()=>[{}]}];assert.equal(c.blocked(true),true);
+});

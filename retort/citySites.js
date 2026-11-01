@@ -4,12 +4,11 @@
 // enterable buildings (each with a return exit to its street), names, templates and genre zone tiles.
 // Descriptions are still written by the model when each room is first entered (rooms are installed as named,
 // undescribed skeletons, exactly like villages.install / fortifiedSites).
-// Coordinates: the anchor (the placed city room, e.g. the test city at 0,3,0) stays where it is and becomes the
-// city gate. Street rooms live on a private layer z = anchor.z + STREET_DZ at x/y offsets from the anchor, and
-// building interiors on z = anchor.z + BUILDING_DZ, so nothing collides with lazily generated dungeon/wilderness
-// rooms on the anchor's own layer. Every link is an explicit exit with targetCoordinates (as fortified floors do).
+// Completed city plans put streets on the anchor's world grid, behind an adjacent cardinal gate.
+// Old private street layers remain readable; never relocate an installed city's saved contents.
+// Building storage aliases remain separate from host-local floors and are not street destinations.
 const Flags = require('./worldFlags');
-const STREET_DZ = 30, BUILDING_DZ = 31, UNDER_DZ = 29, VERSION = 'world1-city-sites-1';
+const STREET_DZ = 30, BUILDING_DZ = 31, UNDER_DZ = 29, VERSION = 'world1-city-sites-2', LEGACY_VERSION = 'world1-city-sites-1';
 const hash = s => { let h = 2166136261; for (const ch of String(s)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; };
 const rng = seed => { let a = hash(seed); return () => { a = (a + 0x6D2B79F5) >>> 0; let t = Math.imul(a ^ (a >>> 15), a | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; };
 const CARD = { north: [0, 1], east: [1, 0], south: [0, -1], west: [-1, 0] };
@@ -46,10 +45,26 @@ function zoneTiles(genre, zone) {
 }
 function streetRuleOf(genre) { try { return require('../assets/genreArchitecture').STYLES[genre]?.street || 'winding_lanes'; } catch { return 'winding_lanes'; } }
 // ---- the plan ----
-function plan({ seed = '', city = {}, anchorKey = '0,3,0', genre = 'fantasy', underground = false, layerOffset = 0 } = {}) {
+function plan({ seed = '', city = {}, anchorKey = '0,3,0', genre = 'fantasy', underground = false, layerOffset = 0,
+  coordinateMode = Flags.on('CITY_COMPLETE') ? 'world-grid' : 'legacy-layers', gateDirection = 'north' } = {}) {
   const anchor = parseKey(anchorKey) || { x: 0, y: 3, z: 0 }, cityId = city.id || 'city', r = rng(`${seed}|${cityId}|${anchorKey}|${genre}|citysites`);
-  if(Flags.on('CITY_COMPLETE')){anchor.x=Math.max(-970,Math.min(970,anchor.x));anchor.y=Math.max(-970,Math.min(950,anchor.y));if(anchor.z>900)layerOffset-=60;}
+  const worldGrid = coordinateMode === 'world-grid';
+  if (!['world-grid', 'legacy-layers'].includes(coordinateMode) || !CARD[gateDirection]) throw Error('Invalid city coordinate mode or gate direction.');
+  const storage = { ...anchor };
+  if(Flags.on('CITY_COMPLETE')){storage.x=Math.max(-970,Math.min(970,storage.x));storage.y=Math.max(-970,Math.min(950,storage.y));if(anchor.z>900)layerOffset-=60;}
+  if (!worldGrid) Object.assign(anchor, storage);
+  const forward = CARD[gateDirection], right = [forward[1], -forward[0]];
+  const worldDirection = direction => {
+    if (!worldGrid) return direction;
+    const [dx, dy] = CARD[direction], wx = right[0] * dx + forward[0] * dy, wy = right[1] * dx + forward[1] * dy;
+    return Object.keys(CARD).find(d => CARD[d][0] === wx && CARD[d][1] === wy);
+  };
   const V = vocab(genre), streetRule = streetRuleOf(genre), axis = { main_street: 'single', harbor_quay: 'single', ring_corridor: 'ring', shanty_ring: 'ring', agora_grid: 'grid', alley_grid: 'grid', canal_grid: 'grid', block_grid: 'grid' }[streetRule] || 'organic';
+  const design=city.design?require('./cityAuthoring').validate(city.design):null;
+  const districtNames=design?Object.fromEntries(DISTRICTS.map(id=>[id,design.districts[id].name])):V.districts;
+  const Art=require('../assets/cityArchitectureStyles');
+  const nativeTemplate=(type,id)=>Art.template(genre,type,`${seed}:${cityId}:${id}`,{tradition:Art.tradition(design||{},cityId)})||require('../assets/cityEstablishments').TEMPLATES[type];
+  const buildingKinds=design?Object.fromEntries(DISTRICTS.map(id=>[id,design.districts[id].locales.map(l=>[l.name,nativeTemplate(l.type,l.name),l.type])])):V.buildings;
   const target = 16 + Math.floor(r() * 6); // 16-21 streets
   // 1) street graph by growth from the gate street (0,0); never below y=0 so the gate's south side stays free for the anchor link.
   const cells = new Map([['0,0', { gx: 0, gy: 0 }]]), edges = new Set(), ek = (a, b) => [a, b].sort().join('|');
@@ -58,14 +73,14 @@ function plan({ seed = '', city = {}, anchorKey = '0,3,0', genre = 'fantasy', un
   while (cells.size < target && guard++ < 5000) {
     const list = [...cells.values()], from = axis === 'single' && r() < .7 ? list[list.length - 1] : list[Math.floor(r() * list.length)];
     let dirs = Object.keys(CARD);
-    if (axis === 'single') dirs = r() < .75 ? ['north'] : ['east', 'west'];
-    if (axis === 'ring') dirs = r() < .5 ? ['north', 'east'] : ['south', 'west', 'north', 'east'];
+    if ((design?.form||axis) === 'single') dirs = r() < .75 ? ['north'] : ['east', 'west'];
+    if ((design?.form||axis) === 'ring') dirs = r() < .5 ? ['north', 'east'] : ['south', 'west', 'north', 'east'];
     const d = dirs[Math.floor(r() * dirs.length)], [dx, dy] = CARD[d], gx = from.gx + dx, gy = from.gy + dy;
     if (!ok(gx, gy)) continue;
     cells.set(`${gx},${gy}`, { gx, gy }); edges.add(ek(`${from.gx},${from.gy}`, `${gx},${gy}`));
   }
   // loops: grid/ring styles join most touching streets, organic a few.
-  const loopP = axis === 'grid' ? .8 : axis === 'ring' ? .5 : .2;
+  const loopP = (design?.form||axis) === 'grid' ? .8 : (design?.form||axis) === 'ring' ? .5 : .2;
   for (const c of cells.values()) for (const d of ['north', 'east']) { const [dx, dy] = CARD[d], n = `${c.gx + dx},${c.gy + dy}`; if (cells.has(n) && r() < loopP) edges.add(ek(`${c.gx},${c.gy}`, n)); }
   // 2) districts by BFS distance from the gate, in DISTRICTS order (each gets >=1 street).
   const adj = new Map([...cells.keys()].map(k => [k, []]));
@@ -75,53 +90,87 @@ function plan({ seed = '', city = {}, anchorKey = '0,3,0', genre = 'fantasy', un
   const rest = order.slice(1), per = Math.max(1, Math.floor(rest.length / (DISTRICTS.length - 1)));
   const districtOf = new Map([['0,0', 'gate']]);
   rest.forEach((k, i) => districtOf.set(k, DISTRICTS[Math.min(DISTRICTS.length - 1, 1 + Math.floor(i / per))]));
-  const used = { gate: 0 }, rooms = [], streetKey = k => { const c = cells.get(k); return keyOf(anchor.x + c.gx, anchor.y + c.gy, anchor.z + STREET_DZ + layerOffset); };
+  const used = { gate: 0 }, rooms = [], streetKey = k => { const c = cells.get(k); return worldGrid ?
+    keyOf(anchor.x + right[0] * c.gx + forward[0] * (c.gy + 1), anchor.y + right[1] * c.gx + forward[1] * (c.gy + 1), anchor.z) :
+    keyOf(anchor.x + c.gx, anchor.y + c.gy, anchor.z + STREET_DZ + layerOffset); };
   // 3) street rooms + exits
   const names = new Set();
   const uniq = base => { let n = base, i = 2; while (names.has(n)) n = `${base} ${['II', 'III', 'IV', 'V', 'VI'][i++ - 2] || i}`; names.add(n); return n; };
   const cityName = city.name || 'the City';
   for (const k of order) {
     const c = cells.get(k), district = districtOf.get(k), z = ZONE_OF[district];
-    const noun = V.street[hash(`${seed}|${k}|noun`) % V.street.length], dn = V.districts[district];
+    const noun = V.street[hash(`${seed}|${k}|noun`) % V.street.length], dn = districtNames[district];
     const name = uniq(k === '0,0' ? `${dn} ${noun}` : `${dn} ${noun}`);
     const exits = {};
-    for (const [d, [dx, dy]] of Object.entries(CARD)) { const n = `${c.gx + dx},${c.gy + dy}`; if (edges.has(ek(k, n))) exits[d] = { status: 'open', targetCoordinates: streetKey(n) }; }
-    if (k === '0,0') exits.south = { status: 'open', targetCoordinates: anchorKey };
-    rooms.push({ key: streetKey(k), kind: 'street', district, districtName: dn, name, grid: [c.gx, c.gy], exits, template: underground ? 'cavern_village' : district === 'market' ? 'market' : 'village', tiles: zoneTiles(genre, 'street') });
+    for (const [d, [dx, dy]] of Object.entries(CARD)) { const n = `${c.gx + dx},${c.gy + dy}`; if (edges.has(ek(k, n))) exits[worldDirection(d)] = { status: 'open', targetCoordinates: streetKey(n) }; }
+    if (k === '0,0') exits[worldGrid ? REVERSE[gateDirection] : 'south'] = { status: 'open', targetCoordinates: anchorKey };
+    const fabric=design?require('../assets/cityEstablishments').descriptor({seed,cityId,streetKey:streetKey(k),genre,scale:require('../assets/urbanDesigns').scale(city,genre),district,mix:design.districts[district].mix}):null;
+    rooms.push({ key: streetKey(k), kind: 'street', district, districtName: dn, name, grid: [c.gx, c.gy], exits, ...(fabric?{fabric,atmosphere:design.districts[district].atmosphere}:{}), template: underground ? 'cavern_village' : district === 'market' ? 'market' : 'village', tiles: zoneTiles(genre, 'street') });
   }
-  // 4) buildings: 1-3 per street (2-4 on market/guild), each an interior room with a return exit to its street.
-  let bIndex = 0;
-  for (const s of rooms.slice()) {
-    if (s.kind !== 'street') continue;
-    const kinds = V.buildings[s.district] || V.buildings.market, n = Math.min((['market', 'guild', 'residential'].includes(s.district) ? 2 : 1) + Math.floor(r() * 2), 3);
+  // Install authored venues before filler, so a random draw cannot omit a city's named institutions.
+  const E=require('../assets/cityEstablishments'),Life=require('./cityLife'),counts=new Map();
+  const Vertical=require('./cityVerticality'),verticalReserve=Vertical.reserve(city,underground);
+  const streets=rooms.slice();
+  function addBuilding(s,kind,localeIndex=null){
+    const i=counts.get(s.key)||0;if(i>=3||rooms.length>=59-verticalReserve)return false;
     const free = BUILDING_DIRS.filter(d => !s.exits[d]);
-    for (let i = 0; i < n && i < free.length && rooms.length < 59; i++) {
-      const [label, template] = kinds[(hash(`${seed}|${s.key}|b${i}`) + i) % kinds.length], d = free[i];
-      const key = keyOf(anchor.x + s.grid[0] * 4 + (i % 4), anchor.y + s.grid[1] * 4, anchor.z + BUILDING_DZ + layerOffset);
-      const name = uniq(`${label} on ${s.name}`.length <= 80 ? `${label}, ${s.name}` : label);
+    if(!free.length)return false;
+      const [label, template, establishmentType] = kind, d = free[0];
+      const key = keyOf(storage.x + s.grid[0] * 4 + (i % 4), storage.y + s.grid[1] * 4, storage.z + BUILDING_DZ + layerOffset);
+      const name = uniq(localeIndex!==null?label:`${label} on ${s.name}`.length <= 80 ? `${label}, ${s.name}` : label);
       s.exits[d] = { status: 'open', targetCoordinates: key };
-      rooms.push({ key, kind: 'building', district: s.district, districtName: s.districtName, name, label, template, streetKey: s.key, exits: { [REVERSE[d]]: { status: 'open', targetCoordinates: s.key } }, tiles: zoneTiles(genre, ZONE_OF[s.district] === 'street' ? 'interior' : ZONE_OF[s.district]) });
-      bIndex++;
+      const venueId=localeIndex!==null?`${cityId}:locale:${s.district}:${localeIndex}`:`${cityId}:building:${key}`;
+      rooms.push({ key, kind: 'building', district: s.district, districtName: s.districtName, name, label, template,
+        ...(establishmentType?{establishmentType,venue:Life.venue(establishmentType,venueId,name),atmosphere:s.atmosphere}:{}),
+        ...(localeIndex!==null?{authored:true,venueId}:{}),
+        streetKey: s.key, exits: { [REVERSE[d]]: { status: 'open', targetCoordinates: s.key } }, tiles: zoneTiles(genre, ZONE_OF[s.district] === 'street' ? 'interior' : ZONE_OF[s.district]) });
+      counts.set(s.key,i+1);return true;
+  }
+  if(design)for(const district of DISTRICTS)for(const [i,locale]of design.districts[district].locales.entries()){
+    const s=streets.find(s=>s.district===district&&(counts.get(s.key)||0)<3&&BUILDING_DIRS.some(d=>!s.exits[d]));
+    if(!s||!addBuilding(s,[locale.name,nativeTemplate(locale.type,locale.name),locale.type],i))throw Error('No reachable city slot for authored locale: '+locale.name);
+  }
+  for (const s of streets) {
+    const kinds=design?design.districts[s.district].mix.map(type=>[E.name(type,genre),nativeTemplate(type,s.key+':'+type),type]):buildingKinds[s.district]||buildingKinds.market;
+    const n=Math.min((['market','guild','residential'].includes(s.district)?2:1)+Math.floor(r()*2),3);
+    while((counts.get(s.key)||0)<n){
+      const i=counts.get(s.key)||0;
+      if(!addBuilding(s,kinds[(hash(`${seed}|${s.key}|b${i}`)+i)%kinds.length]))break;
     }
   }
+  Vertical.add(rooms,city,{underground});
   // 5) undercity / mine entrance: the last undercity street gets a 'down' to an underground room (counts as a building).
   const under = rooms.filter(x => x.kind === 'street' && x.district === 'undercity').pop() || rooms.filter(x => x.kind === 'street').pop();
-  if (under && !under.exits.down) {
+  if (under && !under.exits.down && (!worldGrid || parseKey(under.key).z > -1000)) {
     const [label, template] = (V.buildings.undercity || [])[0] || ['Undercity Entrance', 'cavern'];
-    const key = keyOf(anchor.x + under.grid[0], anchor.y + under.grid[1], anchor.z + UNDER_DZ + layerOffset);
+    const location = parseKey(under.key);
+    const key = worldGrid ? keyOf(location.x, location.y, location.z - 1) : keyOf(anchor.x + under.grid[0], anchor.y + under.grid[1], anchor.z + UNDER_DZ + layerOffset);
     under.exits.down = { status: 'open', targetCoordinates: key };
     rooms.push({ key, kind: 'building', entrance: 'undercity', district: 'undercity', districtName: V.districts.undercity, name: uniq(`${label} beneath ${cityName}`.slice(0, 80)), label, template, streetKey: under.key, exits: { up: { status: 'open', targetCoordinates: under.key } }, tiles: zoneTiles(genre, 'mine') });
   }
-  const anchorDir = 'north';
+  const anchorDir = worldGrid ? gateDirection : 'north';
   const stats = { rooms: rooms.length, streets: rooms.filter(x => x.kind === 'street').length, buildings: rooms.filter(x => x.kind === 'building').length,
-    districts: [...new Set(rooms.map(x => x.district))].length, edges: edges.size };
-  return { version: VERSION, cityId, cityName, genre, streetRule, axis, anchorKey, gateKey: rooms[0].key, anchorDir, rooms, stats };
+    districts: [...new Set(rooms.map(x => x.district))].length, edges: edges.size, ...(design?{authoredLocales:rooms.filter(r=>r.authored).length,proceduralFrontages:rooms.reduce((n,r)=>n+(r.fabric?.count||0),0)}:{}),
+    ...(verticalReserve?{towers:rooms.filter(r=>r.vertical?.floor===0).length,landmarkFloors:rooms.filter(r=>r.vertical?.floor>0).length,storeys:design.verticality.floors}:{}) };
+  return { version: worldGrid ? VERSION : LEGACY_VERSION, coordinateMode, cityId, cityName, genre, enclosed:underground||genre==='underwater'||design?.enclosed===true,streetRule, axis:design?.form||axis, anchorKey, gateKey: rooms[0].key, anchorDir, rooms, stats };
 }
 // ---- checks (used by tests and before install) ----
 function validate(p) {
   const byKey = new Map(p.rooms.map(x => [x.key, x])), errors = [];
   if (p.rooms.length < 30 || p.rooms.length > 60) errors.push(`size ${p.rooms.length}`);
   if (byKey.size !== p.rooms.length) errors.push('duplicate keys');
+  if (p.coordinateMode === 'world-grid') {
+    const routes = require('../assets/outdoorRoutes'), anchor = parseKey(p.anchorKey);
+    if (!anchor || p.gateKey !== routes.resolveExit(anchor, p.anchorDir, {}).targetKey) errors.push('world-grid gate is not adjacent');
+    for (const room of p.rooms) {
+      const at = parseKey(room.key);
+      if (!at || !Object.values(at).every(n => Number.isSafeInteger(n) && Math.abs(n) <= 1000)) errors.push('world-grid coordinates out of bounds');
+      if (room.kind !== 'street' || !at) continue;
+      for (const [direction, exit] of Object.entries(room.exits)) if (exit.targetCoordinates === p.anchorKey || byKey.get(exit.targetCoordinates)?.kind === 'street') {
+        if (exit.targetCoordinates !== routes.resolveExit(at, direction, {}).targetKey) errors.push(`${room.key} ${direction} world-grid street is not adjacent`);
+      }
+    }
+  }
   for (const x of p.rooms) for (const [d, e] of Object.entries(x.exits)) {
     if (e.targetCoordinates === p.anchorKey) continue;
     const t = byKey.get(e.targetCoordinates); if (!t) { errors.push(`${x.key} ${d} -> missing`); continue; }
@@ -151,37 +200,55 @@ function install(database, anchorKey, { seed = '' } = {}) {
     return { status: upgraded?'upgraded':'already-installed', rooms: anchorRoom.citySites.rooms };
   }
   const underground = anchorRoom.environmentIntent?.template === 'cavern_village' || !!site.site?.underground;
-  let p = plan({ seed, city: site, anchorKey, genre: genreFor({ ...anchorRoom, roomKey: anchorKey }), underground });
-  if (Flags.on('CITY_COMPLETE')) {
-    let shift=0;
-    while(p.rooms.some(r=>database[r.key])&&shift<20){shift++;p=plan({seed,city:site,anchorKey,genre:p.genre,underground,layerOffset:shift*3*(parseKey(anchorKey).z>900?-1:1)});}
-    if(p.rooms.some(r=>database[r.key]))return {status:'skipped',reason:'city-space-occupied'};
+  const worldGrid = Flags.on('CITY_COMPLETE');
+  const available = (worldGrid ? ['north', 'east', 'south', 'west'] : ['north', 'northeast', 'northwest', 'east', 'west', 'up', 'southeast', 'southwest', 'south']).filter(d => !anchorRoom.exits?.[d]);
+  if (!available.length) return { status: 'skipped', reason: 'no-free-anchor-exit' };
+  let p, dir;
+  for (const candidate of available) {
+    for (let shift = 0; shift <= (worldGrid ? 20 : 0); shift++) {
+      const next = plan({ seed, city: site, anchorKey, genre: genreFor({ ...anchorRoom, roomKey: anchorKey }), underground,
+        gateDirection: worldGrid ? candidate : 'north', layerOffset: shift * 3 * (parseKey(anchorKey).z > 900 ? -1 : 1) });
+      // A street collision cannot be fixed by changing storage layers. Try a different adjacent gate.
+      if (worldGrid && next.rooms.some(r => r.kind === 'street' && database[r.key])) break;
+      if (worldGrid && next.rooms.some(r => database[r.key])) continue;
+      if (validate(next).length) break;
+      p = next; dir = candidate; break;
+    }
+    if (p) break;
   }
+  if (!p) return { status: 'skipped', reason: 'city-space-occupied' };
   const errors = validate(p); if (errors.length) return { status: 'invalid', errors: errors.slice(0, 5) };
-  // gate link: first free direction on the anchor (north preferred), reverse is the gate street's 'south'.
-  const dir = ['north', 'northeast', 'northwest', 'east', 'west', 'up', 'southeast', 'southwest', 'south'].find(d => !anchorRoom.exits?.[d]);
-  if (!dir) return { status: 'skipped', reason: 'no-free-anchor-exit' };
+  // Link the chosen adjacent gate and its actual reverse direction.
   const catalog = require('./environmentIntents').CATALOG;
   let installed = 0, kept = 0;
   for (const x of p.rooms) {
     if (database[x.key]) { kept++; continue; }
-    const canonical = catalog[x.template] || catalog.village, building = x.kind === 'building';
-    database[x.key] = { name: x.name, indoor: building || underground, isIndoor: building || underground, isOutdoor: !(building || underground),
+    const canonical = catalog[x.template] || catalog.village, building = x.kind === 'building',indoor=p.enclosed||building&&!x.venue?.openAir;
+    database[x.key] = { name: x.name, indoor, isIndoor: indoor, isOutdoor: !indoor,
+      ...(!x.authored?{namePending:true}:{}),
       ...(building ? { complexId: `city-building:${x.key}` } : {}),
-      classification: { indoor: building || underground, size: building ? 64 : 128, biome: canonical.biome, architecture: canonical.architecture, features: [] },
+      classification: { indoor, size: building ? Flags.on('ARCHITECTURE_EXPANSION')?Math.max(x.venue?.width||32,x.venue?.depth||32):64 : 128, biome: canonical.biome, architecture: canonical.architecture, features: [] },
       exits: structuredClone(x.exits), objects: [], monsters: { inRoom: 'None', state: 'None', equippedProperties: 'None' },
-      environmentIntent: { ...canonical, targetKey: x.key, mapRole: `city:${site.id}`, narrativeHint: hintFor(p, x), ...(building ? {} : { citySite: site }) },
-      cityRoom: { version: VERSION, cityId: p.cityId, cityName: p.cityName, anchorKey, kind: x.kind, district: x.district, districtName: x.districtName, genre: p.genre, tiles: x.tiles, ...(x.streetKey ? { streetKey: x.streetKey } : {}), ...(x.entrance ? { entrance: x.entrance } : {}) } };
+      environmentIntent: { ...canonical,indoor,targetKey: x.key, mapRole: `city:${site.id}`, narrativeHint: hintFor(p, x), ...(building ? {} : { citySite: site }) },
+      cityRoom: { version: p.version, coordinateMode: p.coordinateMode, cityId: p.cityId, cityName: p.cityName, anchorKey, kind: x.kind, district: x.district, districtName: x.districtName, genre: p.genre, tiles: x.tiles,
+        ...(x.fabric?{fabric:x.fabric}:{}),...(x.establishmentType?{establishmentType:x.establishmentType}:{}),...(x.atmosphere?{atmosphere:x.atmosphere}:{}),
+        ...(x.vertical?{vertical:x.vertical}:{}),
+        ...(x.venue?{venue:x.venue}:{}),...(x.authored?{authored:true,venueId:x.venueId}:{}),
+        ...(building&&Flags.on('ARCHITECTURE_EXPANSION')?{footprint:{width:x.venue?.width||32,depth:x.venue?.depth||32,metresPerCell:2.5}}:{}),
+        ...(x.streetKey ? { streetKey: x.streetKey } : {}), ...(x.entrance ? { entrance: x.entrance } : {}) } };
     installed++;
   }
   anchorRoom.exits ||= {}; anchorRoom.exits[dir] = { status: 'open', targetCoordinates: p.gateKey };
-  const gate = database[p.gateKey]; if (gate?.exits) gate.exits.south = { status: 'open', targetCoordinates: anchorKey };
+  const gate = database[p.gateKey]; if (gate?.exits) gate.exits[worldGrid ? REVERSE[dir] : 'south'] = { status: 'open', targetCoordinates: anchorKey };
   anchorRoom.villageScan = 1; // the full city replaces the 2-4 building village insert on the anchor
-  anchorRoom.citySites = { version: VERSION, genre: p.genre, gateKey: p.gateKey, gateDirection: dir, rooms: p.rooms.length, stats: p.stats };
+  anchorRoom.citySites = { version: p.version, coordinateMode: p.coordinateMode, genre: p.genre, gateKey: p.gateKey, gateDirection: dir, rooms: p.rooms.length, stats: p.stats };
+  if(Flags.on('ARCHITECTURE_EXPANSION'))require('./cityTowerFloors').install(database,anchorKey,{hostLocal:true});
+  require('./cityArchitecture').installNamed(database,anchorKey);
   require('./cityCompletion').enrich(database,anchorKey);
   return { status: 'installed', direction: dir, installed, kept, stats: p.stats, genre: p.genre };
 }
 function hintFor(p, x) {
+  if(x.vertical)return `Inside ${x.label} in ${p.cityName}; tower level ${x.vertical.floor} of ${x.vertical.storeys}, used for ${x.vertical.use}. Connected by ${x.vertical.transit}; only saved exits are usable.`.slice(0,240);
   const t = x.kind === 'street' ? `A ${x.districtName} street of ${p.cityName}; ${p.genre} city, ${p.streetRule.replace(/_/g, ' ')} layout, buildings open off it.` :
     `Inside the ${x.label} in the ${x.districtName} of ${p.cityName}; a single walk-in building whose door leads back to the street.`;
   return t.slice(0, 240);
@@ -190,15 +257,21 @@ function hintFor(p, x) {
 function describe(room) {
   if (!Flags.on('CITY_SITES') || !room?.cityRoom) return '';
   const c = room.cityRoom;
-  return `[CITY] Saved city structure (data): ${JSON.stringify({ city: c.cityName, district: c.districtName, kind: c.kind, genre: c.genre })}. This room is part of a large, populous city: describe a ${c.kind === 'street' ? 'street with facades, signs and traffic' : 'single building interior'} in that district. Exits are fixed by the city plan; do not add or remove exits. [/CITY]`;
+  return `[CITY] Saved city structure (data): ${JSON.stringify({ city: c.cityName, district: c.districtName, kind: c.kind, genre: c.genre,atmosphere:c.atmosphere,establishmentType:c.establishmentType,vertical:c.vertical?{...c.vertical,directory:undefined}:undefined,footprint:c.footprint,fabric:c.fabric?{count:c.fabric.count,policy:'Seeded frontages may acquire persistent residents, interiors or side jobs through investigation and encounters; they are not all current service operators.'}:undefined })}. This room is part of a large, populous city: describe a ${c.kind === 'street' ? 'street with facades, signs and traffic' : c.venue?.openAir?'purpose-built public open space':'building interior'} in that district. ${require('./cityLife').guidance(c.venue)} ${c.vertical?'Preserve its actual tower level, function and height above the street. Crown access is enclosed; do not invent a walkable outdoor rooftop or unbuilt intermediate floor. Use only the saved stairs, ramps, lifts or covered skybridge routes. ':''}Exits are fixed by the city plan; do not add or remove exits. [/CITY]`;
 }
 // sceneSpec room kind for renderers ('city' biome kind; existing biome keyword scoring is left unchanged).
 function sceneKind(room, database = {}) {
-  if(!room?.cityRoom)return null;
+  if(!room?.cityRoom){
+    const site=room?.environmentIntent?.citySite;
+    if(!site||!room.citySites)return null;
+    return {biome:'city',roomKind:'city-gateway',district:'gate',genre:site.genre||genreFor(room),tiles:zoneTiles(site.genre||genreFor(room),'street'),routes:[]};
+  }
   return {biome:'city',roomKind:`city-${room.cityRoom.kind}`,district:room.cityRoom.district,genre:room.cityRoom.genre,
-    tiles:room.cityRoom.tiles || null,routes:Object.entries(room.exits||{}).flatMap(([direction,e])=>{
+    ...(require('./cityArchitecture').forRoom(room,database)?{architecture:require('./cityArchitecture').forRoom(room,database)}:{}),
+    tiles:room.cityRoom.tiles || null, ...(room.cityRoom.venue?{venue:room.cityRoom.venue}:{}), ...(room.cityRoom.floorProgram?{floorProgram:room.cityRoom.floorProgram}:{}), ...(room.cityRoom.vertical?{vertical:{...room.cityRoom.vertical,directory:undefined}}:{}), ...(room.cityRoom.fabric?{fabric:room.cityRoom.fabric}:{}),routes:Object.entries(room.exits||{}).flatMap(([direction,e])=>{
       const target=database[e?.targetCoordinates];
-      return target?.cityRoom?.kind==='building'?[{direction,targetCoordinates:e.targetCoordinates,name:target.name,kind:'building'}]:[];
+      return target?.cityRoom?.kind==='building'?[{direction,targetCoordinates:e.targetCoordinates,name:target.name,kind:'building',
+        template:target.environmentIntent?.template,footprint:target.cityRoom.footprint,establishmentType:target.cityRoom.establishmentType,vertical:target.cityRoom.vertical}]:[];
     })};
 }
 module.exports = { plan, validate, install, describe, sceneKind, zoneTiles, VERSION, STREET_DZ, BUILDING_DZ, UNDER_DZ, DISTRICTS, VOCAB };

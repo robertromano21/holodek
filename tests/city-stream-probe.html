@@ -1,0 +1,45 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>City Streaming 3D Probe</title>
+<style>body{margin:0;background:#111;color:#fff}#dungeon-container{width:960px;height:600px}pre{white-space:pre-wrap}</style>
+<div id="dungeon-popup" style="display:block"><div id="dungeon-container"></div></div><pre id="results">Loading production renderer</pre>
+<script>window.HolodekFlags={GENRE_KITS:true,GENRE_LIGHTS:true,GENRE_EXPANSION:true,ARCHITECTURE_EXPANSION:true};window.WEBGPU_VOXEL_PREWARM=false;</script>
+<script src="/assets/masonryPatterns.js"></script><script src="/assets/voxelMaterials.js"></script>
+<script src="/assets/designCatalog.js"></script><script src="/assets/genreFixtures.js"></script><script src="/assets/genreFurnishings.js"></script>
+<script src="/assets/architectureDesigns.js"></script><script src="/assets/urbanDesigns.js"></script><script src="/assets/genreExpansion.js"></script>
+<script src="/assets/genreArchitecture.js"></script><script src="/assets/renderCharacterProcedural.js"></script><script src="/assets/cityCrowdUi.js"></script>
+<script src="/assets/genreKits.js"></script><script src="/assets/genreLights.js"></script><script src="/assets/scenePropVoxels.js"></script>
+<script src="/assets/rendererWebGL.js"></script>
+<script>
+(async()=>{let result;try{
+  const r=webglDungeonRenderer,fixture=await(await fetch('/fixture')).json(),texture=color=>{
+    const c=document.createElement('canvas');c.width=c.height=64;const ctx=c.getContext('2d');ctx.fillStyle=color;ctx.fillRect(0,0,64,64);
+    c.complete=true;c.naturalWidth=c.naturalHeight=64;return c;
+  };
+  window.dungeonTextures={floor:texture('#454e58'),wall:texture('#727c89'),ceiling:texture('#36444b')};window.dungeonTexturesMeta={};
+  async function install(d){
+    window.currentDungeon=d;
+    for(const [id,tile]of Object.entries(d.tiles)){
+      const c=texture('#667884');
+      if(tile.spriteSpec?.voxelShape){c.getContext('2d').clearRect(0,0,64,64);GenreKits.paint(c.getContext('2d'),tile.spriteSpec.voxelShape,0,0,64,64);}
+      if(tile.url){const image=new Image();image.src=tile.url;await image.decode();window.dungeonTextures[id]=image;}
+      else window.dungeonTextures[id]=c;
+      if(tile.spriteSpec)window.dungeonTexturesMeta[id]=tile.spriteSpec;
+    }
+  }
+  window.playerPosX=332.5;window.playerPosY=192.5;window.playerDungeonX=332;window.playerDungeonY=192;
+  window.dungeonRunId='city-probe';window.combatCharacters=[];
+  window.playerAngle=Math.PI/2;window.playerZ=1.55;
+  await install(fixture.before);if(!r.init(document.getElementById('dungeon-container')))throw Error('Production shader initialization failed');
+  r.canvas.width=960;r.canvas.height=600;
+  const capture=()=>{r.renderScene();const gl=r.gl,p=new Uint8Array(960*600*4);gl.readPixels(0,0,960,600,gl.RGBA,gl.UNSIGNED_BYTE,p);
+    let hash=2166136261,bright=0;for(let i=0;i<p.length;i+=4){hash=Math.imul(hash^p[i]^p[i+1]^p[i+2],16777619);if(p[i]+p[i+1]+p[i+2]>45)bright++;}
+    return{hash:hash>>>0,bright,error:gl.getError(),png:r.canvas.toDataURL()};};
+  const before=capture();await install(fixture.after);const after=capture();
+  window.playerAngle+=Math.PI/2;const turned=capture();
+  result={pass:!before.error&&!after.error&&!turned.error&&before.hash!==after.hash&&after.hash!==turned.hash&&after.bright>1000,
+    adapter:r.gl.getParameter(r.gl.VERSION),proceduralCitizens:r._getVisibleCharacterVoxelActors().length,before:{...before,png:undefined},after:{...after,png:undefined},turned:{...turned,png:undefined},
+    buildingsBefore:fixture.before.cityBlocks.buildings.length,buildingsAfter:fixture.after.cityBlocks.buildings.length,png:after.png};
+}catch(error){result={pass:false,error:error.stack};}
+document.getElementById('results').textContent=JSON.stringify({...result,png:undefined});
+await fetch('/report',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(result)});
+})();
+</script></html>

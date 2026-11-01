@@ -139,7 +139,7 @@ test('the real server read path publishes stored text and witnessed memory witho
   const state={getLastCoords:()=>({x:0,y:0,z:0}),getDungeonRunId:()=>ledger.runId,getCampaignMemory:()=>ledger,
     getRoomNameDatabase:()=>JSON.stringify(f.database),setRoomNameDatabase:value=>Object.assign(f.database,JSON.parse(value)),
     getRoomDungeon:()=>f.dungeon,getCombatCharactersString:()=>JSON.stringify([f.actor]),getUpdatedGameConsole:()=>f.text};
-  const context={sharedState:state,ReadableItems:R,prepareReadableAction:prepare,Inhabitants:I,CampaignMemory:Memory,ActionFeedback:Feedback,broadcast:e=>events.push(e),console:{info(){}},updatedGameConsole:f.text};
+  const context={require:name=>{if(name==='./worldFlags')return{on:()=>false};assert.equal(name,'./bookResearch');return require('../retort/bookResearch');},sharedState:state,ReadableItems:R,prepareReadableAction:prepare,Inhabitants:I,CampaignMemory:Memory,ActionFeedback:Feedback,broadcast:e=>events.push(e),console:{info(){}},updatedGameConsole:f.text};
   const call=vm.compileFunction(helper+';return tryReadableItemAction(input);',[...Object.keys(context),'input']);
   const puzzle=JSON.stringify(f.p),items=JSON.stringify(f.room.objects);
   const result=await call(...Object.values(context),'read chapter 2 of '+f.p.readables[0].name);

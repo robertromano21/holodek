@@ -37,14 +37,13 @@
     });
   }
   function openConsoleTarget(target){
-    if(root.actionDiceState?.active?.kind!=='combat')return false;
     const link=target?.closest?.('#phaser-container .clickable-pc, #phaser-container .clickable-npc, #phaser-container .clickable-monster');
     if(!link)return false;
     const name=link.getAttribute('data-pc')||link.getAttribute('data-npc')||link.getAttribute('data-monster');
-    if(name)open({name});
-    return true;
+    return name ? open({name}) : false;
   }
   function open(selected){
+    if(selected.ambient)return root.CityCrowdUi?.open(selected)||false;
     const actor=(root.combatCharacters||[]).find(a=>a.name===selected.name);
     if(!actor||actor.discoveryState==='pending'||root.isDungeonActorPresent&&!root.isDungeonActorPresent(actor))return false;
     if(root.actionDiceState?.active?.kind==='combat'){
@@ -58,13 +57,18 @@
       cancel.addEventListener('click',()=>popup.remove());popup.appendChild(cancel);document.body.appendChild(popup);
       positionActions(popup);return true;
     }
+    const allegiance=root.DungeonLife?.actorAllegiance?.(actor)||actor.allegiance||actor.state;
+    if(actor.type==='monster'&&(actor.hp??1)>0&&!['Hostile','Dead','Dying','Unconscious'].includes(allegiance)&&root.CommerceUi?.invite?.(actor.name))return true;
     if(typeof root.openCombatCharacterSheet!=='function')return false;
     const type=actor.type;
     document.querySelectorAll('.popup-container').forEach(p=>p.remove());
     root.openCombatCharacterSheet(actor);
     if(actor.type==='pc'){
       const sheet=document.getElementById('party-popup');
-      if(!root.CombatTurnUi?.addCharacterActions?.(sheet,actor))root.CombatLifeUi?.addAction(sheet,actor.name);
+      if(!root.CombatTurnUi?.addCharacterActions?.(sheet,actor)){
+        root.CombatLifeUi?.addAction(sheet,actor.name);
+        root.SpellUi?.addTargetAction(sheet,actor.name);
+      }
       return true;
     }
     const popup=document.createElement('div');popup.className='popup-container combat-character-actions';
@@ -95,6 +99,7 @@
       root.QuestSceneUi?.addAction(popup,actor.name);
       root.CommerceUi?.addAction(popup,actor.name);
       root.CombatLifeUi?.addAction(popup,actor.name);
+      root.SpellUi?.addTargetAction(popup,actor.name);
     }
     button('Cancel');document.getElementById('party-popup')?.appendChild(popup);root.centerPartySheet?.();
     return true;

@@ -84,9 +84,9 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   quest = 'Recover Sepulchra', onGenerateQuest, stories = false, regional = false, dungeon = null } = {}) {
   const state = { tasks: clone(tasks), index, seeded, database: JSON.stringify(db), text, quest, lastAdjudication: null,
     updates: [], logs: [], setters: [], generatedQuests: [], prompts: [], requests: [], synchronizers: [],
-    seedAttempts: [], xp: 200, score: 17 };
+    seedAttempts: [], scopes: 0, xp: 200, score: 17 };
   const queue = [];
-  const tagged = (parts, ...values) => { state.prompts.push(parts.reduce((s, part, i) => s + part + (values[i] ?? ''), '')); };
+  const tagged = (parts, ...values) => { state.prompts.push(typeof parts === 'string' ? parts : parts.reduce((s, part, i) => s + part + (values[i] ?? ''), '')); };
   const assistant = Object.assign(tagged, { generation: async request => {
     state.requests.push(request);
     assert.ok(queue.length, `Unexpected model call: ${state.prompts.at(-1)}`);
@@ -95,7 +95,10 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
     const response = queue.shift();
     return { content: typeof response === 'string' ? response : JSON.stringify(response) };
   } });
-  const agent = { user: tagged, assistant };
+  const agent = { user: tagged, assistant, run: async work => {
+    state.scopes++;
+    return work({ user: tagged, assistant });
+  } };
   const sharedState = {
     getDungeonRunId: () => 'integration-run',getGamePaused: () => false,
     getLastCoords: () => {const [x,y,z]=Inhabitants.roomKey(state.text.match(/^Coordinates:[ \t]*(.*)$/m)?.[1]).split(',').map(Number);return{x,y,z};},
@@ -115,6 +118,7 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   };
   const sync = name => async (_agent, _coords, _db, text) => { state.synchronizers.push(name); return text; };
   const dependencies = { console: quiet, require: id => require(id.startsWith('./') ? '../retort/' + id.slice(2) : id),
+    WorldSetting: require('../retort/settingLayer'),
     CampaignMemory: require('../retort/campaignMemory'), sharedState, PuzzleRewards, QuestDeliverySuccessors, Inhabitants, ...progress, ...bossGate, ...actualRoomHelpers,
     FortifiedSites: require('../retort/fortifiedSites'), snapshotQuestContext: require('../retort/worldContext').snapshotQuestContext,
     Divinity: require('../retort/divineEncounters'), Pantheon: require('../assets/pantheonCharacters'), GeneratedNames: require('../retort/generatedNames'),
@@ -139,21 +143,21 @@ function harness({ tasks = [fetchTask()], index = 0, seeded = true, db = databas
   const seed = compile(seedSource, dependencies, 'seedAndManageQuest');
   return { state, sharedState, agent, dependencies,
     db: () => JSON.parse(state.database),
-    generate: async (responses = []) => {
+    generate: async (responses = [], preparation = null) => {
       assert.equal(queue.length, 0, 'Previous turn left unused model responses');
       queue.push(...clone(responses));
       const generate = compile(`let updatedGameConsole = sharedState.getUpdatedGameConsole();
         let roomNameDatabaseString = sharedState.getRoomNameDatabase();
         let bossRoom = '';
         ${generationSource}`, dependencies, 'generateQuest');
-      await generate(agent);
+      await generate(agent, preparation);
       assert.equal(queue.length, 0, 'Quest generation left unused model responses');
     },
-    turn: async ({ text, input = 'wait', responses = [PENDING] } = {}) => {
+    turn: async ({ text, input = 'wait', responses = [PENDING], preparation = false } = {}) => {
       assert.equal(queue.length, 0, 'Previous turn left unused model responses');
       if (text !== undefined) state.text = text;
       queue.push(...clone(responses));
-      const result = await seed(agent, state.text, input);
+      const result = await seed(agent, state.text, input, null, preparation);
       assert.equal(queue.length, 0, 'Turn did not consume its scripted model responses');
       return result;
     },
@@ -258,6 +262,90 @@ test('second room still generates the original artifact boss and quest once the 
   assert.deepEqual(h.state.tasks, []);
   assert.equal(h.state.index, 0);
   assert.equal(h.state.seeded, false);
+});
+
+test('isolated opening preparation authors the same quest fields before room two and obeys its reserved boss coordinate', async () => {
+  const h = harness({ text: consoleText({ 'Current Quest': 'None', 'Next Artifact': 'None', 'Rooms Visited': '1' }),
+    quest: 'None', tasks: [], seeded: false });
+  await h.generate(['Test Chalice', 'Test Guardian', 'Test Sanctuary', 'Retrieve the Test Chalice.'], { bossKey: '4,0,0' });
+  assert.equal(h.state.requests.length, 4); assert.equal(h.state.quest, 'Retrieve the Test Chalice.');
+  assert.match(h.state.text, /^Coordinates: X: 0, Y: 0, Z: 0$/m);
+  assert.match(h.state.text, /^Boss Room Coordinates: X: 4, Y: 0, Z: 0$/m);
+});
+
+test('private first-task preparation uses the real compiler without a progress model call, reward or turn advancement', async () => {
+  const db = database(); db['0,0,0'].objects.push({ name: 'Iron Sigil', type: 'other', properties: { magic: 1 } });
+  const h = harness({ db, tasks: [], seeded: false });
+  const result = await h.turn({ preparation: true, input: '', responses: [{ count: 1 }, { type: 'object' },
+    { placement: '0,0,0' }, { type: 'fetch' }, { actionKind: 'take_item' },
+    { desc: 'Recover Iron Sigil.' }, { metrics: 'Iron Sigil in Inventory.' }] });
+  assert.equal(result.questJustSeeded, true); assert.ok(result.activeTask.id);
+  assert.equal(h.state.requests.filter(r => r.parameters.updatedStatus).length, 0);
+  assert.equal(h.state.index, 0); assert.equal(h.state.xp, 200); assert.equal(h.state.score, 17);
+});
+
+test('later room entry preserves an unfinished quest even when artifact metadata or console quest is missing', async () => {
+  for (const index of [0, 1, 2]) for (const seeded of [false, true]) for (const visibleQuest of ['Recover Sepulchra', 'None']) {
+    const h = harness({ index, seeded, text: consoleText({ roomKey: '-2,0,0', 'Current Quest': visibleQuest,
+      'Next Artifact': 'None', 'Next Boss': 'None' }) });
+    const original = clone(h.state);
+    await h.generate();
+    assert.deepEqual(h.state, original, 'Travel must not author another quest, reset tasks, or repair bindings by rerolling.');
+  }
+});
+
+test('saved tasks still protect quest continuity when both quest text projections are stale', async () => {
+  const h = harness({ quest: 'None', text: consoleText({ roomKey: '-2,0,0', 'Current Quest': 'None', 'Next Artifact': 'None' }) });
+  const original = clone(h.state);
+  await h.generate();
+  assert.deepEqual(h.state, original);
+});
+
+test('verified quest completion can author the next quest rather than permanently disabling successors', async () => {
+  const h = harness({ index: 3, seeded: false, tasks: [fetchTask({ status: 'Completed' })],
+    text: consoleText({ roomKey: '-2,0,0', 'Current Quest': 'None', 'Next Artifact': 'None' }) });
+  await h.generate(['Test Chalice', 'Test Guardian', 'Test Sanctuary', 'Retrieve the Test Chalice.']);
+  assert.equal(h.state.quest, 'Retrieve the Test Chalice.');
+  assert.equal(h.state.index, 0);
+  assert.deepEqual(h.state.tasks, []);
+  assert.equal(h.state.seeded, false);
+});
+
+test('legacy placeholder answers fail explicitly without committing partial quest bindings or clearing tasks', async () => {
+  for (const responses of [['None'], ['Test Chalice', 'None'], ['Test Chalice', 'Test Guardian', 'Unassigned Boss'],
+    ['Test Chalice', 'Test Guardian', 'Test Sanctuary', 'None']]) {
+    const h = harness({ text: consoleText({ roomKey: '0,1,0', 'Current Quest': 'None', 'Next Artifact': 'None' }),
+      quest: 'None', tasks: [], seeded: false });
+    const original = { text: h.state.text, quest: h.state.quest, db: h.state.database };
+    await assert.rejects(h.generate(responses), /placeholder/i);
+    assert.deepEqual({ text: h.state.text, quest: h.state.quest, db: h.state.database }, original);
+    assert.deepEqual(h.state.setters, []);
+  }
+});
+
+test('genre quests use isolated structured authoring and repair placeholder names before publishing once', async () => {
+  const Setting = require('../retort/settingLayer'), previous = Setting.current();
+  const world = Setting.localBible('an orbital relay station', ['sci-fi']);
+  world.name = 'Meridian Station';
+  Setting.setActive(world);
+  try {
+    const h = harness({ text: consoleText({ roomKey: '0,1,0', 'Current Quest': 'None', 'Next Artifact': 'None' }),
+      quest: 'None', tasks: [], seeded: false });
+    await h.generate([{ name: 'None' }, { name: 'Signal Key' }, { name: 'Unassigned Boss' }, { name: 'Relay Warden' },
+      { name: 'Signal Vault' }, { description: 'Recover the Signal Key from the Relay Warden in the Signal Vault.' }]);
+    assert.equal(h.state.scopes, 4);
+    assert.ok(h.state.requests.every(request => request.parameters && request.strictParameters));
+    assert.match(h.state.text, /^Next Artifact: Signal Key$/m);
+    assert.match(h.state.text, /^Next Boss: Relay Warden$/m);
+    assert.match(h.state.text, /^Next Boss Room: Signal Vault$/m);
+    assert.deepEqual(h.state.setters, [['tasks', 0], ['index', 0], ['seeded', false]]);
+    const requests = h.state.requests.length;
+    h.state.text = h.state.text.replace('Coordinates: X: 0, Y: 1, Z: 0', 'Coordinates: X: -2, Y: 0, Z: 0')
+      .replace('Rooms Visited: 3', 'Rooms Visited: 4').replace('Next Artifact: Signal Key', 'Next Artifact: None');
+    await h.generate();
+    assert.equal(h.state.requests.length, requests);
+    assert.equal(h.state.quest, 'Recover the Signal Key from the Relay Warden in the Signal Vault.');
+  } finally { Setting.setActive(previous); }
 });
 
 test('quest generation can bind an existing upper temple room without renaming it or minting its key', async () => {
@@ -1007,4 +1095,37 @@ test('zero-element future puzzle tasks bind an existing unsolved mechanism rathe
   assert.match(result.activeTask.desc, /Key Hall/); assert.doesNotMatch(result.activeTask.desc, /invented southern shrine/);
   assert.match(h.state.text, /^Quest Requirements: .*Solve the physical puzzle.*Key Hall/m);
   assert.equal(result.activeTask.progress.eligible, false);
+});
+
+test('every genre generates raw quest fields from its own world, without the canonical wasteland paragraph', async () => {
+  const Setting = require('../retort/settingLayer'), Prompts = require('../retort/graveMasterStoryPrompts');
+  const previous = Setting.current();
+  try {
+    for (const genre of Setting.GENRES) {
+      const world = Setting.localBible('original ' + genre + ' setting', [genre]);
+      world.name = 'Original Test World'; world.topology.goal = 'Bound Destination';
+      world.masterPrompt = Setting.masterText(Setting.masterLocal(world), world); Setting.setActive(world);
+      const h = harness({ text: consoleText({ roomKey: '0,1,0', 'Next Artifact': 'None', 'Current Quest': 'None', 'Rooms Visited': '2' }), quest: 'None', tasks: [], seeded: false });
+      h.dependencies.StoryPrompts = { isHolodek1: () => false, appendOriginal: Prompts.appendOriginal };
+      await h.generate([{ name: 'Signal Token' }, { name: 'Relay Guardian' }, { name: 'Relay Station' },
+        { description: 'Retrieve the Signal Token from the Relay Guardian at Relay Station.' }]);
+      const raw = h.state.prompts.join('\n');
+      assert.doesNotMatch(raw, /Tartarus|Children of the Grave|hellish sandstorms|dragons \(celestial/, genre);
+      assert.equal(h.state.prompts.filter(p => p.startsWith('[MODE-4 QUEST]')).length, 4, genre);
+      assert.match(raw, /Original Test World/); assert.match(raw, /Bound Destination/);
+      assert.match(raw, /Signal Token/); assert.match(raw, /Relay Guardian/);
+      assert.equal(h.state.quest, 'Retrieve the Signal Token from the Relay Guardian at Relay Station.');
+    }
+  } finally { Setting.setActive(previous); }
+});
+
+test('canonical quest fields retain the original Tartarus paragraph unchanged', async () => {
+  const Setting = require('../retort/settingLayer'), previous = Setting.current(); Setting.setActive(null);
+  try {
+    const h = harness({ text: consoleText({ roomKey: '0,1,0', 'Next Artifact': 'None', 'Current Quest': 'None', 'Rooms Visited': '2' }), quest: 'None', tasks: [], seeded: false });
+    await h.generate(['Test Chalice', 'Test Guardian', 'Test Sanctuary', 'Retrieve the Test Chalice.']);
+    const lore = 'The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.';
+    assert.equal(h.state.prompts.filter(p => p.includes(lore)).length, 4);
+    assert.doesNotMatch(h.state.prompts.join('\n'), /MODE-4 QUEST/);
+  } finally { Setting.setActive(previous); }
 });

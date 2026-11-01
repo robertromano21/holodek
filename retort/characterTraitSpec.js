@@ -123,8 +123,14 @@ function compactSheet(s) {
 function buildMessages(sheet, problems) {
   const s = PC.normalizeSheet(sheet);
   const schema = PC.traitSchemaDescription();
+  const world = require('./settingLayer').current();
+  if (world && !require('./genreAssetPolicy').catalog({}, world).classical) {
+    // These are existing body meshes; genreGarb supplies the approved clothing treatment.
+    schema.outfit = { ...schema.outfit, style: ['none','leather','plate','cloak','rags'],
+      helm: ['none','open','closed'], symbol: ['none'] };
+  }
   const sys = [
-    'You are the art director for a dark-fantasy pixel-art RPG. Convert a free-text character sheet into a JSON visual trait spec',
+    world ? `You are the procedural character artist for this ${world.genres.join('/')} world. Convert its character sheet into a JSON visual trait spec` : 'You are the art director for a dark-fantasy pixel-art RPG. Convert a free-text character sheet into a JSON visual trait spec',
     'for a 48x48 front-facing procedural sprite. Races and classes are often invented compound words: interpret their parts',
     '(e.g. "Sandwraith Drakespawn" = sand-coloured, wraith-like translucent tattered lower body, with drake horns, scales, tail and wings;',
     '"-kin/-spawn/-born" usually means a humanoid with the creature\'s traits). Pick the bodyPlan that best fits the creature:',
@@ -132,7 +138,7 @@ function buildMessages(sheet, problems) {
     'skeletal (undead bones), draconic (full dragon), giant. Choose strong, readable, distinctive hex colours that match the words',
     'Choose size when designing the creature: tiny/small/medium use ordinary 80-110 percent stature; large/huge use 150-200 percent. Core humanoid race proportions are engine-defined.',
     '(materials like shadow, glass, storm, blood, bone, gold, frost, flame, void, abyss). Outfit should match the class',
-    '(casters/seers: robe, knights/warriors: plate or mail + helm, rogues/assassins: leather, clerics: tabard + holy symbol).',
+    world ? '(interpret the approved base mesh as this genre\'s clothing; no mandatory medieval armor, robes or religious symbols).' : '(casters/seers: robe, knights/warriors: plate or mail + helm, rogues/assassins: leather, clerics: tabard + holy symbol).',
     'The sprite is tiny (shown as a 24x24 C64-style token), so make the SILHOUETTE distinctive: prefer the creature features the words imply',
     '(horns, wings, tail, ears, mane, spikes, extra arms, beast head) and keep the face visible. Use a hood ONLY when the class or race',
     'explicitly suggests one (hooded, cowled, veiled, shrouded, assassin, wraith); otherwise show hair, horns or a helm. Monsters that are',

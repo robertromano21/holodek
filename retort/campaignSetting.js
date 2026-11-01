@@ -29,7 +29,7 @@ const FAITH = { wellkeepers: { patron: 'Dyanetzia', allegiance: 'Neutral' }, tol
 const EVIL_PATRONS = ['Arithus', 'Dantuea', 'Sharlynn', 'Nameless Drake'];
 function hostileTemple(setting, roomName = '') {
   return !!setting?.religion?.patron && Pantheon.canon(setting.religion.patron)?.allegiance === 'Hostile' &&
-    (['roman_temple', 'byzantine_basilica', 'deity_temple'].includes(setting.siteKind) || /temple|basilica|sanctuary|shrine|chapel/i.test(roomName));
+    (['roman_temple', 'byzantine_basilica', 'deity_temple'].includes(setting.siteKind) || setting.city?.establishmentType==='temple' || /temple|basilica|sanctuary|shrine|chapel/i.test(roomName));
 }
 const BUILDINGS = new Set(['inn', 'house', 'guildhall', 'roman_temple', 'byzantine_basilica', 'castle', 'gatehouse', 'wizard_citadel', 'villa', ...Lore.BUILDINGS.map(row => row[0]), ...Fortified.TYPES]);
 const COMMUNITIES = new Set(['oasis', 'hamlet', 'market', 'village', 'cavern_village', ...BUILDINGS]);
@@ -44,7 +44,7 @@ function chapter(completed = 0, total = 21) {
 }
 function plan(input = {}) {
   const c = coordinates(input.targetKey); if (!c) return null;
-  const homebrew = require('./settingLayer').campaignCommunity(input);
+  const homebrew = require('./settingLayer').campaignCommunity(input, input.database?.['0,0,0']?.setting || require('./settingLayer').current());
   if (homebrew) return homebrew;
   const realm = input.database?.[input.targetKey]?.planarRealm || input.database?.[input.sourceKey]?.planarRealm;
   if (realm) return { version: 1, regionId: realm.id, region: realm.name, communityId: realm.id, community: realm.name,
@@ -190,9 +190,12 @@ async function placeCitiesWithModel($, runId, map) {
 }
 async function prepareAtlas($, state) {
   const runId = state.getDungeonRunId(), db = JSON.parse(state.getRoomNameDatabase() || '{}');
-  if (db['0,0,0']?.campaignAtlas?.runId === runId) return db['0,0,0'].campaignAtlas;
-  const homebrew = require('./settingLayer').campaignPlan(runId);
+  const world = db['0,0,0']?.setting || require('./settingLayer').current();
+  const saved = db['0,0,0']?.campaignAtlas;
+  if (saved?.runId === runId && (world?.kind !== 'homebrew' || saved.kind === 'homebrew')) return saved;
+  const homebrew = require('./settingLayer').campaignPlan(runId, world);
   if (homebrew) {
+    if(require('./settingEcology').enabled())homebrew.ecology=world.ecology||await require('./settingEcology').author($,{world,seed:runId});
     homebrew.map = await placeCitiesWithModel($,runId,require('./campaignMap').compose(runId,homebrew));
     const latest=JSON.parse(state.getRoomNameDatabase()||'{}');(latest['0,0,0'] ||= {}).campaignAtlas=homebrew;
     state.setRoomNameDatabase(JSON.stringify(latest));return homebrew;
@@ -233,6 +236,7 @@ async function prepareAtlas($, state) {
   atlas ||= { version: 1, runId, source: 'seeded-campaign-fallback', origin: 'Tartarus', destination: 'Hades',
     regions: REGIONS.map((r, i) => ({ ...r, underground: Underground.REGIONAL_LAYERS[i] })), factions: FACTIONS,
     connections: REGIONS.slice(1).map((r, i) => ({ from: REGIONS[i].id, to: r.id, kind: 'trade-and-pilgrim-route' })) };
+  if(require('./settingEcology').enabled())atlas.ecology=await require('./settingEcology').author($,{atlas,seed:runId});
   // Re-read after the optional request so other initialized room fields are retained.
   const latest = JSON.parse(state.getRoomNameDatabase() || '{}'); latest['0,0,0'] ||= {};
   if (latest['0,0,0'].campaignAtlas?.runId !== runId) latest['0,0,0'].campaignAtlas = atlas;

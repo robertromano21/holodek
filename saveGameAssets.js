@@ -33,7 +33,9 @@ function rebuildRoom(dungeon, geoKey, options = {}) {
 function rebuild(server, roomKey, options) {
   const next = Shape.clone(server);
   if (!next.roomDungeonDatabase[roomKey]) throw Error('Saved room is missing.');
-  rebuildRoom(next.roomDungeonDatabase[roomKey], roomKey, options);
+  const floor=require('./retort/hostLocalFloors').selectDungeon(next);
+  rebuildRoom(floor,roomKey,options);
+  if(next.activeCityFloor){const db=JSON.parse(next.roomNameDatabaseString);require('./assets/dungeonGeometryStamp').stamp(floor,roomKey);require('./retort/hostLocalFloors').bundle(db,next.activeCityFloor).dungeon=floor;next.roomNameDatabaseString=JSON.stringify(db);}
   return next;
 }
 function characterTraits(payload) {

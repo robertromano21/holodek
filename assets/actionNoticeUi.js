@@ -4,25 +4,42 @@
   else { root.DungeonActionNotices = api; document.addEventListener('DOMContentLoaded', api.init); }
 })(typeof window === 'undefined' ? globalThis : window, function(root) {
   'use strict';
-  const queue = [], seen = new Set();
+  const queue = [], seen = new Set(), pendingQuests = new Map();
   let panel, content, portrait, title, status, message, active = null, room = '', itemSnapshot = null, serial = 0;
   const context = () => root.getDungeonLifeContext?.();
   const clock = () => root.DungeonLife?.time?.() ?? Date.now();
   const clean = value => typeof value === 'string' ? value.trim() : '';
-  const requiresDismissal = event => event.result === 'observed' || ['document-read', 'writing-discovered', 'art-examined'].includes(event.kind);
+  const requiresDismissal = event => event.result === 'observed' || ['document-read', 'writing-discovered', 'art-examined', 'quest-seeded'].includes(event.kind);
+  const lifeNotice = event => ['survival-save', 'dying-warning', 'first-aid', 'injury-death'].includes(event.kind);
+  const completion = event => ['puzzle-complete', 'quest-complete', 'contract-complete'].includes(event.kind);
   const fallbackIcon = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 64"><path fill="#d8bc7a" d="M16 4h16v8h6v16h-6v8h8v8h4v16H4V44h4v-8h8v-8h-6V12h6z"/><path fill="#30251c" d="M18 16h12v8H18zM20 38h8v22h-8z"/></svg>');
-  function sameRoom(event) { return event.runId === root.dungeonRunId && event.geoKey === context()?.dungeon?.geoKey; }
+  function sameRoom(event) { return event.runId === root.dungeonRunId && event.geoKey === context()?.dungeon?.geoKey &&
+    (!event.floorToken || !root.CityFloorScope?.token?.() || event.floorToken===root.CityFloorScope.token()); }
   function receive(event) {
+    if(event.kind==='quest-seeded'&&event.runId===root.dungeonRunId&&!sameRoom(event)&&
+      clean(event.id)&&clean(event.title)&&clean(event.message)&&!seen.has(event.id)){
+      pendingQuests.set(event.id,event);if(pendingQuests.size>8)pendingQuests.delete(pendingQuests.keys().next().value);return true;
+    }
     if (!sameRoom(event) || !clean(event.id) || !clean(event.title) || !clean(event.message) || seen.has(event.id)) return false;
     seen.add(event.id); if (seen.size > 128) seen.delete(seen.values().next().value);
     const row = { ...event, title: event.title.slice(0, 100), message: event.message.slice(0, 700) };
-    if (event.kind === 'puzzle-complete') {
+    if (lifeNotice(event)) {
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].kind === 'dying-warning' && queue[i].subject === event.subject) queue.splice(i, 1);
+      if (active?.kind === 'dying-warning' && active.subject === event.subject) { active = null; if (panel) panel.hidden = true; }
+      queue.unshift(row);
+    } else if (event.kind === 'puzzle-complete') {
       for (let i = queue.length - 1; i >= 0; i--) if (queue[i].kind === 'puzzle-control' && !requiresDismissal(queue[i])) queue.splice(i, 1);
       if (active?.kind === 'puzzle-control' && !requiresDismissal(active)) active = null;
       queue.unshift(row);
-    } else queue.push(row);
+    } else if(event.kind==='quest-seeded'){
+      if(active&&!requiresDismissal(active)&&!lifeNotice(active)&&!completion(active)){
+        queue.unshift(active);active=null;if(panel)panel.hidden=true;
+      }
+      queue.unshift(row);
+    }
+    else queue.push(row);
     if (queue.length > 20) {
-      const optional = queue.findIndex(row => !requiresDismissal(row) && !['puzzle-complete', 'defeat'].includes(row.kind));
+      const optional = queue.findIndex(row => !requiresDismissal(row) && !lifeNotice(row) && !completion(row) && !['defeat', 'defeat-loot'].includes(row.kind));
       // The transient-toast budget must not discard unread pages or important outcomes.
       if (optional >= 0) queue.splice(optional, 1);
     }
@@ -58,16 +75,22 @@
       if (panel) panel.hidden = true;
     }
     if (!panel || root.gamePaused) return;
+    for(const [id,event]of pendingQuests){
+      if(event.runId!==root.dungeonRunId){pendingQuests.delete(id);continue;}
+      if(sameRoom(event)){pendingQuests.delete(id);receive(event);}
+    }
     if (active && active.until !== null && clock() >= active.until) { active = null; panel.hidden = true; }
     if (!active && queue.length) {
       const row = queue.shift();
       if (!sameRoom(row)) return;
       const manual = requiresDismissal(row);
-      active = { ...row, until: manual ? null : clock() + (row.kind === 'puzzle-complete' ? 7500 : Math.min(9000, Math.max(3500, row.message.length * 22))) };
+      active = { ...row, until: manual ? null : clock() + (row.kind === 'puzzle-complete' ? 7500 : completion(row) ? 9000 :
+        lifeNotice(row) ? Math.min(12000, Math.max(6000, row.message.length * 35)) : Math.min(9000, Math.max(3500, row.message.length * 22))) };
       title.textContent = row.title;
       const labels = { success: 'Success', partial: 'Partial Progress', failure: 'Failed', blocked: 'Cannot Do That',
         observed: 'Examined', defeated: 'Defeated', resolved: 'Action Resolved' };
-      status.textContent = row.kind === 'puzzle-complete' ? 'Puzzle Solved' : row.kind === 'item-taken' ? 'Item Taken' :
+      status.textContent = row.kind === 'quest-seeded' ? 'New Objective - Pay Attention' : row.kind === 'puzzle-complete' ? 'Puzzle Solved' : row.kind === 'quest-complete' ? 'Quest Fulfilled' :
+        row.kind === 'contract-complete' ? 'Payment Received' : row.kind === 'item-taken' ? 'Item Taken' :
         row.kind === 'object-discovered' ? 'Object Discovered' :
         row.kind === 'pursuit' ? 'Pursuit' :
         [clean(row.activity).replace(/([a-z])([A-Z])/g, '$1 $2'), labels[row.result], Number.isFinite(row.roll) ? `d20 ${row.roll}` : ''].filter(Boolean).join(' / ');
@@ -97,7 +120,7 @@
     return taken;
   }
   function reset() {
-    queue.length = 0; seen.clear(); active = null; itemSnapshot = null; room = '';
+    queue.length = 0; seen.clear(); pendingQuests.clear(); active = null; itemSnapshot = null; room = '';
     if (panel) panel.hidden = true;
   }
   function dismiss() {
@@ -109,6 +132,9 @@
     const style = document.createElement('style');
     style.textContent = '#dungeon-action-notice{position:fixed;z-index:2150;display:flex;gap:10px;align-items:center;box-sizing:border-box;padding:10px 13px;pointer-events:none;background:linear-gradient(135deg,rgba(32,28,21,.97),rgba(10,10,10,.94));border:1px solid #a48d62;border-radius:7px;color:#eee;font:15px/1.3 Georgia,serif;box-shadow:0 5px 22px #0008}#dungeon-action-notice[hidden]{display:none}#dungeon-action-notice img{width:42px;height:56px;object-fit:contain;image-rendering:pixelated;flex:none}#dungeon-action-notice strong{display:block;color:#ead29d;font-size:15px}#dungeon-action-notice small{display:block;color:#c5bba5;font-size:11px;margin:3px 0 5px}#dungeon-action-notice[data-kind=defeat]{border-color:#ad7768}#dungeon-action-notice[data-kind=puzzle-complete]{border-color:#a9bd79}';
     document.head.appendChild(style);
+    const questStyle=document.createElement('style');
+    questStyle.textContent='#dungeon-action-notice[data-kind=quest-seeded]{border:2px solid #e6bf63;box-shadow:0 0 0 3px #87682455,0 5px 22px #0008;background:linear-gradient(135deg,#3d3020f5,#11100ef5)}#dungeon-action-notice[data-kind=quest-seeded] strong{font-size:19px;color:#ffdfa0}';
+    document.head.appendChild(questStyle);
     const dismissStyle = document.createElement('style');
     dismissStyle.textContent = '#dungeon-action-notice{padding-right:44px}#dungeon-action-notice .dungeon-message-close{position:absolute;top:4px;right:4px;width:32px;height:32px;padding:0;margin:0;border:0;border-radius:4px;background:transparent;color:#ead29d;font:16px Georgia,serif;cursor:pointer;pointer-events:auto}#dungeon-action-notice .dungeon-message-close:hover{background:#ffffff1c}#dungeon-action-notice .dungeon-message-close:focus-visible{outline:1px solid #ead29d;outline-offset:1px}';
     document.head.appendChild(dismissStyle);

@@ -349,7 +349,7 @@ test('overhead architecture matches column range, including diagonal and extende
     [500, 500, []]
   ]) {
     const instances = [], fetched = [];
-    const context = { window:{},dungeon: { sceneStructures: parts }, voxelInstances: instances, playerX, playerY,
+    const context = { window:{},citySkyline:null,dungeon: { sceneStructures: parts }, voxelInstances: instances, playerX, playerY,
       VIS_RADIUS: 10, VOXEL_VIS_RADIUS: 64,
       renderer: { _retroSurfaceKind: () => 0, getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
     vm.runInNewContext(`(function() { ${source.slice(start, end)} }).call(renderer)`, context);
@@ -366,7 +366,7 @@ test('overhead architecture matches column range, including diagonal and extende
 test('all ground voxel shapes use the original column range, not the short billboard range', () => {
   const source = fs.readFileSync(require.resolve('../assets/rendererWebGL'), 'utf8');
   assert.match(source, /const VOXEL_VIS_RADIUS = Math.max\(VIS_RADIUS, 64\)/);
-  const start = source.indexOf('for (let dx = -VOXEL_VIS_RADIUS');
+  const start = source.indexOf('for (const [wx, wy, cell] of nearbyRenderableCells(dungeon, playerX, playerY, VOXEL_VIS_RADIUS))');
   const end = source.indexOf('// Views:', start);
   assert.ok(start > 0 && end > start);
   const cells = {
@@ -383,12 +383,13 @@ test('all ground voxel shapes use the original column range, not the short billb
     dirX: 1, dirY: 0, planeX: 0, planeY: 0.66, focalLength: 160,
     SPRITE_WORLD_HEIGHT: 1, SPRITE_WIDTH_RATIO: 0.6, collectVoxelTorchRectsForWebGPU: false, fullbright: false,
     renderer: { voxelProgram: {}, voxelMeshes: {}, _retroSurfaceKind: () => 0, getVoxelMesh(tile) { fetched.push(tile); return { tile }; } } };
-  vm.runInNewContext(`(function() { ${source.slice(start, end)} }).call(renderer)`, context);
+  const helper = source.slice(source.indexOf('function* nearbyRenderableCells('), source.indexOf('  function formatShaderSource('));
+  vm.runInNewContext(`${helper}\n(function() { ${source.slice(start, end)} }).call(renderer)`, context);
   assert.deepEqual(fetched.sort(), ['custom_altar', 'custom_obelisk', 'custom_tree', 'pillar']);
   assert.equal(instances.length, 4);
 });
 
-test('legacy shaders retain lighting and clipping apart from explicit height traversal and downhill view shift', () => {
+test('legacy shaders retain falloff, shadows and clipping apart from explicit RGB/emission, exposure and height/view fixes', () => {
   const source = fs.readFileSync(require.resolve('../assets/rendererWebGL'), 'utf8').replace(/\r\n/g, '\n');
   // World/fragment programs recorded from 284bd86; vertex hash includes the near-plane clipping fix.
   for (const [name, expected] of Object.entries({
@@ -399,11 +400,34 @@ test('legacy shaders retain lighting and clipping apart from explicit height tra
     const start = source.indexOf(`const ${name} = `);
     const end = name === 'voxelVs' ? source.indexOf(';', source.indexOf('].join', start)) + 1 : source.indexOf('`;', start) + 2;
     let program = source.slice(start, end);
+    if (name === 'voxelFs') {
+      // Only the deliberate finite-exposure/albedo fix is normalized; the
+      // original light falloff, occlusion and material ramp stay byte-pinned.
+      assert.ok(program.includes('torchLight = 1.5 * (1.0 - exp(-max(0.0, torchLight) / 1.5));'));
+      assert.ok(program.includes('vec3 torchTint = v_color * torchChromatic;'));
+      assert.ok(program.includes('col += (vec3(1.0) - col) * torchChromatic * torchLight * 0.04;'));
+      program = program.replace('  // Opaque albedo has finite exposure, even when many city lamps overlap.\n  torchLight = 1.5 * (1.0 - exp(-max(0.0, torchLight) / 1.5));\n', '')
+        .replace('vec3 torchTint = v_color * torchChromatic;', 'vec3 torchTint = mix(v_color, vec3(1.0), 0.4) * torchChromatic;')
+        .replace('col += (vec3(1.0) - col) * torchChromatic * torchLight * 0.04;', 'col += torchChromatic * torchLight * 0.12;');
+    }
+    // Undo only per-source RGB accumulation and luminous fixture cores. Keep the
+    // original brightness, shadow/DDA and material math byte-pinned below.
+    program = program.replace(/^uniform vec3 u_torchColor\[[^\n]*\n/gm, '')
+      .replace(/^vec3 torchChromatic;\n/gm, '')
+      .replace(/^  torchChromatic = [^\n]*\n/gm, '')
+      .replace('    float contribution = (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;\n    total += contribution;\n    torchChromatic += u_torchColor[i] * contribution;',
+        '    total += (TORCH_AMBIENT + ndotl * (1.0 - TORCH_AMBIENT)) * atten;')
+      .replaceAll('torchChromatic', 'TORCH_COLOR')
+      .replace('  if (u_unlit > 3.5 && max(v_color.r,max(v_color.g,v_color.b)) > 0.65) col = v_color;\n','')
+      .replace('if (u_unlit > 2.5 && u_unlit < 3.5)', 'if (u_unlit > 2.5)');
     // Strip only the new retro paint calls before checking the unchanged Modern shader.
     program = program.replace('if (u_fullbright > 0.5) col = retroTrace(col, vec3(u_camPos + rayDir * nextDist, worldZ), normal);', 'if (u_fullbright > 0.5) col = tex.rgb;')
       .replace('if (u_fullbright > 0.5) finalCol = retroTrace(finalCol, exactWorldPos, wallNormalTorch);', 'if (u_fullbright > 0.5) finalCol = tex.rgb;')
       .replace('    if (u_fullbright > 0.5) floorCol = retroTrace(floorCol, hitPos, normal);\n', '');
     if (name === 'fsSource') {
+      // City surfaces only replace texture lookup, not the pinned lighting/shadow math.
+      program=program.replace(/^          vec4 stepCell = currH > nextH \? currCell : nextCell;\n[\s\S]*?^          }\n/m,'')
+        .replace(/^    vec4 floorCell = fetchCell\(int\(floor\(hitPos.x\)\), int\(floor\(hitPos.y\)\)\);\n[\s\S]*?^    }\n/m,'');
       assert.match(program, /if \(wallHit\) break;/);
       assert.match(program, /fCurrDist >= wallDist \|\| \(sideHit && fCurrDist >= sideDistClosest\)/);
       assert.match(program, /float horizon = u_resolution.y \* \(0.5 \+ u_viewShift\)/);
@@ -420,11 +444,19 @@ test('legacy shaders retain lighting and clipping apart from explicit height tra
         .replace(/^    if \(u_fullbright > 0.5\) \{[\s\S]*?^    }\n/m, '');
     } else if (name === 'voxelVs') {
       assert.match(program, /- 2.0 \* u_viewShift \* transformY/);
+      // Facade-only pixel expansion is separately tested. Ordinary vertex projection remains byte-pinned.
+      program=program.replace("        'uniform float u_skylineGlow;',\n",'')
+        .replace(/^        'out (?:vec2 v_skylineUV|float v_skylineCore);',\n/gm,'')
+        .replace("        '  v_skylineUV = vec2(0.0); v_skylineCore = 1.0;',\n",'')
+        .replace(/^        '  if \(u_skylineGlow > 0.5\) \{',[\s\S]*?^        '  }',\n/m,'');
       program = program.replace("        'uniform float u_viewShift;',\n", '')
         .replace('(2.0 * u_focalLength / u_resolution.y) - 2.0 * u_viewShift * transformY;', '(2.0 * u_focalLength / u_resolution.y);')
         .replace("        'uniform float u_retroInk;',\n", '')
         .replace(/^        '  if \(u_retroInk > 0.5\) \{',[\s\S]*?^        '  }',\n/m, '');
     } else {
+      // The facade-only halo does not change ordinary voxel lighting or shadows.
+      program=program.replace(/^in (?:vec2 v_skylineUV|float v_skylineCore);\n/gm,'')
+        .replace(/^uniform float u_skylineGlow;\n/gm,'');
       program = program.replace('if (u_unlit > 0.5 && u_unlit < 1.5)', 'if (u_unlit > 0.5)').replace('  if (u_unlit > 1.5 && u_unlit < 2.5) col = retroTrace(col, v_worldPos, N);\n', '').replace('  if (u_unlit > 2.5) col = clamp(v_color * clamp(dot(ramp, vec3(0.299, 0.587, 0.114)) + torchLight * 0.12, 0.65, 1.05), 0.0, 1.0);\n', '').replace('  // Ordinary unlit artwork retains its original behavior. Retro voxels continue\n  // through the same light accumulation, occlusion and material ramp as Modern.', '  // Debug: prove the \"slits\" are lighting (normal discontinuities) not holes.').replace('  // Trace the finished Modern lighting; never illuminate a shadow independently.\n', '').replace(/^uniform float u_retro(?:Surface|Ink);\n/gm, '')
         .replace('  if (u_retroInk > 0.5) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }\n', '')
         .replace(/^    vec3 paint = v_color;[\s\S]*?^    outColor = vec4\(paint, 1.0\);/m, '    outColor = vec4(v_color, 1.0);');

@@ -26,6 +26,7 @@ function vocab(genre){
 function serviceKind(room){
   if(!Flags.on('CITY_COMPLETE')||room?.cityRoom?.completion!==VERSION)return null;
   const c=room.cityRoom;
+  if(c.kind==='building'&&c.establishmentType)return require('./serviceRoles').kind(room);
   return c.kind==='building'?(c.district==='temple'?'temple':['market','guild','harbor'].includes(c.district)?'shop':null):null;
 }
 function enrich(database,anchorKey){
@@ -36,16 +37,19 @@ function enrich(database,anchorKey){
   for(const [key,room]of Object.entries(database)){
     const c=room?.cityRoom;if(c?.anchorKey!==anchorKey||c.completion===VERSION)continue;
     const role=c.district||'residential';
-    c.completion=VERSION;c.population={roles:ROLES[role]||ROLES.residential,civilianMajority:role!=='undercity',maxResidents:c.kind==='building'?8:16};
+    const venue=c.venue;
+    c.completion=VERSION;c.population={roles:[...new Set([...(venue?.roles||[]),...(city.design?.districts?.[role]?.residentRoles||ROLES[role]||ROLES.residential)])],
+      civilianMajority:role!=='undercity',maxResidents:c.floorProgram?.residents||(c.kind==='building'?8:16)};
     c.routes=Object.entries(room.exits||{}).filter(([,e])=>e?.targetCoordinates).map(([direction,e])=>({direction,to:e.targetCoordinates}));
     const prior=room.campaignSetting||anchor.campaignSetting||{};
     room.campaignSetting={...prior,communityId:`city:${city.id}:${anchorKey}`,community:c.cityName,inhabited:true,
-      siteKind:c.kind==='building'&&['market','guild','harbor'].includes(role)?'market':role==='temple'?'temple':prior.siteKind||'city',
+      siteKind:venue?venue.service==='shop'?'market':venue.service==='temple'?'temple':venue.type:c.kind==='building'&&['market','guild','harbor'].includes(role)?'market':role==='temple'?'temple':prior.siteKind||'city',
       faction:prior.faction||{name:'Local civic council',allegiance:'Neutral'},
-      city:{id:c.cityId,name:c.cityName,district:role,districtName:c.districtName,kind:c.kind,genre:c.genre,population:c.population},
+      city:{id:c.cityId,name:c.cityName,district:role,districtName:c.districtName,kind:c.kind,genre:c.genre,population:c.population,atmosphere:c.atmosphere,
+        identity:city.design?.identity,skyline:city.design?.skyline,verticality:city.design?.verticality,vertical:c.vertical?{...c.vertical,directory:undefined}:undefined,establishmentType:c.establishmentType,venue,populationMix:city.design?.populationMix},
       ...(anchor.planarRealm?{planarRealm:anchor.planarRealm}:{})};
     // No actor, quest, exit, inventory or existing market is replaced by this metadata upgrade.
-    if(c.kind==='building'&&['market','guild','harbor','undercity'].includes(role))require('./market').seed(room,key,city.id);
+    if(c.kind==='building'&&(venue?venue.service==='shop':['market','guild','harbor','undercity'].includes(role)))require('./market').seed(room,key,city.id);
     changed=true;
   }
   if(changed){anchor.citySites.completion=VERSION;for(const [key,room]of Object.entries(database))if(room.cityRoom?.anchorKey===anchorKey)require('./tradeRoutes').connect(database,key);}

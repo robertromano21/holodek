@@ -143,10 +143,24 @@ test('combat target and spellbook casting route through the current initiative p
   assert.deepEqual(calls, ['Sella', ['PC', 'mend']]); assert.equal(f.requests.length, 0);
 });
 
-test('party portraits expose a visible magic action for living allies, not room enemies or the dead', () => {
-  const f = fixture(); f.window.combatCharacters = [{ name: 'Sella', type: 'npc', hp: 1 }, { name: 'Dead', type: 'npc', state: 'Dead' }, { name: 'Enemy', type: 'monster' }];
+test('character actions offer healing for party and room residents, including downed opponents', () => {
+  const f = fixture(); f.window.combatCharacters = [{ name: 'Sella', type: 'npc', hp: 1 }, { name: 'Dead', type: 'npc', state: 'Dead' },
+    { name: 'Enemy', type: 'monster', hp: 0, state: 'Dying' }, { name: 'Hidden', type: 'monster', discoveryState: 'pending' }, { name: 'Gone', type: 'monster' }];
+  f.window.isDungeonActorPresent = a => a.name !== 'Gone';
   assert.ok(f.window.SpellUi.addTargetAction(f.body, 'Sella'));
   assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Sella'), undefined);
   assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Dead'), undefined);
-  assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Enemy'), undefined);
+  assert.ok(f.window.SpellUi.addTargetAction({ appendChild() {}, querySelector() {} }, 'Enemy'));
+  assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Hidden'), undefined);
+  assert.equal(f.window.SpellUi.addTargetAction(f.body, 'Gone'), undefined);
+});
+
+test('target healing lists each eligible party caster and submits the selected NPC, not the PC', async () => {
+  const f = fixture(), choice = f.data.casters[0].choices[0];
+  f.data.casters.push({ name: 'Healer NPC', items: [], choices: [{ ...choice, caster: 'Healer NPC', spellId: 'mend', name: 'Mending', target: 'Enemy', effect: 'heal' }] });
+  await f.window.SpellUi.openForTarget('Enemy');
+  await f.button('Mending on Enemy by Healer NPC').click(); await new Promise(resolve => setImmediate(resolve));
+  const cast = f.requests.find(r => r.path === '/spells/cast');
+  assert.equal(cast.body.caster, 'Healer NPC'); assert.equal(cast.body.target, 'Enemy'); assert.equal(cast.body.spellId, 'mend');
+  assert.equal(f.button('Magic Missile on Enemy by PC'), undefined);
 });

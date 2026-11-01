@@ -15,6 +15,7 @@ function court(db, runId) {
   return db['0,0,0'].divineCourt;
 }
 function finalStage(text) {
+  if (!require('./settingLayer').isCotGPlay()) return false;
   return ['Artifacts Found', 'Quests Achieved'].every(label => {
     const m = /^(\d+)\s*\/\s*(\d+)$/.exec(field(text, label));
     return m && Number(m[2]) > 1 && Number(m[1]) >= Number(m[2]) - 1;
@@ -147,6 +148,7 @@ function seedRaid(db, geoKey, god, steward) {
   return true;
 }
 function seedRoom(db, geoKey, population, runId, text = '') {
+  if (!require('./settingLayer').isCotGPlay()) return null;
   if (!population || geoKey === '0,0,0' || db[geoKey]?.divineVisitChecked || process.env.DIVINE_ENCOUNTERS === 'off') return null;
   const book = court(db, runId), room = db[geoKey];
   room.divineVisitChecked = true; book.rooms.push(geoKey);
@@ -241,6 +243,7 @@ Develop distinctive old loyalties, rivalries, relationships, divine regrets, cho
   state.setRoomPopulation?.(geoKey, population); state.setRoomNameDatabase(JSON.stringify(latest));
 }
 function finalBoss(state, text) {
+  if (!require('./settingLayer').isCotGPlay()) return text;
   const db = JSON.parse(state.getRoomNameDatabase() || '{}'), geoKey = I.roomKey(field(text, 'Coordinates'));
   if (!finalRoom(db, geoKey, text)) return text;
   const pop = state.getRoomPopulation?.(geoKey) || db[geoKey].inhabitants || I.createPopulation(geoKey, [], { indoor: true });
@@ -253,6 +256,7 @@ function finalBoss(state, text) {
   state.setRoomNameDatabase(JSON.stringify(db)); return next;
 }
 function prompt(state, visibleNames = []) {
+  if (!require('./settingLayer').isCotGPlay()) return '';
   const db = JSON.parse(state.getRoomNameDatabase() || '{}'), book = db['0,0,0']?.divineCourt;
   const names = new Set(visibleNames), present = Object.values(book?.actors || {}).filter(a => names.has(a.name) && a.hp > 0);
   return `[DIVINE-COURT] Deities are persistent individuals from the canonical pantheon, not mortal shades. Visiting deities cannot join the party, grant arbitrary items, complete objectives in prose or summon Arithus. Mortacia's existing PC/party role is unchanged. Arithus appears only as the final boss in the Throne Room of Hades. Never narrate an unseen deity's arrival or speech. Visible divine facts: ${JSON.stringify(present.map(a => ({ name: a.name, visits: a.visits,

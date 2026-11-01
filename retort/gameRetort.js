@@ -56,6 +56,20 @@ class GameMessage {
 function createRuntime({ models = Models, client, log = logMessage, timeoutMs, prepareMessages } = {}) {
   const scope = new AsyncLocalStorage();
   function install(conversation, ancestors) {
+    // Resolve the saved GM field on prompt literals before Retort logs them.
+    // Template interpolations are user/world data and are never renamed.
+    const Setting = require('./settingLayer');
+    Object.defineProperty(conversation, 'gmName', { configurable: true, get: () => Setting.gmName() });
+    for (const role of ['user', 'system', 'assistant']) {
+      conversation[role] = new Proxy(conversation[role], { apply(target, receiver, args) {
+        if (Array.isArray(args[0]) && Array.isArray(args[0].raw)) {
+          const parts = args[0].map(Setting.promptGm);
+          Object.defineProperty(parts, 'raw', { value: args[0].raw.map(Setting.promptGm) });
+          args = [parts, ...args.slice(1)];
+        } else if (typeof args[0] === 'string') args = [Setting.roleGm(args[0]), ...args.slice(1)];
+        return Reflect.apply(target, receiver, args);
+      } });
+    }
     if (conversation.model === 'gpt-3.5-turbo') conversation.model = 'gpt-4.1-mini';
     function generate(role, push) {
       return generationSettings => {

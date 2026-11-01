@@ -46,6 +46,18 @@
   }
   function candidates(dungeon, player, camera) {
     const result = [], e = dungeon.physicalPuzzle, P = Puzzles || root.PhysicalPuzzles;
+    for(const counter of root.CityServiceCounters?.catalog(dungeon)||[]){
+      const p=counter.position,s=counter.size;if(Math.hypot(counter.point.x-player.x,counter.point.y-player.y)>18)continue;
+      result.push({type:'service-counter',counter,key:`${Math.floor(counter.point.x)},${Math.floor(counter.point.y)}`,
+        ...counter.point,box:{...p,sx:s.x,sy:s.y,sz:s.z},label:counter.label,command:'access services',
+        enabled:root.CityServiceCounters.reachable(dungeon,counter,player,root.DungeonInhabitants),hint:'Walk closer to the counter'});
+    }
+    for(const control of dungeon.cityCirculation?.controls||[]){
+      if(Math.hypot(control.point.x-player.x,control.point.y-player.y)>18)continue;
+      result.push({type:'city-circulation',control,key:`${Math.floor(control.point.x)},${Math.floor(control.point.y)}`,
+        x:control.point.x,y:control.point.y,box:control.box,label:control.label,command:control.mode==='lift'?'choose a floor':'use stairs',
+        enabled:!!root.CityCirculationUi?.reachable(dungeon,control,player),hint:'Walk to the landing'});
+    }
     for(const writing of dungeon.questWritings || []) {
       const p=writing.position,s=writing.size;
       const x=p.x+s.x/2,y=p.y+s.y/2,distance=Math.hypot(x-player.x,y-player.y);
@@ -258,6 +270,8 @@
   async function activate(target) {
     if (!target?.enabled || blocked()) return;
     if (target.type === 'character') { root.CombatCharacterUi?.open(target.character); return; }
+    if(target.type==='service-counter'){busy=true;clear();try{return await root.CommerceUi?.openCounter?.(target.counter.id);}finally{busy=false;}}
+    if(target.type==='city-circulation'){clear();return root.CityCirculationUi?.open(target.control);}
     if(target.type==='writing') {
       if(await root.QuestSceneUi?.open(target.label,{silent:true}))return;
       await requestRead(target.label);return;

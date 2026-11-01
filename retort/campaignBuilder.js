@@ -99,17 +99,19 @@ const isBuilt = (db, key) => !!db[key]?.builderMode;
 function history(limit = 50) { const past = [], future = []; return { push: s => { past.push(JSON.stringify(s)); if (past.length > limit) past.shift(); future.length = 0; },
   undo: cur => past.length ? (future.push(JSON.stringify(cur)), JSON.parse(past.pop())) : cur, redo: cur => future.length ? (past.push(JSON.stringify(cur)), JSON.parse(future.pop())) : cur, size: () => [past.length, future.length] }; }
 
-// ---- homebrew settings: Children of the Grave terms must not leak into a homebrew world ----
-const COTG_TERMS = ['Mortacia', 'Suzerain', 'Tartarus', 'Hades', 'Children of the Grave', 'Dantuea', 'Arithus', 'Atinus', 'Dyanetzia', 'Ronalde', 'Earthdragon', 'Surface Reckoning', '\\bS\\.R\\.'];
+// Legacy template vocabulary is used only to adapt inherited prompts, never as a name blacklist.
+const TEMPLATE_TERMS = ['Mortacia', 'Suzerain', 'Tartarus', 'Hades', 'Children of the Grave', 'Dantuea', 'Arithus', 'Atinus', 'Dyanetzia', 'Ronalde', 'Earthdragon', 'Surface Reckoning', '\\bS\\.R\\.'];
 // Player-provided text (main character, party names, character-creation names, the player's own prompt/instructions) is NEVER linted:
-// the player may call their character anything, including a Children of the Grave name. Only AI-generated homebrew content is checked.
+// Both player and generated names may reuse the legacy campaign vocabulary.
 const PLAYER_KEYS = new Set(['mainCharacter', 'seed', 'prompt', 'gamePrompt', 'instructions', 'party', 'partyNames', 'playerNames', 'customNames', 'pc', 'character', 'npcs']);
 function lintGenerated(obj) { if (!obj || typeof obj !== 'object') return lint(obj); return lint(JSON.stringify(obj, (k, v) => PLAYER_KEYS.has(k) ? undefined : v)); }
 // Terms the player has used in their own names: these are exempt from translation/renaming in model requests.
 const playerSources = new Map();
 function setPlayerText(source, text) { const s = (Array.isArray(text) ? text : [text]).filter(Boolean).map(String).join(' '); if (s) playerSources.set(source, s); else playerSources.delete(source); }
-function playerTerms() { return lint([...playerSources.values()].join(' ')); }
-function lint(textOrObj) { const s = typeof textOrObj === 'string' ? textOrObj : JSON.stringify(textOrObj); return COTG_TERMS.filter(t => new RegExp(t.startsWith('\\') ? t : `\\b${t}\\b`, 'i').test(s)); }
+function templateTerms(value) { const s=typeof value==='string'?value:JSON.stringify(value);return TEMPLATE_TERMS.filter(t=>new RegExp(t.startsWith('\\')?t:`\\b${t}\\b`,'i').test(s)); }
+function playerTerms() { return templateTerms([...playerSources.values()].join(' ')); }
+const COTG_TERMS = [];
+function lint() { return []; }
 
 module.exports = { TILES, OBJECT_TYPES, object, placeObject, giveToParty, duplicateObject, deleteObject, monster, encounter, ambushFor, injectEncounter,
-  handRoom, installRoom, roomModes, world, save, load, seedCampaign, isBuilt, history, lint, lintGenerated, setPlayerText, playerTerms, PLAYER_KEYS, COTG_TERMS };
+  handRoom, installRoom, roomModes, world, save, load, seedCampaign, isBuilt, history, lint, lintGenerated, setPlayerText, playerTerms, PLAYER_KEYS, COTG_TERMS, templateTerms };

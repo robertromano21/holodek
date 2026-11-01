@@ -2,7 +2,7 @@
 const FIELDS = ['personalNarrative', 'updatedGameConsole', 'roomNameDatabaseString', 'combatCharactersString', 'liveWorldState',
   'npcAutonomyFeed', 'combatMode', 'dungeonTestingMode', 'currentQuest', 'currentTasks', 'currentTaskIndex', 'questSeeded',
   'lastQuestUpdate', 'questLog', 'roomMusicDatabase', 'roomDungeonDatabase', 'dungeonRunId', 'roomPopulations', 'gamePaused',
-  'dialogueMemory', 'campaignMemory', 'lastAdjudication', 'lastCoords', 'currentPC', 'characterGenerationInProgress', 'pendingCharacterForReview'];
+  'dialogueMemory', 'campaignMemory', 'lastAdjudication', 'lastCoords', 'currentPC', 'characterGenerationInProgress', 'pendingCharacterForReview','activeCityFloor','cityFloorEpoch'];
 const record = x => x && typeof x === 'object' && !Array.isArray(x);
 const coordinate = /^-?\d+,-?\d+,-?\d+$/;
 const transient = new Set(['_lodCache', '_minFloor', '_webglCache', '_webgpuCache']);
@@ -15,7 +15,7 @@ function clone(value) {
   }));
 }
 function validate(value) {
-  if (!record(value) || FIELDS.some(k => !Object.hasOwn(value, k))) throw Error('Incomplete server checkpoint.');
+  if (!record(value) || FIELDS.filter(k=>!['activeCityFloor','cityFloorEpoch'].includes(k)).some(k => !Object.hasOwn(value, k))) throw Error('Incomplete server checkpoint.');
   if (typeof value.dungeonRunId !== 'string' || !value.dungeonRunId || value.dungeonRunId.length > 100) throw Error('Invalid adventure identity.');
   for (const key of ['personalNarrative', 'updatedGameConsole', 'roomNameDatabaseString', 'combatCharactersString', 'currentQuest', 'lastQuestUpdate'])
     if (typeof value[key] !== 'string') throw Error('Invalid checkpoint text: ' + key);
@@ -29,6 +29,7 @@ function validate(value) {
       !Number.isInteger(value.currentTaskIndex) || value.currentTaskIndex < 0 || value.currentTaskIndex > value.currentTasks.length) throw Error('Invalid quest checkpoint.');
   if (!record(value.lastCoords) || !['x', 'y', 'z'].every(k => Number.isSafeInteger(value.lastCoords[k]))) throw Error('Invalid saved coordinates.');
   const key = `${value.lastCoords.x},${value.lastCoords.y},${value.lastCoords.z}`;
+  require('./retort/hostLocalFloors').validateSnapshot(value);
   if (!database[key] || !value.roomDungeonDatabase[key]) throw Error('Current room geometry is missing from the checkpoint.');
   const room = String(value.updatedGameConsole).match(/^Coordinates:\s*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/m);
   if (!room || room.slice(1).map(Number).join(',') !== key) throw Error('Server console and saved room disagree.');

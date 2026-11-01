@@ -1,6 +1,6 @@
 'use strict';
 const { randomUUID } = require('node:crypto');
-const Rules = require('../assets/spellRules'), I = require('../assets/dungeonInhabitants'), Inventory = require('../assets/inventoryUi');
+const Rules = require('./genreAbilities').rules, I = require('../assets/dungeonInhabitants'), Inventory = require('../assets/inventoryUi');
 const Reach = require('./dungeonReach');
 const Pantheon = require('../assets/pantheonCharacters');
 const spells = () => require('./spellSystem');
@@ -58,8 +58,8 @@ function sync(state) {
     const initial = [...new Set([...(record?.spellPreferences || []), ...settings.available])].filter(id => settings.available.includes(id)).slice(0, settings.slots);
     let c = pool.casters[actor.name];
     if (!c) {
-      c = pool.casters[actor.name] = { id: 'class:' + actor.name, owner: actor.name, name: settings.spellbook ? 'spellbook of ' + actor.name.toLowerCase() : actor.className + ' weave',
-        bookName: 'spellbook of ' + actor.name.toLowerCase(), classSource: true, className: actor.className, level: actor.level, capacity: settings.capacity,
+      c = pool.casters[actor.name] = { id: 'class:' + actor.name, owner: actor.name, name: settings.spellbook ? (require('./genreAbilities').language()?.book || 'spellbook') + ' of ' + actor.name.toLowerCase() : actor.className + (require('./genreAbilities').language() ? ' loadout' : ' weave'),
+        bookName: (require('./genreAbilities').language()?.book || 'spellbook') + ' of ' + actor.name.toLowerCase(), classSource: true, className: actor.className, level: actor.level, capacity: settings.capacity,
         remaining: settings.capacity, settings, properties: {}, known: [], learned: {}, prepared: [], status: 'ready', nextRecharge: pool.clock + settings.rechargeEvery };
       if (settings.diminished || actor.type === 'monster') {
         pool.baseMagic ||= {}; pool.baseMagic[actor.name] = 0;
@@ -131,7 +131,7 @@ function summary(state, name) {
     rechargeEvery: c.settings.rechargeEvery, rechargeAmount: c.settings.rechargeAmount, scribeTurns: c.settings.scribeTurns, restSafe: restSafe(state, name),
     diminished: !!c.settings.diminished, divineLevel: c.settings.diminished ? c.level : null, castingLevel: Rules.casterLevel(c.className, c.level),
     learnable: (c.settings.spellbook ? c.known : Rules.catalog(c.className)).filter(id => Rules.templates[id]).map(id => ({ ...learnedSpell(c, id), available: c.settings.available.includes(id),
-      unavailableReason: Rules.templates[id].tradition !== c.settings.tradition ? 'Different spell tradition' : `Requires casting level ${Rules.templates[id].minLevel}` })),
+      unavailableReason: !Rules.canLearn(c.className, id) ? 'Different spell tradition' : `Requires casting level ${Rules.templates[id].minLevel}` })),
     spells: ownsBook(state, c) ? c.spells.map(s => ({ ...s, affordable: s.cost <= c.remaining, destroysItem: false })) : [] };
 }
 function advance(state) {
@@ -179,6 +179,7 @@ function action(state, input) {
   } else return { error: 'Unsupported spell preparation.' };
   const turns = input.kind === 'scribe' ? c.settings.scribeTurns : 1;
   const result = { turns, content: input.kind === 'scribe' ? `${input.caster} rests for ${turns} turn${turns === 1 ? '' : 's'} to scribe ${input.item}; the scroll is consumed and its spell and Magic cost are learned.` : `${input.caster} prepares the selected spells.` };
+  result.content = require('../assets/abilityLanguage').text(result.content, require('./genreAbilities').language());
   if (input.nonce) { pool.preparationReceipts ||= []; pool.preparationReceipts.push({ nonce: input.nonce, request, result }); if (pool.preparationReceipts.length > 512) pool.preparationReceipts.shift(); }
   state.setRoomNameDatabase(JSON.stringify(db));
   state.setUpdatedGameConsole(S.write(state.getUpdatedGameConsole(), 'Turns', (Number(S.field(state.getUpdatedGameConsole(), 'Turns')) || 0) + turns));

@@ -12,16 +12,17 @@
 const fs = require('fs');
 const path = require('path');
 const AV = require('./assemblyVocab.js');
+const Assets = require('./genreAssetPolicy');
 
-const MODEL = process.env.HOLODEK_LEVEL_MODEL || 'gpt-4.1-mini';
 const CACHE_FILE = process.env.HOLODEK_LEVEL_CACHE || path.join(__dirname, '..', '.retort-data', 'level-specs.json');
-const MAX_ATTEMPTS = 3;
-const LEVEL_SPEC_VERSION = 3; // v3: concrete voxel scenery and bounded local points of interest
+const LEVEL_SPEC_VERSION = 4; // Genre-approved contracts invalidate cross-genre cached selections.
 const localCheckpoints = require('./localWorkCheckpoint').create();
 const SHAPES = ['column', 'broken_column', 'arch', 'block', 'slab', 'statue', 'mound', 'spire', 'cluster', 'tree', 'orb', 'pool', 'bowl', 'frame', 'hanging', 'banner', 'pile', 'crystal', 'stalagmite', 'table', 'barrel'];
 const expanded = require('./worldFlags').on('ARCHITECTURE_EXPANSION');
 if (expanded) SHAPES.push(...require('../assets/genreKits').SHAPES);
 function allowedShape(shape) {
+  const approved = Assets.catalog();
+  if (approved.strict) return approved.shapes.includes(shape);
   if (!SHAPES.includes(shape)) return false;
   if (!expanded || !require('../assets/genreKits').has(shape)) return true;
   const K = require('../assets/genreKits'), r = K.resolve({}, require('./settingLayer').current());
@@ -68,11 +69,27 @@ const SCHEMA = {
   lighting: { color: '#rrggbb', level: '0.1-1', sources: ['torch|fungus|sun|moon|magic|fire|crystal|candle|lava|none'] },
   atmosphere: { particles: PARTICLES.join('|'), color: '#rrggbb', density: '0-1', grade: '#rrggbb (colour grading tint)' }
 };
+function schemaFor() {
+  const c = Assets.catalog(), schema = JSON.parse(JSON.stringify(SCHEMA));
+  schema.structures[0].shape = (c.strict ? c.shapes : SHAPES.filter(allowedShape)).join('|');
+  if (c.strict) schema.structures[0].material = c.materials.join('|');
+  if (c.strict && !c.classical) {
+    schema.architecture = 'ship|city_street|village|other';
+    schema.structures[0].assembly = { ...schema.structures[0].assembly, kit: 'generic', base: 'none', ornament: 'none', wallStyle: c.wallStyles.join('|') };
+    schema.structures[0].assembly.material = schema.wall.material = schema.floor.material = c.materials.join('|');
+    schema.wallStyle = c.wallStyles.join('|'); schema.floorTreat = c.floorTreatments.join('|');
+    schema.ceiling.kind = 'beams|rock|open_sky|none';
+    schema.lighting.sources = [c.lights.join('|')];
+  }
+  return schema;
+}
 function validate(raw) {
   const p = [];
   if (!raw || typeof raw !== 'object') return ['not an object'];
   if (!Array.isArray(raw.structures) || !raw.structures.length) p.push('structures must be a non-empty array');
-  (raw.structures || []).forEach((s, i) => { if (!s || !s.name) p.push(`structures[${i}].name missing`); if (s && !allowedShape(s.shape)) p.push(`structures[${i}].shape is unsupported in this world`); });
+  const approved = Assets.catalog();
+  (raw.structures || []).forEach((s, i) => { if (!s || !s.name) p.push(`structures[${i}].name missing`); if (s && !allowedShape(s.shape)) p.push(`structures[${i}].shape is unsupported in this world`);
+    if (approved.strict && !approved.classical && s?.assembly?.kit !== 'generic') p.push(`structures[${i}].assembly.kit must be generic for the native asset`); });
   if (!raw.wall || !raw.floor) p.push('wall and floor required');
   return p;
 }
@@ -88,14 +105,17 @@ function normalize(raw) {
         kit: s.shape, state: (s.condition || [])[0], material: s.material, color: s.color, color2: s.color2, glow: s.glow
       }, s.shape, s.name);
       const wh = AV.sizeToWH(assembly.size, assembly.kit);
-      const shape = expanded && require('../assets/genreKits').has(s.shape) && allowedShape(s.shape) ? s.shape : AV.kitToShape(assembly.kit);
+      const approved = Assets.catalog();
+      const shape = approved.strict ? Assets.replacement(s.shape, approved, s.name) :
+        expanded && require('../assets/genreKits').has(s.shape) && allowedShape(s.shape) ? s.shape : AV.kitToShape(assembly.kit);
+      if (approved.strict && require('../assets/genreKits').has(shape)) assembly.kit = 'generic';
       const cond = Array.isArray(s.condition) ? s.condition.map(String) : [];
       if (assembly.state === 'collapsed' || assembly.state === 'ruined' || assembly.state === 'cracked') if (!cond.includes('broken')) cond.push('broken');
       if (assembly.state === 'overgrown') if (!cond.includes('overgrown')) cond.push('overgrown');
       if (assembly.state === 'burnt') if (!cond.includes('burnt')) cond.push('burnt');
       if (assembly.state === 'glowing' || assembly.glow) if (!cond.includes('glowing')) cond.push('glowing');
       return {
-        name: String(s.name).slice(0, 60), type: slug(s.name), shape: SHAPES.includes(shape) ? shape : 'block',
+        name: String(s.name).slice(0, 60), type: slug(s.name), shape: allowedShape(shape) ? shape : 'block',
         count: clamp(s.count, 1, 12, 1) | 0, placement: PLACEMENTS.includes(s.placement) ? s.placement : 'scattered',
         blocking: s.blocking !== false,
         width: clamp(s.width, 0.2, 1, wh.width), height: clamp(s.height, 0.2, 1.4, wh.height),
@@ -212,12 +232,10 @@ function deriveLevelSpecFromText({ roomName = '', description = '', puzzle = '' 
 }
 
 // ---------------- LLM ----------------
-let client = null;
-function getClient() {
-  if (client) return client;
-  if (!process.env.OPENAI_API_KEY) return null;
-  try { const { OpenAI } = require('openai'); client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: 60000 }); } catch (_) { client = null; }
-  return client;
+function modelReady() {
+  const Models = require('./gameModels'), row = Models.catalog.find(r => r.id === Models.current().id);
+  return !!(row?.local || (row?.provider === 'xai' ? process.env.XAI_API_KEY : row?.provider === 'groq' ?
+    process.env.GROQ_API_KEY : process.env.OPENAI_API_KEY && process.env.HOLODEK_OPENAI_KEY_PLACEHOLDER !== '1'));
 }
 function buildMessages(input, problems) {
   const sys = ['You are the level designer for a retro first-person dungeon crawler with real voxel scenery on a heightfield grid.',
@@ -233,16 +251,15 @@ function buildMessages(input, problems) {
     'An environmentIntent is an earlier planning cue, not permission to replace the room description or an existing building. Use its architecture and physical features where consistent with the text.',
     'Caverns, volcanic lava tubes, mines and ice caves are covered underground interiors, never open-sky courtyards. Use cave, mine or ice_cave architecture and rock ceilings, with irregular grottoes or worked haulage galleries. Crypts and catacombs use crypt architecture and stone vaults. Put water or lava beside connected dry paths, not across every walkable floor; cooled lava tubes have basalt floors, not molten floors everywhere.',
     'Quest constructionTasks are read-only, bound to this exact location. Give their existing actions appropriate reachable space, such as a ritual court, inscribed monument, gate or engagement area. Never duplicate quest inventory objects or actors as scenery, move targets, invent prerequisites, complete tasks, unlock doors or award rewards. Existing engine adjudication owns success.',
-    'Respond with ONE JSON object with exactly these keys:', JSON.stringify(SCHEMA)].join(' ');
+    'Respond with ONE JSON object with exactly these keys:', JSON.stringify(schemaFor())].join(' ');
   const msgs = [{ role: 'system', content: sys }, { role: 'user', content: JSON.stringify({ roomName: input.roomName, description: input.description, puzzle: input.puzzle,
     environmentIntent: input.environmentIntent || null, questContext: input.questContext || null }) }];
-  if (expanded) msgs.push({role:'user',content:require('./settingLayer').visualDirection() + ' For a native registered shape, keep its exact shape id; assembly may use generic. Prefer the selected world\'s shape ids, and use no technology in the canonical fantasy campaign.'});
+  msgs.push({role:'user',content:Assets.directive()});
   if (problems && problems.length) msgs.push({ role: 'user', content: 'Your previous answer failed validation: ' + problems.join('; ') + '. Return a corrected JSON object.' });
   return msgs;
 }
-async function callModel(input) {
-  if (require('./graveMasterStoryPrompts').isHolodek1()) {
-    const C = require('./generationContracts'), Runtime = require('./gameRetort');
+function parametersFor() {
+    const C = require('./generationContracts');
     const parameter = (hint, key = '') => {
       if (Array.isArray(hint)) return { type: [parameter(hint[0])], minItems: key === 'structures' ? 1 : 0, maxItems: key === 'structures' ? 8 : 4 };
       if (hint && typeof hint === 'object') return { type: Object.fromEntries(Object.entries(hint).map(([name, value]) => [name, parameter(value, name)])) };
@@ -253,41 +270,38 @@ async function callModel(input) {
       }
       if (hint === '#rrggbb' || hint === '#rrggbb (colour grading tint)') return { ...C.text(7), pattern: '^#[0-9a-fA-F]{6}$' };
       if (hint === '#rrggbb or null') return { ...C.text(7), optional: true, pattern: '^#[0-9a-fA-F]{6}$' };
+      if (['generic','none','timber','metal_plate','planks','flagstone'].includes(hint)) return C.choice([hint]);
       return C.text(key === 'name' ? 60 : 80);
     };
-    const parameters = parameter(SCHEMA).type;
-    parameters.structures.type[0].type.shape = C.choice(SHAPES.filter(allowedShape));
+    return parameter(schemaFor()).type;
+}
+async function callModel(input) {
+  const local = require('./graveMasterStoryPrompts').isHolodek1();
+  if (local || modelReady()) {
+    const C = require('./generationContracts'), Runtime = require('./gameRetort');
+    const parameters = parametersFor();
     try {
       return await localCheckpoints.run({ runId: require('../sharedState').getDungeonRunId(),
         model: require('./gameModels').current().id, input, parameters: require('./structuredSchema').toJSON(parameters),
         direction: require('./settingLayer').visualDirection() }, async checkpoint => {
-      const result = await Runtime.run(Runtime.retort($ => C.request($, { component: 'level-spec', parameters,
+      const result = await Runtime.run(Runtime.retort(async $ => {
+        for (const message of buildMessages(input)) await (message.role === 'system' ? $.system(message.content) : $.user(message.content));
+        return C.request($, { component: 'level-spec', parameters,
         localWork: { checkpoint, brief: `Design ONLY physical scenery from this saved room and puzzle (data): ${JSON.stringify(input)}. Match its genre and architecture. The room name and description are authoritative physical identity: do not turn a temple into a mine or substitute a different biome. One walkable height per XY, roof real underground interiors, preserve clear paths. Existing puzzle controls are built elsewhere; no duplicate controls, actors, loot, quests or exits. Represent each described landmark with a modest count and an exact supported assembly/shape. Preserve the accepted palette and architectural choices in later structure batches.`,
           arrays: { structures: { min: 1, max: 8, batch: 1 }, decals: { min: 0, max: 4, batch: 1 }, scatter: { min: 0, max: 4, batch: 1 } } },
+        maxTokens: local ? undefined : 3500,
         validate: raw => { const errors = validate(raw); if (errors.length) throw Error(errors.join('; ')); return normalize(raw); }
-      })), null, { shouldSaveToLog: false });
+      }); }), null, { shouldSaveToLog: false });
       if (!result.value) throw result.error;
       return result.value;
       });
-    } catch (error) { console.warn('[level] local chain failed: ' + error.message); return null; }
-  }
-  const c = getClient(); if (!c) return null;
-  let problems = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      const r = await require('./modelTransport').complete(c, { model: MODEL, messages: buildMessages(input, problems), response_format: { type: 'json_object' }, temperature: 0.6, max_tokens: 1800 });
-      const raw = JSON.parse(r.choices[0].message.content || '{}');
-      const found = validate(raw);
-      if (!found.length) return normalize(raw);
-      problems = found;
-    } catch (e) { problems = null; console.warn(`[level] attempt ${attempt}/${MAX_ATTEMPTS} failed: ${e.message}`); }
-    if (attempt < MAX_ATTEMPTS) await new Promise((res) => setTimeout(res, 600 * Math.pow(2, attempt - 1)));
+    } catch (error) { console.warn('[level] asset contract failed: ' + error.message); return null; }
   }
   return null;
 }
 const retrying = new Set();
 function scheduleBackgroundRetry(key, input, delay = 30000) {
-  if (retrying.has(key) || !getClient()) return;
+  if (retrying.has(key) || !modelReady()) return;
   retrying.add(key);
   setTimeout(async () => {
     const spec = await callModel(input).catch(() => null);
@@ -331,6 +345,7 @@ function applyLevelSpecToScene(sceneSpec, level) {
   const shapesCovered = new Set(lms.map((l) => l.prim.shape));
   const keep = (sceneSpec.landmarks || []).filter((l) => !lms.some((m) => m.type.includes(l.type) || l.type.includes(m.type)) && !(l.type === 'pillar' && shapesCovered.has('column')));
   sceneSpec.landmarks = [...lms, ...keep].slice(0, 18);
+  Assets.restrictScene(sceneSpec);
   sceneSpec.decals = level.decals;
   sceneSpec.scatter = level.scatter;
   sceneSpec.atmosphere = level.atmosphere;
@@ -340,3 +355,5 @@ function applyLevelSpecToScene(sceneSpec, level) {
 
 module.exports = { getLevelSpec, deriveLevelSpecFromText, applyLevelSpecToScene, normalize, validate, SHAPES, LEVEL_SPEC_VERSION, AV };
 module.exports.buildMessages = buildMessages;
+module.exports.schemaFor = schemaFor;
+module.exports.parametersFor = parametersFor;

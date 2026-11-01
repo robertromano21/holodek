@@ -3,6 +3,7 @@ const test = require('node:test'), assert = require('node:assert/strict');
 const I = require('../assets/dungeonInhabitants'), Give = require('../retort/itemTransfer'), Q = require('../retort/questProgress');
 const { createPopulationService } = require('../retort/roomPopulation');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
+const { EventEmitter } = require('node:events');
 function fixture() {
   const key = '-2,0,0', name = 'Edrin Farrows', item = 'shardbreaker maul';
   const d = { geoKey: key, start: { x: 4, y: 4 }, layout: { width: 16, height: 16 }, cells: {} };
@@ -21,7 +22,7 @@ function fixture() {
     requiredElements: [{ type: 'weapon', name: item, placement: '-1,-1,0' }, { type: 'monster', name, placement: key }],
     hardRequirements: [{ check: 'at_coords', value: '-1,-1,0' }, { check: 'inventory_contains', value: item }],
     actionRequirements: [{ check: 'puzzle_solved', value: '-1,-1,0' }] }];
-  const state = { getLastCoords: () => ({ x: -2, y: 0, z: 0 }), getRoomDungeonForSimulation: () => d,
+  const state = { emitter: new EventEmitter(), getLastCoords: () => ({ x: -2, y: 0, z: 0 }), getRoomDungeonForSimulation: () => d,
     getRoomPopulation: () => p, setRoomPopulation() {}, getRoomNameDatabase: () => db, setRoomNameDatabase: v => db = v,
     getUpdatedGameConsole: () => text, setUpdatedGameConsole: v => text = v,
     getCombatCharactersString: () => wire, setCombatCharactersString: v => wire = v,
@@ -30,6 +31,50 @@ function fixture() {
   return { state, p, d, metadata, service: createPopulationService(state), input: `give ${item} to ${name}`, tasks: () => tasks,
     setText: value => text = value, roster: () => JSON.parse(wire) };
 }
+
+test('a misplaced ordinary gift is acknowledged and returned once without a model or quest credit', async () => {
+  const f = fixture();
+  f.tasks()[0].desc = 'Retrieve the shardbreaker maul and present it to Another Archivist.';
+  f.tasks()[0].requiredElements[1].name = 'Another Archivist';
+  Give.give(f.state, f.service, f.input);
+  const before = Give.possessions(f.p.actors['Edrin Farrows']);
+  assert.equal(before.received[0].from, 'Mortacia'); assert.equal(before.received[0].stillHeld, true);
+  const input = 'ask Edrin Farrows to return shardbreaker maul';
+  const result = await Give.request(f.state, f.service, input, () => { throw Error('A verified mistaken gift needs no model call.'); });
+  assert.match(result.content, /gives you shardbreaker maul/);
+  assert.equal(result.dialogue[0].speaker, 'Edrin Farrows'); assert.match(result.dialogue[0].line, /take it back/);
+  assert.deepEqual(f.p.actors['Edrin Farrows'].inventory, []);
+  assert.match(result.updatedGameConsole, /^Inventory: shardbreaker maul$/m);
+  assert.deepEqual(require('../assets/inventoryUi').parseProperties(result.updatedGameConsole.match(/^Inventory Properties: (.*)$/m)[1]), [f.metadata]);
+  assert.equal(f.state.getCurrentTaskIndex(), 0);
+  assert.equal(Give.possessions(f.p.actors['Edrin Farrows']).received[0].stillHeld, false);
+  assert.match((await Give.request(f.state, f.service, input)).content, /not carrying/);
+  assert.equal((f.state.getUpdatedGameConsole().match(/^Inventory:.*$/m)[0].match(/shardbreaker maul/g) || []).length, 1);
+});
+
+test('owned-item requests commit actual metadata only on consent and revalidate after model work', async () => {
+  for (const mode of ['accept', 'refuse', 'stale', 'hostile', 'paused', 'wall', 'malformed']) {
+    const f = fixture(), record = f.p.actors['Edrin Farrows']; record.inventory = [{ name: 'private token', type: 'artifact', magic: 7 }];
+    if (mode === 'hostile') record.allegiance = 'Hostile';
+    if (mode === 'paused') f.state.getGamePaused = () => true;
+    if (mode === 'wall') f.d.cells['5,4'].tile = 'wall';
+    const result = await Give.request(f.state, f.service, 'request private token from Edrin', async () => {
+      if (mode === 'stale') record.inventory = [];
+      return mode === 'malformed' ? { give: 'yes', reply: 'Take it.' } : { give: mode !== 'refuse', reply: mode === 'refuse' ? 'I need this token.' : 'Take it.' };
+    });
+    assert.equal(/^Inventory:.*private token/m.test(result.updatedGameConsole), mode === 'accept', mode);
+    if (mode === 'accept') assert.equal(require('../assets/inventoryUi').parseProperties(result.updatedGameConsole.match(/^Inventory Properties: (.*)$/m)[1]).find(i => i.name === 'private token').magic, 7);
+  }
+});
+
+test('directions remain normal dialogue and credited deliveries cannot be reclaimed as accidental gifts', async () => {
+  const f = fixture();
+  assert.equal(await Give.request(f.state, f.service, 'ask Edrin for directions to the city'), null);
+  Give.give(f.state, f.service, f.input);
+  const result = await Give.request(f.state, f.service, 'ask Edrin to return shardbreaker maul');
+  assert.match(result.content, /accepted.*contract/);
+  assert.equal(f.p.actors['Edrin Farrows'].inventory.length, 1);
+});
 test('a verified nearby handoff transfers ownership and modifiers, and completes an explicitly worded delivery without any puzzle', () => {
   const f = fixture(), beforeHP = f.roster().map(a => a.hp), result = Give.give(f.state, f.service, f.input);
   assert.match(result.content, /Task completed/); assert.match(result.updatedGameConsole, /^Inventory: Empty$/m);

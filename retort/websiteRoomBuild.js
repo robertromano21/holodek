@@ -42,13 +42,13 @@ function spawnBuild(job, snapshot, { runStage, background = true, skipPopulation
   emitter.terminate = async () => controller.abort();
   setImmediate(async () => {
     try {
-      let combined;
+      let combined, roomName = job.name;
       const send = artifact => emitter.emit('message', { type: 'checkpoint', artifact: structuredClone(artifact) });
       const stage = async (name, source) => {
         if (controller.signal.aborted) throw Error('Remote room build cancelled.');
         let result;
         const order = Object.fromEntries(['id', 'key', 'name', 'coords', 'runId', 'model', 'modelRevision', 'assignment'].filter(key => job[key] !== undefined).map(key => [key, job[key]]));
-        await runStage({ ...order, stage: name }, source, { signal: controller.signal, background,
+        await runStage({ ...order, name: roomName, stage: name }, source, { signal: controller.signal, background,
           onCheckpoint: message => { if (result) throw Error('Duplicate remote stage artifact.'); result = message; } });
         if (controller.signal.aborted) throw Error('Remote room build cancelled.');
         if (result?.artifact?.key !== job.key || result.artifact.runId !== job.runId || result.artifact.stage !== name) throw Error('Remote stage identity mismatch.');
@@ -59,6 +59,7 @@ function spawnBuild(job, snapshot, { runStage, background = true, skipPopulation
       if (!skipPopulation) {
         combined = await stage('population', snapshot); combined.completedStages = ['population']; send(combined);
         if (controller.signal.aborted) throw Error('Remote room build cancelled.');
+        roomName = combined.rooms[job.key].name;
         snapshot = structuredClone(snapshot); snapshot.roomNameDatabaseString = JSON.stringify(combined.rooms);
         if (combined.dungeon) snapshot.roomDungeonDatabase[job.key] = combined.dungeon;
       } else combined = { key: job.key, runId: job.runId, stage: 'population', rooms: JSON.parse(snapshot.roomNameDatabaseString), dungeon: null,

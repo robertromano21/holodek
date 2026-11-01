@@ -1,15 +1,16 @@
 (function(root, factory) {
-  const api = factory();
+  const api = factory(typeof module === 'object' && module.exports ? require('./cityEstablishments') : root.CityEstablishments);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.LandmarkCatalog = api;
-})(typeof window === 'undefined' ? globalThis : window, function() {
+})(typeof window === 'undefined' ? globalThis : window, function(establishments) {
   'use strict';
   const cache = new WeakMap(), prefixes = ['Ashen', 'Whispering', 'Sundered', 'Bonewhite', 'Veiled', 'Cinder', 'Forgotten', 'Silent'];
   function hash(text) { let h = 2166136261; for (const c of text) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
   function catalog(d) {
     if (!d) return [];
-    const stamp = `${d._geometryStamp || ''}:${d.sceneLandmarks?.length || 0}:${d.sceneGeography?.features?.length || 0}:${d.sceneExteriors?.buildings?.length || 0}`;
-    if (cache.get(d)?.stamp === stamp) return cache.get(d).markers;
+    const buildings = d.cityBlocks?.buildings;
+    const stamp = `${d._geometryStamp || ''}:${d.sceneLandmarks?.length || 0}:${d.sceneGeography?.features?.length || 0}:${d.sceneExteriors?.buildings?.length || 0}:${buildings?.length || 0}:${d.cityBlocks?.streaming?.revision || 0}`;
+    if (cache.get(d)?.stamp === stamp && cache.get(d).buildings === buildings) return cache.get(d).markers;
     const markers = [];
     function add(source, p, kind, name, major = false) {
       if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) return;
@@ -27,7 +28,18 @@
     }
     let recognized = 0;
     for (const marker of markers) marker.knownOnArrival = marker.major && recognized++ < 2;
-    const result = markers.slice(0, 48); cache.set(d, { stamp, markers: result }); return result;
+    const result = markers.slice(0, 48);
+    if (!d.cityFloorContext) for (const b of (buildings || []).slice(0, 750)) {
+      const notice = establishments?.serviceNotice(b);
+      if (!notice) continue;
+      const p = b.doors?.find(p => Number.isFinite(p.x) && Number.isFinite(p.y)) ||
+        { x: b.left + Math.floor(b.width / 2), y: b.top };
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+      const name = typeof b.name === 'string' && b.name.trim() ? b.name.trim() : 'Service Building';
+      result.push({ id: `city-service:${b.id}`, x: p.x + .5, y: p.y + .5, kind: 'service-building',
+        label: `${name} - ${notice}`, name, notice, glyph: notice==='Work Inquiries Inside'?'W':'S', color: '#e2c27f', major: false, knownOnArrival: false });
+    }
+    cache.set(d, { stamp, buildings, markers: result }); return result;
   }
   return { catalog };
 });

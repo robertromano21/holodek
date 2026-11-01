@@ -24,7 +24,7 @@ const { appearanceKind } = require('./undergroundEnvironments');
 
 const SPRITE_DIR = process.env.HOLODEK_SPRITE_DIR || path.join(__dirname, '../sid/sprites');
 const LIBRARY_FILE = path.join(SPRITE_DIR, '_library.json');
-const SCENE_GFX_VERSION = 3; // v3: invalidate persisted scene rooms after WebGL/scene sync fixes
+const SCENE_GFX_VERSION = 4; // Native genre sprites replace generic primitive stand-ins.
 const OUT_SIZE = 320;
 
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
@@ -107,6 +107,7 @@ function coverList(spec) {
  */
 function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   if (!dungeon || !spec) return { textures: [], landmarks: [] };
+  require('./genreAssetPolicy').restrictScene(spec);
   const report = { textures: [], landmarks: [] };
   const undergroundProfile = appearanceKind(spec);
   const cover = coverList(spec).filter(type => !undergroundProfile || type !== 'lava');
@@ -126,10 +127,13 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
   const archOpts = dungeon.genreArch ? { window: dungeon.genreArch.window || null, trim: dungeon.genreArch.trim || null, taint: dungeon.genreArch.taint || 0 } : null;
   const roof = roofStyle(spec) || (dungeon.genreArch?.ceiling && !undergroundProfile ? (dungeon.genreArch.ceiling === 'wood' ? 'timber' : 'stone') : null);
   if (roof) {
-    const material = dungeon.genreArch?.ceiling && !undergroundProfile ? dungeon.genreArch.ceiling : roof === 'timber' ? 'wood' : (wallMat || 'stone');
-    const r = librarySprite({ kind: 'ceiling', undersideVersion: 3, material, style: roof, palette: pal, seed: surfaceSeed }, `scene_ceiling_${material}`,
-      ctx => drawRoofSurface(ctx, createCanvas, { material, palette: pal, style: roof, seed: surfaceSeed }));
+    const genre = require('./settingLayer').current() ? dungeon.genreArch?.genre || dungeon.genreKit?.genre : null;
+    const ceiling = genre && require('../assets/genreCeilings').PROFILES[genre];
+    const material = ceiling?.material || (dungeon.genreArch?.ceiling && !undergroundProfile ? dungeon.genreArch.ceiling : roof === 'timber' ? 'wood' : (wallMat || 'stone'));
+    const r = librarySprite({ kind: 'ceiling', undersideVersion: 4, genre, material, style: roof, palette: pal, seed: surfaceSeed }, `scene_ceiling_${material}`,
+      ctx => drawRoofSurface(ctx, createCanvas, { genre, material, palette: pal, style: roof, seed: surfaceSeed }));
     dungeon.tiles.ceiling = { url: r.url };
+    if (ceiling) dungeon.genreCeiling = { version: 1, genre, pattern: ceiling.pattern, material };
     report.textures.push({ tile: 'ceiling', material, style: roof, reused: r.reused });
   }
 
@@ -192,9 +196,12 @@ function applySceneGraphics(dungeon, spec, { geoKey, customTiles }) {
     const name = `custom_${tile.type}_${idx}`;
     tile.name = name;
     const assembly = (tile.sceneLandmark && tile.sceneLandmark.assembly) || (prim && prim.assembly) || null;
-    const descriptor = { kind: 'landmark', drawer, material, condition: condition.slice().sort(), light: lightColor || null, accent: pal.highlight || null, prim: prim || null, assembly,sculpture,
+    const descriptor = { kind: 'landmark', drawer, voxelShape: shape || null, material, condition: condition.slice().sort(), light: lightColor || null, accent: pal.highlight || null, prim: prim || null, assembly,sculpture,
       ...(lm.inscription?{inscriptionMotif:lm.inscription.motif}: {}), ...(lm.shrine?{shrine:lm.shrine}: {}) };
     const r = librarySprite(descriptor, `custom_${assembly ? 'asm_' + assembly.kit + '_' + assembly.state : (prim ? 'prim_' + prim.shape : drawer)}`, ctx => {
+      if (require('../assets/genreKits').has(shape)) {
+        require('../assets/genreKits').paint(ctx, shape, 0, 0, OUT_SIZE, OUT_SIZE); return;
+      }
       if (require('./worldFlags').on('ARCHITECTURE_EXPANSION') && require('../assets/genreExpansion').has(shape)) {
         require('../assets/genreExpansion').paint(ctx,shape,0,0,OUT_SIZE,OUT_SIZE); return;
       }
@@ -619,8 +626,10 @@ function rebuildSceneGraphics(dungeon, geoKey) {
   // applySceneGraphics also prepares tile definitions. Work on a disposable
   // drawing copy and copy back URLs only, never overwrite gameplay/voxel state.
   const drawing = JSON.parse(JSON.stringify({ tiles: dungeon.tiles, customTiles: dungeon.customTiles,
-    visualStyle: dungeon.visualStyle, generation: dungeon.generation }));
+    visualStyle: dungeon.visualStyle, generation: dungeon.generation, genreKit: dungeon.genreKit,
+    genreArch: dungeon.genreArch, classification: dungeon.classification }));
   applySceneGraphics(drawing, spec, { geoKey, customTiles: drawing.customTiles });
+  if (drawing.genreCeiling) dungeon.genreCeiling = drawing.genreCeiling;
   for (const [name, tile] of Object.entries(drawing.tiles)) if (dungeon.tiles[name]) dungeon.tiles[name].url = tile.url;
   for (const art of [...(dungeon.surfaceArt || []), ...(dungeon.moldingArt || [])]) {
     const glyphs = spec.puzzleMechanism?.glyphs || [];

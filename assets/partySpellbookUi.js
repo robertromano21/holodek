@@ -11,6 +11,7 @@
   }
   function render(data, content) {
     content.replaceChildren();
+    root.worldAbilitySystem = data.abilitySystem || null;
     if (quick) {
       const guide = document.createElement('p'); guide.textContent = 'Prepared spells and equipped item spells with Magic available now. Choose a spell, then its target. Casting still requires your turn and a valid target in clear sight.'; content.appendChild(guide);
       let count = 0;
@@ -21,12 +22,13 @@
       }
       if (!count) { const empty = document.createElement('p'); empty.textContent = 'No prepared spells or equipped item spells have enough Magic right now.'; content.appendChild(empty); }
       const full = document.createElement('button'); full.type = 'button'; full.className = 'popup-button'; full.textContent = 'Full Party Spellbook'; full.addEventListener('click', () => open()); content.appendChild(full);
+      root.AbilityLanguage?.apply(panel, data.abilitySystem);
       return;
     }
     const guide = document.createElement('p'); guide.textContent = 'Numbers show casts affordable now from prepared class spells or equipped items. Spells share their source\'s Magic: casting one reduces the others\' counts. (0) means unavailable. Level headings use this game\'s spell unlock levels, not full tabletop spell slots.';
     content.appendChild(guide);
     if (message) { const status = document.createElement('p'); status.setAttribute('role', 'status'); status.textContent = message; content.appendChild(status); }
-    if (!data.casters.length) { content.textContent = 'No party members currently have class spells or equipped item spells.'; return; }
+    if (!data.casters.length) { content.textContent = 'No party members currently have class spells or equipped item spells.'; root.AbilityLanguage?.apply(panel, data.abilitySystem); return; }
     if (!data.casters.some(c => c.name === selected)) selected = data.casters[0].name;
     const tabs = document.createElement('div'); tabs.className = 'party-spellbook-tabs'; tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', 'Party characters');
     const entries = root.getPartyInfoEntries?.() || [];
@@ -109,6 +111,7 @@
       }
       content.appendChild(section);
     }
+    root.AbilityLanguage?.apply(panel, data.abilitySystem);
   }
   async function configure(casterName, spellId, remove, data, content) {
     if (preparationBlocked()) return;

@@ -79,12 +79,38 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
   if (!Number.isFinite(connectionWaitMs) || connectionWaitMs < 0 || connectionWaitMs > 300000) throw Error('Invalid bounded website connection wait.');
   const configFile = path.join(directory, 'connection.json');
   const actions = new AsyncLocalStorage();
+  const lifetime = new AbortController(), operations = new Set();
+  let closed = false;
+  const cancelled = () => Error('Game website work stopped.');
+  const ownedSignal = signal => signal ? AbortSignal.any([signal, lifetime.signal]) : lifetime.signal;
+  function track(work) {
+    const promise = Promise.resolve(work); operations.add(promise);
+    promise.then(() => operations.delete(promise), () => operations.delete(promise)); return promise;
+  }
+  const transport = run;
+  run = (file, args, { shutdownCleanup = false, ...options } = {}) => {
+    if (closed && !shutdownCleanup) return Promise.reject(cancelled());
+    return track(Promise.resolve().then(() => transport(file, args, { ...options,
+      signal: shutdownCleanup ? options.signal : ownedSignal(options.signal) })));
+  };
   let config = { ...DEFAULTS }, identityFile = path.join(directory, 'identity_ed25519'), revision = 0, connection = null, connecting = false, reconnecting = null, connectionProgress = null, verifiedConnection = null;
   const connectionIdentity = value => digest(JSON.stringify([value?.version,value?.port,value?.bundleHash,value?.engineHash,value?.roomWorkers,
     value?.pool?.map(node=>[node.slot,node.node,node.bundleHash,node.engineHash])]));
   if (fs.existsSync(configFile)) {
     const saved = JSON.parse(fs.readFileSync(configFile, 'utf8')); config = normalize(saved);
     if (typeof saved.identityFile === 'string' && path.isAbsolute(saved.identityFile)) identityFile = saved.identityFile;
+  }
+  // Pending source edits belong to the next server release, not an in-flight room chain.
+  let releaseEngine, releaseWorker;
+  const engineForRelease = () => releaseEngine ||= require('./websiteEngineBundle').build(engineRoot, { supportRoot: engineSupportRoot });
+  function workerForRelease() {
+    if (!releaseWorker) {
+      const names = ['worker.cjs', 'workerPool.cjs', 'roomTask.cjs', 'roomWire.cjs'];
+      const allFiles = Object.fromEntries(names.map(name => [name, fs.readFileSync(path.join(path.dirname(source), name), 'utf8')]));
+      releaseWorker = { code: allFiles['worker.cjs'], files: Object.fromEntries(names.slice(1).map(name => [name, allFiles[name]])),
+        allFiles, hash: digest(names.map(name => name + '\n' + allFiles[name]).join('\n')) };
+    }
+    return releaseWorker;
   }
   const exe = name => process.platform === 'win32' ? path.join(env.WINDIR || 'C:/Windows', 'System32/OpenSSH', name + '.exe') : name;
   function privateWrite(file, content) {
@@ -109,14 +135,14 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
   async function request(c, packet, options = {}) {
     if (!c.host || !fs.existsSync(identityFile) || !fs.existsSync(hostFile(c))) throw problem('Connect and verify Website AI before sending jobs.');
     const output = await run(exe('ssh'), sshArgs(c, 'if [ -x "$HOME/.holodek-worker/node" ]; then exec "$HOME/.holodek-worker/node" "$HOME/.holodek-worker/worker.cjs" --rpc; else exec node "$HOME/.holodek-worker/worker.cjs" --rpc; fi'), {
-      input: JSON.stringify(packet), timeout: 615000, ...options });
+      input: JSON.stringify(packet), timeout: 615000, ...options, shutdownCleanup: packet.operation === 'model-cancel' });
     let parsed; try { parsed = JSON.parse(output); } catch { throw Error('Website worker returned an invalid response.'); }
     if (parsed.error) throw require('../tools/website-worker/worker.cjs').failureFrom(parsed); return parsed.value;
   }
-  async function runRoomStage(job, snapshot, { signal, background = true, onCheckpoint } = {}) {
+  async function runRoomStageScoped(job, snapshot, { signal, background = true, onCheckpoint } = {}) {
     await ensureConnected();
     if (!remoteBuildEnabled()) throw Error('The website room engine is not ready.');
-    require('./roomEngineCompatibility').assertCompatible(connection, require('./websiteEngineBundle').build(engineRoot, { supportRoot: engineSupportRoot }).hash);
+    require('./roomEngineCompatibility').assertCompatible(connection, engineForRelease().hash);
     const beforeRevision = revision, profile = require('./gameModels').profile(job.model), pcModel = job.model === 'holodek-1';
     const provider = pcModel || profile.local ? 'ollama' : profile.provider || 'openai', key = credential(provider);
     if (provider !== 'ollama' && !key) throw Error('The selected provider needs a key configured on this PC.');
@@ -152,6 +178,7 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
             replies.add(reply);
           } else if (message.type === 'checkpoint') { const result = Wire.unpack(message.value); checkpoints++; onCheckpoint?.(result); }
           else if (message.type === 'done') complete = true;
+          else if (message.type === 'heartbeat') { /* The remote stream remains owned by this request. */ }
           else throw Error('Unknown remote room message.');
         }
       });
@@ -161,29 +188,25 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
     } catch (error) { controller.abort(); error = relayFailure || error; if (key) error.message = error.message.split(key).join('[redacted]'); throw error; }
   }
   const view = () => ({ ...config, revision, connecting, connectionProgress, connected: !!connection,
+    release: { engineHash: releaseEngine?.hash || null, bundleHash: releaseWorker?.hash || null },
     worker: connection, storage: '.retort-data/website-ai/connection.json', credentials: 'PC environment / keys; sent through SSH in memory only' });
   async function connect(raw, { deploy = false } = {}) {
+    if (closed) throw cancelled();
     if (connecting) throw problem('A connection check is already running.');
     const candidate = normalize(raw);
     if (!candidate.host || !candidate.fingerprint) throw problem('A server address and verified host fingerprint are required.');
     const startRevision = revision; connecting = true;
     try {
+      const worker = workerForRelease(), bundle = candidate.remoteBuild ? engineForRelease() : null;
       await publicKey();
       const scan = await run(exe('ssh-keyscan'), ['-T', '5', '-p', String(candidate.sshPort), '-t', 'ed25519', candidate.host]);
       privateWrite(hostFile(candidate), trustedHost(scan, candidate.fingerprint));
       let value, expectedEngineHash, expectedWorkerHash;
       if (deploy) {
-        const code = fs.readFileSync(source, 'utf8');
-        const files = Object.fromEntries(['workerPool.cjs', 'roomWire.cjs', 'roomTask.cjs'].map(name => [name, fs.readFileSync(path.join(path.dirname(source), name), 'utf8')]));
-        const allFiles = { 'worker.cjs': code, ...files };
-        expectedWorkerHash = digest(['worker.cjs', 'workerPool.cjs', 'roomTask.cjs', 'roomWire.cjs'].map(name => name + '\n' + allFiles[name]).join('\n'));
-        let bundle;
+        const { code, files, allFiles } = worker;
+        expectedWorkerHash = worker.hash;
         const remoteNode = 'if [ -x "$HOME/.holodek-worker/node" ]; then "$HOME/.holodek-worker/node"';
-        if (candidate.remoteBuild) {
-          const Engine = require('./websiteEngineBundle');
-          bundle = Engine.build(engineRoot, { supportRoot: engineSupportRoot });
-          expectedEngineHash = bundle.hash;
-        }
+        if (bundle) expectedEngineHash = bundle.hash;
         const compatible = status => status?.version === 1 && status.bundleHash === expectedWorkerHash &&
           Number.isInteger(status.port) && status.port > 0 && status.port <= 65535 &&
           (!candidate.remoteBuild || status.roomWorkers === 3 && status.engineHash === expectedEngineHash &&
@@ -262,13 +285,12 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
     try { return fs.readFileSync(file, 'utf8').trim(); } catch { return undefined; }
   }
   async function ensureConnected() {
+    if (closed) throw cancelled();
     if (reconnecting) return reconnecting;
     if (connection && connectionIdentity(connection) === verifiedConnection) return;
     if (connection) {
-      if (config.remoteBuild) require('./roomEngineCompatibility').assertCompatible(connection,
-        require('./websiteEngineBundle').build(engineRoot, { supportRoot:engineSupportRoot }).hash);
-      const names = ['worker.cjs','workerPool.cjs','roomTask.cjs','roomWire.cjs'];
-      const hash = digest(names.map(name=>name+'\n'+fs.readFileSync(path.join(path.dirname(source),name),'utf8')).join('\n'));
+      if (config.remoteBuild) require('./roomEngineCompatibility').assertCompatible(connection, engineForRelease().hash);
+      const hash = workerForRelease().hash;
       if (connection.bundleHash !== hash || config.remoteBuild && (connection.pool?.length !== 3 || connection.pool.some(node=>node.bundleHash!==hash || !(Number(String(node.node).replace(/^v/,'').split('.')[0])>=22))))
         throw Object.assign(Error('Website worker sources do not match this game. Reconnect Website AI when the helpers are idle.'),{code:'WEBSITE_WORKER_MISMATCH',recoverable:false});
       verifiedConnection = connectionIdentity(connection); return;
@@ -276,7 +298,7 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
     const work = reconnecting = connect(config, { deploy: true });
     try { await work; } finally { if (reconnecting === work) reconnecting = null; }
   }
-  async function generate({ provider, body, signal, expectedRevision, background = actions.getStore()?.background === true }) {
+  async function generateScoped({ provider, body, signal, expectedRevision, background = actions.getStore()?.background === true }) {
     if (!config.enabled) throw Error('Website AI is disabled.');
     await ensureConnected();
     if ((expectedRevision ?? actions.getStore()?.revision ?? revision) !== revision) throw Error('Website connection changed; retry this action.');
@@ -294,15 +316,31 @@ function createService({ directory = process.env.HOLODEK_WEBSITE_AI_DIR || path.
     }
     catch (e) { if (key) e.message = e.message.split(key).join('[redacted]'); throw e; }
   }
+  const modelsOnWebsite = () => config.enabled && config.useForGameModels && require('./roomHelpers').service().view().location === 'website';
   const withSnapshot = callback => actions.getStore() ? callback() : actions.run({ revision,
-    useForGameModels: config.enabled && config.useForGameModels }, callback);
+    useForGameModels: modelsOnWebsite() }, callback);
   const withBackground = callback => actions.run({ ...actions.getStore(), revision,
     background: true, useForGameModels: true }, callback);
-  const remoteBuildEnabled = () => config.enabled && config.remoteBuild && !!connection?.engineHash && connection.roomWorkers === 3;
+  const remoteBuildEnabled = () => !closed && config.enabled && config.remoteBuild && !!connection?.engineHash && connection.roomWorkers === 3;
+  function runRoomStage(job, snapshot, options = {}) {
+    if (closed) return Promise.reject(cancelled());
+    return track(runRoomStageScoped(job, snapshot, { ...options, signal: ownedSignal(options.signal) }));
+  }
+  function generate(options) {
+    if (closed) return Promise.reject(cancelled());
+    return track(generateScoped({ ...options, signal: ownedSignal(options.signal) }));
+  }
+  async function close() {
+    closed = true; revision++; lifetime.abort(); connection = null; verifiedConnection = null;
+    while (operations.size) await Promise.allSettled([...operations]);
+    // Deliberately preserve saved connection settings and shared website listeners.
+  }
   const spawnBuild = (job, snapshot, options) => require('./websiteRoomBuild').spawnBuild(job, snapshot, { runStage: runRoomStage, ...options });
-  return { view, publicKey, connect, disable, status, generate, ensureConnected, withSnapshot, withBackground, backgroundEnabled: () => config.enabled && config.background,
-    runRoomStage, remoteBuildEnabled, spawnBuild, capacity: () => remoteBuildEnabled() ? 3 : 1,
-    useForGameModels: () => actions.getStore()?.useForGameModels ?? (config.enabled && config.useForGameModels) };
+  return { view, publicKey, connect, disable, status, generate, close, ensureConnected, withSnapshot, withBackground, backgroundEnabled: () => !closed && config.enabled && config.background,
+    runRoomStage, remoteBuildEnabled, spawnBuild,
+    helperSettings: () => ({ ...require('./roomHelpers').service().view(), engineHash: engineForRelease().hash }),
+    capacity: () => remoteBuildEnabled() ? 3 : 1,
+    useForGameModels: () => actions.getStore()?.useForGameModels ?? modelsOnWebsite() };
 }
 
 // Retort accepts an SDK-shaped client, including streamed tool-call deltas.
@@ -333,11 +371,22 @@ function useRemoteTransport(transport) {
     } };
 }
 function install(app, { onChange = () => {} } = {}) {
-  if (service().view().enabled) service().ensureConnected().then(() => console.info('[WebsiteAI] verified worker ready'))
+  const helperStartup = service().helperSettings();
+  if (helperStartup.location === 'website' && service().view().enabled) service().ensureConnected().then(() => console.info('[WebsiteAI] verified worker ready'))
     .catch(() => console.warn('[WebsiteAI] connection unavailable; check Menu > Website AI.'));
   const guard = (req, res, next) => { res.setHeader('Cache-Control', 'no-store');
     if (!localRequest(req)) return res.status(403).json({ error: 'Manage Website AI from this PC using localhost.' }); next(); };
   app.get('/website-ai', guard, (req, res) => res.json(service().view()));
+  app.get('/room-helpers', guard, (_req, res) => res.json(service().helperSettings()));
+  app.post('/room-helpers', guard, async (req, res) => {
+    try {
+      if (req.body?.location === 'website') {
+        await service().ensureConnected();
+        if (!service().remoteBuildEnabled()) throw Error('Connect the three website workers using the existing Website AI settings first.');
+      }
+      const value = require('./roomHelpers').service().configure(req.body); onChange(); res.json(value);
+    } catch (error) { res.status(409).json({ error: require('./privateDiagnostics').clean(error.message) }); }
+  });
   app.post('/website-ai/key', guard, async (req, res) => {
     try { res.json({ publicKey: await service().publicKey() }); } catch (e) { res.status(400).json({ error: require('./privateDiagnostics').clean(e.message) }); }
   });

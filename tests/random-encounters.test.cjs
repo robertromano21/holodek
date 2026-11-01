@@ -41,7 +41,7 @@ test('browser and server share 358 unique races, retaining metadata from all 368
 
 test('indoors have a sparse limit; outdoors can have more, without a fixed race or allegiance', () => {
   assert.ok(E.policy(true).limit < E.policy(false).limit);
-  assert.equal(E.policy(true).groupSize, 1); assert.equal(E.policy(false).groupSize, 3);
+  for(const indoor of [true,false])for(const roll of[0,.2,.4,.6,.8,.999])assert.ok(E.policy(indoor,roll).groupSize>=2&&E.policy(indoor,roll).groupSize<=6);
   const ctx = setup(); assert.ok(E.opportunity(ctx.state, ctx.visit, ctx.player, 200000));
   ctx.p.actors['Existing Watch'].position = { x: 25, y: 25 };
   assert.equal(E.opportunity(ctx.state, ctx.visit, ctx.player, 200000), null);
@@ -56,6 +56,21 @@ test('stationary waiting and teleport-sized movement do not accrue encounter tra
   assert.equal(p.randomEncounters.distance, 0);
   E.observe(p, d, { x: 70, y: 70 }, 7000); assert.equal(p.randomEncounters.distance, 0);
   E.observe(p, d, { x: 73, y: 70 }, 10000); assert.equal(p.randomEncounters.distance, 3);
+});
+
+test('dungeon pacing is brisker without increasing settlement pressure or spawning into combat', () => {
+  const crawl=E.policy(true,.5,{partySize:6}),city=E.policy(true,.5,{partySize:6,settled:true});
+  assert.deepEqual([crawl.groupSize,crawl.distance,crawl.cooldown,crawl.limit],[6,32,60000,4]);
+  assert.deepEqual([city.distance,city.cooldown,city.limit],[48,120000,2]);
+  const f=setup(true),resident=f.p.actors['Existing Watch'];
+  resident.allegiance='Neutral';resident.position={x:35,y:20};
+  assert.ok(E.opportunity(f.state,f.visit,f.player,200000),'A distant peaceful resident does not suppress a dungeon');
+  f.p.encounterBalance={settled:true};
+  assert.equal(E.opportunity(f.state,f.visit,f.player,200000),null,'Cities retain their crowding guard');
+  f.p.encounterBalance.settled=false;f.state.getCombatMode=()=> 'Combat Map-Based';
+  assert.ok(E.opportunity(f.state,f.visit,f.player,200000),'Combat display preferences are not active battles');
+  f.state.getCombatActive=()=>true;
+  assert.equal(E.opportunity(f.state,f.visit,f.player,200000),null);
 });
 
 test('regular inhabitants retain Tartarus race notes and free-form races', async () => {
@@ -74,7 +89,7 @@ test('regular inhabitants retain Tartarus race notes and free-form races', async
 });
 
 for (const indoor of [true, false]) test(`on-the-fly ${indoor ? 'indoor' : 'outdoor'} additions preserve the regular cast, use enums and send creature metadata`, async () => {
-  const ctx = setup(indoor), count = E.policy(indoor).groupSize, names = Catalog.map(r => r.name);
+  const ctx = setup(indoor), count = E.opportunity(ctx.state,ctx.visit,ctx.player,200000).rules.groupSize, names = Catalog.map(r => r.name);
   const rows = fixtures(count, Array.from({ length: count }, (_, slot) => ({ slot, name: `Unfamiliar Soul ${slot}`, race: 'Allip',
     allegiance: 'Hostile', encounterId: 'lost-caravan', history: 'Haunts a forgotten caravan route. Its tormented murmurs preserve one broken memory.' })));
   const rt = runtime({ skip: false, inhabitants: rows }, options => assert.deepEqual(options.parameters.inhabitants.type[0].type.race.enum, names));

@@ -6,6 +6,7 @@
   let viewCenter = null, drag = null;
   let encounterSelect, encounterSignature = '', selectedEncounter = '';
   let mapProjection = null, hover;
+  let mapView = 'room', activeLevel = null, levelButton;
   const portraits = new Map(), itemIcons = new Map();
   function encounterMarkers(dungeon) {
     return [...root.DungeonCartography.landmarks(dungeon, current?.state),
@@ -150,7 +151,8 @@
     ctx.fillStyle = '#080808'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     if (!current?.state) { caption.textContent = 'Explore a dungeon to begin mapping.'; return; }
     const { dungeon: d, player, angle, state } = current;
-    const encounters = encounterMarkers(d);
+    const level = mapView === 'level' ? activeLevel : null;
+    const encounters = encounterMarkers(d).filter(m => !level || root.CityLevelMap.contains(level, m));
     updateEncounterChoices(encounters, state.key);
     if (bitmapRoom !== d || bitmapRevision !== state.revision) {
       bitmap ||= document.createElement('canvas');
@@ -168,15 +170,19 @@
       }
       bitmapRoom = d; bitmapRevision = state.revision;
     }
-    const extent = Math.min(range, Math.max(state.width, state.height)), scale = canvas.width / extent;
+    const levelProjection = level && root.CityLevelMap.projection(level, range, player, viewCenter);
+    const extent = levelProjection?.extent || Math.min(range, Math.max(state.width, state.height)), scale = canvas.width / extent;
     const center = viewCenter || player;
-    const left = Math.max(0, Math.min(state.width - extent, center.x - extent / 2));
-    const top = Math.max(0, Math.min(state.height - extent, center.y - extent / 2));
+    const left = levelProjection?.left ?? Math.max(0, Math.min(state.width - extent, center.x - extent / 2));
+    const top = levelProjection?.top ?? Math.max(0, Math.min(state.height - extent, center.y - extent / 2));
     mapProjection = { left, top, scale, markers: [...encounters, ...(d.roomExits?.markers || []).map(m => ({
       x: m.x + .5, y: m.y + .5, label: `${m.direction === 'portal' ? 'Portal' : m.direction + ' exit'}`, kind: 'exit'
-    }))] };
+    }))].filter(m=>!level||root.CityLevelMap.contains(level,m)) };
     ctx.imageSmoothingEnabled = false;
+    ctx.save();
+    if(level){const b=level.bounds;ctx.beginPath();ctx.rect((b.left-left)*scale,(b.top-top)*scale,b.width*scale,b.depth*scale);ctx.clip();}
     ctx.drawImage(bitmap, -left * scale, -top * scale, state.width * scale, state.height * scale);
+    ctx.restore();
     for (const marker of encounters) {
       const x = (marker.x - left) * scale, y = (marker.y - top) * scale;
       if (x < 8 || y < 8 || x > canvas.width - 8 || y > canvas.height - 8) continue;
@@ -209,6 +215,7 @@
     }
     const questExitLabels = questMarkers(d).exitLabels;
     for (const marker of d.roomExits?.markers || []) {
+      if(level&&!root.CityLevelMap.contains(level,{x:marker.x+.5,y:marker.y+.5}))continue;
       const x = (marker.x + 0.5 - left) * scale, y = (marker.y + 0.5 - top) * scale;
       if (x < 4 || y < 4 || x > canvas.width - 4 || y > canvas.height - 4) continue;
       ctx.fillStyle = '#a8dbb5'; ctx.fillRect(x - 3, y - 3, 6, 6);
@@ -224,10 +231,16 @@
     ctx.fillStyle = '#fff6d8'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.moveTo(9, 0); ctx.lineTo(-5, -5); ctx.lineTo(-5, 5); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
     const target = encounters.find(m => m.id === selectedEncounter);
+    let mapped=state.count,total=state.width*state.height;
+    if(level){mapped=0;total=0;const b=level.bounds;
+      for(let y=Math.max(0,b.top);y<Math.min(state.height,b.top+b.depth);y++)for(let x=Math.max(0,b.left);x<Math.min(state.width,b.left+b.width);x++){
+        total++;const i=y*state.width+x;if(state.bits[i>>3]&(1<<(i&7)))mapped++;
+      }
+    }
     const bearing = target ? ['E', 'SE', 'S', 'SW', 'W', 'NW', 'N', 'NE'][(Math.round(Math.atan2(target.y - player.y, target.x - player.x) / (Math.PI / 4)) + 8) % 8] : '';
     const targetText = target ? ` | ${target.label}: ${Math.round(Math.hypot(target.x - player.x, target.y - player.y))} tiles ${bearing}${target.kind === 'encounter' ? ' (last seen)' : ''}` :
       ` | ${encounters.filter(m => m.kind !== 'encounter' && m.kind !== 'object').length} landmarks, ${encounters.filter(m => m.kind === 'object').length} items, ${encounters.filter(m => m.kind === 'encounter').length} encounters`;
-    caption.textContent = `${d.sceneSpec?.source?.roomName || d.geoKey} | N is up | ${Math.round(state.count / (state.width * state.height) * 100)}% mapped${targetText}`;
+    caption.textContent = `${level ? `${level.name} | Level ${level.floor} | ${level.hostKey}` : d.sceneSpec?.source?.roomName || d.geoKey} | N is up | ${Math.round(mapped / Math.max(1,total) * 100)}% mapped${targetText}`;
   }
   function fit() {
     if (!panel || !open) return;
@@ -258,6 +271,8 @@
     canvas = document.getElementById('exploration-map-canvas');
     caption = document.getElementById('exploration-map-caption');
     if (!panel || !canvas || !caption) return;
+    levelButton = document.getElementById('exploration-map-level');
+    levelButton?.addEventListener('click', () => setView(mapView === 'level' ? 'room' : 'level'));
     hover = document.createElement('div'); hover.id = 'exploration-map-hover'; hover.hidden = true; hover.setAttribute('role', 'status');
     Object.assign(hover.style, { position: 'fixed', zIndex: '20010', pointerEvents: 'none', background: '#17130f', color: '#f3dfb3',
       border: '1px solid #b59a62', padding: '4px 7px', maxWidth: '260px', fontSize: '13px', fontFamily: 'Georgia, serif' });
@@ -296,7 +311,8 @@
         }
         return;
       }
-      const extent = Math.min(range, Math.max(current.state.width, current.state.height)), bounds = canvas.getBoundingClientRect();
+      const extent = mapView==='level'&&activeLevel ? root.CityLevelMap.projection(activeLevel,range,current.player,viewCenter).extent :
+        Math.min(range, Math.max(current.state.width, current.state.height)), bounds = canvas.getBoundingClientRect();
       viewCenter = { x: Math.max(0, Math.min(current.state.width, drag.center.x - (event.clientX - drag.x) / bounds.width * extent)),
         y: Math.max(0, Math.min(current.state.height, drag.center.y - (event.clientY - drag.y) / bounds.height * extent)) };
       paint(true);
@@ -330,6 +346,12 @@
     else document.getElementById('game-menu-toggle')?.focus();
   }
   function update(dungeon, player, angle, runId) {
+    const nextLevel = root.CityLevelMap?.context(dungeon, player, root.getRoomNameDatabase?.()) || null;
+    if(nextLevel?.id !== activeLevel?.id && mapView === 'level'){
+      viewCenter=null;selectedEncounter='';encounterSignature='';range=512;
+    }
+    activeLevel=nextLevel;
+    if(levelButton){levelButton.disabled=!activeLevel;levelButton.setAttribute('aria-pressed',String(mapView==='level'));}
     const state = atlas.get(dungeon, runId);
     if (!state) {
       if (current) { current = null; mapProjection = null; if (hover) hover.hidden = true; bitmapRoom = null; bitmapRevision = -1; paint(true); }
@@ -341,6 +363,7 @@
       viewCenter = null;
       selectedEncounter = ''; encounterSignature = '';
       range = dungeon.classification?.indoor === false ? 96 : 32;
+      if(mapView==='level'&&activeLevel)range=512;
     }
     current = { dungeon, player, angle, state };
     if (applyQuestReveals(state, dungeon)) bitmapRevision = -1;
@@ -360,10 +383,16 @@
     if (timer) { root.clearTimeout(timer); timer = null; }
     if (!discard) atlas.flushAll(); current = null; atlas.clear(); bitmap = null; bitmapRoom = null; bitmapRevision = -1;
     mapProjection = null; drag = null; portraits.clear(); itemIcons.clear(); if (hover) hover.hidden = true;
+    activeLevel=null;mapView='room';if(levelButton){levelButton.disabled=true;levelButton.setAttribute('aria-pressed','false');}
     discardOldRuns(root.dungeonRunId).catch(() => {});
     paint(true);
   }
-  root.DungeonExplorationMap = { update, toggle, reset, flushForSave: () => atlas.flushAll(), refresh() { paint(true); if (open) fit(); },
+  function setView(value){
+    if(!['room','level'].includes(value)||value==='level'&&!activeLevel)return false;
+    mapView=value;viewCenter=null;selectedEncounter='';encounterSignature='';range=value==='level'?512:current?.dungeon.classification?.indoor===false?96:32;
+    levelButton?.setAttribute('aria-pressed',String(value==='level'));paint(true);if(open)fit();return true;
+  }
+  root.DungeonExplorationMap = { update, toggle, reset, setView, view:()=>({mode:mapView,level:activeLevel}), flushForSave: () => atlas.flushAll(), refresh() { paint(true); if (open) fit(); },
     ready: geoKey => !!current?.state?.loaded && (!geoKey || current.dungeon.geoKey === geoKey),
     wasAnnounced: id => !!current?.state?.announcedLandmarks.includes(id),
     observeResident(actor) {

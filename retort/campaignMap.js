@@ -33,7 +33,9 @@ function compose(seed, atlas) {
     const b=require('./settingLayer').current(),genre=b.genres[0],profile=require('../assets/genreExpansion').PROFILES[genre];
     return {version:MAP_VERSION,kind:'homebrew',origin:atlas.origin,destination:atlas.destination,
       cities:(b.cities?.length?b.cities:atlas.regions).slice(0,6).map((city,i)=>({id:`world-city-${i}`,role:'waypoint',stage:i,
-        name:city.name,region:atlas.regions[Math.min(3,i)].name,allegiance:'Neutral',genre,population:3000+hash(`${seed}:${i}`)%9000,
+        name:city.name,region:atlas.regions[Math.min(3,i)].name,allegiance:'Neutral',genre,
+        scale:city.scale||(['sci-fi','cyberpunk','modern','solarpunk','dieselpunk','underwater'].includes(genre)?'metropolis':'city'),
+        population:city.population||(['sci-fi','cyberpunk','modern','solarpunk','dieselpunk','underwater'].includes(genre)?100000+hash(`${seed}:${i}`)%900000:3000+hash(`${seed}:${i}`)%9000),
         utilities:['water supply','transport','storage'],guilds:['provisioners','builders','transporters'],districts:[...profile.names]})),
       route:{description:`Regional routes from ${atlas.origin} toward ${atlas.destination}; no mandatory detour.`},topology:'World-authored geography; cities do not relocate quests.'};
   }
@@ -77,6 +79,10 @@ function placeCities(map, seed, proposal, catalog) {
   if (!map || !Flags.on('CITY_PLACEMENT')) return map;
   const fallback = seededProposal(seed, map.cities.length), taken = new Set(), notes = [];
   map.cities.forEach((city, i) => {
+    if(map.kind==='homebrew'&&city.name?.trim().toLowerCase()===map.origin?.trim().toLowerCase()){
+      city.site={key:'0,0,0',coords:{x:0,y:0,z:0},bearing:'here',distance:0,underground:false,template:'market'};
+      taken.add('0,0,0');return;
+    }
     let site = validSite(proposal?.[i], i, taken, catalog);
     if (!site || !reachable(site)) { if (proposal?.[i]) notes.push(`${city.id}: rejected ${JSON.stringify(proposal[i]).slice(0, 120)}`); site = validSite(fallback[i], i, taken, catalog) || validSite({ bearing: 'east', distance: i === 0 ? 3 : 10 + 6 * i }, i, taken, catalog); }
     if (site) { taken.add(site.key); city.site = site; }
@@ -84,7 +90,11 @@ function placeCities(map, seed, proposal, catalog) {
   map.placement = { version: 'world1-city-1', source: proposal ? 'ai' : 'seeded', rejected: notes };
   return map;
 }
-const PLACEMENT_PROMPT = cities => `Place these cities on the Tartarus-to-Hades campaign grid. The Ruined Temple is at 0,0,0; north is +y. The first exit north is a wasteland at 0,1,0 and is never a city. For each city in order give {bearing: north|south|east|west|northeast|northwest|southeast|southwest, distance: rooms from the temple, underground: true if it lies in a cavern beneath the surface, template: village|oasis|market|hamlet|cavern_village}. The first city must be near the temple (distance 2-5); later cities get farther (each at least 6 more), Hades last and farthest. Vary the layout; make it plausible for the regions: ${cities.map(c => `${c.name} (${c.region})`).join('; ')}.`;
+const PLACEMENT_PROMPT = cities => {
+  const world=require('./settingLayer').current();
+  if(world)return `Place the supplied original-world settlements relative to ${world.topology.start} at 0,0,0, north is +y. World: ${world.name}; genres: ${world.genres.join(', ')}; ecology: ${world.wilds}. A city named exactly like the starting place is already anchored at 0,0,0; never relocate it. Other sites need a bearing, distance, underground boolean and exact template village|oasis|market|hamlet|cavern_village. Underground means an actual cavern, not merely being inside a station or under a weather roof. Use original-world regional geography, not another campaign's mandatory wasteland. Sites: ${cities.map(c=>`${c.name} (${c.region})`).join('; ')}.`;
+  return `Place these cities on the Tartarus-to-Hades campaign grid. The Ruined Temple is at 0,0,0; north is +y. The first exit north is a wasteland at 0,1,0 and is never a city. For each city in order give {bearing: north|south|east|west|northeast|northwest|southeast|southwest, distance: rooms from the temple, underground: true if it lies in a cavern beneath the surface, template: village|oasis|market|hamlet|cavern_village}. The first city must be near the temple (distance 2-5); later cities get farther (each at least 6 more), Hades last and farthest. Vary the layout; make it plausible for the regions: ${cities.map(c => `${c.name} (${c.region})`).join('; ')}.`;
+};
 function roomsWith(db, role) { return Object.entries(db || {}).filter(([, r]) => r?.environmentIntent?.mapRole === role || r?.mapRole === role).map(([k]) => k); }
 function hintFor(city) {
   return `${city.name}: a sprawling city with ${city.utilities.join(', ')}; guilds of ${city.guilds.join(', ')}; about ${city.population} people in ${city.districts.join(', ')}.`.slice(0, 240);

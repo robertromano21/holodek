@@ -73,7 +73,7 @@ function propagateComplexIdentity(database, coords, { readOnly = new Set() } = {
   if (!coords) return;
   const { rooms } = indexDatabase(database), key = keyOf(coords), room = rooms.get(key);
   if (indoor(room) !== true) return;
-  room.complexId ||= key === '0,0,0' ? 'ruined-temple' : `site:${key}`;
+  room.complexId ||= key === '0,0,0' && !require('./settingLayer').current() && !viewSetting(database) ? 'ruined-temple' : `site:${key}`;
   for (const direction of normalize(room.exits)) {
     const targetKey = resolveExit(coords, direction, room.exits).targetKey;
     if (readOnly.has(targetKey)) continue;
@@ -81,6 +81,8 @@ function propagateComplexIdentity(database, coords, { readOnly = new Set() } = {
     if (indoor(target) === true && !target.complexId) target.complexId = room.complexId;
   }
 }
+
+function viewSetting(database){return indexDatabase(database).rooms.get('0,0,0')?.setting?.kind==='homebrew';}
 
 function snapshotQuestContext(state = {}, consoleText = '') {
   const read = (method, fallback) => typeof state?.[method] === 'function' ? state[method]() : fallback;
@@ -99,6 +101,7 @@ function buildRoomWorldContext(database, coords, options = {}) {
   options = record(options) ? options : {};
   const { rooms } = indexDatabase(database), key = coords ? keyOf(coords) : null;
   const room = rooms.get(key) || {}, sourceInside = indoor(room);
+  const world=rooms.get('0,0,0')?.setting?.kind==='homebrew'?rooms.get('0,0,0').setting:require('./settingLayer').current();
   const neighbors = coords ? normalize(options.exits ?? room.exits).map(direction => {
     const resolved = resolveExit(coords, direction, room.exits, options.exits);
     const target = rooms.get(resolved.targetKey) || {}, targetInside = indoor(target);
@@ -111,7 +114,7 @@ function buildRoomWorldContext(database, coords, options = {}) {
             sourceInside === true && targetInside === true ? 'interior-passage' : 'unclassified', status: resolved.status };
   }) : [];
   return { version: 1, coordinates: key, indoor: sourceInside, regionId: text(room.regionId) || null,
-    complexId: text(room.complexId) || (key === '0,0,0' ? 'ruined-temple' : null),
+    complexId: text(room.complexId) || (key === '0,0,0' && !world ? 'ruined-temple' : null),
     outdoorDepth: Number.isSafeInteger(room.outdoorRegionDepth) ? room.outdoorRegionDepth : null, neighbors,
     quest: cloneQuest(options.quest),
     environmentIntent: room.environmentIntent ? cloneMetadata(room.environmentIntent) : null,
@@ -123,7 +126,9 @@ function buildRoomWorldContext(database, coords, options = {}) {
     nearbySites: (room.fortifiedApproaches || []).slice(0, 2).map(a => ({ ...a, name: rooms.get(a.entryKey)?.name })),
     factionMemory: require('./factionMemory').project(database),
     regionalSite: room.regionalSite ? { flavor: room.regionalSite.flavor, storyId: room.regionalSite.storyId } : null,
-    campaign: { origin: 'Ruined Temple Entrance in Tartarus', destination: 'Hades, the City of the Dead',
+    campaign: world?{origin:world.topology?.start,destination:world.topology?.goal,finale:world.arc,
+      progression:'Only engine-verified objectives can complete this original-world journey.'}:
+      { origin: 'Ruined Temple Entrance in Tartarus', destination: 'Hades, the City of the Dead',
       finale: 'Throne Room of Hades: confrontation with Arithus', progression: 'Existing quests, artifacts and victory checks remain authoritative.' } };
 }
 
@@ -191,7 +196,7 @@ function attachSceneWorldContext(spec, database, state, consoleText) {
     completionOwner: 'existing quest adjudication; construction cannot complete tasks' };
   // world1 CITY_SITES: 'city' room kind for planned city streets/buildings (biome keyword scoring is unchanged).
   try { const db = typeof database === 'string' ? JSON.parse(database || '{}') : database; const city = require('./citySites').sceneKind(db?.[key],db);
-    if (city && require('./worldFlags').on('CITY_SITES')) { spec.city = city; spec.roomKind = city.roomKind; } } catch {}
+    if (city && require('./worldFlags').on('CITY_SITES')) { spec.city = city; spec.roomKind = city.roomKind; spec.biome='city'; } } catch {}
   return spec;
 }
 

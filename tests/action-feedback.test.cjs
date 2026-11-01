@@ -86,6 +86,28 @@ test('completion notices never enter the speech queue and pause until gameplay r
   assert.equal(spoken, 0); f.advance(7501); assert.equal(f.elements.get('dungeon-action-notice').hidden, true);
 });
 
+test('first-aid subtitles replace stale dying warnings and remain readable for at least six seconds', () => {
+  const f = browserFixture(), api = f.root.DungeonActionNotices;
+  const event = { runId: 'run', geoKey: '0,0,0', subject: 'Guard', title: 'Guard', result: 'blocked' };
+  api.receive({ ...event, id: 'dying', kind: 'dying-warning', message: 'One action remains for aid.' });
+  api.receive({ ...event, id: 'last-warning', kind: 'dying-warning', message: 'Still dying.' });
+  api.receive({ ...event, id: 'bandaged', kind: 'first-aid', message: 'Hero bandages Guard. Stable, unconscious at 0 HP.', result: 'success' });
+  const panel = f.elements.get('dungeon-action-notice');
+  assert.equal(panel.dataset.kind, 'first-aid'); assert.match(panel.children[1].children[2].textContent, /Stable/);
+  f.advance(5900); assert.equal(panel.hidden, false);
+  f.advance(100000); assert.equal(panel.hidden, true, 'A superseded dying warning cannot replay after treatment');
+});
+
+for (const kind of ['quest-complete', 'contract-complete']) test(`${kind} displays a deduplicated on-screen completion notice`, () => {
+  const f = browserFixture(), api = f.root.DungeonActionNotices;
+  const notice = { id: kind, runId: 'run', geoKey: '0,0,0', kind, title: 'Completed', message: kind === 'contract-complete' ? 'Contract completed. You received 2 credits.' : 'Quest step completed: restore the relay.' };
+  assert.equal(api.receive(notice), true); assert.equal(api.receive(notice), false);
+  const panel = f.elements.get('dungeon-action-notice');
+  assert.equal(panel.hidden, false); assert.equal(panel.children[1].children[2].textContent, notice.message);
+  assert.equal(panel.children[1].children[1].textContent, kind === 'contract-complete' ? 'Payment Received' : 'Quest Fulfilled');
+  f.advance(8000); assert.equal(panel.hidden, false); f.advance(1001); assert.equal(panel.hidden, true);
+});
+
 test('new completion notices immediately replace old control feedback instead of waiting behind clicks', () => {
   const f = browserFixture(), api = f.root.DungeonActionNotices;
   for (let i = 0; i < 3; i++) api.receive({ id: `dial-${i}`, runId: 'run', geoKey: '0,0,0', kind: 'puzzle-control', title: 'West dial', message: 'Click.' });

@@ -710,6 +710,7 @@ test('server startup seeds a complete world and releases its lock after a task e
   const context = {
     app: { post: (url, handler) => routes.set(url, handler) }, inputTaskInFlight: false, tasks,
     startupTasks: require('../retort/startupTasks').create({ tasks }),
+    CombatLife: { status: () => ({ gameOver: null }) },
     console: quiet, broadcast() {}, roomDatabaseReceiver: { reset() {} }, buildInitialWorldConsole, buildInitialGameConsole,
     Economy: { start() {}, refresh() {} },
     actionDice: { end() { values.diceEnded = true; }, setPaused(value) { assert.equal(value, false); } },

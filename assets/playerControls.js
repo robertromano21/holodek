@@ -15,8 +15,8 @@
   function save() { try { root.localStorage?.setItem('holodek-player-controls', JSON.stringify({ bindings, autoTake, controller })); } catch {} }
   function blocked(forMovement = false) {
     const d = root.document;
-    return !d || d.hidden || root.gamePaused || root._gameOver || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
-      root._combatRoundActiveUntil > Date.now() || (root.GameCommandGate?.busy() && !(forMovement && (root.ItemInteractionUi?.isTaking?.() || root.RoomEntry?.walkingAllowed?.()))) || /^(INPUT|TEXTAREA|SELECT)$/.test(d.activeElement?.tagName) ||
+    return !d || d.hidden || root.gamePaused || root._gameOver || root._playerUnconscious || root._deathSceneActive || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
+      root._combatRoundActiveUntil > Date.now() || (!forMovement && root.GameCommandGate?.busy()) || /^(INPUT|TEXTAREA|SELECT)$/.test(d.activeElement?.tagName) ||
       d.activeElement?.isContentEditable || [...d.querySelectorAll('.popup-container:not([data-dungeon-proximity]):not([data-dungeon-item-proximity]), dialog[open], #game-menu:not([hidden]), #player-help:not([hidden])')].some(node => node.getClientRects().length > 0);
   }
   function reset() { held.clear(); root.setDungeonControlInput?.({ forward:0, strafe:0, turn:0, run:false }); root.clearDungeonMoveKeys?.(); }
@@ -78,8 +78,7 @@
         if (event.key==='Tab') { const nodes=[...panel.querySelectorAll('button,input')];const i=nodes.indexOf(d.activeElement), next=event.shiftKey?(i<=0?nodes.length-1:i-1):(i+1)%nodes.length;event.preventDefault();nodes[next]?.focus(); }
         event.stopPropagation();return;
       }
-      if (blocked()) return;
-      const action=actionFor(event); if(!action)return;
+      const action=actionFor(event); if(!action || blocked(movement.has(action)))return;
       if(movement.has(action))held.set(event.code,action);
       else if(!event.repeat){event.preventDefault();event.stopImmediatePropagation();perform(action);}
     },true);

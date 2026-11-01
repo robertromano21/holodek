@@ -38,17 +38,18 @@ function plan(spec = {}, width = 512, height = width) {
   const seed = spec.generation?.seed;
   if (spec.indoor !== false || !seed) return null;
   const text = `${spec.biome || ''} ${spec.source?.roomName || ''} ${spec.source?.description || ''}`.toLowerCase();
-  const flat = /\b(flat|level) (?:\w+ )?(plains?|wastes?|terrain|ground)|\bflatlands?\b|\bflats\b|salt flat|frozen lake/.test(text);
-  const wetland = /swamp|bog|marsh|mire|wetland|lake/.test(text);
+  const recipe=require('./biomeRecipes').resolve(spec);
+  const flat = recipe ? recipe.terrain==='flat' : /\b(flat|level) (?:\w+ )?(plains?|wastes?|terrain|ground)|\bflatlands?\b|\bflats\b|salt flat|frozen lake/.test(text);
+  const wetland = recipe ? recipe.terrain==='wetland' : /swamp|bog|marsh|mire|wetland|lake/.test(text);
   // Match geographic nouns, not substrings such as "capacity" or the verb "harbors".
-  const urban = /\b(city|cities|streets?|towns?|villages?|forums?|amphitheaters?|theaters?|circus|circuses|harbou?r)\b/.test(text);
-  const garden = /\bgarden|orchard/.test(text) && !/mountain|crag|cliff/.test(text);
+  const urban = !!spec.city || spec.biome==='city' || !recipe && /\b(city|cities|streets?|towns?|villages?|forums?|amphitheaters?|theaters?|circus|circuses|harbou?r)\b/.test(text);
+  const garden = !recipe && /\bgarden|orchard/.test(text) && !/mountain|crag|cliff/.test(text);
   const rnd = random(`${seed}:outdoor-terrain`), span = Math.min(width, height);
-  const profile = flat ? 'flat' : wetland ? 'wetland' : urban ? 'urban' : garden ? 'garden' :
+  const profile = urban ? 'urban' : recipe ? recipe.terrain : flat ? 'flat' : wetland ? 'wetland' : garden ? 'garden' :
     /thermal|geyser|hot spring|sulph?ur|mineral terrace/.test(text) ? 'geothermal' : /volcan|lava|cinder/.test(text) ? 'volcanic' :
     /canyon|ravine|gorge/.test(text) ? 'badlands' : /glacier|snow|icy|frozen|\bice\b/.test(text) ? 'glacial' :
     /\b(forest|woodland|grove)\b/.test(text) ? 'forest' : 'wasteland';
-  const choices = profile === 'badlands' ? ['mesa', 'butte', 'canyon', 'hoodoo', 'cliff', 'terraces'] :
+  const choices = recipe?.relief.length ? recipe.relief : profile === 'badlands' ? ['mesa', 'butte', 'canyon', 'hoodoo', 'cliff', 'terraces'] :
     profile === 'geothermal' ? ['thermal_basin', 'terraces', 'cliff'] :
     profile === 'volcanic' ? ['caldera', 'mountain', 'ridge', 'cliff'] : profile === 'glacial' ? ['mountain', 'ridge', 'cliff'] :
     profile === 'forest' ? ['hill', 'ridge', 'terraces'] : ['ridge', 'mountain', 'mesa', 'butte', 'terraces'];

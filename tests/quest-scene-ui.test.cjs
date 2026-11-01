@@ -57,3 +57,19 @@ test('an old room response cannot open a dialogue over a newly entered room',asy
   const opening=f.window.QuestSceneUi.open('Edrin');f.window.currentDungeon={geoKey:'2,0,0'};
   resolve({ok:true,json:async()=>({scene:{title:'Old room'}})});assert.equal(await opening,false);assert.equal(f.popup(),undefined);
 });
+
+test('cached encounter stages retain known contact buttons, without exposing unvisited contacts or completed quests',async()=>{
+  const f=fixture(),source=fs.readFileSync('assets/game.js','utf8');
+  const getter=source.slice(source.indexOf('window.getQuestSceneParticipants ='),source.indexOf('window.persistDungeonObjectDiscoveries ='));
+  const record={stage:'encounter',completed:false,history:[{from:'hook',to:'objective'},{from:'objective',to:'encounter'}]};
+  const room={questScenes:{story:record},questStories:{story:{stages:[{id:'hook',actor:'Edrin'},
+    {id:'objective',actor:'Edrin'},{id:'encounter'},{id:'resolution',actor:'Unmet Contact'}]}},
+    deliverySuccessors:[{recipient:'Edrin',name:'Edrin Assistant'}]};
+  vm.runInNewContext(getter,{window:f.window,roomNameDatabase:new Map([['1,0,0',room]])});
+  assert.deepEqual(Array.from(f.window.getQuestSceneParticipants()),['Edrin','Edrin Assistant']);
+  assert.equal(f.window.QuestSceneUi.addAction(f.body,'Edrin Junior'),null);
+  assert.equal(f.window.QuestSceneUi.addAction(f.body,'Unmet Contact'),null);
+  const button=f.window.QuestSceneUi.addAction(f.body,'Edrin');assert.ok(button);
+  await button.click();assert.equal(f.requests[0].body.actor,'Edrin');assert.ok(f.popup());
+  record.completed=true;assert.deepEqual(Array.from(f.window.getQuestSceneParticipants()),[]);
+});

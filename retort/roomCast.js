@@ -21,11 +21,11 @@ function patrons(runId, geoKey) {
 function promptBlock({ runId, geoKey, nearbyRooms = [] }) {
   if (!enabled()) return '';
   const gods = patrons(runId, geoKey).map(n => { const c = Pantheon.canon(n); return `${n} (${c?.obligation?.[0] || c?.domain || ''})`; });
-  const avoidNames = Memory.avoid(runId, 'names', 40), avoidPremises = Memory.avoid(runId, 'premises', 30);
+  const avoidPremises = Memory.avoid(runId, 'premises', 30);
   return `RECURRING ROOM CAST (new for this game): choose 1-${MAX_MEMBERS} non-hostile residents as recurring people. They live or work in THIS room and will be met again on every return visit, so give each 2-3 distinct interests (trade, faith, family, scholarship, craft, rivalry, debt, art, food, ritual...), different from each other.
 Also write 1-${MAX_ARCS} arcs: small multi-visit quests owned by a recurring person (giver = exact name). Each arc has ${STAGES_MIN}-${STAGES_MAX} short stage lines in order (meeting, request, complication, return, resolution) and a destinationHint naming ONE nearby room from: ${nearbyRooms.slice(0, 8).map(r => r.name).join('; ') || 'any neighbouring room'}.
 ${localBlock()}Their faiths and worries draw on these deities: ${gods.join('; ')}.
-Do not reuse these names from earlier games: ${avoidNames.join(', ') || 'none'}. Do not reuse these quest premises: ${avoidPremises.join(' | ') || 'none'}.`;
+Do not reuse these quest premises: ${avoidPremises.join(' | ') || 'none'}.`;
 }
 // QUEST_LOCAL: arcs begin inside the giver's own room; QUEST_REVEALS: the giver marks what they would plausibly know on the level map.
 const REVEAL_KINDS = ['objective', 'landmark', 'route', 'passage', 'shrine', 'cache', 'danger'];

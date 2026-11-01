@@ -43,12 +43,12 @@ function build() {
   if (chunks) return chunks;
   const Prompts = require('./graveMasterStoryPrompts');
   const list = [];
-  const lore = capture($ => Prompts.appendOriginal($, { full: true }));
+  const lore = capture($ => Prompts.appendOriginal($, { full: true, canonical: true }));
   // lore[0] is the world guidance, which varies by setting; it is not cached here.
   list.push(...split('lore', lore.slice(1).join('\n\n')));
   const stub = { getRoomNameDatabase: () => '{}', getCurrentQuest: () => '', getCurrentTasks: () => [], getCurrentTaskIndex: () => 0 };
   const story = capture($ => Prompts.appendStory($, { roomName: 'the current room', currentSituation: 'x', updatedGameConsole: '',
-    sharedState: stub, parseNpcPartyNamesFromConsole: () => [], full: true }));
+    sharedState: stub, parseNpcPartyNamesFromConsole: () => [], full: true, canonical: true }));
   list.push(...split('story', story.join('\n\n')));
   try { list.push(...split('guide', fs.readFileSync(path.join(__dirname, '..', 'prompts', 'grave-master-local.md'), 'utf8'))); } catch {}
   const seen = new Set();

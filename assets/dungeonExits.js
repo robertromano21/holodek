@@ -16,7 +16,17 @@
     if (!dungeon?.cells || !dungeon.layout || !dungeon.start) return { status: 'skipped', markers: [] };
     const directions = normalize(raw), signature = directions.slice().sort().join(','), stamp = dungeon._geometryStamp;
     const previous = cache.get(dungeon);
-    if (previous?.signature === signature && previous.stamp === stamp) return dungeon.roomExits;
+    const bindingSignature=JSON.stringify(dungeon.cityBuildingEntrances||[]);
+    if (dungeon.roomExits && previous?.signature === signature && previous.stamp === stamp && previous.bindingSignature===bindingSignature) return dungeon.roomExits;
+    const saved = dungeon.roomExits;
+    const legacyBindings = saved && saved.bindingSignature === undefined && Array.isArray(saved.markers) &&
+      (dungeon.cityBuildingEntrances || []).every(e => saved.markers.some(m => m.direction === e.direction && m.x === e.x && m.y === e.y));
+    // Finalized exit meshes include genre dressing. A new JS object is not a request to rebuild them.
+    if (stamp && saved?.version === 1 && Array.isArray(saved.markers) && saved.signature === signature &&
+        (saved.bindingSignature === bindingSignature || legacyBindings)) {
+      cache.set(dungeon, { signature, stamp, bindingSignature });
+      return saved;
+    }
     // world1 ARRIVAL_EDGES moves the party's start to the arrival gate; exits stay laid out from the room's own origin.
     const { width: w, height: h } = dungeon.layout, { x: sx, y: sy } = dungeon._world1Start || dungeon.start;
     if (!(Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 && w <= 512 && h <= 512)) return { status: 'skipped', markers: [] };
@@ -35,8 +45,13 @@
     const markers = [], missing = [];
     for (const direction of directions) {
       let best = null, score = -Infinity;
+      const entrance=dungeon.cityBuildingEntrances?.find(e=>e.direction===direction);
+      const bound=entrance&&Number.isInteger(entrance.x)&&Number.isInteger(entrance.y)&&
+        entrance.x>=0&&entrance.y>=0&&entrance.x<w&&entrance.y<h&&seen[entrance.x+entrance.y*w];
+      if(bound)best={...entrance,direction,label:LABELS[direction],floor:dungeon.cells[entrance.key]?.floorHeight||0,
+        kind:'building-threshold',i:entrance.x+entrance.y*w};
       const v = COMPASS[direction];
-      for (let n = 0; n < count; n++) {
+      for (let n = 0; !bound && n < count; n++) {
         const i = q[n], x = i % w, y = Math.floor(i / w), c = dungeon.cells[`${x},${y}`];
         const dx = x - sx, dy = y - sy, d = Math.hypot(dx, dy);
         if (d < 4 || c.tile !== 'floor' || c.feature || c.interactable || markers.some(m => Math.hypot(x - m.x, y - m.y) < 3)) continue;
@@ -95,8 +110,8 @@
         position: { x: marker.x + .02, y: marker.y + .02, z: marker.floor }, size: { x: .96, y: .96, z: Math.min(3, available) } });
       marker.kind = 'planar-portal';
     }
-    dungeon.roomExits = { version: 1, signature, status: missing.length ? 'partial' : 'built', markers, missing, reachable: count };
-    cache.set(dungeon, { signature, stamp });
+    dungeon.roomExits = { version: 1, signature, bindingSignature, status: missing.length ? 'partial' : 'built', markers, missing, reachable: count };
+    cache.set(dungeon, { signature, stamp, bindingSignature });
     return dungeon.roomExits;
   }
   function frameKind(dungeon, direction) {

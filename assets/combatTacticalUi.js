@@ -6,7 +6,7 @@
   'use strict';
   let active = false, saved = null, savedScroll = null, turn = null, moving = false, angle = null;
   let roomKey = null, specialFloor = false, floorEpoch = 0;
-  let mapZoom = 1.75;
+  let mapZoom = 1.75, focusName = null;
   let savedCameraZoom = null;
   let ledgerState = null, legacyEntries = [], legacyBlock = '';
   function cellScale() { return active ? 1.25 : 1; }
@@ -29,8 +29,8 @@
     const changed = roomKey !== key, reset = changed && (specialFloor || special);
     roomKey = key; specialFloor = special;
     if (!changed) return;
-    floorEpoch++; moving = false;
-    if (!reset) return;
+    floorEpoch++; moving = false; focusName = null;
+    if (!reset && !active) return;
     receive(null);
     root.CombatTurnUi?.receive(null);
     turn = null; angle = null;
@@ -113,6 +113,21 @@
     }
     const turnPanel = document.getElementById('combat-turn-popup'); if (turnPanel) panel.appendChild(turnPanel);
     const follow = created || panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
+    let people = document.getElementById('combat-locations');
+    if (!people) { people = document.createElement('div'); people.id = 'combat-locations'; panel.appendChild(people); }
+    const available = (root.combatCharacters || []).filter(a => a.discoveryState !== 'pending' &&
+      (a.type === 'pc' || a.type === 'npc' || turn?.targets?.includes(a.name)) && Number.isFinite(a.mazeX) && Number.isFinite(a.mazeY));
+    const condition = actor => root.CombatLifeUi?.condition(actor) || actor.state || 'Alive';
+    const signature = JSON.stringify(available.map(a => [a.name, a.hp, condition(a), a.mazeX, a.mazeY]));
+    if (people._locationsSignature !== signature) {
+      people._locationsSignature = signature; people.textContent = '';
+      const hint = document.createElement('p'); hint.textContent = 'Move with arrow keys or your movement keys; click a square to walk. Find a combatant:'; people.appendChild(hint);
+      for (const actor of available) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'popup-button';
+        button.textContent = actor.name + ' · ' + (actor.hp ?? '?') + ' HP · ' + condition(actor);
+        button.title = 'Center map on ' + actor.name; button.addEventListener('click', () => locate(actor.name)); people.appendChild(button);
+      }
+    }
     const content = ledgerContent(ledgerState), entries = document.getElementById('combat-ledger-entries');
     const text = content.entries.join('\n\n');
     if (entries && entries.textContent !== text) entries.textContent = text;
@@ -134,7 +149,7 @@
     document.body?.classList.toggle('combat-compact-map', compact);
     document.body?.classList.add('combat-map-active');
     box.classList.add('combat-expanded'); box.classList.toggle('combat-stacked', d.stacked);
-    Object.assign(box.style, { display: 'block', position: 'fixed', left: d.left + 'px', top: d.top + 'px', width: d.width + 'px', height: d.height + 'px', maxWidth: 'none', maxHeight: 'none', resize: 'none', zIndex: '15000' });
+    Object.assign(box.style, { display: 'block', position: 'fixed', left: d.left + 'px', top: d.top + 'px', width: d.width + 'px', height: d.height + 'px', maxWidth: 'none', maxHeight: 'none', resize: 'none', zIndex: '1000' });
     ledger();
     const after = box.getBoundingClientRect();
     if (animate && before.width && before.height && !root.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
@@ -154,9 +169,9 @@
       const box = document.getElementById('combat-popup'), s = scene();
       if (box) saved = box.style.cssText;
       savedScroll = s ? { manual: s._userScrolledCombatMap, left: s.domContainer?.scrollLeft, top: s.domContainer?.scrollTop } : null;
-      active = true; angle = null; mapZoom = 1.75; applyMapZoom(s); setMapZoom(mapZoom); layout(true);
+      active = true; angle = null; focusName = null; mapZoom = 1.75; applyMapZoom(s); setMapZoom(mapZoom); layout(true);
     } else if (!next && active) {
-      active = false; turn = null; moving = false; angle = null;
+      active = false; turn = null; focusName = null; moving = false; angle = null;
       const box = document.getElementById('combat-popup');
       if (box) { box.classList.remove('combat-expanded', 'combat-stacked'); box.style.cssText = saved || ''; }
       const panel = document.getElementById('combat-ledger'), turnPanel = document.getElementById('combat-turn-popup');
@@ -192,12 +207,16 @@
   }
   function keyMove(event) {
     const directions = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-    const direction = directions[event.key], s = scene(), draw = s?._lastDungeonDraw;
-    if (!direction || !active || !turn?.tactical || !draw || event.ctrlKey || event.metaKey || event.altKey ||
-        event.target?.closest?.('input, textarea, select, button, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], #game-menu') ||
+    const action = root.PlayerControls?.actionFor?.(event);
+    const bindings = { forward: [0, -1], backward: [0, 1], left: [-1, 0], right: [1, 0], strafeLeft: [-1, 0], strafeRight: [1, 0] };
+    const fallback = { KeyW: [0, -1], KeyS: [0, 1], KeyA: [-1, 0], KeyD: [1, 0], KeyQ: [-1, 0], KeyE: [1, 0] };
+    const direction = directions[event.key] || bindings[action] || (!root.PlayerControls ? fallback[event.code] : null), s = scene(), draw = s?._lastDungeonDraw;
+    if (!direction || root._deathSceneActive || !active || !turn?.tactical || !draw || event.ctrlKey || event.metaKey || event.altKey ||
+        event.target?.closest?.('input, textarea, select, a, [contenteditable]:not([contenteditable="false"]), [role="dialog"], #game-menu') ||
         document.querySelector?.('.combat-target-actions') || document.getElementById('combat-popup')?.style.display === 'none') return false;
     event.preventDefault(); event.stopImmediatePropagation?.();
     if (moving || turn.movement?.busy || root.gamePaused || root.actionDiceState?.paused) return true;
+    focusName = null;
     const at = turn.movement?.position;
     if (!at) return true;
     const heading = Math.round((Math.atan2(direction[1], direction[0]) - draw.combatAngle) / (Math.PI / 4)) * Math.PI / 4;
@@ -223,26 +242,37 @@
   }
   function occupants(draw, actors = root.combatCharacters || []) {
     if (!draw?.dungeon) return [];
+    const normalize=value=>root.DungeonInhabitants?.roomKey?.(value)||String(value||'').match(/-?\d+/g)?.map(Number).join(',');
     // Downed allies cannot act, but their occupied tiles still select them for aid.
     const alive = a => root.DungeonInhabitants?.isAlive ? root.DungeonInhabitants.isAlive(a) :
       !/^dead$/i.test(a.state || a.State || a.status || '') &&
       ((a.hp ?? a.HP ?? 1) > 0 || /^(Dying|Unconscious)$/i.test(a.state || a.State || ''));
     return actors.filter(a => a && a.discoveryState !== 'pending' && alive(a) &&
       (!root.isDungeonActorPresent || root.isDungeonActorPresent(a)) &&
-      (!a.mazeRoomKey || a.mazeRoomKey.replace(/\s/g, '') === draw.dungeon.geoKey?.replace(/\s/g, '')))
+      (!a.mazeRoomKey || normalize(a.mazeRoomKey) === normalize(draw.dungeon.geoKey)))
       .map(a => {
-        const point = { x: Math.floor(a.type === 'pc' ? draw.pos.x : a.mazeX), y: Math.floor(a.type === 'pc' ? draw.pos.y : a.mazeY) };
+        const point = { x: Math.floor(Number.isFinite(a.mazeX) ? a.mazeX : draw.pos.x), y: Math.floor(Number.isFinite(a.mazeY) ? a.mazeY : draw.pos.y) };
         return { name: a.name, type: a.type,
-        hostile: turn?.targets?.includes(a.name) || root.DungeonInhabitants?.state(a) === 'Hostile',
+        hostile: a.type !== 'pc' && a.type !== 'npc' && (root.DungeonInhabitants?.allegiance?.(a) === 'Hostile' ||
+          /^hostile$/i.test(a.allegiance || a.state || a.State || '') ||
+          (root.combatCharacters || []).some(c => c.name === turn?.combatant && ['pc', 'npc'].includes(c.type)) && turn?.targets?.includes(a.name)),
         ...point, cells: root.CombatFootprint?.cells(a, point) || [point] }; })
       .filter(a => Number.isFinite(a.x) && Number.isFinite(a.y) && draw.dungeon.cells[`${a.x},${a.y}`]);
   }
-  function cellRect(gfx, draw, tile, fill, stroke, alpha = .12) {
+  function mapCenter(player) {
+    const actor = focusName && (root.combatCharacters || []).find(a => a.name === focusName &&
+      root.DungeonInhabitants?.roomKey(a.mazeRoomKey) === root.DungeonInhabitants?.roomKey(roomKey));
+    return active && actor && Number.isFinite(actor.mazeX) && Number.isFinite(actor.mazeY) ? { x: actor.mazeX + .5, y: actor.mazeY + .5 } : player;
+  }
+  function locate(name) {
+    focusName = name; redraw(); scene()?.centerCameraOn?.(15, 15, true);
+  }
+  function cellRect(gfx, draw, tile, fill, stroke, alpha = .12, inset = 1) {
     const x = (tile.x + .5 - draw.pos.x) * draw.cs, y = (tile.y + .5 - draw.pos.y) * draw.cs;
     if (fill !== null) { gfx.fillStyle(fill, alpha); gfx.fillRect(x - draw.cs / 2 + 1, y - draw.cs / 2 + 1, draw.cs - 2, draw.cs - 2); }
     if (stroke !== null) {
-      gfx.lineStyle(1, 0x000000, 1); gfx.strokeRect(x - draw.cs / 2, y - draw.cs / 2, draw.cs, draw.cs);
-      gfx.lineStyle(1, stroke, 1); gfx.strokeRect(x - draw.cs / 2 + 1, y - draw.cs / 2 + 1, draw.cs - 2, draw.cs - 2);
+      gfx.lineStyle(1, 0x000000, 1); gfx.strokeRect(x - draw.cs / 2 + inset - 1, y - draw.cs / 2 + inset - 1, draw.cs - 2 * (inset - 1), draw.cs - 2 * (inset - 1));
+      gfx.lineStyle(1, stroke, 1); gfx.strokeRect(x - draw.cs / 2 + inset, y - draw.cs / 2 + inset, draw.cs - 2 * inset, draw.cs - 2 * inset);
     }
   }
   function draw(scene, draw) {
@@ -251,15 +281,29 @@
   function drawOverlay(scene, draw) {
     if (!draw || !scene?.make?.graphics) return;
     const gfx = scene.make.graphics({ add: false }), actors = occupants(draw);
-    for (const a of actors) for (const cell of a.cells) cellRect(gfx, draw, cell, a.hostile ? 0xef766c : 0x67d5ef, a.hostile ? 0xef766c : 0x67d5ef, .08);
+    const edges = scene.actorRT ? scene.make.graphics({ add: false }) : gfx;
+    if(active||root.actionDiceState?.active?.kind==='combat')for (const a of actors) for (const cell of a.cells) {
+      const color = a.hostile ? 0xef766c : 0x67d5ef;
+      cellRect(gfx, draw, cell, color, null, .08);
+      cellRect(edges, draw, cell, null, color);
+    }
     const p = scene.combatHoverPoint, tile = p && tileAt(draw, p.x, p.y, scene.PIXEL_SCALE || 1);
     const valid = tile && draw.dungeon.cells[`${tile.x},${tile.y}`];
     const occupant = actors.find(a => a.name === scene.combatHoverActor?.name) ||
       valid && actors.find(a => a.cells.some(c => c.x === tile.x && c.y === tile.y));
-    if (valid || occupant) for (const cell of occupant?.cells || [tile]) cellRect(gfx, draw, cell, 0xffffff, 0xffffff, .13);
-    // Keep all ground-cell ink beneath the full-resolution avatar layer.
+    if (valid || occupant) for (const cell of occupant?.cells || [tile]) {
+      cellRect(gfx, draw, cell, 0xffffff, null, .13);
+      cellRect(edges, draw, cell, null, 0xffffff, .13, occupant ? 3 : 1);
+    }
+    // Floor tint stays beneath avatars; cell borders must survive oversized artwork.
     gfx.setPosition(draw.centerX, draw.centerY); gfx.setRotation(draw.combatAngle);
     scene.renderRT.draw(gfx); gfx.destroy();
+    if (edges !== gfx) {
+      const scale = scene.PIXEL_SCALE || 1;
+      edges.setPosition(draw.centerX * scale, draw.centerY * scale);
+      edges.setRotation(draw.combatAngle); edges.setScale(scale);
+      scene.actorRT.draw(edges); edges.destroy();
+    }
     const status = typeof document === 'object' && document.getElementById('combat-map-status');
     if (status) {
       const a = occupant;
@@ -322,7 +366,8 @@
   }
   root.addEventListener?.('resize', () => layout());
   root.addEventListener?.('keydown', keyMove, true);
-  return { receive, receiveLog, ledgerContent, combatBounds, changeFloor, layout, move, keyMove, click, draw, drawOverlay, bind, occupants, tileAt, dimensions, setMapZoom, cellScale, actorPoint, active: () => active,
-    refreshHealth() { if (active) ledger(); },
+  return { receive, receiveLog, mapCenter, locate, ledgerContent, combatBounds, changeFloor, layout, move, keyMove, click, draw, drawOverlay, bind, occupants, tileAt, dimensions, setMapZoom, cellScale, actorPoint, active: () => active,
+    resized(width) { document.getElementById('combat-popup')?.classList.toggle('combat-stacked', active && width < 480); redraw(); },
+    refreshHealth() { if (active) ledger(); redraw(); },
     angle(value) { if (!active) return value; if (angle === null) angle = value; return angle; } };
 });

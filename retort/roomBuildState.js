@@ -28,6 +28,7 @@ function scopeArtifact(job, artifact, base) {
       normalized.push(key + '.' + field);
       if (Object.hasOwn(original, field)) generated[field] = clone(original[field]); else delete generated[field];
     };
+    for (const field of ['exhaustionLimit', 'attemptedSearches', 'trapTriggered']) restore(field);
     const indoor = typeof original.indoor === 'boolean' ? original.indoor : original.classification?.indoor;
     if (typeof indoor === 'boolean') {
       for (const field of ['indoor', 'isIndoor', 'isOutdoor']) if (generated[field] === (field === 'isOutdoor' ? !indoor : indoor)) restore(field);
@@ -62,8 +63,16 @@ function mergeHistory(base, generated, current, runId) {
   out.runs.sort((a, b) => a.at - b.at); out.runs = out.runs.slice(-20); return out;
 }
 function context(state, model) {
-  return hash([state.getDungeonRunId(), state.getRestoreRevision?.(), model, state.getCurrentQuest?.(), state.getCurrentTaskIndex?.(), state.getCurrentTasks?.(),
-    JSON.parse(state.getRoomNameDatabase() || '{}')['0,0,0']?.setting]);
+  const opening = require('./openingQuestPreparation').constructionContext(state);
+  return hash([state.getDungeonRunId(), state.getRestoreRevision?.(), model,
+    ...(opening ? [opening.quest, opening.index, opening.tasks] : [state.getCurrentQuest?.(), state.getCurrentTaskIndex?.(), state.getCurrentTasks?.()]),
+    state.getActiveCityFloor?.(),JSON.parse(state.getRoomNameDatabase() || '{}')['0,0,0']?.setting]);
+}
+function finalizingName(job, artifact) {
+  const room = artifact.rooms?.[job.key], before = job.base?.[job.key];
+  return artifact.stage === 'population' && before?.namePending === true && before.name === job.name &&
+    room?.namePending !== true && typeof room?.name === 'string' && room.name === room.name.trim() &&
+    room.name.length > 0 && room.name.length <= 120 && !/[\r\n\x00-\x1f]/.test(room.name);
 }
 function merge(base, generated, current, at = 'room') {
   if (equal(base, generated)) return clone(current);
@@ -78,16 +87,21 @@ function merge(base, generated, current, at = 'room') {
   return out;
 }
 function protectDatabase(currentJson, nextJson, runId) {
-  if (!currentJson || !currentJson.includes('"preparedBuild"')) return nextJson;
+  if (!currentJson || !/"(?:preparedBuild|backgroundTopology)"/.test(currentJson)) return nextJson;
   const current = JSON.parse(currentJson), next = JSON.parse(nextJson || '{}'); let changed = false;
   for (const [key, room] of Object.entries(current)) {
+    if (room?.backgroundTopology?.runId === runId && next[key] && !next[key].backgroundTopology &&
+        next[key].name === room.name && !next[key].preparedBuild) {
+      next[key] = { ...next[key], exits: clone(room.exits), backgroundTopology: clone(room.backgroundTopology) }; changed = true;
+    }
     const receipt = room?.preparedBuild, incoming = next[key]?.preparedBuild;
     const forward = incoming && receipt && incoming.runId === runId && incoming.previousId === receipt.id &&
       incoming.revision > (receipt?.revision || 0);
     const older = incoming && receipt && incoming.id === receipt.id && ((incoming.revision || 0) < (receipt.revision || 0) ||
       ((incoming.revision || 0) === (receipt.revision || 0) && receipt.ready === true && incoming.ready !== true));
     if (receipt?.runId === runId && (incoming?.id !== receipt.id && !forward || older) &&
-        (!next[key] || next[key].name === room.name)) {
+        (!next[key] || next[key].name === room.name ||
+          next[key].namePending === true && next[key].name === receipt.provisionalName)) {
       next[key] = room; changed = true;
     }
   }
@@ -98,7 +112,8 @@ function validateArtifact(artifact, job, complete = true) {
       artifact.jobId !== undefined && artifact.jobId !== job.id) throw Error('Room artifact identity mismatch.');
   if (!stages.includes(artifact.stage) || complete !== (artifact.stage === 'complete')) throw Error('Invalid room checkpoint stage.');
   const room = artifact.rooms?.[job.key], dungeon = artifact.dungeon;
-  if (room?.name !== job.name || room.populationComplete !== true || description(room).trim().length < 20) throw Error('Incomplete room population.');
+  if (room?.name !== job.name && !finalizingName(job, artifact)) throw Error('Room name does not match its assigned identity.');
+  if (room?.populationComplete !== true || description(room).trim().length < 20) throw Error('Incomplete room population.');
   if (!complete && !dungeon) return room;
   if (
       !dungeon?.cells || !Object.keys(dungeon.cells).length || !dungeon.layout || !dungeon._geometryStamp || dungeon.geoKey !== job.key ||
@@ -136,7 +151,7 @@ function commit(state, job, artifact, { complete = true, protectedKeys = new Set
     if (!Object.hasOwn(rooms, key)) throw Error('A background build cannot remove a room.');
     if (equal(job.base[key], rooms[key])) continue;
     const current = latest[key], generated = rooms[key];
-    if (current?.name && generated?.name !== current.name) throw conflict(key + '.name');
+    if (current?.name && generated?.name !== current.name && !(key === job.key && current.namePending === true && finalizingName(job, artifact))) throw conflict(key + '.name');
     if ((current?.cityRoom && (!equal(current.cityRoom.anchorKey, generated?.cityRoom?.anchorKey) ||
         !equal(current.cityRoom.cityId, generated?.cityRoom?.cityId))) || (current && !current.cityRoom && generated?.cityRoom))
       throw conflict(key + '.cityRoom namespace');
@@ -146,7 +161,23 @@ function commit(state, job, artifact, { complete = true, protectedKeys = new Set
         responseEvidence: { destination: job.key, leaseOwner: job.id, writeSet: job.assignment?.writeSet || [job.key],
           changedPaths: changedPaths(job.base[key], generated, key) } });
     if (key !== job.key && !equal(job.base[key]?.preparedBuild, generated?.preparedBuild)) throw conflict(key + '.preparedBuild');
-    merged[key] = merge(job.base[key], generated, current, key);
+    // Search counters belong to the host. A model's initialization of them is not a content conflict.
+    const baseline = clone(job.base[key]);
+    for (const field of ['exhaustionLimit', 'attemptedSearches', 'trapTriggered']) if (current && Object.hasOwn(current, field)) {
+      if (baseline) baseline[field] = clone(current[field]);
+      if (field !== 'exhaustionLimit' || current.visited || current.attemptedSearches > 0 || current.trapTriggered)
+        generated[field] = clone(current[field]);
+    }
+    const opening = latest['0,0,0']?.openingQuestActivation;
+    const additions = opening?.runId === job.runId ? (current?.objects || []).filter(item => item.openingQuestId === opening.id &&
+      !(job.base[key]?.objects || []).some(old => old.name === item.name)) : [];
+    const concurrent = additions.length ? { ...current, objects: current.objects.filter(item => !additions.includes(item)) } : current;
+    if (additions.length && !concurrent.objects.length && !Object.hasOwn(job.base[key] || {}, 'objects')) delete concurrent.objects;
+    merged[key] = merge(baseline, generated, concurrent, key);
+    if (additions.length) {
+      if (additions.some(item => merged[key].objects?.some(other => other.name === item.name))) throw conflict(key + '.quest object name');
+      merged[key].objects = [...(merged[key].objects || []), ...clone(additions)];
+    }
     writes.push(key);
   }
   if (artifact.sharedHistory !== undefined && (!Array.isArray(artifact.sharedHistory) || artifact.sharedHistory.length > 4)) throw Error('Invalid shared history proposals.');
@@ -164,6 +195,8 @@ function commit(state, job, artifact, { complete = true, protectedKeys = new Set
   const publishReservations = reserveWrites?.(writes);
   merged[job.key].preparedBuild = { version: 1, id: job.id, runId: job.runId, model: job.model, ready: complete, stage: artifact.stage,
     revision: (previous?.revision || 0) + 1, previousId: previous?.id === job.id ? previous.previousId : previous?.id, at: Date.now() };
+  const provisionalName = previous?.provisionalName || (merged[job.key].name !== job.name ? job.name : null);
+  if (provisionalName) merged[job.key].preparedBuild.provisionalName = provisionalName;
   if (artifact.music) adoptMusic(artifact.music, job.id);
   // No player console, turn, inventory, roster, active quest or live position is imported.
   const coords = Object.fromEntries(['x', 'y', 'z'].map((k, i) => [k, Number(job.key.split(',')[i])]));
@@ -171,10 +204,12 @@ function commit(state, job, artifact, { complete = true, protectedKeys = new Set
   if (merged[job.key].inhabitants) state.setRoomPopulation(job.key, clone(merged[job.key].inhabitants));
   if (artifact.music) state.setRoomMusic(coords, clone(artifact.music));
   // Publish readiness only after all required caches/assets have been installed.
+  if(artifact.dungeon)require('./cityArchitecture').persist(merged,job.key,artifact.dungeon);
   state.setRoomNameDatabase(JSON.stringify(merged));
   publishReservations?.();
   if (state.getRoomDungeonForSimulation) job.dungeonBase = clone(state.getRoomDungeonForSimulation(coords) || null);
   job.base = clone(artifact.rooms);
+  job.name = merged[job.key].name;
   // Parallel geometry/music/art branches arrive in any order; only population and complete are barriers.
   job.checkpoints ||= {};
   job.checkpoints[artifact.stage] = checkpointHash;

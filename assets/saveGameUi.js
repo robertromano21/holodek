@@ -86,7 +86,7 @@
       roomImages, gameOver: !!root._gameOver, gameLogFormat: 'text-v2', gameLogText: root.SaveGameTranscript.capture(root.document.getElementById('chatlog')),
       audioCheckpoint: root.HolodekSfx?.checkpoint?.() || (() => { const elements = [...root.document.querySelectorAll('audio')]; const a = elements.find(a => !a.paused) || elements.find(a => a.currentTime > 0); return { time: a?.currentTime || 0, paused: !!root.HolodekSfx?.settings?.userPaused }; })(),
       audioSettings: root.HolodekSfx?.settings || null };
-    return copy({ version: 1, runId, geoKey, conversation, exploration, memories, data,
+    return copy({ version: 1, runId, geoKey, floorContext:context.dungeon.cityFloorContext||null,conversation, exploration, memories, data,
       position: { x: context.player.x, y: context.player.y, angle: root.playerAngle, z: root.playerZ ?? null } });
   }
   async function save(slot, label, options = {}) {
@@ -135,6 +135,7 @@
     root.gamePaused = true;
     root.HolodekSfx?.stopSpeech(); root.DungeonLife?.reset({ paused: true }); root.InventoryUi?.reset(); root.ItemInteractionUi?.reset(); root.ObjectDiscovery?.reset();
     root.dungeonRunId = loaded.runId;
+    root.CityFloorScope?.receive(loaded);
     await root.DungeonExplorationMap?.flushForSave?.(); root.DungeonExplorationMap?.reset({ discard: true });
     await replaceArchive('cotg-exploration', 'rooms', key => String(key).startsWith(loaded.runId + ':'), b.exploration);
     await replaceArchive('DungeonCampaignMemories', 'records', (key, v) => v.runId === loaded.runId, b.memories);

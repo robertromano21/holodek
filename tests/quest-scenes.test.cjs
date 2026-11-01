@@ -32,6 +32,80 @@ function fixture(kind='npc',type='Fetch',guard=false) {
   const carry=()=>{text=text.replace('Inventory: Empty','Inventory: '+item).replace('Inventory Properties: None','Inventory Properties: '+JSON.stringify(metadata));};
   return {state,service,d,view,choose,carry,task:()=>tasks[0],db:()=>JSON.parse(database),p:()=>population,paused:v=>paused=v,name,item,roomKey};
 }
+function noticeFixture(kind='npc') {
+  const f=fixture(kind);f.events=[];f.broadcast=e=>f.events.push(e);
+  f.state.getCurrentQuest=()=> 'The temple records';f.state.getQuestSeeded=()=>true;
+  f.dialogue=(speaker=f.name,extra={})=>S.onDialogue(f.state,{type:'character_dialogue',runId:'run',geoKey:f.roomKey,
+    dialogue:[{speaker,line:'I have an obligation to discuss with you.',recipient:'PC'}],...extra},f.broadcast);
+  return f;
+}
+test('quest preparation, room polling and unrelated speakers do not announce the saved hook',()=>{
+  const f=noticeFixture();assert.equal(f.view().stageId,'hook');assert.equal(f.events.length,0);
+  assert.equal(f.dialogue('Another resident'),false);assert.equal(f.events.length,0);
+  assert.equal(f.task().seedNoticeId,undefined);
+  assert.equal(f.dialogue(),true);assert.equal(f.events.length,1);assert.equal(f.events[0].kind,'quest-seeded');
+  assert.equal(f.view().stageId,'hook','Hearing the giver does not accept or advance the quest');
+  assert.equal(f.dialogue(),false);
+  f.state.setCurrentTasks(JSON.parse(JSON.stringify(f.state.getCurrentTasks())));
+  assert.equal(f.dialogue(),false,'A saved notice receipt survives reload');assert.equal(f.events.length,1);
+});
+test('a visible giver conversation announces without needing to accept, including narrated encounters',()=>{
+  for(const mode of ['view','story']) {
+    const f=noticeFixture();
+    if(mode==='view')assert.equal(S.view(f.state,f.name,f.broadcast).scene.stageId,'hook');
+    else assert.equal(f.dialogue(f.name,{type:'encounter_story'}),true);
+    assert.equal(f.events.length,1);assert.equal(f.task().status,'Pending');assert.equal(f.view().stageId,'hook');
+  }
+});
+test('stale rooms, runs, floors, silence and speech to other residents cannot announce a quest',()=>{
+  for(const extra of [{runId:'old'},{geoKey:'0,0,0'},{floorToken:'old-floor'},
+    {dialogue:[]},{dialogue:[{speaker:'Edrin Farrows',line:'',recipient:'PC'}]},
+    {dialogue:[{speaker:'Edrin Farrows',line:'Good morning.',recipient:'Another resident'}]}]) {
+    const f=noticeFixture();assert.equal(f.dialogue(f.name,extra),false);assert.equal(f.events.length,0);
+  }
+  const f=noticeFixture(),db=f.db();
+  f.task().roomScopes={[f.roomKey]:{hostKey:f.roomKey,buildingId:'hall',floor:1}};
+  db[f.roomKey].cityFloorContext={hostKey:f.roomKey,buildingId:'hall',floor:2};f.state.setRoomNameDatabase(JSON.stringify(db));
+  assert.equal(f.dialogue(),false);assert.equal(f.events.length,0);
+});
+test('distant, hidden, dead and occluded givers do not trigger encounter notices',()=>{
+  for(const change of [f=>{const roster=JSON.parse(f.state.getCombatCharactersString());roster[0].mazeX=6;roster[0].mazeY=6;f.state.setCombatCharactersString(JSON.stringify(roster));},
+    f=>f.p().actors[f.name].discoveryState='pending',
+    f=>{const db=f.db();db[f.roomKey].inhabitants.actors[f.name].status='dead';f.state.setRoomNameDatabase(JSON.stringify(db));},
+    f=>{f.d.cells['3,2']={tile:'wall',blocked:true};}]) {
+    const f=noticeFixture();change(f);assert.equal(f.dialogue(),false);assert.equal(f.events.length,0);
+  }
+});
+test('written hooks announce on reading, never on room entry, inspection or a forged chapter',()=>{
+  for(const kind of ['writing','item']) {
+    const f=noticeFixture(kind),hook=f.task().story.hook;
+    assert.equal(S.view(f.state,null,f.broadcast).scene.stageId,'hook');assert.equal(f.events.length,0);
+    const plan=Read.prepare({input:'read '+hook.name,consoleText:f.state.getUpdatedGameConsole(),database:f.db(),dungeon:f.d,
+      actor:JSON.parse(f.state.getCombatCharactersString())[0],geoKey:f.roomKey});
+    assert.equal(plan.allowed,true);
+    for(const invalid of [{...plan,inspect:true},{...plan,allowed:false},{...plan,chapter:999},{...plan,sourceKey:'0,0,0'}])S.onRead(f.state,invalid,f.broadcast);
+    assert.equal(f.events.length,0);assert.equal(f.view().stageId,'hook');
+    S.onRead(f.state,plan,f.broadcast);assert.equal(f.events.length,1);assert.equal(f.view().stageId,'objective');
+    S.onRead(f.state,plan,f.broadcast);assert.equal(f.events.length,1);
+  }
+});
+test('quest scene read and accept buttons deliver the same single notice as ordinary actions',()=>{
+  for(const kind of ['npc','writing']) {
+    const f=noticeFixture(kind),scene=f.view();
+    const result=S.choose(f.state,f.service,{runId:'run',geoKey:f.roomKey,storyId:scene.storyId,
+      stageId:scene.stageId,revision:scene.revision,optionId:kind==='npc'?'accept':'read'},f.broadcast);
+    assert.equal(result.error,undefined);assert.equal(f.events.length,1);assert.equal(f.view().stageId,'objective');
+  }
+});
+test('a deceased giver announces only when the surviving written introduction is actually read',()=>{
+  const f=noticeFixture(),db=f.db();
+  db[f.roomKey].inhabitants.actors[f.name].status='dead';f.state.setRoomNameDatabase(JSON.stringify(db));
+  assert.equal(f.dialogue(),false);assert.equal(S.view(f.state,null,f.broadcast).scene.actor,null);assert.equal(f.events.length,0);
+  const fallback=f.task().story.fallback,plan=Read.prepare({input:'read '+fallback.name,consoleText:f.state.getUpdatedGameConsole(),
+    database:f.db(),dungeon:f.d,actor:JSON.parse(f.state.getCombatCharactersString())[0],geoKey:f.roomKey});
+  assert.equal(plan.allowed,true);S.onRead(f.state,plan,f.broadcast);
+  assert.equal(f.events.length,1);assert.equal(f.view().stageId,'objective');
+});
 test('compiler builds actual NPC, document and voxel-writing hooks without changing base objective gates',()=>{
   for(const kind of ['npc','item','writing']) {
     const f=fixture(kind),task=f.task();assert.equal(task.story.hook.kind,kind);assert.equal(S.valid(task.story,f.db()),true);
@@ -106,6 +180,75 @@ test('planned hostile encounter cannot be completed by narrative; actual saved H
   const db=f.db();db[f.roomKey].monsters.inRoom=db[f.roomKey].monsters.inRoom.replace('Stone Sentinel\nFemale\nHuman\nArchivist\nLevel: 2\nAC: 10\nXP: 0\nHP: 20','Stone Sentinel\nFemale\nHuman\nArchivist\nLevel: 2\nAC: 10\nXP: 0\nHP: 0');
   f.state.setRoomNameDatabase(JSON.stringify(db));assert.equal(f.view().stageId,'resolution');
   assert.equal(f.choose('finish').error,undefined);
+});
+
+test('known quest contacts allow progress inquiries during an unfinished encounter without offering a premature conclusion',()=>{
+  const f=fixture('npc','Fetch',true);f.choose('accept');f.carry();
+  assert.equal(f.view().stageId,'encounter');
+  const before=f.state.getRoomNameDatabase(),result=S.view(f.state,f.name);
+  assert.equal(result.error,undefined);assert.equal(result.scene.inquiry,true);
+  assert.equal(result.scene.actor,f.name);assert.equal(result.scene.stageId,'encounter');
+  assert.deepEqual(result.scene.options,[]);assert.match(result.scene.description,/defeat or recruit Stone Sentinel/i);
+  assert.equal(f.state.getRoomNameDatabase(),before);assert.equal(f.task().status,'Pending');
+  for(const optionId of ['invite','finish'])assert.ok(S.choose(f.state,f.service,{runId:'run',geoKey:f.roomKey,
+    storyId:result.scene.storyId,stageId:result.scene.stageId,revision:result.scene.revision,optionId}).error);
+  assert.ok(S.view(f.state,'Edrin Farrows Junior').error,'Similar names do not impersonate the quest contact');
+  const roster=JSON.parse(f.state.getCombatCharactersString());roster[0].mazeX=6;roster[0].mazeY=6;
+  f.state.setCombatCharactersString(JSON.stringify(roster));assert.match(S.view(f.state,f.name).error,/Move closer/);
+});
+
+test('the resolution recruitment guard points to the final choice instead of claiming the objective is unfinished',()=>{
+  const f=fixture();f.choose('accept');f.carry();assert.equal(f.view().stageId,'resolution');
+  const result=S.recruitmentGuard(f.state,'add Edrin Farrows to party');
+  assert.equal(result.actionOnly,true);assert.match(result.content,/ready for its final choice/);
+  assert.match(result.content,/Quest Conversation/);assert.doesNotMatch(result.content,/Fulfill the listed objective/);
+  assert.equal(f.task().status,'Pending');assert.equal(f.choose('invite').error,undefined);
+});
+
+test('a known contact can discuss an objective in another room without exposing its remote interaction choices',()=>{
+  const f=fixture('npc','Fetch',true);f.choose('accept');f.carry();f.view();
+  const db=f.db(),task=f.task(),stage=task.story.stages.find(s=>s.id==='encounter');
+  stage.roomKey='2,0,0';db['2,0,0']={name:'Distant Guardhouse'};
+  db[f.roomKey].questScenes[task.story.id].taskBinding=Q.taskBinding(task);
+  f.state.setRoomNameDatabase(JSON.stringify(db));
+  const result=S.view(f.state,f.name);assert.equal(result.error,undefined);
+  assert.equal(result.scene.inquiry,true);assert.equal(result.scene.roomKey,f.roomKey);
+  assert.match(result.scene.description,/Distant Guardhouse/);assert.deepEqual(result.scene.options,[]);
+  assert.equal(S.runtime(task,f.db()).stage,'encounter');
+});
+
+test('actual nonlethal combat remains credited after bandaging, recovery, healing and JSON reload',()=>{
+  const Life=require('../retort/combatLife');
+  for(const natural of [1,20]) {
+    const f=fixture('npc','Fetch',true);
+    f.task().story.stages.find(s=>s.kind==='encounter').defeatOnly=true;
+    f.choose('accept');f.carry();assert.equal(f.view().stageId,'encounter');
+    const db=f.db(),actor=I.parseSheets(f.state.getUpdatedGameConsole()).find(a=>a.name==='Stone Sentinel');
+    Life.apply(db,'run',actor,0,natural,{geoKey:f.roomKey,damage:20});Life.commit(f.state,db);
+    const roster=JSON.parse(f.state.getCombatCharactersString());roster[0].mazeX=3;f.state.setCombatCharactersString(JSON.stringify(roster));
+    if(natural===1)assert.equal(Life.care(f.state,{runId:'run',geoKey:f.roomKey,actor:'Mortacia',target:actor.name,kind:'bandage',nonce:'quest-bandage:123'}).error,undefined);
+    Life.advance(f.state);Life.advance(f.state);
+    const healed=f.db(),resident=I.parseSheets(f.state.getUpdatedGameConsole()).find(a=>a.name===actor.name);
+    Life.apply(healed,'run',resident,10,null,{geoKey:f.roomKey});Life.commit(f.state,healed);
+    f.state.setRoomNameDatabase(JSON.stringify(JSON.parse(f.state.getRoomNameDatabase())));
+    assert.equal(f.view().stageId,'resolution');assert.equal(f.task().status,'Pending','An explicit conclusion is still required');
+    assert.equal(f.choose('finish').error,undefined);assert.equal(S.isComplete(f.task(),f.db()),true);
+    assert.equal(f.p().actors[actor.name].hp,10);assert.notEqual(f.p().actors[actor.name].status,'dead');
+    assert.match(f.state.getUpdatedGameConsole(),/Inventory: shardbreaker maul/,'Fetch keeps its item');
+  }
+});
+
+test('legacy saved survival evidence unlocks a spared guard, but neutral state alone does not',()=>{
+  const f=fixture('npc','Fetch',true);f.choose('accept');f.carry();
+  const db=f.db(),guard=db[f.roomKey].inhabitants.actors['Stone Sentinel'];
+  guard.hp=1;guard.state=guard.allegiance='Neutral';guard.sheet=sheet(guard.name,1,'Neutral');
+  db[f.roomKey].monsters.inRoom=Object.values(db[f.roomKey].inhabitants.actors).map(a=>a.sheet).join('\n');
+  f.state.setRoomNameDatabase(JSON.stringify(db));assert.equal(f.view().stageId,'encounter');
+  const next=f.db();next['0,0,0']={combatLife:{source:'engine-combat-life-v1',version:1,runId:'run',clock:25,actors:{'stone sentinel':{
+    name:guard.name,type:'monster',geoKey:f.roomKey,hp:1,state:'Neutral',at:23,
+    save:{natural:9,total:9,difficulty:12,passed:false},mercy:{by:'Mortacia',at:23}}},receipts:[]}};
+  f.state.setRoomNameDatabase(JSON.stringify(next));assert.equal(f.view().stageId,'resolution');
+  assert.equal(f.choose('finish').error,undefined);assert.equal(S.isComplete(f.task(),f.db()),true);
 });
 test('stale run, room, revision, unavailable options, pause and distant participants cannot consume a choice',()=>{
   const f=fixture(),scene=f.view(),request={runId:'run',geoKey:f.roomKey,storyId:scene.storyId,stageId:scene.stageId,revision:scene.revision,optionId:'accept'};

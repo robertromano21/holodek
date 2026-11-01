@@ -5,7 +5,7 @@ const Coordination = require('./roomBuildCoordination');
 const { constructionSnapshot } = require('./websiteRoomBuild');
 const sessions = new WeakMap();
 function configured(website = require('./websiteAi').service()) {
-  return process.env.HOLODEK_REMOTE_ENGINE !== '1' && website.view().enabled && website.view().remoteBuild === true;
+  return process.env.HOLODEK_REMOTE_ENGINE !== '1' && require('./roomHelpers').policy(website).location === 'website' && website.view().enabled && website.view().remoteBuild === true;
 }
 function begin(state, consoleText = state.getUpdatedGameConsole(), { website = require('./websiteAi').service(), logger = console } = {}) {
   if (!configured(website)) return null;
@@ -13,6 +13,9 @@ function begin(state, consoleText = state.getUpdatedGameConsole(), { website = r
   if (!match) throw Error('Remote construction has no room coordinate.');
   const key = match.slice(1).map(Number).join(','), runId = state.getDungeonRunId(), db = JSON.parse(state.getRoomNameDatabase());
   const room = db[key]; if (!room?.populationComplete || Build.description(room).trim().length < 20) return null;
+  // Seeded procedural architecture is local work, not a full remote construction assignment.
+  // Named landmarks keep the normal helper pipeline for their authored interiors and content.
+  if(require('./cityArchitecture').forRoom(room,db)?.authored===false)return null;
   let current = sessions.get(state);
   if (!current) sessions.set(state, current = new Map());
   const model = require('./gameModels').current(), existing = current.get(key);

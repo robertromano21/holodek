@@ -9,7 +9,7 @@ const SpellSystem = require('../retort/spellSystem');
 const { formatStartingCharacterSheet } = require('../retort/initialGameState');
 const source = fs.readFileSync('retort/retortWithUserInput.js', 'utf8');
 const combat = source.slice(source.indexOf('let combatSpace = null;'), source.indexOf('// Global variable to hold the current situation'));
-function fixture({ retreatRound = 1, lethal = false, spell = false, turning = false, tactical = false, life = false, aid = false, provocation = false, autoApproach = false } = {}) {
+function fixture({ retreatRound = 1, lethal = false, spell = false, turning = false, tactical = false, life = false, aid = false, provocation = false, autoApproach = false, equipment = false } = {}) {
   const d = { geoKey: '1,0,0', start: { x: 4, y: 4 }, layout: { width: 24, height: 24 }, cells: {} };
   for (let y = 0; y < 24; y++) for (let x = 0; x < 24; x++) d.cells[`${x},${y}`] = { tile: 'floor' };
   const names = ['Guard', 'Guard 2', 'Far Guard'], p = I.createPopulation(d.geoKey, names.map(name => ({ name, allegiance: 'Hostile', encounterId: name === 'Far Guard' ? 'remote' : 'guards' })));
@@ -37,15 +37,22 @@ function fixture({ retreatRound = 1, lethal = false, spell = false, turning = fa
     getUpdatedGameConsole: () => text, setUpdatedGameConsole: value => text = value,
     getCombatCharactersString: () => wire, setCombatCharactersString: value => wire = value,
     getRoomPopulation: () => p, getDungeonRunId: () => 'run' };
-  if (spell || turning || life) Object.assign(state, { getRoomNameDatabase: () => database, setRoomNameDatabase: v => database = v, getRoomDungeonForSimulation: () => d });
+  if (spell || turning || life || equipment) Object.assign(state, { getRoomNameDatabase: () => database, setRoomNameDatabase: v => database = v, getRoomDungeonForSimulation: () => d });
+  if (equipment) text = 'Inventory: real spear\nInventory Properties: ' + JSON.stringify({ name: 'real spear', type: 'weapon', attack_modifier: 2, damage_modifier: 3, ac: 0, magic: 0 }) + '\nParty Equipped Properties: None\n' + text;
   if (aid) {
     const Life = require('../retort/combatLife'), db = JSON.parse(database), ally = Life.actors(text).find(a => a.name === 'Companion');
     Life.apply(db, 'run', ally, 0, 1, { geoKey: d.geoKey, damage: 1000 }); Life.commit(state, db);
   }
   const broadcast = event => {
-    events.push(event);
+    events.push({ ...event, ...(event.equipment ? { equipment: { ...event.equipment } } : {}) });
     if (event.type === 'dice_state' && event.pending) setImmediate(() => dice.submit(event.pending.id, event.pending.actionId, event.pending.geoKey));
-    if (event.type === 'target_prompt' && aid && event.round === 1 && event.combatant === 'PC') {
+    if (event.type === 'target_prompt' && equipment && event.round === 1 && event.combatant === 'PC') {
+      setImmediate(() => {
+        dice.changeEquipment({ actionId: event.actionId, turnId: event.turnId, runId: 'run', geoKey: d.geoKey,
+          combatant: 'PC', kind: 'equip', item: 'real spear', nonce: 'first-turn-equipment' });
+        emitter.emit('target_response_PC', { actionId: event.actionId, turnId: event.turnId, action: 'attack', target: 'Guard' });
+      });
+    } else if (event.type === 'target_prompt' && aid && event.round === 1 && event.combatant === 'PC') {
       const care = event.care.find(c => c.kind === 'bandage' && c.target === 'Companion');
       setImmediate(() => emitter.emit('target_response_PC', { actionId: event.actionId, turnId: event.turnId, action: 'care', ...care }));
     } else if (event.type === 'target_prompt' && tactical && !autoApproach && event.round === 1 && event.combatant === 'PC') {
@@ -59,7 +66,7 @@ function fixture({ retreatRound = 1, lethal = false, spell = false, turning = fa
         itemId: event.spells?.find(s => s.target === 'Guard')?.itemId, spellId: turning ? 'turn_undead' : 'missile' }));
   };
   const context = { CombatTurnFlow: Flow, Inhabitants: I, ActionFeedback, actionDice: dice, createCombatSpace, sharedState: state,
-    SpellSystem, require,
+    SpellSystem, CombatEquipment: require('../retort/combatEquipment'), require,
     populationService: { get: () => p, recordPositions() {}, save() {} }, broadcast,
     console: { log() {}, info() {}, warn() {} }, updatedGameConsole: text, characterClasses: [{ name: 'Fighter', baseHP: 3 }],
     ensureSelectedPCSprite() {}, allocateXP() {}, dropMonsterItemsToRoom() {}, getRandomInt: () => 1000, updateCombatMap() {},
@@ -72,6 +79,23 @@ function fixture({ retreatRound = 1, lethal = false, spell = false, turning = fa
   return { context, events, dice, p, state, d };
 }
 for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map']) {
+  for(const allegiance of ['Friendly','Neutral','Hostile'])test(`${mode}: explicit ${allegiance} attack starts initiative without model adjudication`,async()=>{
+    const f=fixture({provocation:true}),fail=()=>{throw Error('Explicit attacks must not enter a model or room-authoring chain.');};
+    for(const name of ['Guard','Guard 2'])Object.assign(f.p.actors[name],{allegiance,state:allegiance});
+    f.state.setUpdatedGameConsole(I.withStates(f.state.getUpdatedGameConsole(),f.p));
+    let database=JSON.stringify({'0,0,0':{},'1,0,0':{inhabitants:f.p}});
+    Object.assign(f.state,{getGamePaused:()=>false,getDungeonTestingMode:()=>false,getLiveWorldState:()=>null,
+      getRoomNameDatabase:()=>database,setRoomNameDatabase:v=>database=v,getRoomDungeonForSimulation:()=>f.d});
+    Object.assign(f.context,{MonsterConsoleSync:require('../retort/monsterConsoleSync'),StoryPrompts:{isHolodek1:()=>false},
+      getDelayedPersonalNarrative:fail,getDelayedRoomNameDatabase:async()=> '{}',sanitizeLiveWorldStateForPrompt:()=>null,
+      require:require('node:module').createRequire(require.resolve('../retort/retortWithUserInput')),retort:fail,run:fail});
+    const begin=source.indexOf('async function retortWithUserInput('),end=source.indexOf('// Focused, lightweight Retort helper',begin);
+    vm.runInNewContext(source.slice(begin,end),f.context);
+    const result=await f.context.retortWithUserInput('attack Guard',f.context.broadcast,mode);
+    assert.equal(result.combatRoundOnly,true);assert.equal(f.p.actors.Guard.allegiance,'Hostile');assert.equal(f.p.actors['Guard 2'].allegiance,'Hostile');
+    assert.ok(f.events.some(e=>e.type==='dice_state'&&e.results?.some(r=>r.label==='Initiative')));
+    assert.ok(f.events.some(e=>e.type==='target_prompt'&&e.targets.includes('Guard')));
+  });
   for (const natural of [1, 20]) test(`${mode}: ${natural === 20 ? 'unconscious' : 'dying'} companions roll no initiative and receive no actions`, async () => {
     const Life = require('../retort/combatLife'), f = fixture({ life: true, retreatRound: 2 });
     const db = JSON.parse(f.state.getRoomNameDatabase()), ally = Life.actors(f.state.getUpdatedGameConsole()).find(a => a.name === 'Companion');
@@ -99,6 +123,15 @@ for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map'
     assert.ok(f.events.some(e => e.type === 'combat_maze_step' && e.character === 'PC'));
     assert.ok(f.events.some(e => e.type === 'dice_state' && e.results?.some(r => r.actor === 'PC' && r.label === 'Attack')));
     assert.ok(result.retreated);
+  });
+  test(`${mode}: equipping during target selection changes the immediately following attack without ending the turn`, async () => {
+    const f = fixture({ equipment: true, retreatRound: 2 });
+    const result = await f.context.handleCombatRound({}, 'attack Guard', mode);
+    assert.ok(f.events.some(e => e.type === 'target_prompt' && e.combatant === 'PC' && e.equipment?.allowed));
+    const damage = f.events.flatMap(e => e.results || []).find(r => r.actor === 'PC' && r.label === 'Damage');
+    assert.equal(damage.modifier, 3);
+    assert.equal(I.parseEquipment(I.parseSheets(f.state.getUpdatedGameConsole(), 'PC')[0].lines[9]).Weapon, 'real spear');
+    assert.ok(result.retreated); assert.equal(f.dice.changeEquipment, undefined);
   });
   test(`${mode}: attacking a companion commits hostility and party removal before any initiative roll`, async () => {
     const f = fixture({ provocation: true });
@@ -346,4 +379,29 @@ test('the combat endpoint accepts only spells and targets published on this init
   assert.equal(f.events[0].spellId, 'ward'); assert.equal(f.events[0].itemId, 'ring');
   for (const change of [{ itemId: 'other' }, { spellId: 'fireball' }, { target: 'Guard' }, { turnId: 'old' }])
     assert.equal(f.post({ action: 'cast', itemId: 'ring', spellId: 'ward', target: 'Companion', ...change }).status, 409);
+});
+
+for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map']) test(mode + ': an entirely downed party starts no hostile action or initiative', async () => {
+  const f = fixture();
+  let text = f.state.getUpdatedGameConsole();
+  for (const label of ['PC', 'NPCs in Party']) text = text.replace(I.sectionPattern(label), (whole, header, body) => header + body.replace(/^([ \t]*)HP:.*$/gm, '$1HP: 0'));
+  f.state.setUpdatedGameConsole(text);
+  const result = await f.context.handleCombatRound({}, '__ENCOUNTER_DEFENCE__', mode);
+  assert.match(result.combatLog, /Hostiles stop attacking/); assert.equal(f.dice.active, null);
+  assert.equal(f.events.some(e => e.pending?.label === 'Attack' || e.pending?.label === 'Initiative'), false);
+});
+
+for (const mode of ['Combat Map-Based', 'Interactive Map-Based', 'No Combat Map']) test(mode + ': unconscious PC leaves conscious companions fighting without handing control to an NPC', async () => {
+  const f = fixture({ life: true, tactical: true });
+  const Life = require('../retort/combatLife'), db = JSON.parse(f.state.getRoomNameDatabase());
+  const pc = Life.actors(f.state.getUpdatedGameConsole()).find(a => a.type === 'pc');
+  const injury = Life.apply(db, 'run', pc, 0, 20, { geoKey: '1,0,0', damage: 1000 }); injury.recoverAt = 100;
+  Life.commit(f.state, db);
+  let text = f.state.getUpdatedGameConsole().replace(I.sectionPattern('Monsters in Room'), (whole, header, body) => header + body.replace(/^([ \t]*)HP:.*$/gm, '$1HP: 1'));
+  f.state.setUpdatedGameConsole(text);
+  await f.context.handleCombatRound({}, '__ENCOUNTER_DEFENCE__', mode);
+  assert.equal(f.events.some(e => e.type === 'target_prompt' && e.combatant === 'Companion'), false);
+  assert.ok(f.events.some(e => e.type === 'dice_state' && e.results?.some(r => r.actor === 'Companion' && r.label === 'Attack')));
+  assert.equal(Life.status(f.state).rescuesUsed, 0);
+  assert.equal(Life.status(f.state).recovery.afterBattle, true);
 });

@@ -25,6 +25,18 @@ test('automatic survival saves distinguish stable unconsciousness from dying, wi
     assert.equal(f.life().rescuesUsed, undefined);
   }
 });
+
+test('monster defeat evidence survives healing and recovery but cannot cross rooms or adventures', () => {
+  const Defeats=require('../retort/questDefeatEvidence'),f=fixture();
+  f.injure('Enemy',20);
+  const before=JSON.stringify(Defeats.evidence(JSON.parse(f.state.getRoomNameDatabase()),'0,0,0','Enemy'));
+  assert.notEqual(before,undefined);
+  Life.advance(f.state);Life.advance(f.state);
+  const db=JSON.parse(f.state.getRoomNameDatabase());Life.apply(db,'life-run',f.actor('Enemy'),10,null,{geoKey:'0,0,0'});Life.commit(f.state,db);
+  const saved=JSON.parse(f.state.getRoomNameDatabase());assert.equal(JSON.stringify(Defeats.evidence(saved,'0,0,0','Enemy')),before);
+  assert.equal(Defeats.evidence(saved,'1,0,0','Enemy'),null);
+  saved['0,0,0'].combatLife.runId='different-run';assert.equal(Defeats.evidence(saved,'0,0,0','Enemy'),null);
+});
 test('dying characters die only after two subsequent rounds, and paused time never advances injuries', () => {
   const f = fixture(); f.injure('Ally'); Life.advance(f.state);
   assert.equal(f.actor('Ally').state, 'Dying'); assert.equal(f.life().actors.ally.remaining, 1);
@@ -43,11 +55,82 @@ test('bandaging is adjacent, turn-consuming, idempotent and stabilizes without r
   Life.advance(f.state); assert.equal(f.actor('Ally').hp, 0);
   Life.advance(f.state); assert.equal(f.actor('Ally').hp, 1, 'Stable characters eventually recover instead of soft-locking a solo PC');
 });
-test('first aid cannot be performed from afar, through walls, by a downed actor or on a hostile', () => {
+
+test('survival, countdown, aid and death publish committed outcomes exactly once, with no invented bandaging roll', () => {
+  const f = fixture(), events = []; f.state.emitter.on('combat_life_action', notice => events.push(notice));
+  f.injure('Ally');
+  assert.equal(events.length, 1); assert.equal(events[0].roll, 1);
+  assert.match(events[0].message, /d20 1.*vs 12.*2 rounds/);
+  assert.equal(Life.status(f.state).injuries[0].remaining, 2);
+  Life.commit(f.state, JSON.parse(f.state.getRoomNameDatabase()));
+  assert.equal(events.length, 1, 'A repaint is not another survival roll');
+  for (let i = 0; i < 10; i++) { Life.status(f.state); Life.careChoices(f.state, 'PC'); }
+  assert.equal(f.life().clock, 0, 'Reading aid options and status consumes no turn');
+  Life.advance(f.state); assert.equal(events.at(-1).kind, 'dying-warning');
+  assert.equal(Life.status(f.state).injuries[0].remaining, 1);
+  const input = { runId: 'life-run', geoKey: '0,0,0', actor: 'PC', target: 'Ally', kind: 'bandage', nonce: 'last-chance:aid' };
+  assert.ok(!Life.care(f.state, input).error); assert.equal(events.at(-1).kind, 'first-aid');
+  assert.match(events.at(-1).message, /bandages Ally.*countdown has stopped/);
+  assert.equal(events.at(-1).roll, undefined);
+  const count = events.length; Life.care(f.state, input); assert.equal(events.length, count);
+  Life.advance(f.state); Life.advance(f.state); assert.equal(f.actor('Ally').state, 'Friendly');
+
+  const dying = fixture(), deaths = []; dying.state.emitter.on('combat_life_action', notice => deaths.push(notice));
+  dying.injure('Ally'); Life.advance(dying.state); Life.advance(dying.state); Life.advance(dying.state);
+  assert.equal(deaths.filter(n => n.kind === 'injury-death').length, 1);
+  assert.match(deaths.find(n => n.kind === 'injury-death').message, /aid window expired/);
+});
+
+test('life announcements reach both the Game Log and existing on-screen action subtitles', () => {
+  const fs = require('node:fs'), vm = require('node:vm'), events = [];
+  const source = fs.readFileSync('server.js', 'utf8');
+  const start = source.indexOf("sharedState.emitter.on('combat_life_action'");
+  const end = source.indexOf("require('./retort/campaignPlanningLog')", start);
+  const state = { emitter: new EventEmitter(), getLastCoords: () => ({ x: 0, y: 0, z: 0 }), getDungeonRunId: () => 'life-run' };
+  vm.runInNewContext(source.slice(start, end), { sharedState: state, console: { info() {} }, broadcast: e => events.push(e),
+    require: name => { assert.equal(name, './assets/actionFeedback'); return require('../assets/actionFeedback'); } });
+  state.emitter.emit('combat_life_action', { kind: 'first-aid', title: 'Ally', message: 'PC bandages Ally. Stable at 0 HP.', result: 'success' });
+  assert.equal(events[0].type, 'combat_log'); assert.match(events[0].log, /bandages Ally/);
+  assert.equal(events[1].type, 'action_notice'); assert.equal(events[1].kind, 'first-aid');
+  assert.equal(events[1].runId, 'life-run'); assert.equal(events[1].geoKey, '0,0,0');
+});
+test('first aid cannot be performed from afar, through walls or by a downed actor', () => {
   const f = fixture(); f.injure('Ally');
   f.dungeon.cells['3,2'].tile = 'wall'; assert.equal(Life.careChoices(f.state, 'PC').length, 0);
   f.dungeon.cells['3,2'].tile = 'floor'; assert.ok(Life.careChoices(f.state, 'PC').some(c => c.kind === 'bandage'));
   f.injure('PC'); assert.equal(Life.careChoices(f.state, 'PC').length, 0);
+});
+
+test('deliberate mercy stabilizes a dying opponent as Neutral, but automated aid stays team-only', () => {
+  const f = fixture();
+  f.state.setUpdatedGameConsole(f.state.getUpdatedGameConsole().replace(/(Monsters in Room:[\s\S]*?State: )Friendly/, '$1Hostile'));
+  const roster = JSON.parse(f.state.getCombatCharactersString());
+  Object.assign(roster.find(a => a.name === 'Enemy'), { mazeX: 3, mazeY: 3, allegiance: 'Hostile', pursuit: { target: 'PC' } });
+  f.state.setCombatCharactersString(JSON.stringify(roster)); f.injure('Enemy');
+  assert.ok(Life.careChoices(f.state, 'PC').some(c => c.target === 'Enemy' && c.kind === 'bandage'));
+  assert.ok(!Life.careChoices(f.state, 'PC', { mercy: false }).some(c => c.target === 'Enemy'));
+  const input = { runId: 'life-run', geoKey: '0,0,0', actor: 'PC', target: 'Enemy', kind: 'bandage', nonce: 'mercy-bandage:123' };
+  const result = Life.care(f.state, input);
+  assert.ok(!result.error, result.error); assert.equal(result.allegiance, 'Neutral');
+  assert.equal(f.actor('Enemy').state, 'Unconscious');
+  assert.equal(f.life().actors.enemy.allegiance, 'Neutral'); assert.equal(f.life().actors.enemy.remaining, undefined);
+  assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a => a.name === 'Enemy').allegiance, 'Neutral');
+  assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a => a.name === 'Enemy').pursuit, undefined);
+  assert.deepEqual(Life.claimDeaths(f.state), []);
+  Life.advance(f.state); Life.advance(f.state);
+  assert.equal(f.actor('Enemy').state, 'Neutral'); assert.equal(f.actor('Enemy').type, 'monster');
+  assert.equal(Life.care(f.state, input).duplicate, true);
+});
+
+test('bandaging a legacy dying sheet never fabricates a new survival throw', () => {
+  const f = fixture(), notices = [];
+  f.state.setUpdatedGameConsole(f.state.getUpdatedGameConsole().replace(/(NPCs in Party:[\s\S]*?HP: )10/, (_, prefix) => prefix + '0')
+    .replace(/(NPCs in Party:[\s\S]*?State: )Friendly/, '$1Dying'));
+  f.state.emitter.on('combat_life_action', n => notices.push(n));
+  const result = Life.care(f.state, { runId: 'life-run', geoKey: '0,0,0', actor: 'PC', target: 'Ally', kind: 'bandage', nonce: 'legacy-care:123' });
+  assert.ok(!result.error, result.error); assert.equal(f.actor('Ally').state, 'Unconscious');
+  assert.equal(f.life().actors.ally.save, undefined);
+  assert.deepEqual(notices.map(n => n.kind), ['first-aid']);
 });
 test('healing potions wake unconscious and dying allies, consume one copy and cancel their countdown', () => {
   for (const save of [1, 20]) {

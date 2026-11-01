@@ -63,18 +63,20 @@
     const art=dungeon.surfaceArt||[],tiles=new Set(art.map(a=>a.tile));
     const lamps=art.flatMap(a=>plan(a,dungeon));
     lamps.push(...(dungeon.artLamps||[]).filter(l=>!tiles.has(String(l.id).split(':lamp:')[0])));
+    const electric = /^(fluorescent|neon_buzz|arc_spark|beacon_rotating|emergency_strobe|sodium_sick|dying_flashlight|blind_shafts|bulb_sway)$/.test(dungeon.tiles?.torch?.lightType || '');
     return lamps.filter(l=>l&&[l.x,l.y,l.z,l.radius,l.intensity].every(Number.isFinite)&&
-      Math.hypot(l.x-x,l.y-y)<=range).map(l=>({...l,radius:Math.max(.5,Math.min(5,l.radius)),intensity:Math.max(0,Math.min(1,l.intensity)),dist2:(l.x-x)**2+(l.y-y)**2}))
+      Math.hypot(l.x-x,l.y-y)<=range).map(l=>({...l,electric,radius:Math.max(.5,Math.min(5,l.radius)),intensity:Math.max(0,Math.min(1,l.intensity)),dist2:(l.x-x)**2+(l.y-y)**2}))
       .sort((a,b)=>a.dist2-b.dist2).slice(0,14);
   }
   function flamePose(lamp,flicker){
+    if(lamp.electric)return{position:lamp.position,size:lamp.size};
     const pulse=Math.max(.75,Math.min(1.2,Number.isFinite(flicker)?flicker:1));
     const size={...lamp.size,z:lamp.size.z*(.85+.15*pulse)},position={...lamp.position};
     position.z+=.76*(lamp.size.z-size.z);
     position[lamp.axis==='x'?'y':'x']+=(pulse-1)*.018;
     return{position,size};
   }
-  function mesh(flame=false,axis='y',sign=-1,mount='wall'){
+  function mesh(flame=false,axis='y',sign=-1,mount='wall',electric=false){
     const vertices=[],indices=[];
     const box=(lo,hi,color)=>{
       for(const [axis,sign]of[[0,-1],[0,1],[1,-1],[1,1],[2,-1],[2,1]]){
@@ -84,7 +86,11 @@
         indices.push(base,base+1,base+2,base,base+2,base+3);
       }
     };
-    if(flame){box([.35,.35,.76],[.65,.65,.95],[1,.65,.16]);box([.44,.44,.9],[.56,.56,1],[1,.93,.58]);}
+    if(electric){
+      if(flame)box([.18,.22,.6],[.82,.78,.82],[.68,.85,1]);
+      else{box([.08,.12,.5],[.92,.88,.9],[.22,.28,.34]);box([.4,.4,0],[.6,.6,.5],[.28,.34,.4]);}
+    }
+    else if(flame){box([.35,.35,.76],[.65,.65,.95],[1,.65,.16]);box([.44,.44,.9],[.56,.56,1],[1,.93,.58]);}
     else if(mount==='floor'){
       box([.12,.12,0],[.88,.88,.12],[.34,.25,.16]);
       box([.4,.4,.12],[.6,.6,.54],[.48,.33,.18]);

@@ -1,12 +1,22 @@
 const Inhabitants = require('../assets/dungeonInhabitants');
 const Pantheon = require('../assets/pantheonCharacters');
-const SpellRules = require('../assets/spellRules');
+const SpellRules = require('./genreAbilities').rules;
 const GeneratedNames = require('./generatedNames');
 const Contracts = require('./generationContracts');
 const Lore = require('./underworldLore');
 const Policy = require('./generationPolicy');
+const Balance = require('./encounterBalance');
 const { RetortMessage } = require('retort-js/dist/message');
 const BATCH_SIZE = 4;
+function needsStartingResidents(room, geoKey, homebrew) {
+  if (!homebrew || geoKey !== '0,0,0' || !room || room.cityFloorContext) return false;
+  const population = room.inhabitants;
+  // A description or an empty runtime placeholder is not an authored population.
+  // Keep tombstones/recruited records so returning never respawns the welcome cast.
+  return !room.startingResidentsComplete && !population?.authoredAt && !population?.initialSheets &&
+    !Object.keys(population?.actors || {}).length && !Object.keys(population?.companions || {}).length &&
+    !Inhabitants.parseBlocks(room.monsters?.inRoom || '').length;
+}
 function transientTimeout(error) {
   const text = String(error?.message || '');
   if (/quota|rate.?limit|429|refus|declined|content.?filter|cancel|abort/i.test(text)) return false;
@@ -23,12 +33,18 @@ function needsQuestIntroduction(quest, rooms, geoKey, taskIndex = 0) {
 
 // Regular residents and supplemental encounters share this generation path.
 async function generateInhabitants(...args) { return Policy.scope(() => generateInhabitantsScoped(...args)); }
-async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey, indoor, campaignSetting, rooms = {}, partyNames = [], usedNames = [], quest = '', questSeed = false, encounter = null }, rules) {
+async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey, indoor, campaignSetting, rooms = {}, partyNames = [], party = [], usedNames = [], quest = '', questSeed = false, encounter = null }, rules) {
   questSeed = questSeed && geoKey !== '0,0,0' && !!String(quest).trim() && !/^none$/i.test(String(quest).trim());
-  const starting = geoKey === '0,0,0';
+  const starting = !encounter && geoKey === '0,0,0' && !rooms[geoKey]?.cityFloorContext;
+  const venue=rooms[geoKey]?.cityRoom?.venue||campaignSetting?.city?.venue;
+  const market = !encounter && require('./serviceRoles').market(rooms[geoKey], campaignSetting);
   const local = require('./graveMasterStoryPrompts').isHolodek1(), batchSize = local ? 1 : BATCH_SIZE;
-  const count = starting ? rules.random(1, 5) : encounter ? Math.max(1, Math.min(3, encounter.count || 1)) : indoor ? 8 : 16;
+  const floorProgram=rooms[geoKey]?.cityRoom?.floorProgram;
+  const floorResidents=Number.isInteger(floorProgram?.residents)?Math.max(8,Math.min(24,floorProgram.namedResidents??floorProgram.residents)):8;
   const hostileTemple = !starting && require('./campaignSetting').hostileTemple(campaignSetting, roomName);
+  const settled = Balance.settlement(campaignSetting, rooms[geoKey]) && !hostileTemple;
+  const routineResidents = indoor && !settled && party.length ? Math.max(floorResidents, Math.min(16, Balance.partySummary(party).size + 4)) : floorResidents;
+  const count = starting ? rules.random(require('./settingLayer').current() ? market ? 3 : 2 : 1, 5) : encounter ? Math.max(1, Math.min(6, encounter.count || 1)) : indoor ? routineResidents : 16;
   const village = !!campaignSetting?.village;
   const civicMajority = !encounter && !hostileTemple && require('./worldFlags').on('CITY_COMPLETE') && campaignSetting?.city?.population?.civilianMajority;
   const homeSites = ['commons', ...(campaignSetting?.village?.directions || [])];
@@ -37,11 +53,42 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
       campaignSetting.faction?.allegiance === 'Hostile' || i === count - 1 ? 'Hostile' : 'Neutral' : i < 6 || i < 10 && i > 6 ? 'Hostile' : 'Neutral',
     encounterId: i === 0 && questSeed ? 'quest-contact' : i < 3 ? 'residents' : i < 6 ? 'guards' : i === 6 ? 'pilgrim' : i < 10 ? 'raiders' : i < 13 ? 'wayfarers' : 'keepers' }));
   const accepted = [], totalCount = count, originalUsedNames = usedNames, introduceQuest = questSeed;
+  if (market && !hostileTemple && (!starting || require('./settingLayer').current())) Object.assign(slots[1], { serviceRole: 'shop', encounterId: 'market-vendor' });
+  if(!encounter&&venue&&!hostileTemple){
+    if(venue.service&&(!starting||require('./settingLayer').current()))Object.assign(slots[1],{serviceRole:venue.service,encounterId:'venue-operator'});
+    for(const slot of slots)if(!(slot.slot===0&&questSeed)){
+      slot.venueDuty=venue.roles?.[slot.slot===1?0:slot.slot%venue.roles.length];
+      if(floorProgram)slot.unitId=`floor-${floorProgram.floor}:unit-${1+Math.floor(slot.slot/2)%floorProgram.units}`;
+      if(slot.slot===1)slot.encounterId='venue-operator';
+      else if(slot.slot<3)slot.encounterId='venue-visitors';
+    }
+  }
+  Balance.plan(slots, { party, starting, encounter, hostileTemple, settled,
+    roll: Inhabitants.hash(`${geoKey}:cohort-size`) / 4294967296 });
+  const ecology=require('./settingEcology'),table=ecology.get(rooms),nameProfiles=new Map();
+  if(table&&!encounter)for(const slot of slots){
+    if(slot.slot===0&&questSeed)continue; // Existing quest contacts retain their authored identity bindings.
+    const h=Inhabitants.hash(`${table.seed}:${geoKey}:population:${slot.slot}`);let draw=0;
+    const selected=ecology.choose(table,campaignSetting?.city?.populationMix,()=>((h+Math.imul(++draw,2654435761))>>>0)/4294967296);
+    Object.assign(slot,{lineage:selected.name,lineageDescription:selected.description});
+    if(selected.nameParts)nameProfiles.set(slot.slot,selected.nameParts);
+  }
   const originalLore = $.messages?.find(message => message instanceof RetortMessage &&
     ['user', 'system'].includes(message.role) && message.content.startsWith('Instructions for the Grave Master:'));
   async function requestBatch(agent, batch, retryReason) {
-    const $ = agent, count = batch.length, slots = batch;
+    const $ = agent, count = batch.length, slots = batch.map(slot=>({...slot}));
     const usedNames = [...accepted.map(row => row.name), ...originalUsedNames];
+    const promptUsedNames=local?[...accepted.slice(-8).map(row=>row.name),...originalUsedNames.slice(-12)]:usedNames;
+    const promptAccepted=local?accepted.slice(-3):accepted;
+    const reservedNames=[...partyNames,...usedNames];
+    for(const slot of slots){
+      if(encounter?.identity)continue;
+      if(slot.slot===0&&introduceQuest)continue;
+      const profile=nameProfiles.get(slot.slot)||(encounter?.races?.length===1?encounter.catalog?.[0]?.nameParts:null);
+      slot.nameSuggestion=GeneratedNames.generate({seed:`${table?.seed||roomName}:${geoKey}:${encounter?'encounter':'resident'}:${slot.slot}`,
+        profile,used:reservedNames,isReserved:name=>!!Pantheon.name(name)});
+      reservedNames.push(slot.nameSuggestion);
+    }
     const questSeed = introduceQuest && slots.some(slot => slot.slot === 0);
     const majorityBudgets = [
       ...(village && !hostileTemple ? [{ label: 'neutral', qualifies: row => row.allegiance === 'Neutral' }] : []),
@@ -50,8 +97,21 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
       accepted.filter(budget.qualifies).length - (totalCount - accepted.length - count)) }));
     $.model = 'gpt-4.1-mini';
     $.temperature = 0.85;
-    if (local) await $.user(require('./holodekPopulationPrompt').prompt({ roomName, roomDescription, indoor, campaignSetting,
-      slots, quest, questSeed, encounter, partyNames, usedNames, accepted, starting, hostileTemple, homeSites,
+    const encounterGuidance = Balance.guidance(slots, accepted);
+    if (encounterGuidance) await $.user(encounterGuidance);
+    if(!local&&slots.some(s=>s.lineage))await $.user`SAVED WORLD POPULATION SAMPLE: ${JSON.stringify(slots.map(s=>({slot:s.slot,lineage:s.lineage,description:s.lineageDescription})))}. For these slots use the sampled lineage as the exact race, but author each individual's own name, personality, history, occupation and current situation. These are setting-authored population proportions, not prefab characters or a fixed plot. Preserve all fixed allegiances and quest contacts.`;
+    if(venue&&!encounter)await $.user(local?
+      'VENUE FUNCTION: '+JSON.stringify({name:venue.name,type:venue.type,spaces:venue.spaces})+'. slot.venueDuty and serviceRole bind occupations here: shop=exchange operator, temple=healer in this world. Preserve fixed allegiances. No imaginary workers, transactions, crowds as combatants, or new quests.':
+      require('./cityLife').guidance(venue)+' Author the supplied slot.venueDuty in this world\'s own vocabulary. The named operator works in this actual venue, patrons and colleagues have distinct lives. Do not invent absent vendors, move fixed cast members, or turn a whole city into one combat encounter. Crowds are atmosphere, not extra combatants, recruits or fabricated transactions.');
+    if (slots.some(s => s.serviceRole)&&(!local||!venue)) await $.user(local?
+      'ENGINE-BOUND SERVICE ROLE: slot.serviceRole is fixed. shop=exchange operator, temple=healer through this world\'s established powers or technology. No invented transactions.':
+      'ENGINE-BOUND SERVICE ROLE: '+JSON.stringify(slots.filter(s => s.serviceRole))+'. Author each operator as an individual with a distinct history, job and voice who works at the actual venue: shop means an exchange operator; temple means a healer described through this world\'s technology or established powers. Preserve their fixed allegiance. The engine supplies stock, prices and currency separately; do not invent transactions. Other residents need not be merchants.');
+    const populationSetting=local&&venue?{...campaignSetting,city:{name:campaignSetting?.city?.name,districtName:campaignSetting?.city?.districtName,establishmentType:venue.type}}:campaignSetting;
+    if (require('./settingLayer').current()) await $.user(require('./homebrewStoryPrompts').population({ roomName, roomDescription, campaignSetting:populationSetting,
+      slots, quest, questSeed, encounter, partyNames, usedNames:promptUsedNames, accepted:promptAccepted, starting, hostileTemple, homeSites,
+      recent: require('./inhabitantVariety').brief(rooms, geoKey, { includeCurrent: !!encounter }) }));
+    else if (local) await $.user(require('./holodekPopulationPrompt').prompt({ roomName, roomDescription, indoor, campaignSetting,
+      slots, quest, questSeed, encounter, partyNames, usedNames:promptUsedNames, accepted:promptAccepted, starting, hostileTemple, homeSites,
       recent: require('./inhabitantVariety').brief(rooms, geoKey, { includeCurrent: !!encounter }) }));
     else {
     await $.user`Create the inhabitants of this ${indoor ? 'indoor dungeon complex' : 'outdoor biome'} in Children of the Grave.
@@ -64,13 +124,13 @@ These are fantasy races for an intelligent or unintelligent animal, monster, spi
 Regional community facts (read-only): ${JSON.stringify(campaignSetting || {})}. These are BACKGROUND, not a script for every individual's occupation or worry. Respect actual ecology, institutions and allegiances while inventing distinct local lives and interests. Regional trades are possibilities, not a closed profession list; a regional pressure is not every room's scenario. Residents of a settled place are not automatically enemies; the engine's allegiance slots below are authoritative. Never invent a payable contract, money, shop inventory or quest outcome; the engine supplies these separately.
 ${campaignSetting?.planarRealm ? 'This plane has its own native creatures, local factions and cosmology from PLANAR-REALM. Do not turn its hostiles into automatic Arithus servants or give unaware natives knowledge of the underworld war. New local gods are background beliefs, not spawned residents. Choose individuals from this plane\'s saved population concept.' : `When the faction is explicitly Hostile, its non-service guards and cult members follow ${campaignSetting?.hostilePatron || 'Arithus'}. Use that evil patron for their oaths, symbols and loyalties, rather than making them servants of an unrelated benevolent god. The three neutral slots remain neutral regardless of occupation; they need not be workers or business owners. A friendly slot in such territory may be a dissident. In peaceful communities, hostiles are outside threats, not the government. Temples follow the saved religion patron; do not invent another patron or physically summon one.`}
 ${hostileTemple ? 'This is an EVIL TEMPLE: every slot is Hostile, including workers and priests. Intruders face attacks from its guards and cult, not neutral shop or healing services. The neutral-resident and friendly-slot exceptions do NOT apply here.' : ''}
-Return only JSON: {"inhabitants":[{"slot":0,"name":"unique exact name","race":"race","class":"custom class title","combatRole":"Warrior|Spellcaster","combatArchetype":"Fighter|Wizard|Witch|Sorcerer|Warlock|Necromancer|Cleric","spellPreferences":["preferred canonical spell id"],"job":"occupation","activity":"what this individual is doing at their own site","personality":"brief temperament and manner of speaking","voice":"distinct manner of speaking","history":"two short sentences about this individual's life or origins before meeting the party","motivation":"one personal desire or worry","routine":"guard|patrol|work|forage|wander|rest","dialogue":["first encounter greeting or threat","remark about their work or this place","another short personal remark"]}]}.
+Return only JSON: {"inhabitants":[{"slot":0,"name":"unique exact name","race":"race","class":"custom class title","combatRole":"Warrior|Spellcaster","combatArchetype":"Fighter|Wizard|Witch|Sorcerer|Warlock|Necromancer|Cleric","spellPreferences":["preferred canonical spell id"],"job":"occupation","activity":"what this individual is doing at their own site","personality":"brief temperament and manner of speaking","voice":"distinct manner of speaking","history":"personal history about this individual's life or origins before meeting the party, with as much relevant detail as needed","motivation":"one personal desire or worry","routine":"guard|patrol|work|forage|wander|rest","dialogue":["first encounter greeting or threat","remark about their work or this place","another short personal remark"]}]}.
 First decide per individual whether this is a Warrior or a Spellcaster. Warriors must use Fighter rules and empty spellPreferences; only Spellcasters choose a magical archetype. A Warrior never receives innate Magic, even if its flavorful title includes priestly or magical words.
 Keep flavorful custom class names, but choose exactly one combatArchetype that justifies their abilities. Fighters have no innate spells (charged equipment still works). Wizards use runes and force; Witches ritual, restoration and hexes; Sorcerers light-weave healing; Warlocks destructive dark weave; Necromancers bone and death; Clerics priestly healing and sanctuary. A scholar or guard is not automatically a caster. The engine fixes Magic, spellbooks, spell lists and level requirements; do not invent class mechanics or mixed archetypes.
 Choose spellPreferences individually from this archetype's catalog, suiting this character's methods, not identical choices for every caster. Fighter preferences must be empty. Unknown, cross-tradition and above-level spells are rejected by the engine; these are preferences, never a permission to bypass costs or slots. Supported catalogs: ${JSON.stringify(Object.fromEntries(SpellRules.archetypes.map(name => [name, SpellRules.catalog(name).map(id => ({ id, name: SpellRules.templates[id].name, level: SpellRules.templates[id].minLevel, cost: SpellRules.templates[id].cost, effect: SpellRules.templates[id].effect }))])))}.
 Produce exactly ${count} individuals, one for every slot below, using each integer slot ID exactly once. Count and slot IDs are engine constraints, not creative suggestions. Each has a distinct name, race, occupation and voice. Names must not duplicate party members ${partyNames.join(', ') || 'None'} or existing residents ${usedNames.join(', ') || 'None'}. ${GeneratedNames.instructions}
 Required slot IDs with suggested roles and allegiances, NOT a fixed cast: ${JSON.stringify(slots)}.
-Choose each individual's allegiance (Friendly, Neutral or Hostile), encounterId (short shared group label, at most four per group) and routine yourself. The only fixed allegiances are ALL Friendly at the starting temple, ALL Hostile in an explicitly evil temple, and the first three ordinary residents Neutral in the regular cast elsewhere (slot 0 may be Friendly for an explicit quest introduction). Neutrality does not prescribe a job, shop or activity. Supplemental encounters have NO reserved workers: choose any justified allegiance. All other suggested allegiances and group names above are defaults you may replace to fit the scene, not mandatory workers/guards/raiders. A hostile faction does not turn its entire civilian population hostile. Choose guards, threats, refugees, artisans and strangers according to the story, not slot number.
+Choose each individual's allegiance (Friendly, Neutral or Hostile), encounterId (short shared group label, at most six per group) and routine yourself. Ordinary hostile encounters should share groups of 2-6, not many unrelated solo threats; reserve a solo for a deliberate named or exceptional encounter. The only fixed allegiances are ALL Friendly at the starting temple, ALL Hostile in an explicitly evil temple, and the first three ordinary residents Neutral in the regular cast elsewhere (slot 0 may be Friendly for an explicit quest introduction). Neutrality does not prescribe a job, shop or activity. Supplemental encounters have NO reserved workers: choose any justified allegiance. All other suggested allegiances and group names above are defaults you may replace to fit the scene, not mandatory workers/guards/raiders. A hostile faction does not turn its entire civilian population hostile. Choose guards, threats, refugees, artisans and strangers according to the story, not slot number.
 ${village ? `This is a settled community: a majority must be Neutral, with optional individual Friendly allies and Hostile guards or threats. Follow its saved population concept: ${campaignSetting.village.population}. Choose homeSite from ${homeSites.join(', ')}: commons or the named direction's BUILDING APPROACH, not a second copy of someone inside that building. Place frightened shades, pushy demon guards or other residents where their own activities warrant, without repeating a fixed cast.` : 'Vary native beings, shades, spirits and humanoids to suit this level; not every guard is a demon and not every soul is human. Set homeSite to commons.'}
 Neutrals have work or business of their own, tolerate looting and stand aside during combat. Friendlies help the party against hostiles; only recruited companions follow the player. Hostiles guard, patrol or hunt locally and threaten intruders, not the entire level at once.
 Invent occupations and ways of life from this particular place, each individual's nature, interests, relationships and history, not a fixed list of trades. Sacred architecture does not require maintenance workers; open country does not require resource disputes. Use the quest as context without inventing quest completion, new keys, rewards, exits or facts the speaker cannot know.
@@ -78,9 +138,14 @@ ${questSeed ? 'Slot 0 is the single NEUTRAL or FRIENDLY quest contact near the a
 Nearby hostiles confront intruders with threatening, scornful trash talk in their own distinct voices. A warning or taunt is dialogue, not an automatic attack or a combat outcome.
 Provide exactly three nonempty dialogue remarks per individual. Let each remark use the words it needs to convey its greeting, threat, personal detail or existing quest lead clearly; there is no word-count limit. No combat stats, items, geometry, markdown or extra prose.`;
     await $.user`Population contract: return exactly ${count} inhabitants with slot IDs ${slots.map(s => s.slot).join(', ')}, each used once, no extra residents or duplicate slots.${encounter ? ' Only skip:true may return an empty inhabitants array.' : ''}
-Each individual needs a UNIQUE short history and personality that suit their race, occupation and allegiance. History <=55 words. Connect it to a personal relationship, choice, regret or achievement, not an identical death story for everyone. Native creatures need not have been human or mortal. These are character background memories, not completed campaign events, current inventory, puzzle answers or privileged knowledge about the party.`;
+Each individual needs a UNIQUE short history and personality that suit their race, occupation and allegiance. Write as much relevant personal history as needed; there is no history word-count limit. Connect it to a personal relationship, choice, regret or achievement, not an identical death story for everyone. Native creatures need not have been human or mortal. These are character background memories, not completed campaign events, current inventory, puzzle answers or privileged knowledge about the party.`;
     const Variety = require('./inhabitantVariety');
     await $.user`${Variety.prompt(Variety.brief(rooms, geoKey, { includeCurrent: !!encounter }), { starting, encounter: !!encounter })}`;
+    }
+    if(local)await $.user`Use each supplied slot.lineage as its exact race, when present. slot.nameSuggestion is optional for NEW random individuals. Vary first names, surnames and sound patterns. Author their own lives and voices. Preserve all fixed quest contacts, cultivated characters and saved names; never rename them.`;
+    else{
+      if(require('./settingLayer').current())await $.user`${GeneratedNames.instructions}`;
+      if(slots.some(s=>s.nameSuggestion))await $.user`OPTIONAL PROCEDURAL NAME SUGGESTIONS: ${JSON.stringify(slots.filter(s=>s.nameSuggestion).map(s=>({slot:s.slot,name:s.nameSuggestion})))}. You may use or improve these unused names for NEW random individuals. They do not replace fixed quest contacts, saved identities, species names or the cultivated campaign cast. Author each individual's own history, personality and voice; no prefab biography is implied.`;
     }
     if (!local) await $.user`This is one bounded batch of a ${totalCount}-resident population. Return ONLY slot IDs ${slots.map(s => s.slot).join(', ')}; do not restart numbering or generate other batches. Previously accepted residents (read-only, never repeat or replace): ${JSON.stringify(accepted.map(row => ({ slot: row.slot, name: row.name, race: row.race, job: row.job, allegiance: row.allegiance, encounterId: row.encounterId })))}.`;
     if (majorityBudgets.length) await $.user`Whole-population majority budget for ONLY this batch: ${majorityBudgets.map(budget => `at least ${budget.minimum} of these ${count} residents must be ${budget.label}`).join('; ')}. This is the minimum needed to keep the original room-wide majority achievable after the remaining batches, not a new fixed role or allegiance for any slot. Keep all starting-temple, evil-temple and quest-contact protections. Previously accepted residents cannot be replaced.`;
@@ -88,16 +153,18 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     return Contracts.request($, { component: 'inhabitants', context: { geoKey, slots: count, slotIds: slots.map(s => s.slot), totalSlots: totalCount }, attempts: 2,
       strictAnswer: true,
       retryHint: 'For each resident, dialogue must be an array of exactly 3 separate, nonblank authored remarks: a greeting or threat, a local remark, and a personal remark. Do not return one combined entry, duplicate a remark, pad missing entries, or split one sentence to fake three remarks. There is no dialogue word-count limit. If a name is duplicated or reserved, invent a genuinely different identity, not a one-letter spelling variant of the rejected name.',
-      maxTokens: encounter ? 1800 : 2200,
-      parameters: { ...(encounter ? { skip: Boolean } : {}), inhabitants: { type: Contracts.list({ slot: { type: Number, minimum: slots[0].slot, maximum: slots.at(-1).slot, enum: slots.map(s => s.slot), multipleOf: 1 }, name: Contracts.nonblankText(70),
+      maxTokens: encounter ? 4000 : 8000,
+      parameters: { ...(encounter ? { skip: Boolean } : {}), inhabitants: { type: Contracts.list({ slot: { type: Number, minimum: slots[0].slot, maximum: slots.at(-1).slot, enum: slots.map(s => s.slot), multipleOf: 1 }, name: encounter?.identity?Contracts.choice([encounter.identity.name]):Contracts.nonblankText(70),
         race: encounter ? Contracts.choice(encounter.races) : Contracts.nonblankText(55), class: Contracts.nonblankText(80), combatRole: Contracts.choice(['Warrior', 'Spellcaster']),
         combatArchetype: Contracts.choice(SpellRules.archetypes), spellPreferences: [String],
         job: Contracts.nonblankText(70), activity: Contracts.nonblankText(140), personality: Contracts.nonblankText(220), voice: Contracts.nonblankText(140),
-        history: Contracts.nonblankText(600), motivation: Contracts.nonblankText(180), routine: Contracts.choice(['guard', 'patrol', 'work', 'forage', 'wander', 'rest']),
+        history: Contracts.nonblankText(), motivation: Contracts.nonblankText(), routine: Contracts.choice(['guard', 'patrol', 'work', 'forage', 'wander', 'rest']),
         dialogue: { type: [Contracts.nonblankText()], minItems: 3, maxItems: 3 }, allegiance: Contracts.choice(['Friendly', 'Neutral', 'Hostile']),
         encounterId: Contracts.nonblankText(40), homeSite: Contracts.choice(homeSites) }), minItems: encounter ? 0 : count, maxItems: count } },
       validate: parsed => {
         if (encounter && parsed.skip === true) {
+          if(encounter.identity)throw Error('Author this existing citizen; do not skip their introduction.');
+          if(accepted.length)throw Error('An accepted encounter must be completed, not partially skipped.');
           if (!Array.isArray(parsed.inhabitants) || parsed.inhabitants.length) throw Error('A skipped encounter must return an empty inhabitants array.');
           return { skipped: true };
         }
@@ -106,10 +173,10 @@ Each individual needs a UNIQUE short history and personality that suit their rac
         const used = new Set([...partyNames, ...usedNames, '__proto__', 'constructor', 'prototype'].map(name => String(name).toLowerCase()));
         const bySlot = new Map();
         for (const row of rows) {
+          if(encounter?.identity&&(row.name!==encounter.identity.name||row.race!==encounter.identity.race))throw Error('Preserve the existing citizen name and race.');
           if (!Number.isInteger(row?.slot) || !slots.some(slot => slot.slot === row.slot) || bySlot.has(row.slot)) throw Error('Unknown or duplicate inhabitant slot: ' + String(row?.slot));
           for (const field of ['name', 'race', 'class', 'job', 'activity', 'personality', 'voice', 'history', 'motivation'])
             if (typeof row[field] !== 'string' || !row[field].trim()) throw Error(`Slot ${row.slot}.${field} must be nonempty text.`);
-          if (row.history.trim().split(/\s+/).length > 55) throw Error(`Slot ${row.slot}.history exceeds 55 words.`);
           if (!Array.isArray(row.dialogue) || row.dialogue.length !== 3 || row.dialogue.some(line =>
             typeof line !== 'string' || !line.trim()))
             throw Error(`Slot ${row.slot}.dialogue requires three nonempty remarks; received ${Array.isArray(row.dialogue) ? row.dialogue.length + ' entries' : typeof row.dialogue}. Author 3 separate nonblank entries, not one combined remark.`);
@@ -118,19 +185,28 @@ Each individual needs a UNIQUE short history and personality that suit their rac
           if (row.allegiance !== undefined && !['Friendly', 'Neutral', 'Hostile'].includes(row.allegiance)) throw Error(`Slot ${row.slot} has an invalid allegiance.`);
           if (row.homeSite !== undefined && !homeSites.includes(row.homeSite)) throw Error(`Slot ${row.slot} has an unknown home site.`);
           if (encounter && !encounter.races.includes(row.race)) throw Error(`Slot ${row.slot} race is outside the encounter catalog.`);
+          const lineage=slots.find(s=>s.slot===row.slot)?.lineage;
+          if(lineage&&row.race!==lineage)throw Error(`Slot ${row.slot} race must match its saved world population sample: ${lineage}.`);
           const name = GeneratedNames.clean(row.name).slice(0, 70).trim();
           if (!name || used.has(name.toLowerCase()) || Pantheon.name(name)) throw Error(`Slot ${row.slot} has an empty, duplicate or reserved name: ${name}`);
           used.add(name.toLowerCase());
           bySlot.set(row.slot, { ...row, name });
         }
-        const descriptors = slots.map(slot => {
+        const descriptors = [];
+        for (const slot of slots) {
           const row = bySlot.get(slot.slot);
+          const group = Balance.constraint(slot, [...accepted, ...descriptors]);
+          if (group.allegiance && row.allegiance && row.allegiance !== group.allegiance)
+            throw Error(`Slot ${slot.slot} must preserve its routine cohort allegiance: ${group.allegiance}.`);
+          if (slot.peaceful && row.allegiance === 'Hostile') throw Error(`Slot ${slot.slot} is a peaceful resident, not an unrelated solo hostile.`);
           const fixed = starting || hostileTemple || !encounter && slot.slot < 3;
           const allegiance = !hostileTemple && questSeed && slot.slot === 0 && row.allegiance === 'Friendly' ? 'Friendly' :
-            fixed ? slot.allegiance : row.allegiance || slot.allegiance;
-          return { ...row, ...slot, encounterId: row.encounterId || slot.encounterId, homeSite: row.homeSite || 'commons', allegiance, state: allegiance, profile: { name: row.name,
-            personality: row.personality, voice: row.voice, history: row.history, motivation: row.motivation, source: 'llm' } };
-        });
+            group.allegiance || (fixed ? slot.allegiance : row.allegiance || (slot.peaceful ? 'Neutral' : slot.allegiance));
+          descriptors.push({ ...row, ...slot, encounterId: slot.serviceRole ? slot.encounterId : group.encounterId ||
+            (slot.cohort ? `${slot.cohort}:${row.encounterId || slot.encounterId}` : row.encounterId || slot.encounterId),
+            homeSite: group.homeSite || row.homeSite || 'commons', allegiance, state: allegiance, profile: { name: row.name,
+            personality: row.personality, voice: row.voice, history: row.history, motivation: row.motivation, source: 'llm' } });
+        }
         for (const budget of majorityBudgets) if (descriptors.filter(budget.qualifies).length < budget.minimum)
           throw Error(`This batch needs at least ${budget.minimum} ${budget.label} residents to preserve a majority of ${budget.label} residents in the complete population.`);
         return { descriptors };
@@ -167,7 +243,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     console.error('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'failed', reason: error.message, response: response.slice(0, 2000) }));
     throw new Error(`Inhabitant generation failed in ${roomName}: ${error.message}`, { cause: error });
   }
-  const normalized = Inhabitants.normalizeDescriptors(descriptors, { limit: starting ? 4 : indoor ? 10 : 20, starting, excluded: partyNames });
+  const normalized = Inhabitants.normalizeDescriptors(descriptors, { limit: starting ? 4 : indoor ? Math.max(10,routineResidents) : 20, starting, excluded: partyNames });
   const characters = [], equipment = [];
   for (const descriptor of normalized) {
     const level = rules.level(), hp = Array.from({ length: level }, () => rules.random(1, SpellRules.nativeHp[descriptor.combatArchetype] + 1)).reduce((a,b) => a+b, 0);
@@ -185,15 +261,22 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     characters.push(actor);
   }
   const sheets = characters.map(actor => `${actor.Name}\n      ${actor.Sex}\n      ${actor.Race}\n      ${actor.Class}\n      Level: ${actor.Level}\n      AC: ${actor.AC}\n      XP: ${actor.XP}\n      HP: ${actor.HP}\n      MaxHP: ${actor.MaxHP}\n      Equipped: ${Object.entries(actor.Equipped).map(([slot,item]) => `${slot}: ${item?.name || 'None'}`).join(', ')}\n      Attack: ${actor.Attack}\n      Damage: ${actor.Damage}\n      Armor: ${actor.Armor}\n      Magic: ${actor.Magic}\n      State: ${actor.State}`).join('\n');
-  const population = Inhabitants.createPopulation(geoKey, normalized, { indoor, starting });
+  const population = Inhabitants.createPopulation(geoKey, normalized, { indoor, starting,groupLimit:6,
+    ...(floorProgram || routineResidents > 8 ? {residentLimit:routineResidents} : {}) });
+  if (party.length && !encounter?.identity) population.encounterBalance = { version: 1, settled, partySize: Balance.partySummary(party).size };
+  if(venue&&!encounter)population.venue={version:1,id:venue.id,type:venue.type};
+  if(venue&&!encounter)for(const [i,actor]of Object.values(population.actors).entries())actor.occupation={
+    ...require('./cityActivities').assignment(venue.type,i,`${geoKey}:${actor.name}`,venue),activity:actor.activity,duty:actor.job,routine:actor.routine};
   population.authoredAt = Date.now();
   if (village) population.settlement = { id: campaignSetting.village.id, hub: campaignSetting.village.venue === 'commons' };
   Inhabitants.sync(population, Inhabitants.parseBlocks(sheets));
   if (questSeed && ['Neutral', 'Friendly'].includes(normalized[0]?.allegiance)) population.questIntroduction = {
     questId: String(Inhabitants.hash(String(quest).trim())), speaker: normalized[0].name, status: 'pending',
     hook: String(normalized[0].dialogue[0] || '') };
-  console.info('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'generated', names: normalized.map(actor => actor.name), starting }));
+  console.info('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'generated', names: normalized.map(actor => actor.name), starting,
+    ...(population.encounterBalance ? {partySize:population.encounterBalance.partySize,settled,
+      hostileGroups:population.groups.filter(group=>population.actors[group.members[0]]?.allegiance==='Hostile').map(group=>group.members.length)} : {}) }));
   return { population, sheets, equipment };
 }
 
-module.exports = { generateInhabitants, needsQuestIntroduction };
+module.exports = { generateInhabitants, needsQuestIntroduction, needsStartingResidents };

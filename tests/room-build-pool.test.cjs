@@ -137,7 +137,10 @@ test('the PC supplies immutable per-run leases and all three concurrent destinat
     assert.equal(job.assignment.authority, 'pc-game-server'); assert.equal(job.assignment.leaseId, job.id);
     assert.equal(job.assignment.runId, job.runId); assert.equal(job.assignment.destination, job.key);
     assert.ok(job.assignment.readOnly.includes('0,0,0'));
-    assert.deepEqual(job.assignment.writeSet, [job.key]);
+    assert.equal(job.assignment.writeSet[0], job.key);
+    assert.ok(job.assignment.writeSet.every(key => key === job.key || !s.db()[key]), 'Reserve only unnamed frontier slots, not other registered rooms.');
+    for (const other of s.spawned.filter(row => row.job !== job))
+      assert.ok(job.assignment.writeSet.every(key => !other.job.assignment.writeSet.includes(key)));
     assert.equal(job.assignment.assignments.length, 3);
     assert.deepEqual(new Set(job.assignment.assignments.map(row => row.destination)), new Set(['0,1,0', '1,0,0', '0,-1,0']));
     assert.ok(Object.isFrozen(job.assignment)); assert.ok(Object.isFrozen(job.assignment.assignments));
@@ -199,15 +202,16 @@ test('visited-source scratch normalization and live state changes do not discard
 
 test('genuine shared topology conflicts automatically retry on a fresh snapshot and joiners keep the same logical job', async t => {
   const s = setup(t, { retryOptions: { retryDelayMs: 0 } }); s.queue(['north', 'east']); await wait(() => s.workers.length === 2);
-  s.emit(0, 'complete', artifact => { artifact.rooms['1,1,0'] = { name: 'Accepted Shared Road' }; }); s.done(0);
+  const shared = '900,900,0';
+  s.emit(0, 'complete', artifact => { artifact.rooms[shared] = { name: 'Accepted Shared Road' }; }); s.done(0);
   const oldId = s.spawned[1].job.id, oldWorker = s.workers[1];
   let joined = false; const joining = s.service.join('1,0,0').then(() => { joined = true; });
-  s.emit(1, 'complete', artifact => { artifact.rooms['1,1,0'] = { name: 'Conflicting Road' }; });
+  s.emit(1, 'complete', artifact => { artifact.rooms[shared] = { name: 'Conflicting Road' }; });
   assert.equal(joined, false); assert.equal(s.db()['1,0,0'].preparedBuild, undefined);
   await wait(() => s.workers.length === 3);
   const job = s.spawned[2].job;
   assert.notEqual(job.id, oldId); assert.equal(job.attempt, 2);
-  assert.equal(job.base['1,1,0'].name, 'Accepted Shared Road');
+  assert.equal(job.base[shared].name, 'Accepted Shared Road');
   oldWorker.emit('message', { type: 'done' }); oldWorker.emit('exit', 1);
   assert.equal(s.service.status().find(row => row.key === '1,0,0').phase, 'running');
   s.emit(2); s.done(2); await joining; assert.equal(joined, true);
@@ -309,9 +313,10 @@ test('three independent stale snapshots merge in all completion orders without r
 
 test('different shared-neighbor proposals discard the loser atomically and require explicit fresh retry', async t => {
   const s = setup(t); s.queue(); await wait(() => s.workers.length === 3);
-  s.emit(0, 'complete', a => { a.rooms['1,1,0'] = { name: 'First Shared Road' }; }); s.done(0);
+  const shared = '900,900,0'; // An unexpected proposal outside all planned one-hop reservations.
+  s.emit(0, 'complete', a => { a.rooms[shared] = { name: 'First Shared Road' }; }); s.done(0);
   const accepted = s.state.getRoomNameDatabase(), loser = s.spawned[1].job;
-  s.emit(1, 'complete', a => { a.rooms['1,1,0'] = { name: 'Different Shared Road' }; });
+  s.emit(1, 'complete', a => { a.rooms[shared] = { name: 'Different Shared Road' }; });
   assert.equal(s.state.getRoomNameDatabase(), accepted);
   assert.equal(s.dungeons[loser.key], undefined);
   const rejected = s.service.status().find(j => j.key === loser.key);
@@ -321,7 +326,7 @@ test('different shared-neighbor proposals discard the loser atomically and requi
   assert.deepEqual(s.queue(), []);
   assert.deepEqual(s.queue(['east'], true), [loser.key]); await wait(() => s.workers.length === 4);
   assert.notEqual(s.spawned[3].job.id, loser.id);
-  assert.equal(s.spawned[3].job.base['1,1,0'].name, 'First Shared Road');
+  assert.equal(s.spawned[3].job.base[shared].name, 'First Shared Road');
   s.emit(3); s.done(3); assert.equal(s.db()[loser.key].preparedBuild.ready, true);
 });
 
@@ -350,8 +355,9 @@ test('city coordinate namespaces conflict even when both workers propose the sam
 
 test('a new one-way exit into another in-flight target is rejected without changing topology', async t => {
   const s = setup(t); s.queue(); await wait(() => s.workers.length === 3);
+  const before = structuredClone(s.db()['0,1,0'].exits);
   s.emit(0, 'complete', a => { a.rooms['0,1,0'].exits = { southeast: { targetCoordinates: '1,0,0' } }; });
-  assert.equal(s.db()['0,1,0'].exits, undefined);
+  assert.deepEqual(s.db()['0,1,0'].exits, before);
   assert.match(s.service.status()[0].reason, /lacks a reserved return/);
 });
 
@@ -472,9 +478,10 @@ test('cache setters cannot mutate worker payloads and break replay identity', as
 test('wrong job or run identities are rejected before installing any checkpoint state', async t => {
   for (const field of ['jobId','runId']) {
     const s = setup(t); s.queue(['north']); await wait(() => s.workers.length === 1);
+    const writes = s.writes.length;
     const message = { type: 'checkpoint', artifact: makeArtifact(s.spawned[0].job), [field]: 'wrong' };
     s.workers[0].emit('message', message);
-    assert.equal(s.writes.length, 0); assert.equal(s.service.status()[0].phase, 'discarded'); s.service._reset();
+    assert.equal(s.writes.length, writes); assert.equal(s.service.status()[0].phase, 'discarded'); s.service._reset();
   }
 });
 

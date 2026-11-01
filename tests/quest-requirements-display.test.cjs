@@ -42,7 +42,7 @@ test('the display exposes real puzzle, kill and exit gates even when prose omits
       { check: 'monster_hp_zero', value: 'Bastion Guardian' }, { check: 'exit_open', coords: '0,1,0', direction: 'west' }] };
   const text = Q.describeQuestRequirements(task, database);
   assert.ok(text.includes(`Solve the physical puzzle "${puzzle.title}" in Hall of Quiet Descent (0,1,0).`));
-  assert.ok(text.includes('Defeat Bastion Guardian in Hall of Quiet Descent (0,1,0) (HP must be 0 or below).'));
+  assert.ok(text.includes('Defeat Bastion Guardian in Hall of Quiet Descent (0,1,0) (reach 0 HP; recorded defeat still counts after healing).'));
   assert.ok(text.includes('Open the west exit in Hall of Quiet Descent (0,1,0) (it must be unlocked).'));
   assert.doesNotMatch(text, /goal|solution|diagram|mechanismId/);
 });

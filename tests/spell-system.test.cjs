@@ -100,6 +100,33 @@ test('healing caps HP; wards and curses alter actual regular attack results and 
   assert.equal(S.penalty(g.state, g.actor('Enemy')), 2); S.advance(g.state); assert.equal(S.penalty(g.state, g.actor('Enemy')), 2);
   S.advance(g.state); assert.equal(S.penalty(g.state, g.actor('Enemy')), 0);
 });
+
+test('party may deliberately heal neutral, hostile or downed room residents without changing allegiance', () => {
+  for (const condition of ['Neutral', 'Hostile', 'Dying', 'Unconscious']) {
+    const f = fixture({ item: R.scroll('mend', condition) }), hp = ['Dying', 'Unconscious'].includes(condition) ? 0 : 40;
+    f.state.setUpdatedGameConsole(S.changeActor(f.state.getUpdatedGameConsole(), 'Enemy', s => S.stat(S.stat(s, 'HP', hp), 'State', condition)));
+    const choice = S.choices(f.state, 'PC', []).find(c => c.target === 'Enemy' && c.effect === 'heal');
+    assert.ok(choice, condition + ' is offered in the combat prompt');
+    const result = S.cast(f.state, null, f.input('mend', 'Enemy'), { random: () => 3 });
+    assert.equal(result.error, undefined, condition); assert.equal(f.actor('Enemy').hp, hp + 4);
+    if (hp > 0) assert.equal(f.actor('Enemy').state, condition);
+  }
+});
+
+test('deliberate mercy healing preserves target validation and AI never heals the opposing team', () => {
+  const f = fixture({ item: R.scroll('mend', 'pc'), monsterItem: R.scroll('mend', 'enemy') });
+  f.state.setUpdatedGameConsole(S.changeActor(f.state.getUpdatedGameConsole(), 'Enemy', s => S.stat(s, 'HP', 20)));
+  assert.equal(S.choices(f.state, 'PC', [], { monster: true }).some(c => c.target === 'Enemy' && c.effect === 'heal'), false);
+  assert.equal(S.choices(f.state, 'Enemy', [], { monster: true }).some(c => c.target === 'Ally' && c.effect === 'heal'), false);
+  const input = f.input('mend', 'Enemy');
+  f.d.cells['3,2'].tile = 'wall'; assert.match(S.cast(f.state, null, input).error, /line of sight/);
+  f.d.cells['3,2'].tile = 'floor';
+  const roster = JSON.parse(f.state.getCombatCharactersString()); roster.find(a => a.name === 'Enemy').mazeRoomKey = '2,0,0';
+  f.state.setCombatCharactersString(JSON.stringify(roster)); assert.match(S.cast(f.state, null, input).error, /same room/);
+  roster.find(a => a.name === 'Enemy').mazeRoomKey = f.d.geoKey; roster.find(a => a.name === 'Enemy').discoveryState = 'pending';
+  f.state.setCombatCharactersString(JSON.stringify(roster)); assert.ok(S.cast(f.state, null, input).error);
+  assert.equal(f.pool().items[input.itemId].remaining, 1, 'Rejected casts spend no charges');
+});
 test('fireball applies saves, friendly fire and occlusion using actual tile positions', () => {
   const f = fixture({ item: { magic: 3 } }), input = f.input('fireball');
   const result = S.cast(f.state, null, input, { combat: true, random: sides => sides === 20 ? 20 : 6 });

@@ -37,14 +37,15 @@ function rememberPlayerInput(state, input, names, population) {
     entry.player = [...entry.player.filter(s => s !== value), value].slice(-2);
   }
 }
-function memoryContext(state, names, population, maxChars = 3600) {
+function memoryContext(state, names, population, maxChars) {
+  const policy=require('./dialogueContextPolicy'),limits=policy.limits();maxChars ??= limits.ledgerChars;
   const ledger = state.getDialogueMemory(), result = [];
-  for (const name of [...new Set(names)].slice(0, 8)) {
+  for (const name of [...new Set(names)].slice(0, limits.people)) {
     const record = population?.actors?.[name] || population?.companions?.[name];
     const memory = Object.hasOwn(ledger.characters, name) ? ledger.characters[name] : record?.memory;
     if (!memory) continue;
     const row = { name, recollection: { first: memory.first, recent: memory.recent, notes: memory.notes, player: memory.player,
-      ...(memory.profile || record?.profile ? { profile: Profiles.compact(memory.profile || record.profile) } : {}) } };
+      ...(memory.profile || record?.profile ? { profile: policy.background(memory.profile || record.profile) } : {}) } };
     if (JSON.stringify([...result,row]).length > maxChars) break;
     result.push(row);
   }

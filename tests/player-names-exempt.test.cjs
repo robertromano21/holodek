@@ -20,10 +20,10 @@ test('a player can name their character Mortacia in a homebrew world', () => {
   } finally { B.setPlayerText('party', null); Setting.setActive(null); }
 });
 
-test('the denylist still applies to AI-generated homebrew content', () => {
+test('generated names are allowed while inherited template text still follows the chosen world', () => {
   const b = Setting.localBible('a frontier mining town on a red moon');
-  assert.throws(() => Setting.validateBible({ ...b, history: 'Founded when Mortacia fell.' }), /leaks/);
-  assert.deepEqual(B.lintGenerated({ factions: [{ name: 'The Arithus Pact' }] }), ['Arithus']);
+  assert.doesNotThrow(() => Setting.validateBible({ ...b, history: 'Founded when Mortacia fell.' }));
+  assert.deepEqual(B.lintGenerated({ factions: [{ name: 'The Arithus Pact' }] }), []);
   const body = { messages: [{ role: 'system', content: 'Mortacia watches.' }] };
   Setting.setActive(b); try { Setting.applyBody(body); } finally { Setting.setActive(null); }
   assert.doesNotMatch(body.messages[0].content, /Mortacia/, 'with no player using the name, it is renamed');

@@ -7,12 +7,23 @@ const modules = ['portico', 'colonnade', 'vaulted_bay', 'rotunda_section', 'sanc
   'cloister', 'apsidal_chapel', 'switchback_stair', 'split_raised_gallery', 'temple', 'basilica', 'rotunda', 'bathhouse', 'castle', 'catacomb', 'ruins', 'forum', 'domus', 'villa', 'warehouse', 'insula', 'infrastructure'];
 function list(item, min, max = min) { return { type: C.list(item), minItems: min, maxItems: max }; }
 async function generate($, { roomDescription, puzzleDesc, classification, size, customTiles, generation, sceneSpec }) {
+  const approved = require('./genreAssetPolicy').catalog(sceneSpec);
+  const scoped = approved.strict && !approved.classical;
+  const roofs = scoped ? approved.roofs : roof;
   const indoor = classification?.indoor === true, ids = (customTiles || []).map(tile => tile?.type || tile?.name).filter(Boolean);
+  const design = require('./genreLevelDesign');
+  const profile = design.forRoom(sceneSpec || {}, { seed: generation?.seed });
   const data = { description: roomDescription, indoor, size, biome: classification?.biome, architecture: sceneSpec?.architecture,
+    venue:sceneSpec?.city?.venue,floorProgram:sceneSpec?.city?.floorProgram,
+    savedBuilding:sceneSpec?.city?.architecture?{lobby:sceneSpec.city.architecture.lobby,circulation:sceneSpec.city.architecture.circulation,
+      width:sceneSpec.city.architecture.plan.width,depth:sceneSpec.city.architecture.plan.depth}:undefined,
     features: classification?.features, levelFeatures: sceneSpec?.level?.layoutFeatures, exits: sceneSpec?.exits,
+    levelDesign: profile ? design.directive(profile) : undefined,
     storey: sceneSpec?.worldContext?.fortifiedFloor, puzzle: sceneSpec?.puzzleMechanism ? 'Dedicated builder owns controls; reserve accessible workshop space, no duplicate devices.' : puzzleDesc };
-  const brief = `Design only this room's geometry from saved facts: ${JSON.stringify(data)}. All positions and footprint dimensions are normalized 0..1; widths/heights of modules and corridors are grid tiles. Spawn (0.5,0.75) stays clear. Invent a fresh, connected layout, not the example plan. One walkable surface per XY cell, supported stairs/ramps for elevation changes. Natural caves/mines/ice/lava tubes have solid ceilings, dry connected routes and no compulsory classical shrine. Built interiors need coherent supported architecture matching this room. A declared upper storey means no sky court. Outdoor terrain remains outdoor with distinct near/mid/far scenery and bounded buildings, never a dungeon maze. No actors, items, new exits or quest state.`;
+  const brief = `Design only this room's geometry from saved facts: ${JSON.stringify(data)}. All positions and footprint dimensions are normalized 0..1; widths/heights of modules and corridors are grid tiles. For a named venue the normalized plan fills its supplied physical envelope, not the whole district. Give a temple a broad tall nave and an arena a broad competition floor; keep service rooms secondary. ${require('./cityLife').guidance(sceneSpec?.city?.venue)} Spawn (0.5,0.75) stays clear. Invent a fresh, connected layout, not the example plan. One walkable surface per XY cell, supported stairs/ramps for elevation changes. Natural caves/mines/ice/lava tubes have solid ceilings, dry connected routes and no compulsory classical shrine. Built interiors need coherent supported architecture matching this room. A declared upper storey means no sky court. Outdoor terrain remains outdoor with distinct near/mid/far scenery and bounded buildings, never a dungeon maze. No actors, items, new exits or quest state.`;
   async function request(component, parameters, arrays, context = {}) {
+    await $.user(brief + '\nApproved assets: ' + JSON.stringify({ genres: approved.genres, roofs, modules: approved.modules }) +
+      '\nAccepted geometry to preserve: ' + JSON.stringify(context));
     const result = await C.request($, { component: 'blueprint-' + component, parameters,
       localWork: { brief: brief + '\nAccepted geometry to preserve: ' + JSON.stringify(context), arrays },
       validate: value => value });
@@ -20,20 +31,24 @@ async function generate($, { roomDescription, puzzleDesc, classification, size, 
     return result.value;
   }
   const header = await request('concept', { base: { floor: num(-4, 4), ceil: num(3, 9) },
-    ...(indoor ? { roomCount: { type: Number, enum: [6, 7, 8, 9, 10, 11, 12] } } : {
+    ...(indoor ? { roomCount: { type: Number, enum: sceneSpec?.city?.floorProgram?[Math.max(4,Math.min(12,sceneSpec.city.floorProgram.units+2))]:sceneSpec?.city?.venue&&['shop','home','bar','clinic'].includes(sceneSpec.city.venue.type)?[3,4,5]:[6, 7, 8, 9, 10, 11, 12] } } : {
       landformCount: { type: Number, enum: [2, 3, 4, 5, 6] }, buildingCount: { type: Number, enum: [0, 1, 2, 3] } }) }, {});
   let result;
   if (indoor) {
-    const spaces = await request('spaces', { rooms: list({ ...rectangle,
-      role: C.choice(['entrance', 'hall', 'chapel', 'sanctum', 'shrine', 'rotunda', 'courtyard', 'chamber', 'gallery', 'crypt', 'keep']),
+    const room = { ...rectangle,
       shape: C.choice(['hall', 'round', 'irregular']), clearance: num(3, 9), floor: num(-3, 3),
-      roofStyle: C.choice(roof), columnOrder: C.choice(['doric', 'ionic', 'corinthian']) }, header.roomCount) },
-      { rooms: { count: header.roomCount, max: 12, batch: 2 } }, header);
-    if (!spaces.rooms.some(room => room.role === 'entrance')) throw Error('Blueprint needs an authored entrance room.');
+      roofStyle: C.choice(roofs), columnOrder: C.choice(scoped ? ['plain'] : ['doric', 'ionic', 'corinthian']) };
+    // Author the entrance explicitly: array batches must never omit this required room.
+    const authored = await request('spaces', {
+      entrance: { ...room, role: C.choice(['entrance']) },
+      rooms: list({ ...room, role: C.choice(scoped ? ['hall', 'courtyard', 'chamber', 'gallery'] :
+        ['hall', 'chapel', 'sanctum', 'shrine', 'rotunda', 'courtyard', 'chamber', 'gallery', 'crypt', 'keep']) }, header.roomCount - 1)
+    }, { rooms: { count: header.roomCount - 1, max: 11, batch: 2 } }, header);
+    const spaces = { rooms: [authored.entrance, ...authored.rooms] };
     const index = { type: Number, enum: Array.from({ length: spaces.rooms.length }, (_, i) => i) };
     const routes = await request('connections', {
       corridors: list({ fromRoom: index, toRoom: index, style: C.choice(['L', 'H', 'V']), width: { type: Number, enum: [2, 3, 4] }, ramp: Boolean }, header.roomCount - 1, header.roomCount + 3),
-      modules: list({ type: C.choice(modules), room: index, ...xy, width: num(3, 25), height: num(5, 32), roofStyle: C.choice(roof) }, 0, 3)
+      modules: list({ type: C.choice(scoped ? approved.modules : modules), room: index, ...xy, width: num(3, 25), height: num(5, 32), roofStyle: C.choice(roofs) }, 0, 3)
     }, { corridors: { min: header.roomCount - 1, max: header.roomCount + 3, batch: 3 }, modules: { min: 0, max: 3, batch: 1 } }, spaces);
     result = { base: header.base, indoorPlan: { roomCount: header.roomCount, rooms: spaces.rooms, corridors: routes.corridors,
       modules: routes.modules, heightLevels: [...new Set(spaces.rooms.map(room => room.floor))] } };
@@ -41,8 +56,8 @@ async function generate($, { roomDescription, puzzleDesc, classification, size, 
     const terrain = await request('terrain', { landforms: list({ kind: C.choice(['hill', 'ridge', 'mountain', 'mesa', 'butte', 'hoodoo', 'terraces', 'basin', 'cliff', 'canyon', 'thermal_basin', 'caldera']),
       ...xy, radiusX: num(.03, .7), radiusY: num(.03, .7), rise: num(1, 60), angle: num(0, 359) }, header.landformCount) },
       { landforms: { count: header.landformCount, max: 6, batch: 2 } }, header);
-    const structures = await request('buildings', { buildings: list({ type: C.choice(['temple', 'castle', 'rotunda', 'bathhouse', 'catacomb', 'ruins', 'basilica', 'forum', 'villa', 'domus', 'warehouse', 'insula']),
-      variant: C.choice(['gatehouse', 'stone-keep', 'shell-keep', 'motte-bailey', 'concentric', 'watchtower']), ...rectangle, ruined: Boolean }, header.buildingCount) },
+    const structures = await request('buildings', { buildings: list({ type: C.choice(scoped ? approved.buildings : ['temple', 'castle', 'rotunda', 'bathhouse', 'catacomb', 'ruins', 'basilica', 'forum', 'villa', 'domus', 'warehouse', 'insula']),
+      ...(scoped ? {} : { variant: C.choice(['gatehouse', 'stone-keep', 'shell-keep', 'motte-bailey', 'concentric', 'watchtower']) }), ...rectangle, ruined: Boolean }, header.buildingCount) },
       { buildings: { count: header.buildingCount, max: 3, batch: 1 } }, terrain);
     const routes = await request('paths', { paths: list({ from: { type: [num(0, 1)], minItems: 2, maxItems: 2 },
       to: { type: [num(0, 1)], minItems: 2, maxItems: 2 }, widthTiles: num(3, 8), ramp: { type: Boolean, enum: [true] } }, 3, 8) },

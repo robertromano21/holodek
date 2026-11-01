@@ -14,6 +14,17 @@ test('expanded combat window uses the available width from a one-inch left margi
   }
 });
 
+test('combat map stays below inventory, item dialogs and logs rather than hiding other windows', () => {
+  const f = fixture();
+  const source = fs.readFileSync(require.resolve('../assets/combatTacticalUi'), 'utf8');
+  const html = fs.readFileSync(require.resolve('../assets/index.html'), 'utf8');
+  assert.match(source, /zIndex: '1000'/);
+  assert.doesNotMatch(html, /combat-compact-map[^}]*visibility: hidden/);
+  const inventoryLayer = Number(html.match(/#inventory-popup \{[^}]*z-index: (\d+)/)[1]);
+  assert.ok(inventoryLayer > 1000);
+  assert.equal(f.ui.active(), true);
+});
+
 test('desktop combat uses the full free center, beside every party avatar and above lower shortcuts', () => {
   for (const zoom of [1, 1.3125, 1.75, 2]) for (const partyTop of [700, 350]) {
     const rects = { party: { left: 8, right: 330, top: partyTop, bottom: 1160 },
@@ -32,6 +43,23 @@ test('small screens stack the map above the complete party controls', () => {
   const d = Tactical.combatBounds(540, 950, 1.75, { party: { left: 8, right: 280, top: 650 }, command: { left: 10, right: 530, top: 820 } });
   assert.equal(d.compact, true); assert.equal(d.stacked, true);
   assert.equal(d.left * 1.75, 12); assert.equal((d.top + d.height) * 1.75, 638);
+});
+
+test('horizontal resizing never reserves an empty ledger half in the exploration map', () => {
+  const f = fixture({ active: false });
+  for (const width of [170, 300, 479, 480, 650]) {
+    f.ui.resized(width);
+    assert.equal(f.box.classList.contains('combat-stacked'), false, 'Exploration width ' + width);
+  }
+  f.ui.receive(f.state);
+  f.ui.resized(300); assert.equal(f.box.classList.contains('combat-stacked'), true, 'Narrow active combat still stacks the ledger.');
+  f.ui.resized(650); assert.equal(f.box.classList.contains('combat-stacked'), false);
+  f.ui.resized(300);
+  f.ui.receive({ active: null });
+  f.ui.resized(300); assert.equal(f.box.classList.contains('combat-stacked'), false, 'Ending combat restores a full-height map.');
+  const html = fs.readFileSync(require.resolve('../assets/index.html'), 'utf8');
+  assert.doesNotMatch(html, /#combat-popup\.combat-stacked #combat-container\s*\{/);
+  assert.match(html, /#combat-popup\.combat-expanded\.combat-stacked #combat-container\s*\{/);
 });
 
 test('ledger summarizes authoritative outcomes, orders initiative and keeps raw rolling out', () => {
@@ -57,7 +85,7 @@ test('older running servers get an outcome-only fallback without changing the fu
 function fixture({ active = true, zoom = 1 } = {}) {
   const strokes = [], fills = [], submitted = [], opened = [], requests = [], notices = [], zooms = [];
   const actors = [{ name: 'PC', type: 'pc', mazeX: 4, mazeY: 4 },
-    { name: 'Giant', type: 'monster', mazeX: 5, mazeY: 4, sprite: { spec: { stature: { scale: 3 } } } },
+    { name: 'Giant', type: 'monster', state: 'Hostile', mazeX: 5, mazeY: 4, sprite: { spec: { stature: { scale: 3 } } } },
     { name: 'Ally', type: 'npc', mazeX: 4, mazeY: 5 },
     { name: 'Undiscovered', type: 'monster', mazeX: 6, mazeY: 4, discoveryState: 'pending' },
     { name: 'Elsewhere', type: 'npc', mazeX: 3, mazeY: 4, mazeRoomKey: '9,9,0' }];
@@ -72,8 +100,11 @@ function fixture({ active = true, zoom = 1 } = {}) {
     cameras: { main: { zoom, setZoom(value) { this.zoom = value; zooms.push(value); } } },
     make: { graphics: () => gfx }, renderRT: { draw() {}, clear() {} }, actorRT: { draw() {}, clear() {} } };
   const nodes = new Map();
-  const element = () => ({ style: {}, children: [], setAttribute() {}, appendChild(child) { this.children.push(child); if (child.id) nodes.set(child.id, child); }, remove() { nodes.delete(this.id); } });
-  const box = { ...element(), getBoundingClientRect: () => ({ width: 0 }), classList: { add() {}, toggle() {}, remove() {} } };
+  const element = () => ({ style: {}, children: [], addEventListener() {}, setAttribute() {}, appendChild(child) { this.children.push(child); if (child.id) nodes.set(child.id, child); }, remove() { nodes.delete(this.id); } });
+  const classes = new Set();
+  const box = { ...element(), getBoundingClientRect: () => ({ width: 0 }), classList: {
+    add(...values) { values.forEach(v => classes.add(v)); }, remove(...values) { values.forEach(v => classes.delete(v)); },
+    toggle(value, force) { if (force ?? !classes.has(value)) classes.add(value); else classes.delete(value); }, contains: value => classes.has(value) } };
   const status = {};
   const root = { combatCharacters: actors, innerWidth: 1680, innerHeight: 950,
     CombatTurnUi: { receive() {}, submit(...args) { submitted.push(args); }, notice(s) { notices.push(s); } },
@@ -95,8 +126,37 @@ function fixture({ active = true, zoom = 1 } = {}) {
     return { x: 2 * (draw.centerX + dx * Math.cos(draw.combatAngle) - dy * Math.sin(draw.combatAngle)),
       y: 2 * (draw.centerY + dx * Math.sin(draw.combatAngle) + dy * Math.cos(draw.combatAngle)) };
   };
-  return { ui, actors, draw, scene, status, project, strokes, fills, submitted, opened, requests, notices, zooms, state };
+  return { ui, actors, draw, scene, root, box, status, project, strokes, fills, submitted, opened, requests, notices, zooms, state };
 }
+
+test('the real roster merge paints first-round outlines when initiative arrives before actors', () => {
+  const f = fixture({ active: false }), source = fs.readFileSync('assets/game.js', 'utf8');
+  f.root.combatCharacters = [];
+  f.ui.receive({ active: { kind: 'combat', round: 1 } });
+  const method = source.slice(source.indexOf('    updatePositions(characters) {'), source.indexOf('    centerCameraOn(x, y, force = false) {'));
+  const copy = source.slice(source.indexOf('function copyCombatPersistentFields('), source.indexOf('function isDungeonActorPresent('));
+  const visual = () => ({ setOrigin() {}, setVisible() {}, destroy() {} });
+  let paints = 0, sleeps = 0;
+  Object.assign(f.scene, { characters: {}, add: { text: visual }, time: { delayedCall() { sleeps++; return { remove() {} }; } },
+    redrawCombatRT() { paints++; f.ui.drawOverlay(f.scene, f.draw); } });
+  const context = { window: f.root, isDungeonActorPresent: a => a.state !== 'Dead',
+    ensurePCSpriteInCombatList() {}, ensureKnownSpritesInCombatList() {}, cloneSpritePayload: s => s,
+    refreshCombatVisualIfStale() {}, applyCombatVisualFrame() {}, moveCombatVisualTo() {},
+    syncPartyMazeToCombatPositions() {}, setCombatVisualOverlayVisible() {}, setCombatPlayerTokenOwner() {}, createCombatVisual: visual };
+  const update = vm.runInNewContext(copy + '\n({' + method + '})', context).updatePositions;
+  const incoming = f.actors.slice(0, 3).map(a => ({ ...a, hp: 10, state: a.type === 'monster' ? 'Hostile' : 'Friendly',
+    x: a.mazeX, y: a.mazeY, mazeRoomKey: f.draw.dungeon.geoKey }));
+  const before = JSON.stringify(incoming);
+  update.call(f.scene, incoming);
+  assert.equal(paints, 1); assert.equal(sleeps, 1);
+  assert.equal(f.strokes.filter(s => s.color === 0xef766c).length, 1);
+  assert.equal(f.strokes.filter(s => s.color === 0x67d5ef).length, 2);
+  assert.equal(f.root.combatCharacters[1].state, 'Hostile', 'First-appearance entries retain their team metadata');
+  assert.equal(JSON.stringify(incoming), before, 'Painting never repositions the encounter');
+  incoming[1].state = 'Neutral'; incoming[1].allegiance = 'Neutral';
+  f.strokes.length = 0; update.call(f.scene, incoming);
+  assert.equal(f.strokes.filter(s => s.color === 0xef766c).length, 0, 'An authoritative mercy change repaints immediately');
+});
 
 test('combat-only grid spacing grows without changing sprite zoom or world coordinates', () => {
   const f = fixture({ active: false }), original = JSON.stringify(f.actors);
@@ -171,6 +231,27 @@ test('logical occupied cells do not grow with sprite size or reveal undiscovered
   assert.equal(JSON.stringify(f.actors), before);
 });
 
+test('team outlines exist during first-round initiative and do not flip during an enemy turn', () => {
+  const f = fixture({ active: false });
+  f.ui.receive({ active: { kind: 'combat', round: 1, ledger: { initiative: [], entries: [] } } });
+  f.ui.drawOverlay(f.scene, f.draw);
+  assert.equal(f.strokes.filter(s => s.color === 0xef766c).length, 1);
+  assert.equal(f.strokes.filter(s => s.color === 0x67d5ef).length, 2);
+  f.strokes.length = 0;
+  f.ui.receive({ active: { kind: 'combat', turn: { combatant: 'Giant', targets: ['PC', 'Ally'] } } });
+  f.ui.drawOverlay(f.scene, f.draw);
+  assert.equal(f.strokes.filter(s => s.color === 0xef766c).length, 1);
+  assert.equal(f.strokes.filter(s => s.color === 0x67d5ef).length, 2);
+});
+
+test('a health or roster refresh wakes and redraws the map without moving any actors', () => {
+  const f = fixture(), before = JSON.stringify(f.actors); let wakes = 0, draws = 0;
+  f.scene.sys.game.loop.wake = () => wakes++;
+  f.scene.redrawCombatRT = () => draws++;
+  f.ui.refreshHealth();
+  assert.equal(wakes, 1); assert.equal(draws, 1); assert.equal(JSON.stringify(f.actors), before);
+});
+
 test('hover outlines exactly one rotated square, including after zoom; leaving clears it', () => {
   const f = fixture();
   for (const value of [1.25, 1.5, 1.75]) {
@@ -178,6 +259,8 @@ test('hover outlines exactly one rotated square, including after zoom; leaving c
     f.scene.combatHoverPoint = f.project(5, 4); f.strokes.length = 0;
     f.ui.drawOverlay(f.scene, f.draw);
     assert.equal(f.strokes.filter(s => s.color === 0xffffff).length, 1);
+    assert.ok(f.strokes.find(s => s.color === 0xffffff).args[2] < f.strokes.find(s => s.color === 0xef766c).args[2],
+      'The hover frame stays inside the persistent enemy-colored boundary');
     assert.match(f.status.textContent, /Square 5, 4: Giant \(attack available\)/);
   }
   f.scene.combatHoverPoint = null; f.strokes.length = 0; f.ui.drawOverlay(f.scene, f.draw);

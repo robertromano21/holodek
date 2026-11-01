@@ -61,6 +61,7 @@ test('actual Save endpoint joins active task and permits one new attempt after f
     setCurrentPC() {}, setCharacterGenerationInProgress() {}, setPendingCharacterForReview() {}, setCombatCharactersString() {},
     setRoomNameDatabase() {}, setPersonalNarrative() {}, setUpdatedGameConsole() {} };
   const context = { app: { post: (url, handler) => routes.set(url, handler) }, startupTasks: registry, sharedState: state, tasks,
+    CombatLife: { status: () => ({ gameOver: null }) },
     inputTaskInFlight: false, console: { log() {}, error() {} }, broadcast() {}, actionDice: { setPaused() {}, end() {} },
     roomDatabaseReceiver: { reset() {} }, buildInitialWorldConsole: () => ({ console: '', roomNameDatabaseString: '{}' }),
     buildInitialGameConsole: () => '', Economy: { start() { economyStarts++; } },

@@ -1,7 +1,7 @@
 (function(root,factory){const api=factory(root);if(typeof module==='object'&&module.exports)module.exports=api;else root.RoomEntry=api;})(typeof window==='undefined'?globalThis:window,function(root){
   'use strict';
   const stamp=d=>d?._geometryStamp||d?._meta?.geometryStamp;
-  const key=(run,d)=>[run,d?.geoKey,stamp(d)].join('|');
+  const key=(run,d)=>[run,d?.geoKey,d?.cityFloorContext?`${d.cityFloorContext.buildingId}:${d.cityFloorContext.floor}`:'street',stamp(d),...(d?.visualAssetStamp?[d.visualAssetStamp]:[])].join('|');
   function create({readManifest,readSnapshot,loadResources,release=()=>{},now=Date.now,maxEntries=2}){
     const cache=new Map();let epoch=0,origin=null,pending=null;
     function clear(){epoch++;for(const entry of cache.values())release(entry.id);cache.clear();origin=null;pending=null;}
@@ -27,10 +27,12 @@
         const neighbors=(manifest.neighbors||[]).filter(n=>n.preloadable&&n.ready&&!n.locked&&n.geometryStamp)
           .sort((a,b)=>Number(b.direction===preferred)-Number(a.direction===preferred)).slice(0,maxEntries);
         for(const target of neighbors){
-          if(token!==epoch)return;const id=[identity.runId,target.geoKey,target.geometryStamp].join('|');if(cache.has(id))continue;
+          if(token!==epoch)return;
+          if([...cache.values()].some(e=>e.run===identity.runId&&e.geoKey===target.geoKey&&e.stamp===target.geometryStamp&&e.snapshotToken===target.snapshotToken))continue;
           const snapshot=await readSnapshot(identity,manifest.scope,target);if(token!==epoch)return;
           if(snapshot.scope?.runId!==identity.runId||snapshot.scope?.token!==manifest.scope.token||snapshot.scope?.geometryStamp!==identity.geometryStamp||snapshot.geoKey!==target.geoKey||snapshot.geometryStamp!==target.geometryStamp||snapshot.snapshotToken!==target.snapshotToken||stamp(snapshot.dungeon)!==target.geometryStamp)throw Error('Stale room snapshot.');
           await remember(identity.runId,snapshot.dungeon);
+          cache.get(key(identity.runId,snapshot.dungeon)).snapshotToken=target.snapshotToken;
         }
         return manifest;
       })();pending=work;work.finally(()=>{if(pending===work)pending=null;}).catch(()=>{});return work;
@@ -93,7 +95,18 @@
         root.resumeDungeonHeldMovement?.();telemetry('movement-ready',{movementMs:Math.round(now()-transition.at)});transition.movement=true;};resume();}));
   }
   function reset(){manager?.clear();observed=null;preferred=null;transition=null;serial++;removeOverlay();}
+  function failed(error,{geoKey,phase,dungeon}={}){
+    if(!transition||transition.runId!==root.dungeonRunId||transition.geoKey!==geoKey)return;
+    transition.frame=false;removeOverlay();telemetry('failed');
+    const message=String(error?.message||error||'Unknown display error').slice(0,500);
+    root.fetch?.('/debug/dungeon-rendering',{method:'POST',headers:{'Content-Type':'application/json'},keepalive:true,
+      body:JSON.stringify({reason:'room-entry-failed',runId:transition.runId,geoKey,geometryStamp:stamp(dungeon)||null,
+        phase:String(phase||'unknown').slice(0,80),error:message,samples:[]})}).catch(()=>{});
+    if(root.document){status=root.document.createElement('div');status.id='room-entry-status';status.setAttribute('role','alert');
+      status.style.cssText='position:fixed;left:50%;top:12%;transform:translateX(-50%);z-index:10000;padding:10px;background:#241812;color:#ead29d';
+      status.textContent='The room could not be displayed. '+message;root.document.body.appendChild(status);}
+  }
   function cancel(){telemetry('cancelled');transition=null;removeOverlay();}
-  if(root.document)root.setInterval(()=>{if(transition?.movement&&!root.GameCommandGate?.busy?.())transition=null;if(transition&&now()-transition.at>120000)cancel();if(observed&&Date.now()-lastPoll>6000)refresh();},1500);
-  return{create,onFrame,begin,prepare,shown,reset,cancel,isPending:()=>!!transition,walkingAllowed:()=>!!transition&&transition.runId===root.dungeonRunId&&[transition.fromKey,transition.geoKey].includes(root.currentDungeon?.geoKey),texturesFor:d=>manager?.resources(root.dungeonRunId,d)};
+  if(root.document)root.setInterval(()=>{if(transition?.movement&&!root.GameCommandGate?.busy?.())transition=null;if(transition&&!transition.frame&&now()-transition.at>120000)cancel();if(observed&&Date.now()-lastPoll>6000)refresh();},1500);
+  return{create,onFrame,begin,prepare,shown,reset,cancel,failed,isPending:()=>!!transition,walkingAllowed:()=>!!transition&&transition.runId===root.dungeonRunId&&[transition.fromKey,transition.geoKey].includes(root.currentDungeon?.geoKey),texturesFor:d=>manager?.resources(root.dungeonRunId,d)};
 });

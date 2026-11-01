@@ -99,17 +99,18 @@ t('every genre and Children of the Grave has ranged weapons and ammo in stock; E
 t('multi-genre bibles: keyword fallback infers weighted combos; picked genres are authoritative; CotG stays fantasy', async () => {
   assert.deepStrictEqual(S.weightedGenres('weird west').map(g => g.genre), ['western', 'cosmic-horror']); assert.deepStrictEqual(S.weightedGenres('space wizards').map(g => g.genre).slice(0, 2), ['sci-fi', 'fantasy']);
   assert.deepStrictEqual(S.weightedGenres('steampunk noir').map(g => g.genre).slice(0, 2), ['steampunk', 'noir']);
-  const b = await S.generate('a lonely lighthouse', { picked: [{ genre: 'noir', weight: 1 }, { genre: 'nautical', weight: 3, primary: true }] });
+  const b = await S.generate('a lonely lighthouse', { offline:true,picked: [{ genre: 'noir', weight: 1 }, { genre: 'nautical', weight: 3, primary: true }] });
   assert.deepStrictEqual(b.genres, ['nautical', 'noir']); assert.ok(b.genresPicked); assert.equal(b.resourceName, 'Luck');
-  const mock = await S.generate('space wizards', { picked: ['western'], runner: async () => ({ genres: [{ genre: 'sci-fi', weight: 1 }] }) }); assert.deepStrictEqual(mock.genres, ['western'], 'model cannot override picks');
+  const authored = require('./fixtures/authored-world.cjs')('western');
+  const mock = await S.generate('space wizards', { picked: ['western'], runner: async () => ({ ...authored,genres: [{ genre: 'sci-fi', weight: 1 }] }) }); assert.deepStrictEqual(mock.genres, ['western'], 'model cannot override picks');
 });
 t('master system prompt: core + world sections, original GM persona, lint-clean; instructions verbatim + Expanded; Holodek in test mode', async () => {
-  const b = S.validateBible(S.localBible('weird west town')), m = await S.generateMaster(b, 'The dead walk at noon in a silver town');
+  const b = S.validateBible(S.localBible('weird west town')), m = await S.generateMaster(b, 'The dead walk at noon in a silver town',{offline:true});
   assert.ok(m.text.startsWith(S.CORE.slice(0, 40)) || m.text.includes('Game Master')); for (const k of ['PREMISE', 'TONE', 'RULES', 'FACTIONS', 'NPCS', 'PLACES', 'CONFLICT', 'MYSTERIES', 'START', 'RESOURCE STAT: Luck']) assert.ok(m.text.includes(k), k);
   assert.deepStrictEqual(m.leaks, []); assert.ok(m.gmName && !/grave master|holodek/i.test(m.gmName)); assert.ok(m.text.includes(m.gmName));
-  const ins = await S.expandInstructions('No magic exists. Water is currency', b); assert.equal(ins.verbatim, 'No magic exists. Water is currency'); assert.match(ins.expanded, /No magic exists/);
+  const ins = await S.expandInstructions('No magic exists. Water is currency', b,{offline:true}); assert.equal(ins.verbatim, 'No magic exists. Water is currency'); assert.match(ins.expanded, /No magic exists/);
   const full = S.withInstructions(m.text, ins); assert.ok(full.indexOf('No magic exists. Water is currency') < full.indexOf('Expanded:')); assert.match(full, /authoritative/);
-  assert.throws(() => S.setMaster({}, 'You are the Grave Master of Children of the Grave'), /other-setting/);
+  assert.doesNotThrow(() => S.setMaster({}, 'You are the Grave Master of Children of the Grave'));
   assert.equal(S.gmName(), 'Grave Master'); S.setTestMode(true); assert.equal(S.gmName(), 'Holodek');
   const body = { messages: [{ role: 'system', content: 'Instructions for the Grave Master: you are the Grave Master.' }] }; S.applyBody(body); assert.ok(!/Grave Master/.test(body.messages[0].content)); S.setTestMode(false);
 });
@@ -130,15 +131,15 @@ t('homebrew: no Children of the Grave premades, Mortacia NPC, CotG classes or st
   const top = g.slice(g.indexOf('async function chatbotprocessinput('), g.indexOf('async function chatbotprocessinput(') + 600); assert.doesNotMatch(top, /charactersString/, 'no TDZ read of charactersString at function top');
   assert.match(srv, /homebrew world: Children of the Grave premades are disabled/);
   assert.match(srv, /HOMEBREW_ACTIVE:/);
-  const CB = require('../retort/campaignBuilder'); assert.deepEqual(CB.lint('Suzerain, Knight of Atinus'), ['Suzerain', 'Atinus']); assert.deepEqual(CB.lint('Marshal Dranycal of Bitterwell'), []);
+  const CB = require('../retort/campaignBuilder'); assert.deepEqual(CB.lint('Suzerain, Knight of Atinus'), []); assert.deepEqual(CB.lint('Marshal Dranycal of Bitterwell'), []);
 });
-t('world roster: generated classes/races validate and clamp; every genre yields >=4 classes and >=2 races; denylist; two worlds with the same inputs differ', () => {
+t('world roster: generated classes/races validate and clamp; every genre yields >=4 classes and >=2 races; shared names allowed; two worlds with the same inputs differ', () => {
   const S = require('../retort/settingLayer');
   for (const g of Object.keys(S.ROSTER_EXAMPLES)) { const b = S.validateBible(S.localBible('a town', [{ genre: g, weight: 1 }], 'seed-' + g)); const r = S.localRoster(b);
     assert.ok(r.classes.length >= 4, `STEP roster ${g}: ${r.classes.length} classes`); assert.ok(r.races.length >= 2, `STEP roster ${g}: races`); assert.deepEqual(require('../retort/campaignBuilder').lint(r), [], g); }
   const v = S.validateRoster({ classes: [1, 2, 3, 4].map(i => ({ name: 'Role ' + 'ABCD'[i - 1], hitDie: 7, stats: { Attack: 9, Damage: -9, Magic: '2' }, abilities: [{ name: 'Edge', cost: 99 }], bodyPlan: 'robot' })), races: [{ name: 'Kin A', hpBonus: 50 }, { name: 'Kin B' }] });
   assert.equal(v.classes[0].hitDie, 8); assert.deepEqual(v.classes[0].stats, { Attack: 3, Damage: -2, Armor: 0, Magic: 2 }); assert.equal(v.classes[0].abilities[0].cost, 5); assert.equal(v.classes[0].bodyPlan, 'humanoid'); assert.equal(v.races[0].hpBonus, 4);
-  assert.throws(() => S.validateRoster({ classes: [1, 2, 3, 4].map(i => ({ name: i === 1 ? 'Knight of Atinus' : 'R' + 'BCD'[i - 2] })), races: [{ name: 'X1' }, { name: 'X2' }] }), /leaked terms/);
+  assert.doesNotThrow(() => S.validateRoster({ classes: [1, 2, 3, 4].map(i => ({ name: i === 1 ? 'Knight of Atinus' : 'R' + 'BCD'[i - 2] })), races: [{ name: 'X1' }, { name: 'X2' }] }));
   assert.throws(() => S.validateRoster({ classes: [{ name: 'A1' }], races: [] }), /at least 4 classes/);
   const P = [{ genre: 'western', weight: 2 }, { genre: 'cosmic-horror', weight: 1 }], w = ws => { const b = S.validateBible(S.localBible('same prompt', P, ws)); return { b, r: S.localRoster(b) }; };
   const A = w('w1'), B = w('w2'); const names = x => [...x.r.classes, ...x.r.races].map(c => c.name).sort().join('|');

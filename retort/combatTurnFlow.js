@@ -25,7 +25,7 @@ function create(dice, state) {
       if (dice.active.ledger) { dice.active.ledger.round = this.round; dice.active.ledger.initiative = []; }
       dice.publish();
     },
-    canContinue() { return !this.retreated && !(state.getRoomNameDatabase && Life.status(state).gameOver) &&
+    canContinue() { return !this.retreated && !(state.getRoomNameDatabase && (Life.status(state).gameOver || Life.status(state).pendingRespawn)) &&
       this.teams?.friends.some(I.canAct) && this.teams?.hostiles.some(I.canAct); },
     async initiative(actor) {
       if (!I.canAct(actor)) return null;
@@ -59,7 +59,7 @@ function create(dice, state) {
 // Re-evaluate after every strike so another enemy cannot choose a just-killed party member.
 function opportunityTargets(attacker, party, space) {
   if (attacker.hp <= 0 || I.allegiance(attacker) !== 'Hostile') return [];
-  return party.filter(actor => I.isAlive(actor) && (actor.type === 'pc' || actor.type === 'npc') &&
+  return party.filter(actor => actor.hp > 0 && I.isAlive(actor) && (actor.type === 'pc' || actor.type === 'npc') &&
     (space ? (space.canStrike || space.canAttack)(attacker, actor) : Number.isFinite(attacker.x) && Number.isFinite(actor.x) &&
       Math.hypot(attacker.x - actor.x, attacker.y - actor.y) <= 1.5));
 }

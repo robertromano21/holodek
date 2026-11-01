@@ -114,6 +114,21 @@
     }
     return pool.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x);
   }
+  function groupSpaces(d, candidate, count, occupied, player) {
+    const spaces = [], queue = [candidate], seen = new Set([`${candidate.x},${candidate.y}`]);
+    for (let index = 0; index < queue.length && spaces.length < count && index < 64; index++) {
+      const from = queue[index], key = `${from.x},${from.y}`, cell = d.cells[key];
+      if (occupied.has(key) || cell?.tile !== 'floor' || cell.feature || cell.object || cell.door || cell.exitMarker || cell.complexExit ||
+          player && !I.lineClear(d, player, { x: from.x + .5, y: from.y + .5 })) continue;
+      spaces.push({ x: from.x, y: from.y });
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const next = { x: from.x + dx, y: from.y + dy }, id = `${next.x},${next.y}`;
+        if (seen.has(id) || Math.hypot(next.x - candidate.x, next.y - candidate.y) > 3 || !I.canTraverse(d, from, next)) continue;
+        seen.add(id); queue.push(next);
+      }
+    }
+    return spaces;
+  }
   function tick(d, p, roster, player, { now = Date.now(), consoleText = '', protectedNames = [] } = {}) {
     const travel = p?.travelDiscovery;
     if (!eligible(d) || !travel || !point(player)) return { changed: false, discoveries: [] };
@@ -148,7 +163,7 @@
     if (travel.movingMs < MIN_MOVING_MS || (travel.distance < travel.nextDistance &&
         !(travel.movingMs >= QUIET_MOVING_MS && travel.walkedDistance >= 24 && travel.excursion >= 8))) return finish('insufficient-travel');
     const groups = p.groups.filter(g => g.discoveryState === 'pending' && g.status === 'unseen' && !g.introPlayed &&
-      g.members.length <= 4 && g.members.every(name => p.actors[name]?.status === 'present' &&
+      g.members.length <= 6 && g.members.every(name => p.actors[name]?.status === 'present' &&
         (p.actors[name].hp ?? 1) > 0 && !protectedSet.has(norm(name))));
     const objects = Object.entries(travel.objects).filter(([key, item]) => item.status === 'pending' &&
       wanted?.has(key) && !protectedSet.has(key));
@@ -163,12 +178,7 @@
       const rank = g => p.actors[g.members[0]]?.allegiance === travel.nextAllegiance ? 0 : 1;
       group = groups.sort((a, b) => rank(a) - rank(b) || I.hash(a.id) - I.hash(b.id))[0];
       for (const candidate of pool.slice(0, 48)) {
-        spaces = [candidate];
-        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-          const next = { x: candidate.x + dx, y: candidate.y + dy }, cell = d.cells[`${next.x},${next.y}`];
-          if (!occupied.has(`${next.x},${next.y}`) && cell?.tile === 'floor' && !cell.feature && !cell.object &&
-              !cell.exitMarker && !cell.complexExit && I.canTraverse(d, candidate, next)) spaces.push(next);
-        }
+        spaces = groupSpaces(d, candidate, group.members.length, occupied, player);
         if (spaces.length >= group.members.length) { site = candidate; break; }
       }
     } else site = pool[0];
@@ -208,5 +218,5 @@
       return [placement?.status === 'placed' ? { ...item, x: placement.x, y: placement.y } : item];
     });
   }
-  return { eligible, setup, tick, release, objects, candidates, MAX_SEARCH, QUIET_MOVING_MS, SPAWN_MIN, SPAWN_MAX };
+  return { eligible, setup, tick, release, objects, candidates, groupSpaces, MAX_SEARCH, QUIET_MOVING_MS, SPAWN_MIN, SPAWN_MAX };
 });

@@ -2,9 +2,24 @@
 
 const FIRST_ROOM_DESCRIPTION = 'You find yourself standing in the first room of the afterlife at the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons, magical beings, angels and powerful demons.';
 
-function buildInitialWorldConsole(state = {}) {
+function buildInitialWorldConsole(state = {}, world = null) {
   const database = JSON.parse(state.roomNameDatabaseString || '{}');
   if (!database || typeof database !== 'object' || Array.isArray(database)) throw new Error('Invalid starting room database.');
+  const profile = world ? require('./settingLayer').startRoomProfile(world) : null;
+  if (profile) {
+    // New-game input can still carry the old client's starting skeleton. It is not authored world data.
+    const Builder = require('./campaignBuilder'), own = new Set(Builder.templateTerms(world));
+    const places = new Set([world.opening?.name, world.topology?.start, world.topology?.goal,
+      ...(world.topology?.layers || []), ...(world.cities || []).map(city => city.name)]);
+    for (const room of Object.values(database)) {
+      if (!room || places.has(room.name) || Builder.templateTerms(room.name || '').some(term => own.has(term)) ||
+        !['Ruined Temple Entrance', 'Wastelands of Tartarus'].includes(room.name)) continue;
+      for (const key of ['name', 'description', 'roomDescription', 'classification', 'sceneSpec', 'complexId', 'visited', 'indoor', 'isIndoor', 'isOutdoor']) delete room[key];
+    }
+    const room = database['0,0,0'] ||= {};
+    Object.assign(room, { name: profile.name, description: '', setting: world });
+    require('./settingLayer').applyStartRoom(room, world);
+  }
   let text = String(state.updatedGameConsole || '').trim();
   // The server supplies the saved PC/party sheets separately; retain all world fields.
   const pc = text.search(/^PC:/m), monsters = text.search(/^Monsters in Room:/m);
@@ -13,7 +28,7 @@ function buildInitialWorldConsole(state = {}) {
   if (coordinates && coordinates.slice(1).some(v => Number(v) !== 0)) throw new Error('A new game must start in room 0,0,0.');
   const exits = Object.keys(database['0,0,0']?.exits || {});
   const defaults = {
-    'Room Name': 'Ruined Temple Entrance', 'Room Description': FIRST_ROOM_DESCRIPTION,
+    'Room Name': profile?.name || 'Ruined Temple Entrance', 'Room Description': profile ? 'None' : FIRST_ROOM_DESCRIPTION,
     Coordinates: 'X: 0, Y: 0, Z: 0', 'Objects in Room': 'None', 'Objects in Room Properties': 'None',
     Exits: exits.length ? exits.join(', ') : 'north, down', Score: '0', 'Puzzle in Room': 'None', 'Puzzle Solution': 'None',
     'Artifacts Found': '0/15', 'Quests Achieved': '0/21', 'Next Artifact': 'None', 'Next Boss': 'None', 'Next Boss Room': 'None',
@@ -25,6 +40,12 @@ function buildInitialWorldConsole(state = {}) {
     const match = text.match(pattern);
     if (!match) text += `\n${label}: ${fallback}`;
     else if (label === 'Turns' || !match[0].slice(label.length + 1).trim()) text = text.replace(pattern, `${label}: ${fallback}`);
+  }
+  if (profile) {
+    text = text.replace(/^Room Name:.*$/m, `Room Name: ${profile.name}`).replace(/^Room Description:.*$/m, 'Room Description: None');
+    const adjacent = Object.entries(database['0,0,0'].exits || {}).map(([direction, exit]) =>
+      `${direction}: ${database[exit?.targetCoordinates]?.name || 'None'}`).join(', ') || 'None';
+    text = text.replace(/^Adjacent Rooms:.*$/m, `Adjacent Rooms: ${adjacent}`);
   }
   return { console: text.trim(), roomNameDatabaseString: JSON.stringify(database) };
 }

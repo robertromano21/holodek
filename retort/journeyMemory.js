@@ -3,12 +3,14 @@
 const clean = (value, limit) => typeof value === 'string' ? value.replace(/[\r\n]/g, ' ').trim().slice(0, limit) : '';
 
 function progressSynopsis(state) {
+  const Setting = require('./settingLayer'), world = Setting.current();
   const text = String(state.getUpdatedGameConsole?.() || '');
   const line = label => clean(text.match(new RegExp(`^${label}:[ \\t]*([^\\r\\n]*)`, 'm'))?.[1], 180);
   const tasks = state.getCurrentTasks?.() || [], index = state.getCurrentTaskIndex?.() || 0;
   const active = tasks[index];
   const synopsis = {
-    destination: 'Hades; the final confrontation is Arithus in the Throne Room of Hades.',
+    destination: world ? require('./homebrewStoryPrompts').destination(world) : Setting.isCotGPlay() ?
+      'Hades; the final confrontation is Arithus in the Throne Room of Hades.' : 'Not yet established.',
     room: line('Room Name'), visitedRooms: line('Rooms Visited'),
     completedQuests: line('Quests Achieved'), artifacts: line('Artifacts Found'),
     quest: clean(state.getCurrentQuest?.() || line('Current Quest'), 500),

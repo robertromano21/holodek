@@ -13,7 +13,8 @@ function validatePayload(p) {
   if (b?.version !== 1 || b.runId !== s.dungeonRunId || b.geoKey !== geo || !b.position ||
       !['x', 'y', 'angle'].every(k => Number.isFinite(b.position[k])) || !b.conversation ||
       typeof b.conversation.id !== 'string' || !b.conversation.id || !Array.isArray(b.conversation.rows) || !b.data) throw error('Browser and server checkpoints do not match.');
-  const room = s.roomDungeonDatabase[geo], { x, y } = b.position;
+  const room = require('./retort/hostLocalFloors').selectDungeon(s), { x, y } = b.position;
+  if(require('./retort/hostLocalFloors').identity(b.floorContext)!==require('./retort/hostLocalFloors').identity(s.activeCityFloor))throw error('Browser and server floors do not match.');
   if (x < 0 || y < 0 || x >= room.layout.width || y >= room.layout.height || !room.cells[`${Math.floor(x)},${Math.floor(y)}`]) throw error('Saved player position is outside the room.');
   if (p.runId !== s.dungeonRunId || p.roomKey !== geo || typeof p.label !== 'string' || p.label.length > 80) throw error('Invalid save metadata.');
   const record = v => v && typeof v === 'object' && !Array.isArray(v);
@@ -131,6 +132,7 @@ function install(app, options) {
       try { audio = await options.onRestored?.(p); } catch (e) { warning = 'The adventure loaded, but audio could not be rebuilt: ' + e.message; console.warn('[GameLoadAudio]', e.message); }
       const geo = p.roomKey, dungeon = state.getRoomDungeon(state.getLastCoords());
       return { loaded: true, checksum: envelope.checksum, browser: p.browser, runId: p.runId, roomKey: geo, audio, warning, characterTraits,
+        floorContext:state.getActiveCityFloor?.()||null,floorToken:require('./retort/hostLocalFloors').token(state),
         updatedGameConsole: state.getUpdatedGameConsole(), roomNameDatabaseString: state.getRoomNameDatabase(),
         combatCharactersString: state.getCombatCharactersString(), dungeon, population: state.getRoomPopulation(geo) };
     });

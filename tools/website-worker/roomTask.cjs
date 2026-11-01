@@ -32,7 +32,7 @@ function engine(directory, hash) {
 async function run(packet, { directory, signal, send, pcSession, log = line => process.stderr.write(line), spawn = (file, options) => new Worker(file, options) }) {
   const root = engine(directory, packet.engineHash), payload = Wire.unpack(packet.payload), { job } = payload;
   if (!/^[a-f0-9-]{36}$/.test(job?.id || '') || !/^[-\d]+,[-\d]+,[-\d]+$/.test(job.key || '') ||
-      !['population', 'geometry', 'music', 'art'].includes(job.stage) || !['openai', 'xai', 'ollama'].includes(payload.provider)) throw Error('Invalid remote stage identity.');
+      !['population', 'geometry', 'music', 'art', 'quest'].includes(job.stage) || !['openai', 'xai', 'groq', 'ollama'].includes(payload.provider)) throw Error('Invalid remote stage identity.');
   if (payload.provider !== 'ollama' && !/^[\x21-\x7e]{20,500}$/.test(payload.credential || '')) throw Error('The room stage needs a provider key from the PC.');
   const bridge = packet.pcModel !== undefined || payload.pcModel !== undefined || job.model === 'holodek-1' || pcSession !== undefined;
   if (bridge && (packet.pcModel !== 'holodek-1' || payload.pcModel !== 'holodek-1' || job.model !== 'holodek-1' || payload.provider !== 'ollama' ||

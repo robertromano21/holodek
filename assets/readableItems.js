@@ -10,6 +10,8 @@
   function hasContent(record){
     return Array.isArray(record?.chapters)&&record.chapters.some(c=>typeof c?.text==='string'&&!!c.text.trim());
   }
+  function canOpen(record){return hasContent(record)||record?.bookLore?.pending===true||
+    record?.bookLore&&Array.isArray(record.chapters)&&record.chapters.length>0;}
   function validate(rows){
     if(rows===undefined)return[];
     if(!Array.isArray(rows)||rows.length>4)throw Error('At most four additional readable puzzle pieces.');
@@ -18,11 +20,12 @@
       if(!['book','spellbook','scroll','map'].includes(r?.kind)||!clean(r.name,65)||!/^[a-z][a-z '-]+$/.test(r.name)||
         !new RegExp('\\b(?:'+(r.kind==='book'?'book|tome|codex|ledger|journal|chronicle':r.kind==='spellbook'?'spellbook|grimoire':r.kind)+')\\b').test(r.name)||names.has(key(r.name))||
         !clean(r.title,90)||/[\r\n]/.test(r.title)||!clean(r.backstory,350)||
-        !['lore','mechanism_clue','route_notes','spell_reference'].includes(r.role)||!Array.isArray(r.chapters)||r.chapters.length<1||r.chapters.length>3||
+        !['lore','mechanism_clue','route_notes','spell_reference'].includes(r.role)||!Array.isArray(r.chapters)||
+        r.chapters.length<(r.bookLore?.pending===true&&['book','spellbook'].includes(r.kind)?0:1)||r.chapters.length>3||
         r.chapters.some(c=>!clean(c?.title,70)||/[\r\n]/.test(c.title)||!clean(c.text,800)))throw Error('Invalid readable item, backstory or chapters.');
       names.add(key(r.name));
       const clueChapter=r.clueChapter??1;
-      if(!Number.isInteger(clueChapter)||clueChapter<1||clueChapter>r.chapters.length)throw Error('A document clue must refer to a real chapter.');
+      if(!Number.isInteger(clueChapter)||clueChapter<1||clueChapter>Math.max(1,r.chapters.length)||!r.chapters.length&&r.role==='mechanism_clue')throw Error('A document clue must refer to a real chapter.');
       const modifiers={};
       for(const field of ['attack_modifier','damage_modifier','ac','magic']){
         const value=r.modifiers?.[field]??0;if(!Number.isInteger(value)||value<0||value>8)throw Error('Readable modifiers must be bounded integer item stats.');
@@ -31,7 +34,8 @@
       const spellRefs=r.spellRefs??[];
       if(!Array.isArray(spellRefs)||spellRefs.length>6||spellRefs.some(id=>typeof id!=='string'||!/^[a-z][a-z0-9_]{0,31}$/.test(id))||new Set(spellRefs).size!==spellRefs.length)throw Error('Invalid future spell references.');
       return{id:'text_'+i,name:r.name.trim(),kind:r.kind,title:r.title.trim(),backstory:r.backstory.trim(),role:r.role,clueChapter,
-        modifiers,spellRefs,chapters:r.chapters.map(c=>({title:c.title.trim(),text:c.text.trim()}))};
+        modifiers,spellRefs,chapters:r.chapters.map(c=>({title:c.title.trim(),text:c.text.trim()})),
+        ...(r.bookLore?.pending===true&&['book','spellbook'].includes(r.kind)?{bookLore:{version:2,pending:true}}:{})};
     });
   }
   function validateInscriptions(rows){
@@ -61,10 +65,11 @@
   function passage(record,action,clue=''){
     if(record.kind==='inscription')return`${record.title}\n${action.inspect?record.backstory+'\n':''}${record.chapters[0].text}${record.role==='mechanism_clue'&&clue?'\nThe accompanying diagram: '+clue:''}`;
     const contents=record.chapters.map((c,i)=>`Chapter ${i+1}: ${c.title}`).join('; ');
-    if(action.inspect)return`${record.title}\n${record.backstory}\nContents: ${contents}.`;
+    const metadata=`${record.title}\n${record.author&&!/^(Anonymous|Unknown)$/i.test(record.author)?'By '+record.author:'Author unknown'}\nWritten: ${record.published||'Year unknown'}`;
+    if(action.inspect)return`${metadata}\n${record.backstory}\nContents: ${contents}.`;
     const number=action.chapter??1,c=record.chapters[number-1];
     if(!c)return`This ${record.kind} has ${record.chapters.length} chapters. Contents: ${contents}.`;
-    return`${record.title}\nChapter ${number}: ${c.title}\n${c.text}${record.role==='mechanism_clue'&&number===record.clueChapter&&clue?'\nThe accompanying diagram: '+clue:''}`;
+    return`${metadata}\nChapter ${number}: ${c.title}\n${c.text}${record.role==='mechanism_clue'&&number===record.clueChapter&&clue?'\nThe accompanying diagram: '+clue:''}`;
   }
   function spawn(definition,room,consoleText){
     const records=definition.readables||[],inscriptions=definition.inscriptions||[];
@@ -95,5 +100,5 @@
     return consoleText.replace(/^Objects in Room:[^\r\n]*/m,()=>`Objects in Room: ${names.join(', ')||'None'}`)
       .replace(/^Objects in Room Properties:[^\r\n]*/m,()=>`Objects in Room Properties: ${properties.join(', ')||'None'}`);
   }
-  return{validate,validateInscriptions,fixtureTypes,hasContent,intent,passage,spawn,key};
+  return{validate,validateInscriptions,fixtureTypes,hasContent,canOpen,intent,passage,spawn,key};
 });

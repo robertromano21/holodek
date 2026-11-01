@@ -1,5 +1,9 @@
 # Agents working on Holodek
 
+## Release Handoff
+- Finish every implementation pass by updating the PowerShell/helper updater for the exact verified release, then provide its command so the user can test promptly.
+- Updaters must reject changed or unverified source, coordinate all three website helpers, and leave PC server restarts to the user unless explicitly authorized. Leave gameServer2 untouched unless specifically requested.
+
 ## world1 features
 - Flags off by default (`retort/worldFlags.js`). Never change live (port 3000, `holodek-1`) without backups, MD5 re-checks, `node --check` and the full test suite.
 - Test copy: `holodek-1-world1-test`, pm2 `gameServer-world1-test`, port 3001. A visible test window needs the user's approval through the native dialog.

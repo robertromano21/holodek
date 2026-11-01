@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Illuminated City Skyline Probe</title>
+<style>body{background:#10141e;color:#e6d6ae;font:16px Georgia;margin:20px}main{display:grid;grid-template-columns:1fr 1fr;gap:16px}canvas{width:100%;image-rendering:pixelated}h2{font-size:18px}#dungeon-popup{position:absolute;left:-10000px;top:0}#dungeon-container{width:640px;height:480px}pre{white-space:pre-wrap}</style>
+<h1>Production Renderer: Illuminated City Skylines</h1><main id="panels"></main>
+<div id="dungeon-popup" style="display:block"><div id="dungeon-container"><canvas id="gpu"></canvas></div></div><pre id="results">Running...</pre>
+<script>window.HolodekFlags={GENRE_KITS:true,GENRE_EXPANSION:true,ARCHITECTURE_EXPANSION:true,GENRE_LIGHTS:true};window.WEBGPU_VOXEL_PREWARM=false;</script>
+<script src="../assets/masonryPatterns.js"></script><script src="../assets/voxelMaterials.js"></script>
+<script src="../assets/designCatalog.js"></script><script src="../assets/genreFurnishings.js"></script>
+<script src="../assets/architectureDesigns.js"></script><script src="../assets/genreFixtures.js"></script>
+<script src="../assets/urbanDesigns.js"></script><script src="../assets/genreExpansion.js"></script>
+<script src="../assets/cityKit.js"></script><script src="../assets/genreKits.js"></script><script src="../assets/genreLights.js"></script>
+<script src="../assets/cityParcels.js"></script><script src="../assets/cityBuildingFootprints.js"></script>
+<script src="../assets/cityArchitectureStyles.js"></script><script src="../assets/cityBuildingStyle.js"></script><script src="../assets/citySkyline.js"></script>
+<script src="../assets/puzzleModules.js"></script><script src="../assets/puzzleMotion.js"></script>
+<script src="../assets/renderCharacterProcedural.js"></script><script src="../assets/shrineIconography.js"></script>
+<script src="../assets/artCharacters.js"></script><script src="../assets/sculptureAnatomy.js"></script><script src="../assets/sculptureForms.js"></script>
+<script src="../assets/stoneCarvings.js"></script><script src="../assets/ancientScripts.js"></script>
+<script src="../assets/frescoDesigns.js"></script><script src="../assets/frescoSerpents.js"></script><script src="../assets/frescoFigures.js"></script>
+<script src="../assets/mosaicDesigns.js"></script><script src="../assets/surfaceArt.js"></script><script src="../assets/artPresentation.js"></script>
+<script src="../assets/scenePropVoxels.js"></script><script src="../assets/readableItems.js"></script><script src="../assets/physicalPuzzles.js"></script>
+<script src="../assets/dungeonInhabitants.js"></script><script src="../assets/questWritings.js"></script><script src="../assets/sceneExteriorDetails.js"></script>
+<script src="../assets/characterMotion3d.js"></script><script src="../assets/renderSceneItems.js"></script><script src="../assets/retroDetails.js"></script>
+<script src="../assets/rendererWebGL.js"></script>
+<script>
+(async()=>{try{
+  const classical=location.search.includes('classical'),genre=classical?'fantasy':'cyberpunk';
+  if(classical)document.querySelector('h1').textContent='Production Renderer: Native Classical Fantasy Facades';
+  const r=window.webglDungeonRenderer;r.canvas=document.getElementById('gpu');r.canvas.width=640;r.canvas.height=480;
+  if(!r.init(document.getElementById('dungeon-container')))throw Error('Production WebGL2 initialization failed.');
+  const gl=r.gl,debug=gl.getExtension('WEBGL_debug_renderer_info'),adapter=debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):'Unavailable';
+  const texture=color=>{const c=document.createElement('canvas');c.width=c.height=8;const ctx=c.getContext('2d');ctx.fillStyle=color;ctx.fillRect(0,0,8,8);c.complete=true;c.naturalWidth=c.naturalHeight=8;return c;};
+  const d={geoKey:'skyline-probe',_geometryStamp:'skyline-probe-1',generation:{runId:'probe'},layout:{width:512,height:256},start:{x:20,y:100},
+    classification:{indoor:false,biome:'city'},skyTop:'#1e2034',skyBot:'#82566d',cells:{},tiles:{floor:{},wall:{},ceiling:{}},sceneStructures:[],
+    cityBlocks:{streaming:{genre},buildings:[]},genreLights:[]};
+  for(let y=0;y<256;y++)for(let x=0;x<512;x++)d.cells[`${x},${y}`]={tile:'floor',floorHeight:0,ceilHeight:3};
+  const add=(id,x,y,z,sx,sy,sz)=>{const tile='tower-'+id,shape=`a_${genre}_urban_skyline`,b={id,seed:x,type:'guild',storeys:classical?6:80,
+    width:sx,depth:sy,clearance:4.2,storeyHeightMetres:11.5,metres:{height:70}},footprint={version:1,kind:'rectangle'},
+    architecture=classical?CityArchitectureStyles.envelope(CityArchitectureStyles.choose(genre,b,{tradition:'roman'}),b):null;
+    d.tiles[tile]={spriteSpec:{voxelShape:shape,material:classical?'stone':'metal',palette:{primary:classical?'#d6b688':'#55556f',secondary:'#806342',highlight:'#dfc6a0'},collisionBlocking:false,
+      ...(classical?{cityFootprint:footprint,cityArchitecture:architecture}:{})}};
+    d.cityBlocks.buildings.push(b);d.sceneStructures.push({skyline:true,cityParcel:id,tile,shape,position:{x,y,z},size:{x:sx,y:sy,z:classical?architecture.height:sz},
+      ...(classical?{cityFootprint:footprint,cityArchitecture:architecture}:{})});};
+  add('west',86,32,3,28,32,86);add('center',180,90,3,30,28,116);add('east',285,156,3,32,30,150);add('horizon',420,50,3,42,38,190);
+  window.currentDungeon=d;window.dungeonTextures={floor:texture('#242735'),wall:texture('#55556f'),ceiling:texture('#202231')};
+  window.playerDungeonX=20;window.playerDungeonY=100;window.playerPosX=20.5;window.playerPosY=100.5;window.playerZ=.65;window.playerAngle=0;
+  const pixels=()=>{const p=new Uint8Array(r.canvas.width*r.canvas.height*4);gl.readPixels(0,0,r.canvas.width,r.canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,p);return p;};
+  const panel=title=>{const section=document.createElement('section'),h=document.createElement('h2'),c=document.createElement('canvas');h.textContent=title;c.width=r.canvas.width;c.height=r.canvas.height;
+    c.getContext('2d').drawImage(r.canvas,0,0);section.append(h,c);document.getElementById('panels').append(section);};
+  const draw=()=>{for(let i=0;i<3;i++)r.renderScene();gl.finish();if(gl.getError()!==gl.NO_ERROR)throw Error('Production render GL error.');return pixels();};
+  window.CITY_SKYLINE_RENDERING=false;const dark=draw();panel('Existing skyline: long-range cutoff and dark facades');
+  window.CITY_SKYLINE_RENDERING=true;const lit=draw();panel('Batched skyline: lit windows, beacons and distant bodies');
+  const stats={...r.lastFrameStats.citySkyline},cached=r.citySkylineMeshes.values().next().value;draw();
+  const reused=[...r.citySkylineMeshes.values()].includes(cached);
+  let changed=0,brightened=0;for(let i=0;i<lit.length;i+=4){if(Math.abs(lit[i]-dark[i])+Math.abs(lit[i+1]-dark[i+1])+Math.abs(lit[i+2]-dark[i+2])>20)changed++;
+    if(lit[i]+lit[i+1]+lit[i+2]>dark[i]+dark[i+1]+dark[i+2]+90)brightened++;}
+  window.RetroGraphics={fullbright:()=>true};draw();panel('Retro mode: same depth-tested luminous skyline');window.RetroGraphics=undefined;
+  r.canvas.width=160;r.canvas.height=120;window.CITY_SKYLINE_RENDERING=false;const lowDark=draw();
+  window.CITY_SKYLINE_RENDERING=true;const lowLit=draw();panel('Native 160 x 120 resolution: distant windows retain a dimmed pixel footprint');
+  let lowBright=0;for(let i=0;i<lowLit.length;i+=4)if(lowLit[i]+lowLit[i+1]+lowLit[i+2]>lowDark[i]+lowDark[i+1]+lowDark[i+2]+60)lowBright++;
+  for(let y=0;y<256;y++)d.cells[`40,${y}`]={tile:'wall',floorHeight:0,ceilHeight:250};
+  d._geometryStamp='skyline-occluded';const occluded=draw();panel('Occlusion check: a solid foreground wall hides the skyline');
+  window.CITY_SKYLINE_RENDERING=false;const wallOnly=draw();
+  let leak=0;for(let i=0;i<occluded.length;i+=4)if(Math.abs(occluded[i]-wallOnly[i])+Math.abs(occluded[i+1]-wallOnly[i+1])+Math.abs(occluded[i+2]-wallOnly[i+2])>30)leak++;
+  const report={pass:changed>100&&brightened>50&&lowBright>10&&leak===0&&reused&&stats.dynamicLights===0&&stats.far>=3,adapter,genre,
+    changedPixels:changed,brightenedPixels:brightened,lowResolutionLitPixels:lowBright,occludedLeakPixels:leak,reusedGpuBuffers:reused,stats,glError:gl.getError(),liveGameModified:false};
+  document.getElementById('results').textContent=JSON.stringify(report);window.probeReport=report;
+}catch(e){document.getElementById('results').textContent=JSON.stringify({pass:false,error:e.stack||e.message});}})();
+</script></html>

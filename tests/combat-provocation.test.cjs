@@ -21,6 +21,63 @@ function fixture(allegiance = 'Friendly') {
   const service = { get: () => population, save: () => { saved = JSON.parse(JSON.stringify(population)); } };
   return { dungeon, state, service, population, roster: () => roster, saved: () => saved, pause: () => { paused = true; } };
 }
+function addResident(f, name, { x=6, y=5, group=false, allegiance='Neutral' }={}) {
+  const extra=I.createPopulation('1,0,0',[{name,allegiance,encounterId:name}]),record=extra.actors[name];
+  f.population.actors[name]=record;
+  if(group){record.encounterId=f.population.actors.Resident.encounterId;f.population.groups.find(g=>g.id===record.encounterId).members.push(name);}
+  else f.population.groups.push(...extra.groups);
+  const actor={name,type:'monster',hp:40,mazeX:x,mazeY:y,mazeRoomKey:'1,0,0'};
+  f.roster().push(actor);
+  const sheet=formatStartingCharacterSheet({Name:name,Sex:'Female',Race:'Human',Class:'Fighter',Level:2,HP:40,MaxHP:40,AC:13,Attack:3,Damage:2,Armor:1,Magic:1});
+  f.state.setUpdatedGameConsole(f.state.getUpdatedGameConsole().replace('Monsters Equipped Properties:',sheet+'\nMonsters Equipped Properties:'));
+  return {actor,record};
+}
+
+test('explicit target routing accepts every allegiance independently of single-line console summaries',()=>{
+  for(const allegiance of ['Friendly','Neutral','Hostile']){
+    const f=fixture(allegiance);assert.equal(P.attackTarget(f.state,'attack Resident').name,'Resident');
+    assert.equal(P.attackTarget(f.state,'attack Res').name,'Resident');
+    assert.equal(P.attackTarget(f.state,'ask Resident about attack drills'),null);
+    addResident(f,'Resident Two');assert.equal(P.attackTarget(f.state,'attack Res'),null);
+    assert.equal(P.attackTarget(f.state,'attack Resident').name,'Resident');
+  }
+});
+test('nearby encounter friends retaliate for every target allegiance, without aggroing unrelated residents or companions',()=>{
+  for(const allegiance of ['Friendly','Neutral','Hostile']){
+    const f=fixture(allegiance);addResident(f,'Encounter Friend',{group:true});addResident(f,'Bystander');
+    const event=P.prepare(f.state,f.service,'attack Resident');assert.ok(event);assert.deepEqual(event.defenders,['Encounter Friend']);
+    assert.equal(f.saved().actors['Encounter Friend'].allegiance,'Hostile');assert.equal(f.saved().actors.Bystander.allegiance,'Neutral');
+    assert.equal(f.roster().find(a=>a.name==='Companion').type,'npc');
+    assert.match(event.content,/Encounter Friend joins the fight/);
+    const teams=I.teams(f.roster(),f.population,createCombatSpace(f.dungeon,f.roster(),'1,0,0'),'attack Resident');
+    assert.deepEqual(teams.hostiles.map(a=>a.name).sort(),['Encounter Friend','Resident']);
+  }
+});
+test('saved explicit friendships link separate groups for this combat and survive subsequent rounds without merging identities',()=>{
+  const f=fixture('Neutral'),ally=addResident(f,'Named Friend'),reverse=addResident(f,'Reverse Friend',{x:5,y:6});
+  f.population.actors.Resident.friends=['Named Friend'];reverse.record.relationships=[{name:'Resident',type:'ally'}];
+  const ids=[ally.record.encounterId,reverse.record.encounterId,f.population.actors.Resident.encounterId];
+  P.prepare(f.state,f.service,'attack Resident');assert.equal(new Set(ids).size,3);
+  for(const input of ['attack Resident','__ENCOUNTER_DEFENCE__']){
+    const teams=I.teams(f.roster(),f.population,createCombatSpace(f.dungeon,f.roster(),'1,0,0'),input);
+    assert.deepEqual(teams.hostiles.map(a=>a.name).sort(),['Named Friend','Resident','Reverse Friend']);
+  }
+  assert.deepEqual([ally.record.encounterId,reverse.record.encounterId,f.population.actors.Resident.encounterId],ids);
+});
+test('unseen, dead, dying, departed, distant and occluded friends are not remotely provoked',()=>{
+  for(const mode of ['pending','dead','dying','departed','distant','other-room','wall']){
+    const f=fixture('Neutral'),a=addResident(f,'Absent Friend',{group:true,x:7,y:5});
+    if(mode==='pending')a.record.discoveryState='pending';
+    if(mode==='dead'){a.record.hp=0;a.record.state='Dead';}
+    if(mode==='dying'){a.record.hp=0;a.record.state='Dying';}
+    if(mode==='departed')a.record.status='departed';
+    if(mode==='distant')Object.assign(a.actor,{mazeX:23,mazeY:23});
+    if(mode==='other-room')a.actor.mazeRoomKey='2,0,0';
+    if(mode==='wall')for(let y=0;y<24;y++)f.dungeon.cells[`6,${y}`].tile='wall';
+    const event=P.prepare(f.state,f.service,'attack Resident');assert.ok(event,mode);
+    assert.equal(a.record.allegiance,'Neutral',mode);assert.deepEqual(event.defenders,[],mode);
+  }
+});
 test('attacking a friendly or neutral resident persists hostility without changing other allegiances', () => {
   for (const allegiance of ['Friendly', 'Neutral']) {
     const f = fixture(allegiance), event = P.prepare(f.state, f.service, 'attack Resident');
