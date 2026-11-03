@@ -106,9 +106,10 @@ test('generic chapter commands follow the explicit last-read focus and otherwise
   f.room.readableFocus={Hero:f.p.id+':text_0'};
   assert.ok(prepare({...f.args,input:'read chapter 1',consoleText:text}).message.includes(raw().chapters[0].text));
 });
-test('readable validation prevents blank objects, invalid chapters, huge text and unbounded item modifiers',()=>{
-  for(const patch of [{name:'None'},{name:'3'},{chapters:[]},{backstory:'x'.repeat(351)},{clueChapter:9},{modifiers:{magic:900}},{spellRefs:['bad id']}])
+test('readable validation prevents blank objects, invalid chapters and unbounded item modifiers without capping authored text',()=>{
+  for(const patch of [{name:'None'},{name:'3'},{chapters:[]},{clueChapter:9},{modifiers:{magic:900}},{spellRefs:['bad id']}])
     assert.throws(()=>R.validate([{...raw(),...patch}]));
+  const backstory='An authored history. '.repeat(100);assert.equal(R.validate([{...raw(),backstory}])[0].backstory,backstory.trim());
   assert.equal(R.intent('say "read the book"'),null);assert.equal(R.intent('read chapter 2 of the chronicle of the pale court').chapter,2);
 });
 test('document subjects do not turn books into the weapons named on their covers',()=>{

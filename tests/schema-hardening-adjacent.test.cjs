@@ -66,7 +66,9 @@ for (const entry of [false, true]) test('cloud dialogue schema bounds ' + (entry
   for (const branch of properties.replies.items.anyOf) {
     assert.equal(branch.properties.lines.minItems, 2);
     assert.equal(branch.properties.lines.maxItems, 6);
-    assert.match(branch.properties.lines.items.pattern, /\{0,19\}/);
+    assert.equal(branch.properties.lines.items.maxLength, undefined);
+    assert.ok(new RegExp(branch.properties.lines.items.pattern).test('A natural complete remark. '.repeat(30)));
+    assert.equal(new RegExp(branch.properties.lines.items.pattern).test(' '),false);
   }
   assert.equal(properties.exchanges.maxItems, 2);
   assert.equal(properties.exchanges.items.properties.lines.minItems, 2);

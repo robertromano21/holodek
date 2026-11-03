@@ -93,11 +93,11 @@ async function developRecipes($, state, { constructionKey } = {}) {
   if (!pending.length) return;
   let rows = [];
     $.model = 'gpt-4.1-mini'; $.temperature = .9;
-    await $.user`${require('./genreAbilities').language() ? 'Invent original ability names and brief lore for this world’s equipment, consistent with its saved ability system and setting. '+JSON.stringify(require('./genreAbilities').language()) : 'Invent original underworld spell names and brief lore for the magical equipment below, consistent with the Children of the Grave system prompt.'} Return JSON only: {"items":[{"name":"exact item name","spells":[{"id":"exact supplied effect id","name":"short spell name","lore":"<=35 words"}]}]}. Mechanics, charge costs, ranges, targets and dice are FIXED by the engine. Name and describe only the supplied effects; no summons, resurrection, teleportation, new items, quest completion or arbitrary mechanics. Do not use a name shared by another spell on the same item. Equipment and effects: ${JSON.stringify(pending.map(o => ({ name: o.name, magic: o.magic, spells: Rules.recipe(o) })))}`;
+    await $.user`${require('./genreAbilities').language() ? 'Invent original ability names and brief lore for this world’s equipment, consistent with its saved ability system and setting. '+JSON.stringify(require('./genreAbilities').language()) : 'Invent original underworld spell names and brief lore for the magical equipment below, consistent with the Children of the Grave system prompt.'} Return JSON only: {"items":[{"name":"exact item name","spells":[{"id":"exact supplied effect id","name":"short spell name","lore":"authored effect description"}]}]}. Mechanics, charge costs, ranges, targets and dice are FIXED by the engine. Name and describe only the supplied effects; no summons, resurrection, teleportation, new items, quest completion or arbitrary mechanics. Do not use a name shared by another spell on the same item. Equipment and effects: ${JSON.stringify(pending.map(o => ({ name: o.name, magic: o.magic, spells: Rules.recipe(o) })))}`;
     const effects = [...new Set(pending.flatMap(item => Rules.recipe(item).map(spell => spell.id)))];
     const result = await Contracts.request($, { component: 'spell-flavor', context: { runId: pool.runId, geoKey: key }, maxTokens: Math.min(3000, 200 * pending.length),
       parameters: { items: Contracts.list({ name: Contracts.choice(pending.map(o => o.name)), spells: Contracts.list({
-        id: Contracts.choice(effects), name: Contracts.text(70), lore: Contracts.text(220, 'At most 35 words; flavor only, no new mechanical effects.') }) }) },
+        id: Contracts.choice(effects), name: Contracts.text(70), lore: Contracts.text(220, 'Authored flavor only, no new mechanical effects.') }) }) },
       validate(parsed) {
         if (!Array.isArray(parsed?.items) || parsed.items.length !== pending.length) throw Error(`items: expected ${pending.length} equipment rows.`);
         const seen = new Set();
@@ -110,11 +110,11 @@ async function developRecipes($, state, { constructionKey } = {}) {
           for (const spell of row.spells) {
             if (!expected.includes(spell?.id) || ids.has(spell.id)) throw Error(`${row.name}.spells.id: unknown or duplicate effect.`);
             ids.add(spell.id);
-            if (typeof spell.name !== 'string' || !spell.name.trim() || spell.name.length > 70 || names.has(Rules.key(spell.name)))
-              throw Error(`${row.name}.${spell.id}.name: unique text, max 70 characters.`);
+            if (typeof spell.name !== 'string' || !spell.name.trim() || names.has(Rules.key(spell.name)))
+              throw Error(`${row.name}.${spell.id}.name: required unique authored text.`);
             names.add(Rules.key(spell.name));
-            if (typeof spell.lore !== 'string' || !spell.lore.trim() || spell.lore.length > 220 || spell.lore.trim().split(/\s+/).length > 35)
-              throw Error(`${row.name}.${spell.id}.lore: required, max 220 characters and 35 words.`);
+            if (typeof spell.lore !== 'string' || !spell.lore.trim())
+              throw Error(`${row.name}.${spell.id}.lore: required authored text.`);
           }
         }
         return parsed.items;

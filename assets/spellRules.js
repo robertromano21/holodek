@@ -52,7 +52,7 @@
     if (name === 'Assassin-Fighter-Necromancer-Goddess') return name;
     const rule = archetypes.includes(suggested) ? suggested : monsterArchetype(name);
     if (classes[name]?.tradition === rule || name === 'Fighter' && rule === 'Fighter') return name;
-    const title = String(name || 'Wanderer').replace(/\s*\[rules:[^\]]*\]$/, '').replace(/[\r\n<>\[\]]/g, '').trim().slice(0, 45);
+    const title = String(name || 'Wanderer').replace(/\s*\[rules:[^\]]*\]$/, '').replace(/[\r\n<>\[\]]/g, '').trim();
     return `${title} [rules: ${rule}]`;
   }
   const progression = {
@@ -216,7 +216,7 @@
     }).slice(0, 3);
   }
   function decorate(recipe, rows) {
-    const clean = (s, max) => typeof s === 'string' ? s.replace(/[\x00-\x1f<>"`{}]/g, ' ').trim().slice(0, max) : '';
+    const clean = s => typeof s === 'string' ? s.replace(/[\x00-\x1f<>"`{}]/g, ' ').trim() : '';
     const names = new Set();
     return recipe.map(spell => {
       const matches = Array.isArray(rows) ? rows.filter(r => r?.id === spell.id) : [];

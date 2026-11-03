@@ -27,7 +27,7 @@ const FUNCTIONS = {
 };
 const isType = value => TYPES.includes(canonicalType(value));
 const isFloor = room => room?.fortifiedFloor?.version === 1;
-const singleLine = (s, max) => typeof s === 'string' && s.trim() && s.length <= max && !/[<>\r\n|`]/.test(s);
+const singleLine = s => typeof s === 'string' && s.trim() && !/[<>\r\n|`]/.test(s);
 const key = Routes.keyOf;
 function protectedKeys(database, input = {}) {
   const keys = Routes.coordinateKeys([input.bossCoordinates, ...(input.protectedKeys || [])]);
@@ -68,14 +68,14 @@ function route(database, sourceKey, direction, template, input = {}, allowNew = 
 }
 function validate(raw, planned) {
   for (const [field, max] of [['history', 500], ['purpose', 250], ['heraldry', 120]])
-    if (!singleLine(raw?.[field], max)) throw Error(`${field}: required single-line text <=${max} characters.`);
+    if (!singleLine(raw?.[field], max)) throw Error(`${field}: required single-line text.`);
   if (planned.template === 'deity_temple' && !Pantheon.canon(raw.patron)) throw Error('patron: choose a canonical deity.');
   if (planned.expectedPatron && raw.patron !== planned.expectedPatron) throw Error(`patron must remain ${planned.expectedPatron}, as named in this temple.`);
-  if (!singleLine(raw.name, 80)) throw Error('name: required unique site name <=80 characters.');
+  if (!singleLine(raw.name, 80)) throw Error('name: required unique site name.');
   if (!Array.isArray(raw.floors) || raw.floors.length !== planned.floors.length) throw Error(`floors: expected ${planned.floors.length} ordered storeys, beginning with the cellar.`);
   const labels = new Set();
   for (const f of raw.floors) {
-    if (!singleLine(f?.label, 65) || !singleLine(f?.flavor, 400)) throw Error('Each floor needs label <=65 and flavor <=400 characters.');
+    if (!singleLine(f?.label, 65) || !singleLine(f?.flavor, 400)) throw Error('Each floor needs a label and authored flavor.');
     const label = f.label.trim().toLowerCase(); if (labels.has(label)) throw Error('Floor labels must be distinct.'); labels.add(label);
   }
   return raw;
@@ -123,12 +123,12 @@ async function seed($, database, planned, input = {}) {
   await $.assistant`Design an intact ${planned.template === 'deity_temple' ? 'deity-aligned temple' : 'medieval ' + planned.template.replace(/_/g, ' ')} for this outdoor approach in Children of the Grave.
 Use this saved campaign context: ${JSON.stringify({ approach: database[planned.sourceKey]?.name, region: database[planned.sourceKey]?.campaignSetting,
     atlas: database['0,0,0']?.campaignAtlas, existingName: database[planned.entryKey]?.name, floors: planned.floors })}.
-Return name (unique site name <=80 characters; preserve existingName when supplied), history (<=500 characters), purpose (<=250), heraldry (<=120), floors [{label <=65, flavor <=400}] in exactly the supplied order.
+Return name (unique site name; preserve existingName when supplied), history, purpose, heraldry, floors [{label, flavor}] in exactly the supplied order.
 Patron: ${planned.template === 'deity_temple' ? 'Choose ' + (planned.expectedPatron || 'a canonical deity consistent with the region: ' + Pantheon.names.join(', ')) + '. Use that deity\'s canonical symbols, domains and appearance. Evil temples are hostile. No god is physically spawned, and Arithus himself remains exclusive to the final throne room.' : 'Set patron to none.'}
 The building is COMPLETE and maintained, not a ruin. Castles, fortresses and towers are medieval: include gate defences, arrow slits, portcullises, battlements, banners, guard quarters, kitchens, stores and appropriate roofed halls. Temples instead use appropriate classical, Gothic or Byzantine sacred architecture and this deity's exact symbols, altar, effigies and reliefs. Wizard towers add libraries, studies, laboratories and observatories; citadels can have fantastic spires grounded in real masonry. Spread these features across the floor purposes, not identical halls. State who maintains the place and how it relates to regional factions, resources and the underworld campaign. A guard post, dungeon cell or treasury does not automatically contain a spawned actor or portable treasure.
 Each floor is its own room at the supplied XYZ coordinate; stairs connect adjacent storeys. Lower ceilings are the underside of the floor above. No floating floors, elevators or unsupported stacked surfaces inside one map. The approach is OUTSIDE; all these rooms are INSIDE. Do not invent exits, keys, quests, characters, rewards or boss assignments. Upper rooms may later host a quest boss, but the existing quest engine alone owns boss placement and locks. Flavor is physical planning guidance, not a replacement Room Description. Use the requested Retort fields, single-line values only.`;
   const generated = await Contracts.request($, { component: 'fortified-site', context: { geoKey: planned.entryKey }, maxTokens: 1800,
-    localWork: { brief: `Design this complete maintained building, not a ruin: ${planned.template}. Outdoor approach: ${database[planned.sourceKey]?.name}. Existing site name must be preserved: ${database[planned.entryKey]?.name || 'not named'}. Region: ${JSON.stringify(require('./holodekRoomWork').region(database[planned.sourceKey]?.campaignSetting))}. Storeys in required order: ${JSON.stringify(planned.floors)}. Each is a distinct indoor room with stairs and a real ceiling below the next floor; no unsupported stacked maps. Include practical spaces and fitting patron symbols. Never spawn gods, actors, loot, quests, keys or extra exits. Arithus remains exclusive to the final throne encounter. Write complete concise sentences comfortably below field limits.`,
+    localWork: { brief: `Design this complete maintained building, not a ruin: ${planned.template}. Outdoor approach: ${database[planned.sourceKey]?.name}. Existing site name must be preserved: ${database[planned.entryKey]?.name || 'not named'}. Region: ${JSON.stringify(require('./holodekRoomWork').region(database[planned.sourceKey]?.campaignSetting))}. Storeys in required order: ${JSON.stringify(planned.floors)}. Each is a distinct indoor room with stairs and a real ceiling below the next floor; no unsupported stacked maps. Include practical spaces and fitting patron symbols. Never spawn gods, actors, loot, quests, keys or extra exits. Arithus remains exclusive to the final throne encounter. Write complete sentences with the detail each field needs.`,
       arrays: { floors: { count: planned.floors.length, max: planned.floors.length, batch: 1 } } },
     parameters: { name: Contracts.text(80), history: Contracts.text(500), purpose: Contracts.text(250), heraldry: Contracts.text(120), patron: Contracts.choice(planned.template === 'deity_temple' ? planned.expectedPatron ? [planned.expectedPatron] : Pantheon.names : ['none']),
       floors: Contracts.list({ label: Contracts.text(65), flavor: Contracts.text(400) }) }, validate: value => {

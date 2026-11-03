@@ -30,7 +30,7 @@ function agent(reply) {
 
 test('party biography-writing prompt permits detailed histories while preserving canonical and knowledge constraints', () => {
   const text = fs.readFileSync(require.resolve('../retort/characterProfiles'), 'utf8');
-  assert.match(text, /History has no word-count limit/);
+  assert.match(text, /No authored profile field has a character-count or word-count limit/);
   assert.doesNotMatch(text, /History <=70|two short sentences/);
   assert.match(text, /Mortacia and Suzerain have established canon and must not be rewritten/);
   assert.match(text, /knowledge of encounters they have not witnessed/);

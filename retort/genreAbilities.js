@@ -4,7 +4,7 @@ const Base = require('../assets/spellRules');
 const flights = new WeakMap();
 const bible = () => require('./settingLayer').current();
 function validate(value, world) {
-  const text = (s, max) => typeof s === 'string' && s.trim() && s.length <= max;
+  const text = s => typeof s === 'string' && s.trim();
   for (const key of ['name', 'ability', 'plural', 'resource', 'book', 'scroll', 'activate', 'explanation'])
     if (!text(value?.[key], key === 'explanation' ? 700 : 70)) throw Error('Ability system requires ' + key + '.');
   const ids = Object.keys(Base.templates), seen = new Set();

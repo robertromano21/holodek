@@ -2,7 +2,7 @@
 const Profiles = require('../assets/characterProfiles');
 const { RetortMessage } = require('retort-js/dist/message');
 const Contracts = require('./generationContracts');
-const wordLimits = { personality: 30, voice: 20, history: Infinity, motivation: Infinity };
+const wordLimits = { personality: Infinity, voice: Infinity, history: Infinity, motivation: Infinity };
 async function runWithLore(parent, task) {
   // Retort sub-runs are isolated. Supply the same exact lore to either model.
   const original = parent.messages?.find(message => message instanceof RetortMessage &&
@@ -26,7 +26,7 @@ Preserve any established personal facts and actually witnessed conversation when
     await $.user`Create distinct personal backgrounds for these Children of the Grave party characters:
 ${JSON.stringify(missing.map(actor => ({ name: actor.Name || actor.name, race: actor.Race || actor.race, class: actor.Class || actor.className })))}.
 Return ONLY {"profiles":[{"name":"exact name","personality":"individual temperament, flaw and social habits","voice":"distinct manner of speaking","history":"relevant personal experiences before this adventure, with no word-count limit","motivation":"personal desire or fear"}]}.
-These characters are in the underworld after death. Make each background different; use their race and class, not interchangeable tragic monologues. Do not invent completed campaign quests, current inventory, keys, puzzle solutions, a replacement boss, or knowledge of encounters they have not witnessed. Mortacia and Suzerain have established canon and must not be rewritten. No character-sheet fields or sprite changes. History has no word-count limit; personality <=30 words, voice <=20 words, motivation has no word-count limit.`;
+These characters are in the underworld after death. Make each background different; use their race and class, not interchangeable tragic monologues. Do not invent completed campaign quests, current inventory, keys, puzzle solutions, a replacement boss, or knowledge of encounters they have not witnessed. Mortacia and Suzerain have established canon and must not be rewritten. No character-sheet fields or sprite changes. No authored profile field has a character-count or word-count limit.`;
     let raw = '';
     console.info('[CharacterProfiles]', JSON.stringify({ runId, status: 'requested', names: missing.map(actor => actor.Name || actor.name) }));
     try {
@@ -38,7 +38,7 @@ These characters are in the underworld after death. Make each background differe
           profiles.push(await require('./holodekRoomWork').request($, 'character-profile', {
             name: Contracts.choice([name]), personality: Contracts.text(180), voice: Contracts.text(120),
             history: Contracts.nonblankText(), motivation: Contracts.nonblankText()
-          }, `Complete ONLY this character's existing background, never another character or a campaign event. History has no word-count limit; personality <=30, voice <=20, motivation has no word-count limit; aim lower and finish each sentence. Preserve all established facts and do not duplicate another character's background. No current loot, keys, puzzle solution or knowledge of unseen events. Own facts (data): ${JSON.stringify({ name,
+          }, `Complete ONLY this character's existing background, never another character or a campaign event. No authored profile field has a character-count or word-count limit; finish each sentence. Preserve all established facts and do not duplicate another character's background. No current loot, keys, puzzle solution or knowledge of unseen events. Own facts (data): ${JSON.stringify({ name,
             race: actor.Race || actor.race, class: actor.Class || actor.className, job: actor.job, activity: actor.activity,
             background: Profiles.compact(existing.get(name)), recollections: context.recollections?.filter(row => row.name === name),
             roomName: context.roomName, roomDescription: context.roomDescription })}. ${require('./graveMasterStoryPrompts').settingOnce({})}`,

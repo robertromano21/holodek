@@ -26,7 +26,7 @@
     if (typeof value !== 'string') return null;
     value = value.trim();
     // Names share a comma-delimited text field; modifiers and field syntax are never item names.
-    return value.length <= 100 && /[a-z]/i.test(value) && !/[{},:\[\]"\r\n<>]/.test(value) &&
+    return /[a-z]/i.test(value) && !/[{},:\[\]"\r\n<>]/.test(value) &&
       !/^(?:none|empty|null|undefined)$/i.test(value) ? value : null;
   }
   function parseEquipment(value) {
@@ -104,7 +104,7 @@
     for (const ch of String(value)) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
     return h >>> 0;
   }
-  const text = (value, max = 180) => String(value || '').replace(/[\r\n<>]/g, ' ').trim().slice(0, max);
+  const text = value => String(value || '').replace(/[\r\n<>]/g, ' ').trim();
   function parseBlocks(block, type = 'monster') {
     const raw = String(block || '').split(/\r?\n/);
     const rows = raw.map((line, index) => ({ line: line.trim(), index })).filter(row => row.line);

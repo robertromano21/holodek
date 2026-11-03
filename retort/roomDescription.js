@@ -34,7 +34,7 @@ async function generate($, target) {
     const Work = require('./holodekRoomWork'), C = require('./generationContracts');
     return Work.request($, 'room-description', { description: C.text(1600) },
       creationPrompt(target, P.settingOnce({})) + '\nRead-only physical context: ' + JSON.stringify(Work.descriptionData(target)) +
-      '\nWrite 80-160 words, well below the field limit, ending in a complete sentence. Use only the target location, never earlier naming instructions.',
+      '\nWrite the complete paragraph, ending in a complete sentence. Use only the target location, never earlier naming instructions.',
       raw => validate(raw.description));
   }
   await $.user(creationPrompt(target, P.isHolodek1() ? P.settingOnce($) : ''));

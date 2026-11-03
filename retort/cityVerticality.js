@@ -5,7 +5,7 @@ function schema(C){return{floors:{type:Number,minimum:1,maximum:160,multipleOf:1
   lowerUse:C.nonblankText(90),middleUse:C.nonblankText(90),upperUse:C.nonblankText(90),roofUse:C.nonblankText(90)};}
 function validate(p){
   if(!Number.isInteger(p?.floors)||p.floors<1||p.floors>160||!TRANSIT.includes(p.transit)||typeof p.bridges!=='boolean'||
-    ['lowerUse','middleUse','upperUse','roofUse'].some(k=>typeof p[k]!=='string'||!p[k].trim()||p[k].length>90))throw Error('Invalid authored city verticality.');
+    ['lowerUse','middleUse','upperUse','roofUse'].some(k=>typeof p[k]!=='string'||!p[k].trim()))throw Error('Invalid authored city verticality.');
   return p;
 }
 function profile(city,underground=false){

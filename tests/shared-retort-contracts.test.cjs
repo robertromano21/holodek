@@ -43,21 +43,20 @@ function route(id, answer) {
 for (const id of ['gpt-6-luna', 'xai-fixture', 'holodek-1']) {
   test(id + ': schema errors repair only the invalid nested remark and preserve accepted siblings', async () => {
     const parameters = { title: C.text(80), replies: { type: C.list({ speaker: C.choice(['Veyra']), lines: { type: [C.wordText()], minItems: 2, maxItems: 2 } }), minItems: 1, maxItems: 1 } };
-    const long = Array.from({ length: 21 }, (_, n) => 'word' + n).join(' ');
-    const first = { title: 'The Saved Story', replies: [{ speaker: 'Veyra', lines: ['Keep this exact thought.', long] }] };
-    const f = route(id, (_body, n) => n === 1 ? first : { fix_0: n === 2 ? long : 'A new, shorter thought.' });
+    const first = { title: 'The Saved Story', replies: [{ speaker: 'Veyra', lines: ['Keep this exact thought.', ''] }] };
+    const f = route(id, (_body, n) => n === 1 ? first : { fix_0: n === 2 ? '' : 'A complete authored thought.' });
     const result = await C.request(f.agent, { component: 'cross-route', parameters });
     assert.ok(result.value, result.error?.message); assert.equal(f.calls.length, 3);
     assert.equal(result.value.title, first.title); assert.equal(result.value.replies[0].speaker, 'Veyra');
     assert.equal(result.value.replies[0].lines[0], first.replies[0].lines[0]);
-    assert.equal(result.value.replies[0].lines[1], 'A new, shorter thought.');
+    assert.equal(result.value.replies[0].lines[1], 'A complete authored thought.');
     for (const body of f.calls.slice(1)) {
       const schema = body.response_format?.json_schema.schema || body.tools[0].function.parameters;
       assert.deepEqual(Object.keys(schema.properties), ['fix_0']);
     }
     assert.match(f.prompts[0], /\$\.replies\[0\]\.lines\[1\]/);
-    assert.match(f.prompts[0], /Veyra/); assert.match(f.prompts[0], /word20/);
-    assert.deepEqual(first.replies[0].lines, ['Keep this exact thought.', long], 'Rejected input is not mutated.');
+    assert.match(f.prompts[0], /Veyra/);
+    assert.deepEqual(first.replies[0].lines, ['Keep this exact thought.', ''], 'Rejected input is not mutated.');
     assert.equal(!!f.calls[0].response_format, id === 'holodek-1');
     assert.equal(f.calls[0].tools?.[0]?.function.strict, id === 'holodek-1' ? undefined : true);
   });
@@ -167,15 +166,14 @@ test('authoritative sex and pronouns survive compact character context without n
   assert.equal(rows[0].sex, 'Male'); assert.equal(rows[0].pronouns, 'he/him');
   assert.match(rows[1].pronouns, /do not infer/);
 });
-test('logged 21-word cache remark is corrected by index, not truncated or regenerated as an entire cache', async () => {
+test('logged 21-word cache remark is accepted in one request without truncation or regeneration', async () => {
   const before = Models.current().id; Models.restore('gpt-6-luna');
   try {
-    const bad = Array.from({ length: 21 }, (_, n) => 'word' + n).join(' ');
-    const accepted = ['Keep the first.', 'Keep the second.', 'Keep the third.', bad, 'Keep the fifth.', 'Keep the sixth.'];
+    const long = Array.from({ length: 21 }, (_, n) => 'word' + n).join(' ');
+    const accepted = ['Keep the first.', 'Keep the second.', 'Keep the third.', long, 'Keep the fifth.', 'Keep the sixth.'];
     const f = route('gpt-6-luna', (_body, count) => count === 1 ? { spoken: [], replies: [{ speaker: 'Veyra Ashquiet', lines: accepted }], exchanges: null } : { fix_0: 'The shorter authored thought.' });
     const result = await Dialogue.generateCharacterDialogue(f.agent, { characters: [{ name: 'Veyra Ashquiet', partyMember: true }], roomDescription: 'The saved hall.' });
-    assert.equal(f.calls.length, 2); assert.equal(result.replies[0].lines.length, 6);
-    assert.deepEqual(result.replies[0].lines, accepted.map((line, n) => n === 3 ? 'The shorter authored thought.' : line));
-    assert.match(f.prompts.at(-1), /\$\.replies\[0\]\.lines\[3\]/);
+    assert.equal(f.calls.length, 1); assert.equal(result.replies[0].lines.length, 6);
+    assert.deepEqual(result.replies[0].lines, accepted);
   } finally { Models.restore(before); }
 });

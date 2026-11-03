@@ -27,7 +27,8 @@ test('inscription records persist apart from item properties, without replacing 
   const p=definition(),room={objects:[{name:'old sword',type:'weapon'}]},text='Objects in Room: old sword\nObjects in Room Properties: {name: "old sword", type: "weapon", magic: 1}';
   assert.equal(R.spawn(p,room,text),text);assert.equal(room.objects.length,1);assert.equal(room.inscriptions.length,4);
   const before=JSON.stringify(room);R.spawn(p,room,text);assert.equal(JSON.stringify(room),before);
-  for(const patch of [{type:'unbuilt_tomb'},{name:'3'},{text:''},{motif:'unknown'},{text:'x'.repeat(651)}])assert.throws(()=>R.validateInscriptions([{...rows()[0],...patch}]));
+  for(const patch of [{type:'unbuilt_tomb'},{name:'3'},{text:''},{motif:'unknown'}])assert.throws(()=>R.validateInscriptions([{...rows()[0],...patch}]));
+  assert.equal(R.validateInscriptions([{...rows()[0],text:'x'.repeat(651)}])[0].chapters[0].text,'x'.repeat(651));
   assert.throws(()=>R.validateInscriptions([...rows(),rows()[0]]),/four/);
   assert.throws(()=>P.compile({...p,readables:[{kind:'scroll',name:p.inscriptions[0].name,title:'Clashing Names'}]}));
 });

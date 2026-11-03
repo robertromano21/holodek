@@ -130,11 +130,11 @@
     }
     const content = ledgerContent(ledgerState), entries = document.getElementById('combat-ledger-entries');
     const text = content.entries.join('\n\n');
-    if (entries && entries.textContent !== text) entries.textContent = text;
+    const fresh = !!entries && entries.textContent !== text; if (fresh) entries.textContent = text;
     const initiative = document.getElementById('combat-ledger-initiative'), pending = document.getElementById('combat-ledger-pending');
     if (initiative) initiative.textContent = content.initiative;
     if (pending) pending.textContent = content.pending;
-    if (follow) panel.scrollTop = panel.scrollHeight;
+    if (fresh && entries.lastChild) panel.scrollTop = Math.max(0, entries.offsetTop + entries.offsetHeight - panel.clientHeight); else if (follow) panel.scrollTop = panel.scrollHeight;
   }
   function layout(animate = false) {
     const box = document.getElementById('combat-popup'); if (!box || !active) return;

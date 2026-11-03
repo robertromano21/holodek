@@ -41,7 +41,7 @@ test('entry withholds display until first-quest inference finishes, then publish
   const start = source.indexOf('    let preparedEntry = null;'), end = source.indexOf('    let roomDescriptionGenerated', start);
   const run = vm.runInNewContext('(async()=>{' + source.slice(start, end) + '})()', {
     updatedGameConsole: f.text(), roomNameDatabaseString: f.state.getRoomNameDatabase(), sharedState: f.state,
-    userInput: 'north', populationService: f.population, broadcast: f.options.broadcast, Inhabitants: I, console: { info() {} },
+    userInput: 'north', populationService: f.population, broadcast: f.options.broadcast, Inhabitants: I, console: { info() {}, warn() {} },
     require: id => id === './roomBuildQueue' ? { service: () => ({ join: async () => {} }) } :
       id === './gameModels' ? { current: () => ({ id: f.model }) } : require('../retort/' + id.slice(2)),
     $: { run: work => work() }, generateQuest: async () => { questStarted = true; await waiting; quest = 'Prepared quest'; },

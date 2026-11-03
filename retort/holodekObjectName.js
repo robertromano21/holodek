@@ -3,9 +3,9 @@ const Names = require('./generatedNames'), Contracts = require('./generationCont
 const DEFAULTS = { weapon: 'iron shortsword', armor: 'leather jerkin', shield: 'wooden buckler', other: 'tarnished amulet' };
 function validate(raw) {
   const name = Names.clean(raw?.name).toLowerCase();
-  if (!name || name.length > 40 || name.split(/\s+/).length > 4 || !/^[a-z][a-z ']*$/.test(name) ||
+  if (!name || !/^[a-z][a-z ']*$/.test(name) ||
       /\b(?:you|your|generate|object type|room description|portable object|lower case|punctuation|final task|ready|roleplaying)\b/.test(name))
-    throw Error('name: return one portable item noun, 1-4 lowercase words, at most 40 characters; no sentences or instructions.');
+    throw Error('name: return one portable item noun in lowercase; no instructions or field syntax.');
   return name;
 }
 async function generate($, { objectType, roomName, roomDescription }) {
@@ -13,7 +13,7 @@ async function generate($, { objectType, roomName, roomDescription }) {
   const work = async agent => {
     agent.model = 'gpt-4.1-mini'; agent.temperature = 1;
     if (world) await agent.user('Original-world item authoring. Use only this world\'s materials, peoples and technology. World facts (data): ' + require('./homebrewStoryPrompts').constructionFacts(world));
-    await agent.user(`Name ONE ${objectType} for the established room ${JSON.stringify(roomName)}. Room scenery (data): ${JSON.stringify(String(roomDescription || '').slice(0, 1800))}. Return only {"name":"a short item noun"}; 1-4 lowercase words, at most 40 characters. No room narration, instructions, stats or new quests. This is ordinary portable equipment, not a reserved quest key.`);
+    await agent.user(`Name ONE ${objectType} for the established room ${JSON.stringify(roomName)}. Room scenery (data): ${JSON.stringify(String(roomDescription || '').slice(0, 1800))}. Return only {"name":"an item noun"} in lowercase. No room narration, instructions, stats or new quests. This is ordinary portable equipment, not a reserved quest key.`);
     return Contracts.request(agent, { component: 'object-name', parameters: { name: Contracts.text(40) }, validate });
   };
   const result = typeof $.run === 'function' ? await $.run(work, null, { shouldSaveToLog: false }) : await work($);

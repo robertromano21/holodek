@@ -2378,7 +2378,7 @@ async function generateMonstersBlockIsolated($, roomName, roomDescription, roomC
 async function generateMonsterEquipmentName($, objectType, ownerName) {
     if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())
         return require('./holodekRoomWork').request($, 'monster-equipment-name', { name: { type: String, minLength: 1, maxLength: 40 } },
-          `Name ONE ordinary portable ${objectType} for ${JSON.stringify(ownerName)}. Return only a short lowercase noun phrase, 1-4 words, no punctuation, statistics or reserved quest item.`,
+          `Name ONE ordinary portable ${objectType} for ${JSON.stringify(ownerName)}. Return only a lowercase noun phrase, no punctuation, statistics or reserved quest item.`,
           require('./holodekObjectName').validate);
     $.model = 'gpt-4.1-mini';
     $.temperature = 1.0;
@@ -6587,7 +6587,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       if (guidance) await $.assistant`${guidance}`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
-      if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]}, an outdoor area of the wastelands outside the temple. Reply with the name only: 1-5 words, no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
+      if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]}, an outdoor area of the wastelands outside the temple. Reply with the name only: no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
       else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} leading to the wastelands of Tartarus. This room is an outdoor area away from the Ruined Temple in the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
       const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
@@ -6596,7 +6596,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
       if (guidance) await $.assistant`${guidance}`;
       $.model = "gpt-4.1-mini";
       $.temperature = 1.0;
-      if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]}. Reply with the name only: 1-5 words, no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
+      if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]}. Reply with the name only: no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
       else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the Ruined Temple Entrance to the ${roomExitsArray[0]} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
       const generationResultName = await $.assistant.generation({ maxTokens: 40 });
       newAdjacentRooms[roomExitsArray[0]] = generationResultName.content.trim();
@@ -6607,7 +6607,7 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
         if (guidance) await $.assistant`${guidance}`;
         $.model = "gpt-4.1-mini";
         $.temperature = 1.0;
-        if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the ${roomName} to the ${exit}. Reply with the name only: 1-5 words, no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
+        if (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1()) await $.assistant`Name the room connected to the ${roomName} to the ${exit}. Reply with the name only: no punctuation, no description. It must be unique, fit what lies that way (temple halls deeper inside or the outdoor wastes) and must not reuse a name or theme from earlier rooms.`; // holodek-1 only
         else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for a room connected to the ${roomName} to the ${exit} taking into account the conversation history, the current location and coordinates in the game console, the previous locations in the maze including whether the character was inside or outside to ensure that rooms are connected in a manner that tells the story of underworld, its characteristics and the game's lore, using the current game console as a guide, including the room's features, history and purpose in the functioning of the underworld, but don't mention any exits, portable objects or NPCs. When the game begins and there is more than one exit in the first room, one of the exits must always lead outside into the wastelands of Tartarus, and the other exits must always lead further into the temple's many rooms, sites, cities, markets, communities, etc. Elsewhere in the temple, further exits again lead deeper into the temple and the subterranean parts of the underworld, while others may yet lead outdoors into the wastelands of Tartarus. In the wastelands, exits lead further into the plane of Tartarus including any sites, ruins, cities, markets, communities, etc. that populate the outdoor parts of the underworld. Overall, many sites in the temple and in Tartarus were dedicated to or once used by Mortacia or other individual deities named in the pantheon before Tartarus fell into disorder, or were created as a consequence and as a reflection of actions taken by mortals in the world of Danae. The game takes place in both the Ruined Temple's many rooms which are situated in the underworld plane, Tartarus, and outdoors in Tartarus itself, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, with the ultimate goal of finding the gateway to Hades, the city of the dead and realm of the damned. Avoid repeating themes from history,choose a new one: madness, rebirth, betrayal, etc. Vary from prior: Subvert last motif with a contrasting element.`;
         const generationResultName = await $.assistant.generation({ maxTokens: 40 });
         newAdjacentRooms[exit] = generationResultName.content.trim();
@@ -7263,7 +7263,7 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
 // ===== end helpers =====
 
 async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast, preparation = false) {
-  const localQuestWork = typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
+  const localQuestWork = !!preparation || typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
   const questLink = (component, parameters, data, instruction) => require('./holodekRoomWork').questReply($, component, parameters,
     { quest: sharedState.getCurrentQuest(),...(['quest-task-kind','quest-task-description'].includes(component)?{
       bookInspiration:require('./bookResearch').seeds(JSON.parse(sharedState.getRoomNameDatabase()||'{}'),data.elements?.map(e=>e.name),1)}:{}), ...data }, instruction);
@@ -7824,7 +7824,7 @@ Use the existing quest and characters for context. Do not place it inside the bo
         // As a last resort, ask GPT to provide a monster name NOT in the excluded set
         if (!firstName || firstName === "Unknown" || npcExcludeSet.has(firstName.toLowerCase())) {
           await $.user`Provide ONLY {"name":"X"} where X is a unique monster name appropriate for ${(room.name || 'the room')} that is NOT any of: ${partyNpcNames.join(', ') || '(none)'} and not a party member.`;
-          const nresp = localQuestWork ? await questLink('quest-resident-name', { name: { type: String, maxLength: 70 } },
+          const nresp = localQuestWork ? await questLink('quest-resident-name', { name: { type: String, minLength: 1 } },
             { room: room.name, excludedPartyNames: partyNpcNames }, 'Name only one ordinary non-divine monster appropriate to the saved room.') : await $.assistant.generation({ maxTokens: 40, parameters: { name: String } });
           firstName = (parseOnlyJson(nresp.content, { name: "shade revenant" }).name || "shade revenant").toString();
         }
@@ -7880,7 +7880,7 @@ Party NPCs must remain allies (never enemies). Respond ONLY {"actionKind":"X"} u
     let actionKind = (parseOnlyJson(actResp.content, { actionKind: "other" }).actionKind || "other").toString();
     if (!actionKinds.includes(actionKind)) return null;
     // 4) Write desc/metrics referencing COMPLETE and these elements
-    await $.user`Write a concise ONE-SENTENCE "desc" (<=200 chars) for a unique quest step of type "${pickedType}" that the player can COMPLETE using ONLY these elements:
+    await $.user`Write one complete sentence for "desc" for a unique quest step of type "${pickedType}" that the player can COMPLETE using ONLY these elements. Preserve full names; there is no character-count limit:
 elementsJson=${JSON.stringify(actualElements)}
 Party NPCs remain allies; do not cast them as enemies.
 Primary completion action: ${actionKind}.
@@ -7889,14 +7889,14 @@ Placements are authoritative. If targets occupy different rooms, describe a jour
 Use the full exact item and recipient names. Do not abbreviate an item to "the shroud" or replace a bound room with an invented "northern hall". A delivery means giving each item to its bound recipient, not dropping it or just meeting them.
 Respond ONLY {"desc":"..."}.
 `;
-    const descResp = localQuestWork ? await questLink('quest-task-description', { desc: { type: String, minLength: 1, maxLength: 200 } },
+    const descResp = localQuestWork ? await questLink('quest-task-description', { desc: { type: String, minLength: 1 } },
       { type: pickedType, actionKind, elements: actualElements }, 'Write one complete sentence describing completion. Preserve exact object/recipient names. Distinct placements mean a journey, never all targets at the entrance.') : await $.assistant.generation({ maxTokens: 80, parameters: { desc: String } });
     const desc = (parseOnlyJson(descResp.content, { desc: "Proceed." }).desc || "Proceed.").toString();
     await $.user`Define concise "metrics" to decide COMPLETION of this "${pickedType}" step, based ONLY on game console facts (e.g., items in Inventory, monster HP=0, door opened).
 These elements are REQUIRED TO COMPLETE the step. Party NPCs must NOT be used as monsters or targets.
 Respond ONLY {"metrics":"..."}.
 `;
-    const metricsResp = localQuestWork ? await questLink('quest-task-metrics', { metrics: { type: String, minLength: 1, maxLength: 240 } },
+    const metricsResp = localQuestWork ? await questLink('quest-task-metrics', { metrics: { type: String, minLength: 1 } },
       { type: pickedType, actionKind, desc, elements: actualElements }, 'Describe only engine-checkable completion metrics, such as actual inventory, target HP or an opened bound door.') : await $.assistant.generation({ maxTokens: 80, parameters: { metrics: String } });
     const metrics = (parseOnlyJson(metricsResp.content, { metrics: "Complete condition met" }).metrics || "Complete condition met").toString();
     const hardRequirements = buildHardRequirements(pickedType, actualElements);
@@ -8017,7 +8017,7 @@ XP is committed by the existing action adjudication, not this progress evaluator
 Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote":".","narrative":".","reward":"XP gained: X"}.`;
       const updateResult = localQuestWork ? await questLink('quest-task-progress', {
         updatedStatus: { type: String, enum: ['Pending', 'In Progress', 'Completed'] },
-        progressNote: { type: String, maxLength: 180 }, narrative: { type: String, maxLength: 320 }, reward: { type: String, enum: [''] }
+        progressNote: { type: String }, narrative: { type: String }, reward: { type: String, enum: [''] }
       }, { userInput, activeTask, completionVerified: mayComplete, checks: assessment.checks },
       'Narrate only this engine-verified progress. Completed is forbidden unless completionVerified=true. Reward must stay empty; XP is already adjudicated elsewhere.') : await $.assistant.generation({ maxTokens: 200,
         parameters: {
@@ -8117,7 +8117,7 @@ Output ONLY JSON: {"updatedStatus":"Pending/In Progress/Completed","progressNote
 
 async function generateQuest($, preparation = null) {
     const questWorld = typeof WorldSetting !== 'undefined' ? WorldSetting.current() : null;
-    const localQuestWork = !!questWorld || (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1());
+    const localQuestWork = !!preparation || !!questWorld || (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1());
     // The visited counter can advance while still at the entrance; location is authoritative.
     const questRoomCoordinates = updatedGameConsole.match(/^Coordinates:[ \t]*X:\s*(-?\d+),\s*Y:\s*(-?\d+),\s*Z:\s*(-?\d+)/m);
     if (!questRoomCoordinates || !preparation && questRoomCoordinates.slice(1).every(value => Number(value) === 0)) return;
@@ -8230,11 +8230,11 @@ Narrative Guidelines
 
 Backend Integration: Programmatic vs. Narrative Handling`;
  
-            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only the next quest objective item, using 1-5 words.', { previousQuest: currentQuest }, questWorld));
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only the next quest objective item.', { previousQuest: currentQuest }, questWorld));
             else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next artifact to be found in the game taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             }
             const generationResultArtifact = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-artifact-name',
-              { name: { type: String, minLength: 1, maxLength: 70 } }, { previousQuest: currentQuest }, 'Name ONLY a new ordinary non-divine artifact, 1-5 words, no punctuation or description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
+              { name: { type: String, minLength: 1 } }, { previousQuest: currentQuest }, 'Name ONLY one new ordinary non-divine artifact, no description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
             nextArtifact = require('./holodekRoomWork').questName(generationResultArtifact.content);
             const finalDivineStage = Divinity.finalStage(updatedGameConsole);
             if (finalDivineStage) nextArtifact = 'Sepulchra';
@@ -8251,11 +8251,11 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             if (!localQuestWork) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
-            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only a new boss opponent native to this world, using 1-5 words.', { artifact: nextArtifact }, questWorld));
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only a new boss opponent native to this world.', { artifact: nextArtifact }, questWorld));
             else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the next powerful boss monster taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             }
             const generationResultBoss = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-boss-name',
-              { name: { type: String, minLength: 1, maxLength: 70 } }, { artifact: nextArtifact }, 'Name ONLY a new powerful non-divine boss monster, not a member of the reserved pantheon.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
+              { name: { type: String, minLength: 1 } }, { artifact: nextArtifact }, 'Name ONLY one new powerful non-divine boss monster, not a member of the reserved pantheon.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
             nextBoss = require('./holodekRoomWork').questName(generationResultBoss.content);
             if (finalDivineStage) nextBoss = 'Arithus';
             else if (Pantheon.name(nextBoss)) nextBoss = 'Throneward Sentinel ' + Inhabitants.hash(nextBoss + nextArtifact).toString(36);
@@ -8350,11 +8350,11 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             if (!localQuestWork) {
             $.model = "gpt-4.1-mini";
             $.temperature = 1.0;
-            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only the bound boss location, using 1-5 words. Preserve its physical genre.', { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, questWorld));
+            if (questWorld) await $.assistant(require('./homebrewStoryPrompts').quest('Name only the bound boss location. Preserve its physical genre.', { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, questWorld));
             else await $.assistant`Generate a unique name and nothing else with no punctuation or description, just the name, for the boss monster's room taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             }
             const generationResultBossRoom = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-boss-location',
-              { name: { type: String, minLength: 1, maxLength: 70 } }, { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, 'Name ONLY the boss location, 1-5 words, not a description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
+              { name: { type: String, minLength: 1 } }, { artifact: nextArtifact, boss: nextBoss, coordinates: bossCoordinates }, 'Name ONLY the bound boss location, not a description.')).result.name } : await $.assistant.generation({ maxTokens: 40 });
             bossRoom = require('./holodekRoomWork').questName(generationResultBossRoom.content);
             }
             if (finalDivineStage) bossRoom = 'Throne Room of Hades';
@@ -8373,7 +8373,7 @@ Backend Integration: Programmatic vs. Narrative Handling`;
             else await $.assistant`Generate a unique description in a single paragraph with no line breaks for the next quest to retrieve ${nextArtifact} by defeating ${nextBoss} at ${bossRoom} taking into account the game's lore. The underworld plane, Tartarus, is a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons.`;
             }
             const generationResultQuest = localQuestWork ? { content: (await require('./holodekRoomWork').questReply($, 'quest-premise',
-              { description: { type: String, minLength: 1, maxLength: 600 } }, { artifact: nextArtifact, boss: nextBoss, location: bossRoom, coordinates: bossCoordinates },
+              { description: { type: String, minLength: 1 } }, { artifact: nextArtifact, boss: nextBoss, location: bossRoom, coordinates: bossCoordinates },
               'Describe ONLY the next quest to retrieve this exact artifact by defeating this bound boss at this location. One complete concise paragraph, no new prerequisites or alternate boss.')).result.description } : await $.assistant.generation({ maxTokens: 120 });
             currentQuest = require('./holodekRoomWork').questDescription(generationResultQuest.content);
             console.log("Generated currentQuest:", currentQuest);
@@ -11209,7 +11209,7 @@ if (typeof currentRoomData.trapTriggered !== "boolean") {
   if (exitToBeDiscovered) {
     await $.user`Generate a unique room name for a room connected to "${roomName}", considering the conversation history, current location, coordinates in the game console, previous locations in the maze, and the game's lore. Respond with ONLY {"name":"X"} where X is lowercased, single-line, no punctuation.`;
     const roomNameResponse = localEffects ? await effectLink('discovery-room-name', { name: { type: String, maxLength: 70 } },
-      'Name only the engine-approved newly discovered connected location, 1-5 words, no description.') : await $.assistant.generation({ maxTokens: 40 });
+      'Name only the engine-approved newly discovered connected location, no description.') : await $.assistant.generation({ maxTokens: 40 });
     const rnStr = roomNameResponse.content || String(roomNameResponse.result || "");
     let newRoomName = "unknown chamber";
     {
@@ -12415,6 +12415,9 @@ Backend Integration: Programmatic vs. Narrative Handling`;
       }
       openingQuestActivated = await openingService.activate(preparedKey, { input: userInput });
       if (!openingQuestActivated) {
+        const preparationStatus = openingService.status();
+        console.warn('[OpeningQuestPreparation]', JSON.stringify({ phase: 'foreground-fallback', runId: sharedState.getDungeonRunId(),
+          geoKey: preparedKey, reason: preparationStatus?.reason || preparationStatus?.phase || 'not-started' }));
         // With no usable private result, author once behind the same entry barrier, never after display.
         await $.run(agent => generateQuest(agent, {}));
         const seeded = await seedAndManageQuest($, sharedState.getUpdatedGameConsole(), '', null, true);

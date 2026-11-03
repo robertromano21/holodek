@@ -17,7 +17,7 @@ function edges(room, from, db) {
     const exit=object(raw)?raw:typeof raw==='string'?{status:raw}:null;
     if(!text(direction,40)||!exit||exit.hidden||exit.secret&&!exit.discovered)continue;
     const vector=VECTORS[direction],target=exit.targetCoordinates || (vector&&from.split(',').map((n,i)=>Number(n)+vector[i]).join(','));
-    if(!key(target)||target===from||!object(db[target])||!text(db[target].name,240))continue;
+    if(!key(target)||target===from||!object(db[target])||typeof db[target].name!=='string'||!db[target].name.trim())continue;
     const status=String(exit.status||'open').toLowerCase();
     result.push({direction,geoKey:target,locked:status!=='open'||exit.locked===true||exit.isLocked===true||exit.blocked===true});
     if(result.length===LIMITS.neighbors)break;

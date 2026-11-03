@@ -169,10 +169,9 @@ test('explicit links and declared first root exit precede geometric/default pres
   assert.equal(redirected.intents.north.targetKey, '11,12,13');
 });
 
-test('malformed replies, template/hint types and oversized hints use deterministic typed fallbacks', async () => {
+test('malformed replies and invalid template/hint types use deterministic typed fallbacks', async () => {
   for (const response of ['not json', '[]', '{"directions":[]}', { directions: { east: { template: '__proto__', hint: 'bad' } } },
-    { directions: { east: { template: 1, hint: 'bad' } } }, { directions: { east: { template: 'castle', hint: {} } } },
-    { directions: { east: { template: 'castle', hint: 'H'.repeat(241) } } }]) {
+    { directions: { east: { template: 1, hint: 'bad' } } }, { directions: { east: { template: 'castle', hint: {} } } }]) {
     const source = input({ directions: ['east'] });
     const plan = await chooseEnvironmentIntents(assistant(response).$, source);
     assert.equal(plan.status, 'fallback');
@@ -189,6 +188,12 @@ test('malformed replies, template/hint types and oversized hints use determinist
     assert.ok(calls.generations.length <= 1);
   }
   assert.deepEqual(await chooseEnvironmentIntents(null, input()), await chooseEnvironmentIntents(null, input()));
+});
+
+test('authored environment hints are not rejected or clipped for length',async()=>{
+  const hint='A complete account of the local architecture. '.repeat(400).trim();
+  const plan=await chooseEnvironmentIntents(assistant({directions:{east:{template:'castle',hint}}}).$,input({directions:['east']}));
+  assert.equal(plan.status,'planned');assert.equal(plan.intents.east.narrativeHint,hint);
 });
 
 test('task context is allowlisted, detached, bounded and spatial only; quest/task state is unchanged', async () => {

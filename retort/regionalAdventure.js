@@ -12,7 +12,7 @@ const Native = require('./homebrewRegionalAdventure');
 const templates = ['oasis', 'graveyard', 'wasteland', 'roman_temple'];
 const directions = [['north', 0, 1, 'south'], ['east', 1, 0, 'west'], ['south', 0, -1, 'north'], ['west', -1, 0, 'east'],
   ['northeast', 1, 1, 'southwest'], ['southeast', 1, -1, 'northwest'], ['southwest', -1, -1, 'northeast'], ['northwest', -1, 1, 'southeast']];
-const clean = (s, max) => typeof s === 'string' && s.trim() && s.length <= max && !/[<>\r\n|`]/.test(s) ? s.trim() : null;
+const clean = s => typeof s === 'string' && s.trim() && !/[<>\r\n|`]/.test(s) ? s.trim() : null;
 function contactAt(database, origin) {
   const room=database[origin];
   return I.parseBlocks(room?.monsters?.consoleBlock || room?.monsters?.inRoom || '').find(a=> {
@@ -48,21 +48,21 @@ and two defensible faction choices. Write short dramatic dialogue, not an omnisc
 The four sites, in order, are a fertile oasis/community, an outdoor graveyard, a dangerous outdoor road, and an INDOOR hostile temple of Arithus or Dantuea.
 Use the existing firstSiteName when supplied; its open trail can contain a watered settlement. The existing contact alone speaks the hook; do not replace their identity. The engine binds all exact room names and directions after validation.
 Name six non-divine inhabitants (souls, shades, native beings or humanoids as you choose): oasis representative, rescued prisoner, two road guards, two temple guards; no gods, bosses or party names. These are underworld people, not necessarily living mortals.
-Return only JSON with title (<=70 chars), premise (<=220), hook (<=400), rumor (<=220), investigation (<=400), rescue (<=400), conclusion (<=400),
-sites:[{name (<=80), flavor (<=240)}] (four entries),
-actors:[{name (<=60), history (<=220), personality (<=160)}] (six entries in the order above),
+Return only JSON with title, premise, hook, rumor, investigation, rescue, conclusion,
+sites:[{name, flavor}] (four entries),
+actors:[{name, history, personality}] (six entries in the order above),
 templePatron:"Arithus|Dantuea" (must match the temple name),
-burialText (<=700), testimonyText (<=700). Include concrete facts in the two writings that justify the revelation and resolution.
-All limits are CHARACTERS, not words. Aim below them. Every value must be a single line: no paragraph breaks, HTML, pipes or backticks. Return the Retort fields, not a prose essay. The six NEW inhabitants must not reuse the existing contact or party names. Use the site and actor names you return consistently, with no alternative oasis aliases. Pick ONE templePatron, never "Arithus or Dantuea".
+burialText, testimonyText. Include concrete facts in the two writings that justify the revelation and resolution.
+Authored text has no character-count or word-count limit. Every value must be a single line: no paragraph breaks, HTML, pipes or backticks. Return the Retort fields, not a prose essay. The six NEW inhabitants must not reuse the existing contact or party names. Use the site and actor names you return consistently, with no alternative oasis aliases. Pick ONE templePatron, never "Arithus or Dantuea".
 Do not mention nonexistent items or directions. The compiler supplies exact names, rooms and task requirements.`;
 }
 function validationIssues(raw) {
   if (!raw || typeof raw !== 'object') return ['Expected one regional adventure object.'];
   const errors = [], limits = { title: 70, premise: 220, hook: 400, rumor: 220, investigation: 400, rescue: 400, conclusion: 400, burialText: 700, testimonyText: 700 };
-  for (const [field, max] of Object.entries(limits)) if (!clean(raw[field], max)) errors.push(`${field}: required single-line text <=${max} characters; received ${typeof raw[field] === 'string' ? raw[field].length : 'non-text'}.`);
+  for (const [field, max] of Object.entries(limits)) if (!clean(raw[field], max)) errors.push(`${field}: required single-line text.`);
   for (const [field, count, fields] of [['sites', 4, { name: 80, flavor: 240 }], ['actors', 6, { name: 60, history: 220, personality: 160 }]]) {
     if (!Array.isArray(raw[field]) || raw[field].length !== count) { errors.push(`${field}: expected exactly ${count} entries.`); continue; }
-    for (const [i, row] of raw[field].entries()) for (const [key, max] of Object.entries(fields)) if (!clean(row?.[key], max)) errors.push(`${field}[${i}].${key}: required single-line text <=${max} characters.`);
+    for (const [i, row] of raw[field].entries()) for (const [key, max] of Object.entries(fields)) if (!clean(row?.[key], max)) errors.push(`${field}[${i}].${key}: required single-line text.`);
   }
   return errors;
 }

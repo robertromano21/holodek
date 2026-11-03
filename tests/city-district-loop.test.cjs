@@ -170,7 +170,8 @@ test('interrupted generation, changed recipient and malformed prose never instal
   await assert.rejects(Commissions.request(f.state, f.service, f.request(), { run: async () => { throw Error('generation interrupted'); } }), /interrupted/);
   assert.equal(f.db[f.upper].minorMissions, undefined);
   assert.throws(() => Commissions.validate({ ...brief, title: '<script>' }), /plain-text/);
-  assert.throws(() => Commissions.validate({ ...brief, purpose: 'x'.repeat(301) }), /300/);
+  assert.equal(Commissions.validate({ ...brief, purpose: 'x'.repeat(301) }).purpose, 'x'.repeat(301));
+  assert.throws(() => Commissions.validate({ ...brief, purpose: '' }), /nonblank/);
 });
 
 test('a save restore or setting edit during authorship invalidates the offer even at the same room and run ID', async () => {

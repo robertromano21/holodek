@@ -14,7 +14,7 @@ function context(state, geoKey) {
   const c = state.getLastCoords();
   const here = `${c.x},${c.y},${c.z}` === geoKey;
   const description = Art.description(room, here ? consoleText.match(/^Room Description:[ \t]*(.*)$/m)?.[1] : '');
-  if (typeof description !== 'string' || description.trim().length < 20 || description.length > 12000) throw Error('This room needs its saved description before it can be illustrated.');
+  if (typeof description !== 'string' || !description.trim()) throw Error('This room needs its saved description before it can be illustrated.');
   return { geoKey, name: room.name, description: description.trim(), indoor: room.classification?.indoor ?? room.indoor ?? room.isIndoor ?? null,
     biome: room.classification?.biome || '', realm: room.planarRealm ? { name: room.planarRealm.name, nature: room.planarRealm.nature, palette: room.planarRealm.palette } : null,
     ...(require('./worldFlags').on('CITY_COMPLETE') && room.cityRoom ? { city: require('./cityCompletion').artContext(room) } : {}),

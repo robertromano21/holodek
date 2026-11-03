@@ -7,6 +7,14 @@ function install(app, sharedState, { adjacent = null, models = require('./gameMo
   require('./adjacentRoomSnapshots').install(app, sharedState, { models, adjacent });
   if (app.get) app.get('/room-build-status', (_req, res) => res.json({ runId: sharedState.getDungeonRunId(), rooms: adjacent.status?.() || [] }));
   const seen = new Set(), rejected = new Set(); let run = null;
+  function queueOpening(key, activeRun) {
+    if (!full || key !== '0,0,0') return;
+    setImmediate(() => {
+      if (sharedState.getDungeonRunId() !== activeRun) return;
+      try { models.withSnapshot(() => require('./openingQuestPreparation').service(sharedState).begin()); }
+      catch (error) { console.warn('[OpeningQuestPreparation]', error.message); }
+    });
+  }
   app.post('/room-displayed', (req, res) => {
     const body = req.body || {}, activeRun = sharedState.getDungeonRunId();
     if (body.runId !== activeRun || !activeRun) return res.status(409).json({ error: 'That game is no longer active.' });
@@ -27,7 +35,7 @@ function install(app, sharedState, { adjacent = null, models = require('./gameMo
     const helpers = require('./roomHelpers').policy(website);
     if (!helpers.enabled) return res.json({ queued: [], enabled: false });
     const identity = `${key}|${body.geometryStamp}|${helpers.revision}|${website.view().revision}`;
-    if (seen.has(identity)) return res.json({ queued: [], duplicate: true });
+    if (seen.has(identity)) { queueOpening(key, activeRun); return res.json({ queued: [], duplicate: true }); }
     try {
       const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}'), room = db[key];
       if (!room || !room.description && !room.roomDescription && !room.sceneSpec?.source?.description)
@@ -39,11 +47,7 @@ function install(app, sharedState, { adjacent = null, models = require('./gameMo
       const queued = models.withSnapshot(() => adjacent.queueNeighbors({ db, currentKey: key, exits: Object.keys(room.exits || {}),
         runId: activeRun, context: room.description || room.roomDescription || room.sceneSpec?.source?.description || '' }));
       // Read the quest snapshot after the queue has reserved its initial topology.
-      if (full && key === '0,0,0') setImmediate(() => {
-        if (sharedState.getDungeonRunId() !== activeRun) return;
-        try { models.withSnapshot(() => require('./openingQuestPreparation').service(sharedState).begin()); }
-        catch (error) { console.warn('[OpeningQuestPreparation]', error.message); }
-      });
+      queueOpening(key, activeRun);
       seen.add(identity); while (seen.size > 64) seen.delete(seen.values().next().value);
       console.info('[RoomPrefetch]', JSON.stringify({ phase: 'accepted', geoKey: key, runId: activeRun,
         model: models.current?.().id || null, queued, preparation: full ? 'complete-rooms' : 'descriptions' }));

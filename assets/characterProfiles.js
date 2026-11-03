@@ -3,7 +3,7 @@
   else root.CharacterProfiles = factory();
 })(typeof window === 'object' ? window : globalThis, function() {
   'use strict';
-  const clean = (value, max) => typeof value === 'string' ? value.replace(/[\r\n]/g, ' ').trim().slice(0, max) : '';
+  const clean = value => typeof value === 'string' ? value.replace(/[\r\n]/g, ' ').trim() : '';
   const canon = {
     mortacia: { personality: 'Commanding, grieving and fiercely protective of the dead; compassion struggles with wounded divine pride.',
       voice: 'Direct judgments, sudden emotional reactions and reluctant admissions of doubt.',
@@ -33,8 +33,9 @@
     return profile;
   }
   function compact(profile) {
-    return profile && !legacyFallback(profile) ? { personality: clean(profile.personality, 140), voice: clean(profile.voice, 80),
-      history: clean(profile.history, 300), motivation: clean(profile.motivation, 120) } : undefined;
+    // Retrieval/context excerpts are bounded; the stored authored profile is not.
+    return profile && !legacyFallback(profile) ? { personality: clean(profile.personality).slice(0, 140), voice: clean(profile.voice).slice(0, 80),
+      history: clean(profile.history).slice(0, 300), motivation: clean(profile.motivation).slice(0, 120) } : undefined;
   }
   return { create, compact, complete, legacyFallback };
 });

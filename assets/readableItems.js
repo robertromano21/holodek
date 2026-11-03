@@ -5,7 +5,7 @@
 })(typeof window==='undefined'?globalThis:window,function(Carvings,Icons){
   'use strict';
   const key=value=>String(value||'').trim().toLowerCase();
-  const clean=(s,max)=>typeof s==='string'&&!!s.trim()&&s.length<=max&&!/[<>]/.test(s);
+  const clean=s=>typeof s==='string'&&!!s.trim()&&!/[<>]/.test(s);
   const fixtureTypes=['stone_tablet','gravestone','chest_tomb','sarcophagus','obelisk'];
   function hasContent(record){
     return Array.isArray(record?.chapters)&&record.chapters.some(c=>typeof c?.text==='string'&&!!c.text.trim());

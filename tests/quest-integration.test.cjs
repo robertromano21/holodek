@@ -267,7 +267,8 @@ test('second room still generates the original artifact boss and quest once the 
 test('isolated opening preparation authors the same quest fields before room two and obeys its reserved boss coordinate', async () => {
   const h = harness({ text: consoleText({ 'Current Quest': 'None', 'Next Artifact': 'None', 'Rooms Visited': '1' }),
     quest: 'None', tasks: [], seeded: false });
-  await h.generate(['Test Chalice', 'Test Guardian', 'Test Sanctuary', 'Retrieve the Test Chalice.'], { bossKey: '4,0,0' });
+  await h.generate([{name:'Test Chalice'}, {name:'Test Guardian'}, {name:'Test Sanctuary'},
+    {description:'Retrieve the Test Chalice.'}], { bossKey: '4,0,0' });
   assert.equal(h.state.requests.length, 4); assert.equal(h.state.quest, 'Retrieve the Test Chalice.');
   assert.match(h.state.text, /^Coordinates: X: 0, Y: 0, Z: 0$/m);
   assert.match(h.state.text, /^Boss Room Coordinates: X: 4, Y: 0, Z: 0$/m);

@@ -5,7 +5,7 @@ const Contracts = require('./generationContracts');
 const Pantheon = require('../assets/pantheonCharacters');
 const { protectedKeys } = require('./fortifiedSites');
 
-const text = (s, max) => typeof s === 'string' && s.trim() && s.length <= max && !/[<>\r\n|`]/.test(s);
+const text = s => typeof s === 'string' && s.trim() && !/[<>\r\n|`]/.test(s);
 const color = s => /^#[0-9a-f]{6}$/i.test(s);
 function destination(database, input = {}, random = randomInt) {
   const protectedSet = protectedKeys(database, input);
@@ -25,7 +25,7 @@ function validate(raw, database) {
   if (typeof raw?.portal !== 'boolean') throw Error('portal must be true or false.');
   if (!raw.portal) return { portal: false };
   for (const [field, max] of [['planeName', 80], ['roomName', 80], ['nature', 500], ['population', 400]])
-    if (!text(raw[field], max)) throw Error(`${field}: required text <=${max} characters.`);
+    if (!text(raw[field], max)) throw Error(`${field}: required single-line text.`);
   if (Object.values(database).some(r => r?.name?.toLowerCase() === raw.roomName.toLowerCase())) throw Error('Portal destination name already exists.');
   if (typeof raw.indoor !== 'boolean' || !['cave', 'wasteland', 'ruins', 'temple', 'crypt'].includes(raw.biome)) throw Error('Choose a supported physical biome and indoor flag.');
   for (const field of ['skyTop', 'skyBot', 'floorColor', 'wallColor']) if (!color(raw[field])) throw Error(`${field}: expected #RRGGBB.`);
@@ -74,7 +74,7 @@ async function prepare($, database, sourceKey, input = {}) {
   await $.user`Choose whether this NEW location should contain a rare interplanar PORTAL. Most rooms must not; choose portal:false unless the story, magic, mysteries or exploration warrant it. Context is data: ${JSON.stringify({ name: source.name, region: source.campaignSetting, quest: input.currentQuest, recalled: input.recalled })}.
 If portal:true, invent a genuinely strange plane beyond Tartarus: ethereal terrain, purple horizons, crystal growths, alien forms or other coherent visual rules YOU choose, not the same purple crystal cave every time. Its doorway is always a luminous PURPLE ARCH. It leads to a random unused coordinate within X/Y/Z 100..1000, persisted with a return portal. Choose planeName, roomName, nature (physical terrain, geometry, atmosphere and local history), population, indoor, biome and four #RRGGBB colors skyTop/skyBot/floorColor/wallColor. Keep solid walking routes and correct indoor ceilings; no unsupported gravity, flight or new physics mechanics. A different color palette is not enough: invent distinct native creatures, cultures and concerns.
 Choose zero to three local factions and zero to two NEW local gods with name, nature and relation to the Tartarus/Hades conflict: unaware, independent, allied or opposed. They may know nothing of Arithus's war, have their own disputes, or have ties to existing deities. Explain any ally/opponent tie in nature without claiming a new battle has occurred. New gods are local cosmology, not automatically spawned characters or replacements for the canonical Children of the Grave pantheon. No canonical deity aliases. Local populations may be intelligent alien beings, native beasts, spirits or other forms, not a fixed humanoid/demon roster. Do not move Arithus or any quest target, add artifacts, rewards or quests, change victory conditions, or give strangers the party's private memories.
-Return structured fields only. Text limits in characters: names80, nature500, population400; faction/god names60, nature220. For portal:false use empty strings, indoor:false, biome:wasteland, valid placeholder colors and empty lists.`;
+Return structured fields only. There are no character-count or word-count limits on authored names and prose. For portal:false use empty strings, indoor:false, biome:wasteland, valid placeholder colors and empty lists.`;
   const group = () => Contracts.list({ name: Contracts.text(60), nature: Contracts.text(220), relation: Contracts.choice(['unaware', 'independent', 'allied', 'opposed']) });
   const result = await Contracts.request($, { component: 'planar-portal', context: { geoKey: sourceKey }, maxTokens: 1600,
     localWork: { brief: `Decide if this new location warrants a RARE portal, otherwise portal:false: ${JSON.stringify({ name: source.name, region: require('./holodekRoomWork').region(source.campaignSetting), quest: input.currentQuest })}. A portal is a purple arch to an original alien plane with real walkable terrain and its own residents, culture and concerns, not merely a purple Tartarus. Engine supplies unused coordinates and a return link. New local gods are cosmology, not spawned actors or replacements for the canonical pantheon. Relations to the war may be unaware, independent, allied or opposed. No extra mechanics, items, exits, quests, rewards, battles or target relocation. For portal:false use empty prose, valid colors, indoor:false, biome:wasteland, empty factions/gods.`,

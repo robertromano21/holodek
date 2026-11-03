@@ -84,3 +84,24 @@ must be authored, not silently declined or changed to a different disposition.
 Prepared fixed/discovery groups reveal without model calls. A new pre-authored
 supplemental reserve is not implemented: the supplemental path still authors
 new groups on demand. That latency optimization remains separate.
+
+## Authored Text And Quest Preparation
+
+Names, descriptions, histories, dialogue, documents and quest prose have no
+arbitrary character-count or word-count ceilings. Legacy schema field widths
+are stripped before authoring requests and repair validation. Accepted authored
+text is retained, not shortened to fit those former widths. Nonempty content,
+valid JSON, safe text formats, exact engine choices and mechanical rules remain
+required. Provider context/output limits, retrieval context packing, collection
+bounds, image formats and UI pagination are separate technical constraints.
+
+The reported Ashen Measure quest was valid prose: its 638 characters exceeded
+the former 600-character validator. Both helper preparation and foreground
+fallback encountered the same rejection. Opening quest preparation now uses
+the structured quest author for cloud models as well as local models, without
+the old text ceiling. A failed helper may be restarted on a repeated first-room
+receipt or joined on departure, at most three worker attempts per unchanged
+run/restore/model/helper context. A failed state cannot permanently suppress
+preparation. Duplicate display receipts do not rebuild adjacent rooms. Actual
+foreground fallback is logged explicitly; private preparation still publishes
+no quest until it is installed into the chosen second room.

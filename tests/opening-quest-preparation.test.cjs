@@ -68,6 +68,63 @@ test('early departure joins the existing author, never dispatches a second quest
   s.workers[0].emit('message', { type: 'checkpoint', artifact: s.artifact() });
   assert.equal(await travel, true); assert.equal(s.jobs.length, 1);
 });
+
+test('a failed opening helper is retried privately and its successful result is handed off once',async t=>{
+  const s=fixture(t),first=s.service.begin();await tick();
+  s.workers[0].emit('message',{type:'failed',reason:'Temporary authoring failure'});await first.promise;
+  assert.equal(s.service.status().phase,'failed');assert.equal(s.state.getCurrentQuest(),'None');
+  const second=s.service.begin();assert.notEqual(second,first);assert.equal(s.service.begin(),second);await tick();
+  assert.equal(s.jobs.length,2);assert.equal(s.service.status().attempt,2);
+  s.workers[1].emit('message',{type:'checkpoint',artifact:s.artifact()});await second.promise;
+  assert.equal(await s.service.activate('0,1,0'),true);assert.equal(await s.service.activate('0,1,0'),false);
+  assert.equal(s.jobs.length,2);
+});
+
+test('travel can join a replacement helper instead of immediately regenerating the quest in the foreground',async t=>{
+  const s=fixture(t),first=s.service.begin();await tick();
+  s.workers[0].emit('message',{type:'failed',reason:'Temporary authoring failure'});await first.promise;
+  let finished=false;const travel=s.service.activate('0,1,0').then(v=>{finished=true;return v});await tick();
+  assert.equal(s.jobs.length,2);assert.equal(finished,false);assert.equal(s.state.getCurrentQuest(),'None');
+  s.workers[1].emit('message',{type:'checkpoint',artifact:s.artifact()});assert.equal(await travel,true);
+});
+
+test('helper restarts stop after three attempts per unchanged adventure context',async t=>{
+  const s=fixture(t);let entry;
+  for(let n=0;n<3;n++){
+    entry=s.service.begin();await tick();s.workers[n].emit('message',{type:'failed',reason:'Persistent failure'});await entry.promise;
+  }
+  assert.equal(s.service.begin(),entry);assert.equal(s.jobs.length,3);assert.equal(s.service.status().attempt,3);
+  s.restore();const fresh=s.service.begin();assert.notEqual(fresh,entry);await tick();assert.equal(s.service.status().attempt,1);
+});
+
+test('opening introductions keep authored names and text beyond the former field ceilings',async t=>{
+  const s=fixture(t);s.service.begin();await tick();const artifact=s.artifact();s.state.setRoomNameDatabase(JSON.stringify(artifact.rooms));
+  const passage='The witness explains the obligation through its saved campaign history. '.repeat(20).trim();
+  const name='the memorial message of the distant witnesses beneath the mountain';
+  const value={title:passage,name,hook:passage,resolution:passage,completion:passage,acceptLabel:passage,finishLabel:passage};
+  const requests=[],$={model:'gpt-6-luna',run:async fn=>fn($),user:async()=>{},assistant:{generation:async options=>{requests.push(options);return{content:JSON.stringify(value)}}}};
+  await Opening.authorIntroduction($,s.state,artifact.task);
+  const task=s.state.getCurrentTasks()[0],writing=s.db()['0,0,0'].inscriptions.find(r=>r.id===task.story.fallback.readableId);
+  assert.equal(task.story.title,passage);assert.equal(writing.name,name);assert.equal(writing.chapters[0].text,passage);
+  assert.equal(task.story.stages.find(r=>r.id==='complete').text,passage);assert.equal(requests.length,1);
+  assert.ok(Object.values(requests[0].parameters).every(p=>p.maxLength===undefined));
+});
+
+test('duplicate room-display receipts can restart the quest helper without rebuilding adjacent rooms',async t=>{
+  const s=fixture(t),endpoints={},Module=require('node:module'),vm=require('node:vm');
+  const file=require.resolve('../retort/roomPrefetchRoutes'),native=Module.createRequire(file);let queued=0;
+  const adjacent={_reset(){},queueNeighbors(){queued++;return[]}};
+  const module={exports:{}};vm.runInNewContext(fs.readFileSync(file,'utf8'),{module,exports:module.exports,setImmediate,console,
+    require:id=>id==='./roomBuildQueue'?{service:()=>adjacent}:id==='./adjacentRoomSnapshots'?{install(){}}:native(id)});
+  s.db()['0,0,0'].description='An authored entrance.';
+  const website={helperSettings:()=>s.settings,view:()=>({revision:1})};
+  module.exports.install({post:(url,fn)=>{endpoints[url]=fn}},s.state,{website,models:{withSnapshot:fn=>fn()}});
+  const shown=()=>{let result;endpoints['/room-displayed']({body:{runId:'opening-run',geoKey:'0,0,0',geometryStamp:'unchanged'}},
+    {status(){return this},json:v=>{result=v}});return result};
+  shown();await tick();await tick();assert.equal(s.jobs.length,1);
+  s.workers[0].emit('message',{type:'failed',reason:'Temporary failure'});await tick();
+  assert.equal(shown().duplicate,true);await tick();await tick();assert.equal(s.jobs.length,2);assert.equal(queued,1);
+});
 test('activating a prepared quest preserves the context of already-running adjacent builds', async t => {
   const s = fixture(t), before = Build.context(s.state, s.model.id), entry = s.service.begin(); await tick();
   assert.equal(Build.context(s.state, s.model.id), before);

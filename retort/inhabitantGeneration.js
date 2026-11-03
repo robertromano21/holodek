@@ -196,7 +196,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
           if (encounter && !encounter.races.includes(row.race)) throw Error(`Slot ${row.slot} race is outside the encounter catalog.`);
           const lineage=slots.find(s=>s.slot===row.slot)?.lineage;
           if(lineage&&row.race!==lineage)throw Error(`Slot ${row.slot} race must match its saved world population sample: ${lineage}.`);
-          const name = GeneratedNames.clean(row.name).slice(0, 70).trim();
+          const name = GeneratedNames.clean(row.name).trim();
           if (!name || used.has(name.toLowerCase()) || Pantheon.name(name)) throw Error(`Slot ${row.slot} has an empty, duplicate or reserved name: ${name}`);
           used.add(name.toLowerCase());
           bySlot.set(row.slot, { ...row, name });

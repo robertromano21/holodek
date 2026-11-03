@@ -20,7 +20,7 @@
     const previous = state.knownResidents.find(row => row.name === actor.name), fresh = !previous;
     const x = actor.mazeX + .5, y = actor.mazeY + .5, allegiance = actor.allegiance || actor.state || 'Neutral';
     if (previous && previous.x === x && previous.y === y && previous.allegiance === allegiance) return { fresh, changed: false };
-    const row = { name: actor.name.slice(0, 70), x, y, allegiance, firstSeenAt: previous?.firstSeenAt || at, lastSeenAt: at };
+    const row = { name: actor.name, x, y, allegiance, firstSeenAt: previous?.firstSeenAt || at, lastSeenAt: at };
     if (previous) Object.assign(previous, row); else state.knownResidents.push(row);
     if (state.knownResidents.length > 32) state.knownResidents.shift();
     state.revision++; return { fresh, changed: true };
@@ -175,7 +175,7 @@
         state.knownLandmarks = [...new Set([...state.knownLandmarks, ...(Array.isArray(saved.knownLandmarks) ? saved.knownLandmarks : []).filter(id => typeof id === 'string')])].slice(-64);
         state.announcedLandmarks = [...new Set([...state.announcedLandmarks, ...(Array.isArray(saved.announcedLandmarks) ? saved.announcedLandmarks : []).filter(id => typeof id === 'string')])].slice(-64);
         for (const row of (Array.isArray(saved.knownResidents) ? saved.knownResidents : []).slice(0, 32)) {
-          if (!row || typeof row.name !== 'string' || row.name.length > 70 || !validPoint(row) || row.x < 0 || row.y < 0 ||
+          if (!row || typeof row.name !== 'string' || !row.name.trim() || !validPoint(row) || row.x < 0 || row.y < 0 ||
               row.x >= width || row.y >= height || !['Friendly', 'Neutral', 'Hostile'].includes(row.allegiance) ||
               state.knownResidents.some(known => known.name === row.name)) continue;
           state.knownResidents.push({ name: row.name, x: row.x, y: row.y, allegiance: row.allegiance,

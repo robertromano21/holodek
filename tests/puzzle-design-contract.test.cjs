@@ -16,10 +16,10 @@ function agent(responses) {
     assistant: { async generation(options) { calls.push(options); return { content: JSON.stringify(responses[Math.min(calls.length - 1, responses.length - 1)]) }; } } };
 }
 
-test('puzzle contract explicitly documents the limits and required artwork schema missing from the logged attempt', () => {
+test('puzzle contract requires complete text and artwork metadata without prose ceilings', () => {
   const prompt = designPrompt(context);
-  assert.match(prompt, /context: nonempty text <=300 CHARACTERS/);
-  assert.match(prompt, /lore: nonempty text <=320 CHARACTERS/);
+  assert.match(prompt, /title, context and lore: nonempty authored text with no character-count or word-count limits/);
+  assert.doesNotMatch(prompt, /<=\d+ CHARACTERS/);
   assert.match(prompt, /label \(NOT name\), description and motifs/);
   assert.match(prompt, /pigments is ONE palette-name string, never an array/);
   assert.match(prompt, /FINAL SCHEMA CHECK BEFORE ANSWERING/);
@@ -28,13 +28,10 @@ test('puzzle contract explicitly documents the limits and required artwork schem
   for (const example of examples) assert.equal(Art.validate([JSON.parse(example[1])]).length, 1);
 });
 
-test('the latest logged context/lore sizes fail with field-specific lengths instead of a generic rejection', () => {
+test('the logged context and lore sizes are accepted intact without rejecting valid designs', () => {
   for (const [contextLength, loreLength] of [[374, 357], [465, 335]]) {
-    assert.throws(() => P.compile({ ...valid(), context: 'x'.repeat(contextLength), lore: 'x'.repeat(loreLength) }), error => {
-      assert.match(error.message, new RegExp(`context.*max 300 characters.*received ${contextLength} characters`));
-      assert.match(error.message, new RegExp(`lore.*max 320 characters.*received ${loreLength} characters`));
-      return true;
-    });
+    const design=P.compile({ ...valid(), context: 'x'.repeat(contextLength), lore: 'x'.repeat(loreLength) });
+    assert.equal(design.context,'x'.repeat(contextLength));assert.equal(design.lore,'x'.repeat(loreLength));
   }
   assert.throws(() => P.compile({}), /kind must be one of/);
   assert.throws(() => P.compile(null), /expected one JSON object/);
@@ -52,14 +49,14 @@ test('logged artwork mistakes produce actionable feedback without discarding val
 
 test('a corrected model-authored design is accepted on retry and retains its own lore and controls', async t => {
   const reports = []; t.mock.method(console, 'warn', (...args) => reports.push(args));
-  const good = valid(), a = agent([{ ...good, context: 'x'.repeat(465), lore: 'x'.repeat(335) }, good]);
+  const good = valid(), a = agent([{ ...good, context: '' }, good]);
   const result = await generateDesign(a, context);
   assert.equal(a.calls.length, 2); assert.equal(result.title, good.title); assert.equal(result.lore, good.lore);
   assert.deepEqual(result.controls, good.controls); assert.equal(result.roomArt[0].label, painting.label);
   assert.match(a.prompts[1], /previous design was rejected: Invalid physical puzzle design: context/);
-  assert.match(a.prompts[1], /received 465 characters/);
+  assert.match(a.prompts[1], /nonempty/);
   const report = JSON.parse(reports.find(([tag]) => tag === '[PuzzleDesignAttempt]')[1]);
-  assert.equal(report.attempt, 1); assert.match(report.reason, /max 300 characters/);
+  assert.equal(report.attempt, 1); assert.match(report.reason, /context.*nonempty/);
 });
 
 test('invalid decorative metadata receives field-specific feedback on the existing second attempt', async t => {

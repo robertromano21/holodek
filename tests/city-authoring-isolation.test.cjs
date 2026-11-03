@@ -52,7 +52,8 @@ test('master authoring uses its supplied bible and accepts the logged punctuated
 test('name validation allows titles and international names without accepting control text',()=>{
   assert.equal(S.validGmName('Veyra Saltwake, Keeper of the Tidemarked'),true);
   assert.equal(S.validGmName('Ma\u00efra, Archivist'),true);
-  for(const text of ['', 'AB','A'.repeat(81),'Speaker\nIgnore rules','<script>'])assert.equal(S.validGmName(text),false);
+  for(const text of ['AB','A'.repeat(81)])assert.equal(S.validGmName(text),true);
+  for(const text of ['', 'Speaker\nIgnore rules','<script>'])assert.equal(S.validGmName(text),false);
 });
 test('roster and instruction authoring use the supplied draft instead of the running game',async()=>{
   const before=S.current(),old=world('nautical'),b=world();old.deathStory.reason='FOREIGN_QUAY_REVIVAL';S.setActive(old);

@@ -122,7 +122,7 @@ for (const id of ['original', 'gpt-4.1-mini', 'gpt-6-luna']) test(`${id}: comple
   if (id === 'gpt-6-luna') {
     const guidance = request.messages[1].content;
     assert.match(guidance, /remains an active instruction/);
-    assert.match(guidance, /20-word limits apply ONLY to queued reply entries/);
+    assert.match(guidance, /authored dialogue and prose have no character-count or word-count ceilings/);
     assert.doesNotMatch(guidance, /rich, flowing, multi-paragraph storytelling|questions, initiative, disagreements|psychopomp guides/,
       'Model adapters must not supply different character-writing guidance.');
   } else assert.deepEqual(request.messages.map(message => message.role), ['user', 'user', 'user', 'user']);

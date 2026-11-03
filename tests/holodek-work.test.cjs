@@ -58,7 +58,7 @@ test('local quest chunks retain their original world and exact bindings without 
 test('quest name validation rejects reserved missing-data answers without supplying replacement content', () => {
   const { questName, questDescription } = require('../retort/holodekRoomWork');
   for (const name of ['None', ' none ', 'null', 'undefined', 'unknown', 'Unassigned Boss', 'N/A', '',
-    'one two three four five six', 'bad\nname']) assert.throws(() => questName(name), /name:/, name);
+    'bad\nname']) assert.throws(() => questName(name), /name:/, name);
   assert.equal(questName('Floodgate Signal Key'), 'Floodgate Signal Key');
   assert.equal(questName('Relay Warden'), 'Relay Warden');
   for (const description of ['None', '', 'undefined', 'Unknown', 'first\nsecond'])
@@ -74,6 +74,14 @@ test('native quest work retries rejected placeholders through the model rather t
     assert.equal(requests.length, 2);
     assert.ok(requests.every(body => size(body) <= Budget.CEILING));
   }
+});
+
+test('local quest authoring accepts prose longer than the former cap without truncation or a corrective model call', async () => {
+  const paragraph='Recover the named artifact from its bound guardian and preserve the testimony of those who remember its origin. '.repeat(8).trim();
+  const {result,requests}=await runtime($=>require('../retort/holodekRoomWork').questReply($,'quest-premise',
+    {description:C.text(600)},{artifact:'Witness Seal'},'Author one complete paragraph.'),()=>({description:paragraph}));
+  assert.equal(result.result.description,paragraph);assert.equal(requests.length,1);
+  assert.equal(requests[0].response_format.json_schema.schema.properties.description.maxLength,undefined);
 });
 
 test('installed 4096 context reserves input, answer and framing space together', () => {
@@ -233,7 +241,7 @@ test('item naming starts in a fresh structured branch and retries prose without 
     return require('../retort/holodekObjectName').generate($, { objectType: 'armor', roomName: 'Saved Hall', roomDescription: 'Bronze-studded arches.' });
   }, (_body, count) => ({ name: count === 1 ? 'worn chainmail you are in the ruined temple entrance an indoor chamber with worn' : 'bronze mail' }));
   assert.equal(result, 'bronze mail'); assert.equal(requests.length, 2);
-  assert.ok(requests.every(body => body.response_format.json_schema.schema.properties.name.maxLength === 40));
+  assert.ok(requests.every(body => body.response_format.json_schema.schema.properties.name.maxLength === undefined));
   assert.ok(requests.every(body => !body.messages.some(row => row.content.includes('Choose your next adventure action'))));
 });
 

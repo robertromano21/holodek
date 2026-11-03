@@ -78,11 +78,11 @@ async function authorIntroduction($, state, task) {
   const writing = room?.inscriptions?.find(row => row.id === story.fallback?.readableId);
   if (!writing) throw Error('Opening quest writing is missing.');
   const { result } = await require('./holodekRoomWork').questReply($, 'quest-opening-introduction', {
-    title: C.text(70), name: C.text(40), hook: C.text(600), resolution: C.text(400), completion: C.text(180),
-    acceptLabel: C.text(80), finishLabel: C.text(80)
+    title: C.nonblankText(), name: C.nonblankText(), hook: C.nonblankText(), resolution: C.nonblankText(), completion: C.nonblankText(),
+    acceptLabel: C.nonblankText(), finishLabel: C.nonblankText()
   }, { quest: state.getCurrentQuest(), task: { desc: task.desc, requiredElements: task.requiredElements },
     campaign: db['0,0,0']?.setting, excludedNames: Object.values(db).flatMap(r => (r.inscriptions || []).map(w => w.name)) },
-  'Write the opening quest introduction and its eventual conclusion from this campaign, not a stock covenant or another campaign. The arrival room and speaker are not chosen yet: do not invent either, state a direction, or claim the player accepted or completed anything. Preserve the exact bound objective names and locations. Name the readable message with 1-4 lowercase words (max 40 characters), not a repeated existing document name. Author physical-fiction text and natural button labels only; no new conditions, rewards or mechanics.');
+  'Write the opening quest introduction and its eventual conclusion from this campaign, not a stock covenant or another campaign. The arrival room and speaker are not chosen yet: do not invent either, state a direction, or claim the player accepted or completed anything. Preserve the exact bound objective names and locations. Give the readable message a concrete lowercase name, not a repeated existing document name. There are no character-count or word-count limits on authored text. Author physical-fiction text and natural button labels only; no new conditions, rewards or mechanics.');
   const name = require('./holodekObjectName').validate({ name: result.name });
   if (Object.values(db).some(r => (r.inscriptions || []).some(w => w.name === name && w.id !== writing.id))) throw Error('Opening message duplicates an existing document.');
   const oldName = writing.name;
@@ -148,7 +148,8 @@ function createService(state, { website = require('./websiteAi').service(), mode
   function begin() {
     if (closed || !state.exportSaveState || !empty(state) || state.getActiveCityFloor?.() || !Helpers.policy(website).enabled) return null;
     const here = state.getLastCoords(); if (here.x || here.y || here.z) return null;
-    if (entry && valid(entry)) return entry;
+    const previous = entry && valid(entry) ? entry : null;
+    if (previous && (previous.phase !== 'failed' || previous.attempt >= 3)) return previous;
     entry?.cancel?.();
     const snapshot = state.exportSaveState(), model = models.current(), policy = Helpers.policy(website);
     const db = JSON.parse(snapshot.roomNameDatabaseString), origin = db['0,0,0']; if (!origin?.populationComplete) return null;
@@ -164,8 +165,9 @@ function createService(state, { website = require('./websiteAi').service(), mode
     job.assignment = registry.describe(job, new Map(), db);
     const current = entry = { job, snapshot, registry, fingerprint: fingerprint(state, model.id),
       originalContext: { quest: state.getCurrentQuest?.(), index: state.getCurrentTaskIndex?.(), tasks: state.getCurrentTasks?.() },
-      helperRevision: policy.revision, websiteRevision: website.view().revision, location: policy.location, phase: 'running', controller: new AbortController() };
-    log('started', { location: current.location });
+      helperRevision: policy.revision, websiteRevision: website.view().revision, location: policy.location,
+      attempt: (previous?.attempt || 0) + 1, phase: 'running', controller: new AbortController() };
+    log('started', { location: current.location, attempt: current.attempt });
     current.promise = new Promise(resolve => {
       let timer, finished = false;
       const finish = (artifact, error) => {
@@ -180,7 +182,7 @@ function createService(state, { website = require('./websiteAi').service(), mode
             throw Error('Opening quest bindings are incomplete or changed.');
           mergedRooms(artifact, JSON.parse(state.getRoomNameDatabase() || '{}'));
         } catch (failure) { error = failure; }
-        current.phase = error ? 'failed' : 'ready'; current.artifact = error ? null : artifact;
+        current.phase = error ? 'failed' : 'ready'; current.artifact = error ? null : artifact; current.reason = error?.message || null;
         if (error) { registry.release(job.id); log('failed', { reason: error.message }); }
         else log('ready');
         resolve(current.artifact);
@@ -211,7 +213,7 @@ function createService(state, { website = require('./websiteAi').service(), mode
   }
   async function activate(key, { input = '' } = {}) {
     if (key === '0,0,0' || !empty(state) || !entry || !valid(entry)) return false;
-    const current = entry;
+    const current = entry.phase === 'failed' ? begin() || entry : entry;
     const artifact = await current.promise;
     if (!artifact || !valid(current) || !empty(state)) return false;
     const db = mergedRooms(artifact, JSON.parse(state.getRoomNameDatabase() || '{}'));
@@ -250,7 +252,8 @@ function createService(state, { website = require('./websiteAi').service(), mode
   }
   return { begin, activate: async (key, options) => { const result = await activate(key, options);
     if (result) entry.activeBinding = require('./questProgress').taskBinding(state.getCurrentTasks()[0]); return result; },
-    close, cancel, constructionContext, status: () => entry ? { phase: entry.phase, runId: entry.job.runId, location: entry.location } : null };
+    close, cancel, constructionContext, status: () => entry ? { phase: entry.phase, runId: entry.job.runId, location: entry.location,
+      attempt: entry.attempt, reason: entry.reason || null } : null };
 }
 const services = new WeakMap();
 const service = (state, options) => { if (!services.has(state)) services.set(state, createService(state, options)); return services.get(state); };

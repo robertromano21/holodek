@@ -318,13 +318,13 @@ const ROSTER_EXAMPLES = {
 const HIT_DICE = [6, 8, 10, 12], clampN = (v, lo, hi, d = 0) => { const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
 function validateRoster(r) {
   if (!r || !Array.isArray(r.classes) || !Array.isArray(r.races)) throw Error('roster: classes and races arrays are required');
-  const name = (x, what) => { const n = String(x || '').trim().replace(/\s+/g, ' '); if (!/^[A-Za-z][\w' -]{1,39}$/.test(n)) throw Error(`roster: bad ${what} name "${n}"`); return n; };
+  const name = (x, what) => { const n = String(x || '').trim().replace(/\s+/g, ' '); if (!/^[A-Za-z][\w' -]*$/.test(n)) throw Error(`roster: bad ${what} name "${n}"`); return n; };
   const stats = o => ({ Attack: clampN(o?.Attack ?? o?.attack, -2, 3), Damage: clampN(o?.Damage ?? o?.damage, -2, 3), Armor: clampN(o?.Armor ?? o?.armor, -2, 3), Magic: clampN(o?.Magic ?? o?.magic, -2, 3) });
   const plan = p => BODY_PLANS.includes(String(p || '').toLowerCase()) ? String(p).toLowerCase() : 'humanoid';
-  const classes = r.classes.slice(0, 8).map(c => ({ name: name(c.name, 'class'), description: String(c.description || '').slice(0, 200), hitDie: HIT_DICE.includes(Number(c.hitDie)) ? Number(c.hitDie) : 8,
-    stats: stats(c.stats), abilities: (Array.isArray(c.abilities) ? c.abilities : []).slice(0, 3).map(a => ({ name: name(a.name, 'ability'), cost: clampN(a.cost, 1, 5, 1), effect: String(a.effect || '').slice(0, 160) })),
-    gear: (Array.isArray(c.gear) ? c.gear : []).slice(0, 4).map(g => String(g).slice(0, 40)), ammo: c.ammo ? String(c.ammo).slice(0, 30) : null, bodyPlan: plan(c.bodyPlan) }));
-  const races = r.races.slice(0, 6).map(x => ({ name: name(x.name, 'race'), description: String(x.description || '').slice(0, 200), stats: stats(x.stats), hpBonus: clampN(x.hpBonus, -2, 4), bodyPlan: plan(x.bodyPlan) }));
+  const classes = r.classes.slice(0, 8).map(c => ({ name: name(c.name, 'class'), description: String(c.description || ''), hitDie: HIT_DICE.includes(Number(c.hitDie)) ? Number(c.hitDie) : 8,
+    stats: stats(c.stats), abilities: (Array.isArray(c.abilities) ? c.abilities : []).slice(0, 3).map(a => ({ name: name(a.name, 'ability'), cost: clampN(a.cost, 1, 5, 1), effect: String(a.effect || '') })),
+    gear: (Array.isArray(c.gear) ? c.gear : []).slice(0, 4).map(g => String(g)), ammo: c.ammo ? String(c.ammo) : null, bodyPlan: plan(c.bodyPlan) }));
+  const races = r.races.slice(0, 6).map(x => ({ name: name(x.name, 'race'), description: String(x.description || ''), stats: stats(x.stats), hpBonus: clampN(x.hpBonus, -2, 4), bodyPlan: plan(x.bodyPlan) }));
   if (classes.length < 4) throw Error(`classes: expected 5 or so (at least 4 classes, got ${classes.length})`); if (races.length < 2) throw Error(`races: expected 3 or so (at least 2 races, got ${races.length})`);
   const all = [...classes, ...races], dup = all.map(x => x.name.toLowerCase()).find((n, i, a) => a.indexOf(n) !== i); if (dup) throw Error(`roster: duplicate name ${dup}`);
   const leaks = require('./campaignBuilder').lint({ classes, races }); if (leaks.length) throw Error('roster: leaked terms ' + leaks.join(', '));
@@ -376,7 +376,7 @@ function masterLocal(b, gamePrompt = '') {
 }
 function masterText(m, b) { return `${CORE.replace('You are the Game Master', `You are ${m.gmName}, the Game Master`)}\n\n[WORLD: ${b.name}]\n${SECTIONS.map(k => `${k.toUpperCase()}: ${m[k]}`).join('\n')}\nRESOURCE STAT: ${m.resourceName}. ERA: ${m.era}. AMMO: ${(m.ammo || []).join(', ') || 'none'}.\n[/WORLD]`; }
 function lintMaster(m) { return require('./campaignBuilder').lint({ m }); }
-function validGmName(name) { return typeof name==='string'&&name.length>=3&&name.length<=80&&/^[\p{L}][\p{L}\p{M}\p{N} ,'’:.\-]*$/u.test(name)&&name.trim()===name; }
+function validGmName(name) { return typeof name==='string'&&!!name.trim()&&/^[\p{L}][\p{L}\p{M}\p{N} ,'’:.\-]*$/u.test(name)&&name.trim()===name; }
 function generateMaster(b,gamePrompt='',options={}) { return withDraft(b,()=>authorMaster(b,gamePrompt,options)); }
 async function authorMaster(b, gamePrompt = '', { runner, offline = false, recentWorlds } = {}) {
   if(!runner&&offline!==true)throw Error('Master prompt creation requires a model authoring runner; offline fixtures must be explicitly requested.');
@@ -393,7 +393,7 @@ async function authorMaster(b, gamePrompt = '', { runner, offline = false, recen
         maxTokens: 2500, parameters: { ...Object.fromEntries(SECTIONS.map(k => [k, Contracts.text(700)])), gmName: Contracts.text(80,'An original name and optional title; punctuation such as a comma is allowed.') },
         validate: x => { const leaks = lintMaster(x); if (leaks.length) throw Error('leaked terms: ' + leaks.join(', '));
           for(const k of SECTIONS)if(typeof x[k]!=='string'||!x[k].trim())throw Error('Author the campaign section '+k+'.');
-          if(!validGmName(x.gmName))throw Error('Author a valid gmName, 3-80 characters; a name with a punctuated title is allowed.');
+          if(!validGmName(x.gmName))throw Error('Author a valid nonempty gmName; a name with a punctuated title is allowed.');
           require('./worldAuthoringHistory').validate({...b,gmName:x.gmName},recentWorlds,{brief:[gamePrompt,b.instructions?.verbatim].filter(Boolean).join('\n'),gmOnly:true});
           return x; } }); return r.value; });
     if (!v) throw Error('No valid master prompt returned.');
@@ -427,7 +427,7 @@ if (Flags.on('GENRE_EXPANSION')) for (const [genre, row] of Object.entries(Expan
   START_NOUN[genre] = row.noun; GM_TITLES[genre] = [row.title,row.title]; ROSTER_EXAMPLES[genre] = ExpandedWorlds.roster[genre];
   PLACE_PARTS[genre] = [row.adj, [' Haven',' Reach',' Ward',' Landing']];
 }
-function setMaster(b, text) { const leaks = lintMaster({ text }); if (leaks.length) throw Error('Master prompt mentions other-setting terms: ' + leaks.join(', ')); b.masterPrompt = String(text).slice(0, 12000); return b; }
+function setMaster(b, text) { const leaks = lintMaster({ text }); if (leaks.length) throw Error('Master prompt mentions other-setting terms: ' + leaks.join(', ')); b.masterPrompt = String(text); return b; }
 module.exports = { withDraft, validateRoster, localRoster, generateRoster, recentNames, rememberNames, ROSTER_EXAMPLES, leaks: () => lastLeak, firstRoom, expandInstructions, expandLocal, withInstructions, gmName, promptGm, roleGm, setTestMode, inventGmName, CORE, masterLocal, masterText, generateMaster, setMaster, weightedGenres, normalizePicked, GENRE_ALIASES, genreOf: g => { const k = String(g || '').toLowerCase().trim(); return GENRES.includes(k) ? k : GENRE_ALIASES[k] || null; }, GENRES, KIT_MAP, COTG_SLOTS, setActive, attach, current, guidance, translate, applyBody, localBible, validateBible, generate, defaultRunner, genresFor };
 // True only while the running campaign is Children of the Grave itself: no homebrew world (live or builder draft) and not TEST MODE.
 // Use it to gate CotG lore, the Grave Master persona, the premade-party gate and Mortacia wiring to actual CotG play.

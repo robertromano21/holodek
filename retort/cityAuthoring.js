@@ -8,9 +8,8 @@ function distinctName(name,qualifier,used,max){
   const original=String(name||'').trim().replace(/\s+/g,' ');if(!original)throw Error('A city location needs an authored name.');
   if(!used.has(normalized(original)))return original;
   // Repeated brands and place names are legal; the saved district/function makes their address unambiguous.
-  const short=(text,n)=>text.length<=n?text:text.slice(0,n).replace(/\s+\S*$/,'').trim()||text.slice(0,n);
   for(let n=1;n<100;n++){
-    const suffix=' / '+short(qualifier,28)+(n===1?'':' '+n),candidate=short(original,max-suffix.length)+suffix;
+    const suffix=' / '+qualifier+(n===1?'':' '+n),candidate=original+suffix;
     if(!used.has(normalized(candidate)))return candidate;
   }
   throw Error('City location address space exhausted.');

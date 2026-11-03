@@ -90,7 +90,7 @@ function knownNames(db) {
 function storeFacts(db, facts, bookTitle) {
   const root = db['0,0,0'] ||= {};
   root.bookFacts ||= [];
-  for (const t of facts || []) if (typeof t === 'string' && t.trim().length > 8) root.bookFacts.push({ text: t.trim().slice(0, 300), book: bookTitle, at: Date.now() });
+  for (const t of facts || []) if (typeof t === 'string' && t.trim()) root.bookFacts.push({ text: t.trim(), book: bookTitle, at: Date.now() });
   if (root.bookFacts.length > CAP.facts) root.bookFacts.splice(0, root.bookFacts.length - CAP.facts);
 }
 function findRecord(db, name) {
@@ -101,7 +101,7 @@ function findRecord(db, name) {
 async function coverWith($, ctx) {
   const avoid = ctx.avoid.length ? ` Avoid these titles used in earlier games: ${ctx.avoid.slice(0, 20).join('; ')}.` : '';
   await $.user(`BOOK COVER for an object in the established world. Object name: ${JSON.stringify(ctx.name)}; found in room ${JSON.stringify(ctx.roomName)}. Relevant canon (consistent, may foreshadow; never contradict): ${JSON.stringify(ctx.facts)}.
-Write an original in-world title (no real books, authors, games or people), the author ONLY if a writer is established in the supplied canon (otherwise "Anonymous" or "Unknown"), ${ctx.world?'writtenYear: a year and calendar belonging to this saved world, or "Unknown" if none is established. Do not import another setting\'s calendar or gods':'publishedSR: the year of writing in Surface Reckoning (integer 1..899, before the present year)'}, a backstory <=300 characters, and ${ctx.contents?.length?`exactly these existing chapter titles, in order: ${JSON.stringify(ctx.contents)}`:'a table of contents of 4..9 original chapter titles about relevant local life, history or discoveries'}. ${ctx.world?'World: '+JSON.stringify({name:ctx.world.name,genres:ctx.world.genres,realm:ctx.world.realm}):'This is Children of the Grave; its established underworld history can inform this book.'} Different books and new games have fresh titles, voices and subjects. Seed: ${JSON.stringify(ctx.seed)}.${avoid} Optionally up to 3 NEW background facts. Never promise new exits, quest rewards, usable spells, hidden keys or engine events.`);
+Write an original in-world title (no real books, authors, games or people), the author ONLY if a writer is established in the supplied canon (otherwise "Anonymous" or "Unknown"), ${ctx.world?'writtenYear: a year and calendar belonging to this saved world, or "Unknown" if none is established. Do not import another setting\'s calendar or gods':'publishedSR: the year of writing in Surface Reckoning (integer 1..899, before the present year)'}, an authored backstory, and ${ctx.contents?.length?`exactly these existing chapter titles, in order: ${JSON.stringify(ctx.contents)}`:'a table of contents of 4..9 original chapter titles about relevant local life, history or discoveries'}. ${ctx.world?'World: '+JSON.stringify({name:ctx.world.name,genres:ctx.world.genres,realm:ctx.world.realm}):'This is Children of the Grave; its established underworld history can inform this book.'} Different books and new games have fresh titles, voices and subjects. Seed: ${JSON.stringify(ctx.seed)}.${avoid} Optionally up to 3 NEW background facts. Never promise new exits, quest rewards, usable spells, hidden keys or engine events.`);
   const r = await Contracts.request($, { component: 'book-cover', maxTokens: 900, parameters: { title: Contracts.text(90), author: Contracts.text(60),
     ...(ctx.world?{writtenYear:Contracts.text(80)}:{publishedSR:{type:Number,minimum:1,maximum:899}}),
     backstory: Contracts.text(300), contents: {type:[{type:String,minLength:ctx.contents?.length?1:3,maxLength:70}],minItems:ctx.contents?.length||4,maxItems:ctx.contents?.length||9},
@@ -110,19 +110,19 @@ Write an original in-world title (no real books, authors, games or people), the 
   return r.value;
 }
 function validateCover(v, ctx) {
-  if (!v || typeof v.title !== 'string' || !v.title.trim() ||v.title.length>90|| /[<>\r\n]/.test(v.title)) throw Error('Invalid book title.');
-  if(ctx?.world){if(typeof v.writtenYear!=='string'||!v.writtenYear.trim()||v.writtenYear.length>80||/[<>\r\n]/.test(v.writtenYear)||/Surface Reckoning|\bS\.R\./i.test(v.writtenYear))throw Error('Use this world\'s own written year/calendar, or Unknown.');}
+  if (!v || typeof v.title !== 'string' || !v.title.trim() || /[<>\r\n]/.test(v.title)) throw Error('Invalid book title.');
+  if(ctx?.world){if(typeof v.writtenYear!=='string'||!v.writtenYear.trim()||/[<>\r\n]/.test(v.writtenYear)||/Surface Reckoning|\bS\.R\./i.test(v.writtenYear))throw Error('Use this world\'s own written year/calendar, or Unknown.');}
   else if (!Number.isInteger(v.publishedSR) || v.publishedSR < 1 || v.publishedSR > 899) throw Error('Publication year must be an integer Surface Reckoning year 1..899.');
-  if (!Array.isArray(v.contents) || v.contents.length < (ctx?.contents?.length||4) || v.contents.length > (ctx?.contents?.length||9) || v.contents.some(t => typeof t !== 'string' || !t.trim() || t.length>70 || /[<>\r\n]/.test(t))) throw Error('Contents must list the requested chapter titles.');
+  if (!Array.isArray(v.contents) || v.contents.length < (ctx?.contents?.length||4) || v.contents.length > (ctx?.contents?.length||9) || v.contents.some(t => typeof t !== 'string' || !t.trim() || /[<>\r\n]/.test(t))) throw Error('Contents must list the requested chapter titles.');
   if(ctx?.contents?.length&&JSON.stringify(v.contents)!==JSON.stringify(ctx.contents))throw Error('Preserve the existing authored chapter titles.');
   if (ctx?.avoid?.some(t => key(t) === key(v.title))) throw Error('That title was used in an earlier game; choose a new one.');
   const author = ctx?.authors?.has(String(v.author || '').trim()) ? v.author.trim() : 'Anonymous';
-  return { title: v.title.trim(), author, ...(ctx?.world?{writtenYear:v.writtenYear.trim()}:{publishedSR:v.publishedSR}), backstory: String(v.backstory || '').trim().slice(0, 300), contents: v.contents.map(t => t.trim()), newFacts: (v.newFacts || []).slice(0, 3) };
+  return { title: v.title.trim(), author, ...(ctx?.world?{writtenYear:v.writtenYear.trim()}:{publishedSR:v.publishedSR}), backstory: String(v.backstory || '').trim(), contents: v.contents.map(t => t.trim()), newFacts: (v.newFacts || []).slice(0, 3) };
 }
 async function chapterWith($, ctx) {
-  await $.user(`BOOK CHAPTER. Book: ${JSON.stringify({ title: ctx.record.title, author: ctx.record.author, published: ctx.record.published, contents: ctx.record.chapters.map(c => c.title) })}. Write a significant part of chapter ${ctx.chapter}: ${JSON.stringify(ctx.record.chapters[ctx.chapter - 1].title)} as several paragraphs (${CAP.chapterMin}..${CAP.chapterMax} characters) in the book's voice, consistent with earlier chapters ${JSON.stringify(ctx.record.chapters.filter(c => c.text).map(c => c.text.slice(0, 200)))} and with this canon (may foreshadow, never contradict): ${JSON.stringify(ctx.facts)}. No real authors, books, games or people. Optionally up to 3 NEW facts this chapter establishes.`);
+  await $.user(`BOOK CHAPTER. Book: ${JSON.stringify({ title: ctx.record.title, author: ctx.record.author, published: ctx.record.published, contents: ctx.record.chapters.map(c => c.title) })}. Write a significant part of chapter ${ctx.chapter}: ${JSON.stringify(ctx.record.chapters[ctx.chapter - 1].title)} as several complete paragraphs in the book's voice, consistent with earlier chapters ${JSON.stringify(ctx.record.chapters.filter(c => c.text).map(c => c.text.slice(0, 200)))} and with this canon (may foreshadow, never contradict): ${JSON.stringify(ctx.facts)}. No real authors, books, games or people. Optionally up to 3 NEW facts this chapter establishes.`);
   const r = await Contracts.request($, { component: 'book-chapter', maxTokens: 1600, parameters: { text: Contracts.text(CAP.chapterMax), newFacts: [{ type: String, maxLength: 300 }] },
-    validate: v => { if (typeof v?.text !== 'string' || v.text.trim().length < CAP.chapterMin||v.text.length>CAP.chapterMax) throw Error(`Chapter text must be ${CAP.chapterMin}..${CAP.chapterMax} characters of several paragraphs.`); return { text: v.text.trim(), newFacts: (v.newFacts || []).slice(0, 3) }; } });
+    validate: v => { if (typeof v?.text !== 'string' || !v.text.trim()) throw Error('Chapter text must contain authored prose.'); return { text: v.text.trim(), newFacts: (v.newFacts || []).slice(0, 3) }; } });
   if (!r.value) throw Error('Book chapter was not generated: ' + (r.error?.message || 'invalid'));
   return r.value;
 }

@@ -74,7 +74,7 @@
     if (!Array.isArray(rows) || rows.length > 12) throw Error('At most twelve named visual symbols are allowed.');
     const seen = new Set(Object.keys(glyphs)),images=new Set(Object.values(glyphs).map(rows=>rows.join('')));
     return rows.map(row => {
-      if (typeof row?.name !== 'string' || !/^[a-z][a-z '-]{0,27}$/i.test(row.name) || seen.has(row.name.toLowerCase()) ||
+      if (typeof row?.name !== 'string' || !/^[a-z][a-z '-]*$/i.test(row.name) || seen.has(row.name.toLowerCase()) ||
           !Array.isArray(row.pixels) || row.pixels.length !== 7 || row.pixels.some(line => !/^[01]{7}$/.test(line)) ||
           !row.pixels.some(line => line.includes('1')) || !row.pixels.some(line => line.includes('0'))||images.has(row.pixels.join(''))) throw Error('Symbols require a unique name and readable 7-by-7 bitmap.');
       seen.add(row.name.toLowerCase());images.add(row.pixels.join(''));return { name: row.name, pixels: [...row.pixels] };

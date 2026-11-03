@@ -94,7 +94,7 @@ function install(app, express, port, sharedState, { broadcast = () => {}, busy =
     }
     Object.assign(b,Setting.validateRoster(b));
     if (typeof req.body.expanded === 'string' && b.instructions) b.instructions.expanded = req.body.expanded.slice(0, 4000);
-    if(req.body.gmName&&!Setting.validGmName(req.body.gmName))throw Error('The GM name and optional title must contain 3-80 characters of name text.');
+    if(req.body.gmName&&!Setting.validGmName(req.body.gmName))throw Error('The GM name and optional title must contain nonempty name text.');
     Setting.setMaster(b, Setting.withInstructions(req.body.master || b.masterDraft, b.instructions)); if (req.body.gmName) b.gmName = req.body.gmName; Setting.setTestMode(false); if (req.body.genres) { const g = Setting.normalizePicked(req.body.genres); if (g) { b.genres = g.map(x => x.genre); b.genreWeights = g; b.genresPicked = true; } }
     b.party = req.body.party !== false; b.mainCharacter = String(req.body.mainCharacter || '').replace(/\s+/g, ' ').trim().slice(0, 600);
     B.setPlayerText('mainCharacter', b.mainCharacter); // player-provided: never filtered or renamed, even if it uses a Children of the Grave name

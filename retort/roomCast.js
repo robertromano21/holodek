@@ -107,25 +107,25 @@ function accept(parsed, residents, { runId } = {}) {
   if (!enabled()) return null;
   const byName = new Map(residents.filter(a => a && a.allegiance !== 'Hostile' && a.status !== 'gone').map(a => [String(a.name).toLowerCase(), a]));
   const members = (Array.isArray(parsed?.members) ? parsed.members : []).filter(m => byName.has(String(m?.name || '').toLowerCase()))
-    .slice(0, MAX_MEMBERS).map(m => ({ name: byName.get(String(m.name).toLowerCase()).name, interests: (m.interests || []).slice(0, 3).map(x => String(x).slice(0, 40)) }));
+    .slice(0, MAX_MEMBERS).map(m => ({ name: byName.get(String(m.name).toLowerCase()).name, interests: (m.interests || []).slice(0, 3).map(x => String(x)) }));
   if (!members.length) throw Error('members: choose 1-3 exact resident names.');
   const names = new Set(members.map(m => m.name.toLowerCase()));
   const arcs = (Array.isArray(parsed?.arcs) ? parsed.arcs : []).filter(a => a && names.has(String(a.giver || '').toLowerCase()) &&
     Array.isArray(a.stages) && a.stages.length >= STAGES_MIN && !Memory.collides(runId, 'premises', a.premise))
-    .slice(0, MAX_ARCS).map((a, i) => ({ id: `arc-${i}`, title: String(a.title).slice(0, 70), premise: String(a.premise).slice(0, 220),
+    .slice(0, MAX_ARCS).map((a, i) => ({ id: `arc-${i}`, title: String(a.title), premise: String(a.premise),
       giver: members.find(m => m.name.toLowerCase() === String(a.giver).toLowerCase()).name,
-      stages: a.stages.slice(0, STAGES_MAX).map(x => String(x).slice(0, 160)), destinationHint: String(a.destinationHint || '').slice(0, 90), stage: 0, ...localFields(a, residents) }));
+      stages: a.stages.slice(0, STAGES_MAX).map(x => String(x)), destinationHint: String(a.destinationHint || ''), stage: 0, ...localFields(a, residents) }));
   return { version: Flags.VERSION, runId, members, arcs, visits: 1, history: [] };
 }
 function localFields(a, residents) {
   const out = {}, stages = Math.min(STAGES_MAX, a.stages.length);
   if (Flags.on('QUEST_REWARDS')) out.difficulty = DIFFICULTY[String(a.difficulty || '').toLowerCase()] ? String(a.difficulty).toLowerCase() : 'normal';
-  if (Flags.on('QUEST_LOCAL')) { out.localStages = Math.max(1, Math.min(2, stages - 2, Math.round(Number(a.localStages)) || 1)); out.localSpot = String(a.localSpot || 'a quiet corner of this room').slice(0, 80); }
+  if (Flags.on('QUEST_LOCAL')) { out.localStages = Math.max(1, Math.min(2, stages - 2, Math.round(Number(a.localStages)) || 1)); out.localSpot = String(a.localSpot || 'a quiet corner of this room'); }
   if (Flags.on('QUEST_REVEALS')) {
     const giver = residents.find(r => String(r.name).toLowerCase() === String(a.giver).toLowerCase());
     const role = roleReveal(giver?.job || giver?.className || giver?.role), seen = new Set();
     out.reveals = [role, ...(Array.isArray(a.reveals) ? a.reveals : [])].filter(r => r && REVEAL_KINDS.includes(String(r.kind).toLowerCase()))
-      .map(r => ({ kind: String(r.kind).toLowerCase(), label: String(r.label || r.kind).slice(0, 80), why: String(r.why || '').slice(0, 140) }))
+      .map(r => ({ kind: String(r.kind).toLowerCase(), label: String(r.label || r.kind), why: String(r.why || '') }))
       .filter(r => !seen.has(r.kind + r.label) && seen.add(r.kind + r.label)).slice(0, 3);
   }
   return out;

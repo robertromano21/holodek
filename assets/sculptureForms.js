@@ -16,7 +16,7 @@
     if(rows===undefined)return[];
     if(!Array.isArray(rows)||rows.length>1)throw Error('At most one focal altar assembly.');
     return rows.map(s=>{
-      if(!altarTypes.includes(s?.type)||typeof s.label!=='string'||!s.label.trim()||s.label.length>70||/[<>\r\n]/.test(s.label)||
+      if(!altarTypes.includes(s?.type)||typeof s.label!=='string'||!s.label.trim()||/[<>\r\n]/.test(s.label)||
         s.deity!==undefined&&!Iconography.name(s.deity)||!Number.isInteger(s.candles)||s.candles<0||s.candles>3)throw Error('Invalid shrine assembly.');
       return{type:s.type,label:s.label.trim(),candles:s.candles,...(s.deity?{deity:Iconography.name(s.deity)}:{})};
     });
@@ -35,10 +35,10 @@
     if(rows===undefined)return[];
     if(!Array.isArray(rows)||rows.length>2)throw Error('At most two authored sculptures per room.');
     return rows.map(s=>{
-      if(typeof s?.label!=='string'||!s.label.trim()||s.label.length>70||/[<>\r\n]/.test(s.label)||
+      if(typeof s?.label!=='string'||!s.label.trim()||/[<>\r\n]/.test(s.label)||
         !poses.includes(s.pose)||!heads.includes(s.head)||!robes.includes(s.robe)||!attributes.includes(s.attribute)||
         s.form!==undefined&&!forms.includes(s.form)||s.deity!==undefined&&!Iconography.name(s.deity)||
-        s.motif!==undefined&&(typeof s.motif!=='string'||s.motif.length>28||/[<>\r\n]/.test(s.motif))||
+        s.motif!==undefined&&(typeof s.motif!=='string'||/[<>\r\n]/.test(s.motif))||
         s.workmanship!==undefined&&!['classic','carved'].includes(s.workmanship)||
         s.sculptureStyle!==undefined&&!styles.includes(s.sculptureStyle))throw Error('Invalid sculpture assembly.');
       const person=People.validate(s);

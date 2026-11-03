@@ -35,7 +35,7 @@ class ActionDice {
   recordCombat(entry) {
     if (this.active?.kind !== 'combat' || !entry || !this.active.ledger) return false;
     const ledger = this.active.ledger;
-    const name = value => typeof value === 'string' && value.length > 0 && value.length <= 120;
+    const name = value => typeof value === 'string' && !!value.trim();
     if (entry.kind === 'initiative') {
       if (!Array.isArray(entry.order) || !entry.order.every(a => a && name(a.name) && Number.isFinite(a.roll))) return false;
       ledger.round = this.active.round || 1;
@@ -43,7 +43,7 @@ class ActionDice {
     } else {
       if (entry.kind === 'hit' && (!name(entry.actor) || !name(entry.target) || !Number.isFinite(entry.damage) || entry.damage < 0 || !Number.isFinite(entry.hp))) return false;
       if (entry.kind === 'miss' && (!name(entry.actor) || !name(entry.target))) return false;
-      if (entry.kind === 'notice' && (typeof entry.text !== 'string' || !entry.text.trim() || entry.text.length > 1200)) return false;
+      if (entry.kind === 'notice' && (typeof entry.text !== 'string' || !entry.text.trim())) return false;
       if (!['hit', 'miss', 'notice'].includes(entry.kind)) return false;
       ledger.entries.push({ ...entry, id: `${this.active.id}:${++ledger.sequence}`, round: this.active.round || 1 });
       if (ledger.entries.length > 60) ledger.entries.shift();

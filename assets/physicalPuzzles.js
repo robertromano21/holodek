@@ -13,7 +13,7 @@
   const receiver = p => Modules.kits[p.moduleKit]?.receiver || 'cabinet';
   const receiverLabel = p => p.outputLabel || ({ cabinet: 'reading cabinet', beacon: 'star beacon', iris: 'stone iris',
     statue: 'ancestral statue', fountain: 'shrine fountain', gate: 'counterweight gate', mosaic: 'memory mosaic',altar:'ceremonial altar' }[receiver(p)]);
-  const clean = (s, n = 100) => typeof s === 'string' && s.trim().length <= n && !/[<>\r\n]/.test(s) ? s.trim() : '';
+  const clean = s => typeof s === 'string' && !/[<>\r\n]/.test(s) ? s.trim() : '';
   const hash = text => {
     let h = 2166136261;
     for (const c of String(text)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
@@ -24,7 +24,7 @@
     const issues = [];
     if (!KINDS.includes(raw.kind)) issues.push(`kind must be one of ${KINDS.join(', ')}`);
     for (const [field, limit] of [['title', 70], ['context', 300], ['lore', 320]]) {
-      if (!clean(raw[field], limit)) issues.push(`${field} must be nonempty single-line text, max ${limit} characters (received ${typeof raw[field] === 'string' ? raw[field].trim().length + ' characters' : typeof raw[field]})`);
+      if (!clean(raw[field], limit)) issues.push(`${field} must be nonempty single-line text`);
     }
     if (!Array.isArray(raw.controls) || raw.controls.length < 2 || raw.controls.length > 4) issues.push('controls must contain 2-4 controls');
     if (issues.length) throw Error(`Invalid physical puzzle design: ${issues.join('; ')}.`);

@@ -63,8 +63,7 @@ function invalid(issues) {
   return Object.assign(Error(issues.map(row => `${row.path}: ${row.message || `expected ${row.expected}; received ${row.actual}`}`).join('\n')),
     { code: 'GENERATION_VALIDATION', issues });
 }
-function wordIssues(value, path, maximum = 20) {
-  const count = typeof value === 'string' && value.trim() ? value.trim().split(/\s+/).length : 0;
-  return !count || count > maximum ? [issue(path, `1-${maximum} words`, count, `expected 1-${maximum} words; received ${count}`)] : [];
+function wordIssues(value, path) {
+  return typeof value !== 'string' || !value.trim() ? [issue(path, 'nonempty text', typeof value, 'expected a nonempty authored remark')] : [];
 }
 module.exports = { prepare, apply, instructions, invalid, issue, wordIssues };

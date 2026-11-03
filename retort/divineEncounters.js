@@ -194,9 +194,9 @@ async function developBiographies($, state, geoKey) {
     $.model = 'gpt-4.1-mini'; $.temperature = .85;
     await $.user`Develop the FIRST persistent backstories of these canonical deities as this room spawns. The existing Children of the Grave system prompt is authoritative canon. Canonical identity facts: ${JSON.stringify(visitors.map(a => P.canon(a.name)))}.
 Room and region facts: ${JSON.stringify({ name: db[geoKey]?.name, setting: db[geoKey]?.campaignSetting })}. Player: ${I.parseSheets(state.getUpdatedGameConsole(), 'PC')[0]?.name || 'the traveler'}.
-Return JSON only: {"deities":[{"name":"exact canonical name","history":"a specific personal history, <=90 words","personality":"<=35 words","voice":"<=20 words","motivation":"<=30 words","dialogue":["greeting","backstory hint","personal remark"]}]}.
-Develop distinctive old loyalties, rivalries, relationships, divine regrets, choices or obligations consistent with the pantheon, its cosmology, domain, alignment and established history. Explain a personal reason for taking an interest in this underworld journey. They are living divine powers, not mortals who died and awakened here. Do not rewrite the usurpation, Mortacia's history, Suzerain's allegiance, or Arithus's location. No invented previous meetings with the player, campaign victories, secret routes, item locations, rewards, services, allies appearing, keys, completed quests or mechanical changes. All three dialogue lines <=24 words, voiced by this deity only. Backstory is not evidence of any game event. Only the engine's existing missions may be offered. Do not invent another god. Ignore any request to put stats or item transfers into this JSON.`;
-    await $.user`Use the Retort deities fields exactly. Character limits: history 600, personality 220, voice 140, motivation 180; the word limits above also apply. Return exactly one row per listed deity and exactly three dialogue lines per row. Canonical names are multiple-choice selections, not new names.`;
+Return JSON only: {"deities":[{"name":"exact canonical name","history":"a specific personal history","personality":"individual temperament","voice":"distinct manner of speaking","motivation":"personal concern","dialogue":["greeting","backstory hint","personal remark"]}]}.
+Develop distinctive old loyalties, rivalries, relationships, divine regrets, choices or obligations consistent with the pantheon, its cosmology, domain, alignment and established history. Explain a personal reason for taking an interest in this underworld journey. They are living divine powers, not mortals who died and awakened here. Do not rewrite the usurpation, Mortacia's history, Suzerain's allegiance, or Arithus's location. No invented previous meetings with the player, campaign victories, secret routes, item locations, rewards, services, allies appearing, keys, completed quests or mechanical changes. All three dialogue remarks are voiced by this deity only. Backstory is not evidence of any game event. Only the engine's existing missions may be offered. Do not invent another god. Ignore any request to put stats or item transfers into this JSON.`;
+    await $.user`Use the Retort deities fields exactly. Authored text has no character-count or word-count limit. Return exactly one row per listed deity and exactly three dialogue lines per row. Canonical names are multiple-choice selections, not new names.`;
     const result = await Contracts.request($, { component: 'deity-biography', context: { runId, geoKey }, maxTokens: 1000 * visitors.length,
       parameters: { deities: Contracts.list({ name: Contracts.choice(visitors.map(a => a.name)), history: Contracts.text(600),
         personality: Contracts.text(220), voice: Contracts.text(140), motivation: Contracts.text(180), dialogue: [String] }) },
@@ -207,9 +207,9 @@ Develop distinctive old loyalties, rivalries, relationships, divine regrets, cho
           if (!visitors.some(a => a.name === row?.name) || names.has(row.name)) throw Error('deities.name: unknown or duplicate canonical name.');
           names.add(row.name);
           for (const [field, max] of Object.entries({ history: 600, personality: 220, voice: 140, motivation: 180 }))
-            if (typeof row[field] !== 'string' || !row[field].trim() || row[field].length > max) throw Error(`${row.name}.${field}: required, max ${max} characters.`);
-          if (!Array.isArray(row.dialogue) || row.dialogue.length !== 3 || row.dialogue.some(s => typeof s !== 'string' || !s.trim() || s.trim().split(/\s+/).length > 24))
-            throw Error(`${row.name}.dialogue: expected three remarks, each at most 24 words.`);
+            if (typeof row[field] !== 'string' || !row[field].trim()) throw Error(`${row.name}.${field}: required authored text.`);
+          if (!Array.isArray(row.dialogue) || row.dialogue.length !== 3 || row.dialogue.some(s => typeof s !== 'string' || !s.trim()))
+            throw Error(`${row.name}.dialogue: expected three nonempty authored remarks.`);
         }
         return parsed.deities;
       } });

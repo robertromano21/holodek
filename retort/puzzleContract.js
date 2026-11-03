@@ -53,7 +53,7 @@ function parameters(brief) {
     material: C.choice(tools.materials), outputLabel: optional(single(60)), storyLead: optional(single(240)),
     couplings: optional({ type: [{ type: [C.text(24)], minItems: 1, maxItems: brief.controls.length }],
       minItems: brief.kind === 'interlock' ? brief.controls.length : 0, maxItems: brief.controls.length }),
-    glyphs: C.list({ name: { ...single(28), pattern: "^[A-Za-z][A-Za-z '-]{0,27}$" },
+    glyphs: C.list({ name: { ...single(28), pattern: "^[A-Za-z][A-Za-z '-]*$" },
       pixels: { type: [{ ...C.text(7), pattern: '^[01]{7}$' }], minItems: 7, maxItems: 7 } }),
     roomArt: [Schema.discriminated(artwork, 'kind', {
       fresco: ['mosaicPattern', 'mosaicShape'], mosaic: ['aspectRatio'], relief: ['aspectRatio', 'mosaicPattern', 'mosaicShape'],

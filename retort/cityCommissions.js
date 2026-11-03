@@ -5,8 +5,8 @@ const parameters = { title: C.nonblankText(70), purpose: C.nonblankText(300), pa
 function validate(value) {
   const out = {};
   for (const [key, max] of [['title', 70], ['purpose', 300], ['parcelDescription', 180]]) {
-    if (typeof value?.[key] !== 'string' || !value[key].trim() || value[key].length > max || /[<>\r\n\x00-\x1f]/.test(value[key]))
-      throw Error(`Commission ${key} must be one nonblank plain-text line of at most ${max} characters.`);
+    if (typeof value?.[key] !== 'string' || !value[key].trim() || /[<>\r\n\x00-\x1f]/.test(value[key]))
+      throw Error(`Commission ${key} must be one nonblank plain-text line.`);
     out[key] = value[key].trim();
   }
   return out;

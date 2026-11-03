@@ -151,7 +151,7 @@ async function request(state, service, input, decide = facts => decideRequest(st
     const answer = received ? { give: true, reply: `Yes, I still have ${c.item.name}. Here, take it back.` } : await decide({
       resident: { name, personality: c.record.personality, motivation: c.record.motivation, job: c.record.job },
       possessions: possessions(c.record, 8), requestedItem: c.item, player: c.pc.name, request: value });
-    if (typeof answer?.give !== 'boolean' || typeof answer.reply !== 'string' || !answer.reply.trim() || answer.reply.length > 400) throw Error('The resident did not provide a verified answer. No item moved.');
+    if (typeof answer?.give !== 'boolean' || typeof answer.reply !== 'string' || !answer.reply.trim()) throw Error('The resident did not provide a verified answer. No item moved.');
     c = context(); check(c);
     if (c.geoKey !== geoKey || c.actor.name !== name || runId !== state.getDungeonRunId?.() || JSON.stringify(c.item) !== before) throw Error('The item or room changed during the request. No item moved.');
     const dialogue = [{ speaker: name, line: answer.reply }];

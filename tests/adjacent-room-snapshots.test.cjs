@@ -32,6 +32,14 @@ test('manifest and graphics snapshot read only direct prepared destinations, wit
   assert.deepEqual(response.dungeon.secretDoors.doors.map(d=>d.id),['known']);
   assert.equal(JSON.stringify([f.db,f.dungeons,f.songs]),before);assert.equal(f.writes,0);
 });
+test('long authored room names remain eligible for adjacent preload without truncation',()=>{
+  const f=fixture(),name='The Hall Beyond the Mountain '.repeat(20).trim();
+  f.db['0,1,0'].name=name;
+  const item=f.service.manifest(f.query).neighbors[0];
+  assert.equal(item.name,name);assert.equal(item.ready,true);assert.equal(item.preloadable,true);
+  assert.equal(f.service.snapshot(f.snapshot()).geoKey,'0,1,0');assert.equal(f.db['0,1,0'].name,name);
+});
+
 test('incomplete checkpoints expose bounded status only; all assets are required before unvisited readiness',()=>{
   for(const field of ['population','geometry','music','art','receipt']){
     const f=fixture();
