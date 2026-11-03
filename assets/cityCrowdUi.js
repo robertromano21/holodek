@@ -67,11 +67,13 @@
     if(pending||!actor.ambient||root.gamePaused||root.actionDiceState?.active||root.GameCommandGate?.busy?.())return false;
     const ctx=root.getDungeonLifeContext?.();if(!ctx||ctx.dungeon.geoKey!==actor.mazeRoomKey)return false;
     const row=ctx.dungeon.cityCrowd?.actors?.[actor.crowdId];
-    if(!services&&row?.occupation?.mode==='work'&&VENUES.has(row.occupation.venueType))return offerAmbient(actor);
+    if(!services&&!root.EconomyRules?.isStarterRoom(ctx.dungeon.geoKey,ctx.dungeon)&&row?.occupation?.mode==='work'&&VENUES.has(row.occupation.venueType))return offerAmbient(actor);
     const runId=root.dungeonRunId,floorToken=root.CityFloorScope?.token();
     const current=()=>root.currentDungeon?.geoKey===ctx.dungeon.geoKey&&root.dungeonRunId===runId&&root.CityFloorScope?.token()===floorToken&&
       (root.currentDungeon===ctx.dungeon||typeof floorToken==='string'&&floorToken.length>0);
     pending=true;pinned=actor.crowdId;
+    const track=root.GameCommandGate?.trackNative||((work)=>work());
+    return track(async()=>{
     try{
       const response=await root.fetch('/city/residents/meet',{method:'POST',headers:{'content-type':'application/json'},
         body:JSON.stringify({runId,geoKey:ctx.dungeon.geoKey,floorToken,id:actor.crowdId,counterId,player:{...ctx.player},
@@ -89,6 +91,7 @@
       if(current())root.DungeonActionNotices?.receive?.({id:'citizen:'+Date.now(),runId,geoKey:ctx.dungeon.geoKey,
         kind:'city-resident',title:actor.name,message:error.message});return false;
     }finally{pending=false;pinned=null;}
+    });
   }
   function greetAmbient(d,player){
     const now=Date.now(),run=root.dungeonRunId;
@@ -110,7 +113,7 @@
   function onFrame(d,player){
     if(!d||pending||root.CommerceUi?.hasInteraction?.()||root.gamePaused||root.actionDiceState?.active||root._combatCommandPending||
       root._gameOver||root._playerUnconscious||root._deathSceneActive||root._characterStartupPending||root._combatRoundActiveUntil>Date.now()||
-      root.GameCommandGate?.busy?.()||root.RoomEntry?.isPending?.()||root.document?.querySelector('.popup-container')||
+      root.GameCommandGate?.busy?.()||root.GameCommandGate?.isSubmitting?.()||root.RoomEntry?.isPending?.()||root.document?.querySelector('.popup-container')||
       /^(INPUT|TEXTAREA|SELECT)$/.test(root.document?.activeElement?.tagName)||root.currentDungeon!==d)return;
     const nearby=point=>Math.hypot(point.x-player.x,point.y-player.y)<=3&&root.DungeonInhabitants?.lineClear(d,player,point);
     const ctx=root.getDungeonLifeContext?.();

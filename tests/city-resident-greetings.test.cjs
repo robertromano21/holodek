@@ -90,7 +90,7 @@ test('service desks are separately bound and described at shared city coordinate
   const room={inhabitants:{actors:{}}};
   for(const [name,type]of [['Host','inn'],['Archivist','library'],['Attendant','temple']]){
     const a={name,hp:7,status:'present',allegiance:'Neutral'};room.inhabitants.actors[name]=a;
-    const desk=V.bind(room,a,{mode:'work',venueId:name,venueType:type},'0,0,0');
+    const desk=V.bind(room,a,{mode:'work',venueId:name,venueType:type},'1,0,0');
     assert.equal(V.forActor(room,name),desk);assert.equal(V.describe(room,name).type,type);
     if(type==='inn')assert.ok(desk.capabilities.includes('lodging'));
   }

@@ -1,15 +1,32 @@
 'use strict';
+const I=require('../assets/dungeonInhabitants');
 
+function partyMembers(roster = [], consoleText = '') {
+  const sheets=new Map([...I.parseSheets(consoleText,'PC'),...I.parseSheets(consoleText,'NPCs in Party')]
+    .map(actor=>[String(actor.name).trim().toLowerCase(),actor]));
+  return roster.filter(actor=>!actor.type||actor.type==='pc'||actor.type==='npc').map(actor=>{
+    const sheet=sheets.get(String(actor.name??actor.Name??'').trim().toLowerCase());
+    return sheet?{...actor,...sheet}:actor;
+  });
+}
 function partySummary(roster = []) {
-  const active = roster.filter(actor => {
+  const active = partyMembers(roster).filter(actor => {
     const type = actor.type;
     return (!type || type === 'pc' || type === 'npc') && actor.combatant !== false && !actor.noncombatant &&
       Number(actor.hp ?? actor.HP ?? 0) > 0 && !/^(dead|dying|unconscious)$/i.test(actor.state ?? actor.State ?? '');
   });
   // Retain the existing exceptional-premade level exemption, not a difficulty cap on bosses.
-  const mortal = active.filter(actor => (actor.name ?? actor.Name) !== 'Mortacia');
+  const mortal = active.filter(actor => String(actor.name ?? actor.Name).trim().toLowerCase() !== 'mortacia');
   const average = mortal.length ? mortal.reduce((sum, actor) => sum + Math.max(1, Number(actor.level ?? actor.Level) || 1), 0) / mortal.length : 3;
-  return { size: Math.max(1, active.length), level: Math.max(1, Math.min(12, Math.floor(average))) };
+  return { size: Math.max(1, active.length), level: Math.max(1, Math.min(20, Math.round(average))) };
+}
+function levelRange(party) {
+  const {level}=partySummary(party);return{min:level,max:Math.min(20,level+2)};
+}
+function levelPicker(party,{fallback,random,starting=false,scripted=false,identity=false}={}) {
+  const range=levelRange(party);
+  return descriptor=>!starting&&!scripted&&!identity&&descriptor?.allegiance==='Hostile'?
+    random(range.min,range.max):fallback();
 }
 
 function groupSize(size = 1, roll = .5) {
@@ -40,7 +57,7 @@ function plan(slots, { party, starting, encounter, hostileTemple, settled, roll 
     if (count < 2) continue;
     const cohort = combatSlots.slice(offset, offset += count), unitId = cohort[0].unitId;
     for (const slot of cohort) Object.assign(slot, { cohort: `routine-${index + 1}`, cohortSize: count,
-      cohortAllegiance: encounter || settled && !hostileTemple ? null : 'Hostile', ...(unitId ? { unitId } : {}) });
+      cohortAllegiance: encounter ? encounter.allegiance || null : settled && !hostileTemple ? null : 'Hostile', ...(unitId ? { unitId } : {}) });
   }
   // Settlement threats remain an optional minority, not scattered solo attackers.
   if (settled && !encounter && !hostileTemple) for (const slot of eligible) if (!slot.cohort) slot.peaceful = true;
@@ -49,7 +66,7 @@ function plan(slots, { party, starting, encounter, hostileTemple, settled, roll 
 function constraint(slot, accepted) {
   const anchor = slot.cohort && accepted.find(row => row.cohort === slot.cohort);
   return { anchor, allegiance: slot.cohortAllegiance || anchor?.allegiance,
-    encounterId: anchor?.encounterId, homeSite: anchor?.homeSite };
+    encounterId: anchor?.encounterId, homeSite: slot.fixedHomeSite || anchor?.homeSite };
 }
 
 function guidance(slots, accepted) {
@@ -62,4 +79,4 @@ function guidance(slots, accepted) {
   })) + '. Members of a cohort share allegiance, encounterId and homeSite; author distinct individuals with a coherent shared situation, not unrelated solo threats. The first member chooses the group label and, when not fixed, its allegiance. Preserve this across subsequent single-slot requests. Peaceful slots cannot be Hostile. These are ordinary encounters, not authored bosses; never substitute a named cosmic power. No resolved attacks or invented quests.';
 }
 
-module.exports = { partySummary, groupSize, settlement, partition, plan, constraint, guidance };
+module.exports = { partyMembers, partySummary, levelRange, levelPicker, groupSize, settlement, partition, plan, constraint, guidance };

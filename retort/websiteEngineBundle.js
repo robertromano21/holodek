@@ -136,7 +136,7 @@ function installationRuntime() {
       LANG: 'C.UTF-8', npm_config_userconfig: emptyConfig('.npmrc-user'), npm_config_globalconfig: emptyConfig('.npmrc-global'),
       npm_config_registry: 'https://registry.npmjs.org/', ONNXRUNTIME_NODE_INSTALL: 'skip' };
     const run = (label, exe, args, timeout) => {
-      const result = spawnSync(exe, args, { cwd: directory, env, encoding: 'utf8', timeout, maxBuffer: 1024 * 1024 });
+      const result = spawnSync(exe, args, { cwd: directory, env, encoding: 'utf8', timeout, maxBuffer: 1024 * 1024, windowsHide: true });
       if (result.error || result.status !== 0) {
         const exitCode = Number.isInteger(result.status) ? result.status : null;
         const signal = diagnostic(result.signal, 32), spawnCode = diagnostic(result.error?.code, 64);

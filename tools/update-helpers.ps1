@@ -10,7 +10,8 @@ if (-not $installer.StartsWith(($root + [System.IO.Path]::DirectorySeparatorChar
 if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $manifest.installerHash) {
     throw 'The helper updater changed after verification. Do not restart yet.'
 }
-Write-Host 'Checking the verified PC release and the selected local or website helpers...'
+Write-Host 'Checking the exact verified PC release and all three selected local or website helpers...'
+Write-Host ("Verified engine: {0}" -f $manifest.engineHash)
 & node $installer --helpers
 if ($LASTEXITCODE -eq 2) {
     Write-Warning 'Update paused before deployment: restart only gameServer, then run this command again before opening the game. Leave gameServer2 untouched.'

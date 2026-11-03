@@ -1,6 +1,7 @@
 'use strict';
 const I=require('../assets/dungeonInhabitants');
 function providers(room,population,database={}){
+  if(require('../assets/economyRules').isStarterRoom(population?.geoKey,room))return[];
   const jobs=Object.values(database).flatMap(r=>Object.values(r?.minorMissions||{})).filter(m=>m.status!=='completed');
   const E=require('../assets/cityEstablishments');
   const names=new Set([...Object.values(room?.services||{}).flatMap(E.operators),...E.operators(room?.venueDesk),

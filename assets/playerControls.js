@@ -13,11 +13,11 @@
   let panel, pickupButton, helpButton, capture = null, previousButtons = [], activePad = null, held = new Map();
   const movement = new Set(['forward','backward','left','right','strafeLeft','strafeRight','run']);
   function save() { try { root.localStorage?.setItem('holodek-player-controls', JSON.stringify({ bindings, autoTake, controller })); } catch {} }
-  function blocked(forMovement = false) {
+  function blocked(forMovement = false, { ignorePopup = null } = {}) {
     const d = root.document;
     return !d || d.hidden || root.gamePaused || root._gameOver || root._playerUnconscious || root._deathSceneActive || root._characterStartupPending || root._combatCommandPending || root.actionDiceState?.active ||
       root._combatRoundActiveUntil > Date.now() || (!forMovement && root.GameCommandGate?.busy()) || /^(INPUT|TEXTAREA|SELECT)$/.test(d.activeElement?.tagName) ||
-      d.activeElement?.isContentEditable || [...d.querySelectorAll('.popup-container:not([data-dungeon-proximity]):not([data-dungeon-item-proximity]), dialog[open], #game-menu:not([hidden]), #player-help:not([hidden])')].some(node => node.getClientRects().length > 0);
+      d.activeElement?.isContentEditable || [...d.querySelectorAll('.popup-container:not([data-dungeon-proximity]):not([data-dungeon-item-proximity]), dialog[open], #game-menu:not([hidden]), #player-help:not([hidden])')].some(node => node !== ignorePopup && node.getClientRects().length > 0);
   }
   function reset() { held.clear(); root.setDungeonControlInput?.({ forward:0, strafe:0, turn:0, run:false }); root.clearDungeonMoveKeys?.(); }
   function actionFor(event) {

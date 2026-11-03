@@ -39,8 +39,8 @@ test('browser and server share 358 unique races, retaining metadata from all 368
   assert.match(source, /const monsterRaces = window.MonsterRaces/);
 });
 
-test('indoors have a sparse limit; outdoors can have more, without a fixed race or allegiance', () => {
-  assert.ok(E.policy(true).limit < E.policy(false).limit);
+test('indoor and outdoor supplemental encounters are capped at two party-sized groups', () => {
+  assert.equal(E.policy(true).limit,2);assert.equal(E.policy(false).limit,2);
   for(const indoor of [true,false])for(const roll of[0,.2,.4,.6,.8,.999])assert.ok(E.policy(indoor,roll).groupSize>=2&&E.policy(indoor,roll).groupSize<=6);
   const ctx = setup(); assert.ok(E.opportunity(ctx.state, ctx.visit, ctx.player, 200000));
   ctx.p.actors['Existing Watch'].position = { x: 25, y: 25 };
@@ -60,7 +60,7 @@ test('stationary waiting and teleport-sized movement do not accrue encounter tra
 
 test('dungeon pacing is brisker without increasing settlement pressure or spawning into combat', () => {
   const crawl=E.policy(true,.5,{partySize:6}),city=E.policy(true,.5,{partySize:6,settled:true});
-  assert.deepEqual([crawl.groupSize,crawl.distance,crawl.cooldown,crawl.limit],[6,32,60000,4]);
+  assert.deepEqual([crawl.groupSize,crawl.distance,crawl.cooldown,crawl.limit],[6,32,60000,2]);
   assert.deepEqual([city.distance,city.cooldown,city.limit],[48,120000,2]);
   const f=setup(true),resident=f.p.actors['Existing Watch'];
   resident.allegiance='Neutral';resident.position={x:35,y:20};
@@ -94,14 +94,14 @@ for (const indoor of [true, false]) test(`on-the-fly ${indoor ? 'indoor' : 'outd
     allegiance: 'Hostile', encounterId: 'lost-caravan', history: 'Haunts a forgotten caravan route. Its tormented murmurs preserve one broken memory.' })));
   const rt = runtime({ skip: false, inhabitants: rows }, options => assert.deepEqual(options.parameters.inhabitants.type[0].type.race.enum, names));
   const old = JSON.stringify(ctx.p.actors['Existing Watch']);
-  const result = await E.maybeGenerate({ ...ctx, runtime: rt, now: 200000 });
+  const result = await E.maybeGenerate({ ...ctx, runtime: rt, now: 200000, random:()=>0 });
   assert.equal(ctx.p.randomEncounters.count, 1); assert.equal(Object.keys(ctx.p.actors).length, count + 1);
   assert.equal(JSON.stringify(ctx.p.actors['Existing Watch']), old);
   assert.ok(result.discoveries.some(row => row.kind === 'people'));
   for (const actor of Object.values(ctx.p.actors).filter(a => a.supplemental)) {
     assert.equal(actor.race, 'Allip'); assert.equal(actor.allegiance, 'Hostile'); assert.ok(actor.position);
     assert.ok(Math.hypot(actor.position.x + .5 - ctx.player.x, actor.position.y + .5 - ctx.player.y) >= 12);
-    assert.ok(I.parseBlocks(actor.sheet)[0].level <= 3);
+    const level=I.parseBlocks(actor.sheet)[0].level;assert.ok(level>=3&&level<=5);
   }
   assert.ok(rt.prompts.some(p => p.includes('Tormented, babbling undead') && /derive suitable anatomy, intelligence, behavior, history, personality/.test(p)));
   assert.ok(rt.prompts.some(p => p.includes('These are fantasy races for an intelligent or unintelligent animal, monster, spirit') &&
@@ -113,18 +113,47 @@ test('unsupported races are rejected, while a model-declined encounter adds no m
   const bad = runtime({ inhabitants: fixtures(1, [{ slot: 0, race: 'Not In The Enum' }]) });
   await assert.rejects(bad.run($ => generateInhabitants($, { roomName: 'Crossing', geoKey: key, indoor: true,
     encounter: { count: 1, races: Catalog.map(r => r.name), catalog: Catalog } }, rules)), /outside the encounter catalog/);
-  const result = await E.maybeGenerate({ ...ctx, runtime: runtime({ skip: true, inhabitants: [] }), now: 200000 });
+  const result = await E.maybeGenerate({ ...ctx, runtime: runtime({ skip: true, inhabitants: [] }), now: 200000, random:()=>0 });
   assert.equal(result, ctx.visit); assert.equal(Object.keys(ctx.p.actors).length, 1); assert.equal(ctx.p.randomEncounters.attempts, 1);
 });
 
 test('stale generation, pause, per-room caps and live-action guards cannot install new creatures', async () => {
   const ctx = setup(true), reply = { inhabitants: fixtures(1, [{ slot: 0, race: 'Imp', name: 'New Imp', allegiance: 'Neutral' }]) };
   const rt = runtime(reply, () => ctx.setRun('new-run'));
-  await E.maybeGenerate({ ...ctx, runtime: rt, now: 200000 });
+  await E.maybeGenerate({ ...ctx, runtime: rt, now: 200000, random:()=>0 });
   assert.equal(Object.keys(ctx.p.actors).length, 1);
   const capped = setup(); capped.p.randomEncounters.count = E.policy(false).limit;
   assert.equal(E.opportunity(capped.state, capped.visit, capped.player, 200000), null);
   const paused = setup(); paused.pause(); assert.equal(E.opportunity(paused.state, paused.visit, paused.player, 200000), null);
   const busy = setup(); await E.maybeGenerate({ ...busy, runtime: runtime(reply, () => { throw Error('Must not call'); }), isCurrent: () => false, now: 200000 });
   assert.equal(busy.p.randomEncounters.attempts, 0);
+});
+
+test('an eligible failed 25-percent roll is persisted and consumes its cooldown without any model call',async()=>{
+  const ctx=setup(true);let calls=0;
+  const result=await E.maybeGenerate({...ctx,now:200000,random:()=>.25,runtime:{run:()=>{calls++;throw Error('Must not call');}}});
+  assert.equal(result,ctx.visit);assert.equal(calls,0);assert.equal(ctx.p.randomEncounters.count,0);
+  assert.equal(ctx.p.randomEncounters.attempts,1);assert.equal(ctx.p.randomEncounters.lastAttempt,200000);
+  assert.deepEqual(JSON.parse(JSON.stringify(ctx.p.randomEncounters.lastRoll)),{attempt:1,hit:false,allegiance:null});
+  ctx.p.randomEncounters.distance=150;
+  await E.maybeGenerate({...ctx,now:200001,random:()=>assert.fail('The same opportunity cannot reroll every poll')});
+  assert.equal(ctx.p.randomEncounters.attempts,1);assert.equal(Object.keys(ctx.p.actors).length,1);
+});
+for(const [roll,allegiance]of [[.5999,'Hostile'],[.6,'Neutral'],[.8,'Friendly']])test('a successful random check installs the engine-selected '+allegiance+' group',async()=>{
+  const ctx=setup(),count=E.opportunity(ctx.state,ctx.visit,ctx.player,200000).rules.groupSize;
+  const rows=fixtures(count,Array.from({length:count},(_,slot)=>({slot,name:'Extra '+slot,race:'Allip',allegiance,encounterId:'unrelated-'+slot})));
+  const rt=runtime({inhabitants:rows},request=>assert.deepEqual(request.parameters.inhabitants.type[0].type.allegiance.enum,[allegiance]));
+  const result=await E.maybeGenerate({...ctx,runtime:rt,now:200000,random:purpose=>purpose==='chance'?.2499:roll});
+  assert.equal(result.discoveries.length,1);assert.equal(ctx.p.randomEncounters.count,1);
+  const added=Object.values(ctx.p.actors).filter(a=>a.supplemental);assert.equal(added.length,count);
+  assert.ok(added.every(a=>a.allegiance===allegiance));assert.equal(new Set(added.map(a=>a.encounterId)).size,1);
+});
+test('the safe opening and peaceful service interiors never roll supplemental hostility',async()=>{
+  for(const protect of [ctx=>ctx.p.starting=true,ctx=>ctx.p.encounterBudget={profile:'safe'},ctx=>{
+    ctx.p.geoKey=ctx.d.geoKey='0,0,0';ctx.state.getLastCoords=()=>({x:0,y:0,z:0});
+  }]){
+    const ctx=setup();protect(ctx);
+    await E.maybeGenerate({...ctx,now:200000,random:()=>assert.fail('Protected rooms do not roll'),runtime:{run:()=>assert.fail('No generation')}});
+    assert.equal(ctx.p.randomEncounters.attempts,0);assert.equal(Object.keys(ctx.p.actors).length,1);
+  }
 });

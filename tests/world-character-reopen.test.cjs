@@ -10,6 +10,7 @@ function fixture(type = 'monster') {
     appendChild(node) { node.parent = this; this.children.push(node); return node; }
     remove() { this.connected = false; if (this.parent) this.parent.children = this.parent.children.filter(n => n !== this); }
     addEventListener(name, callback) { this.listeners[name] = callback; }
+    setAttribute(name, value) { this[name] = value; }
     click() { this.listeners.click?.(); }
     getClientRects() {
       for (let n = this; n; n = n.parent) if (!n.connected || n.hidden || n.style.display === 'none') return [];

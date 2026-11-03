@@ -144,6 +144,7 @@ function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   if (!cachedGeometry && !dungeon.sceneRoof) applySceneRoofs(dungeon, dungeon.sceneSpec);
   if (!cachedGeometry && !dungeon.roomExits) DungeonExits.install(dungeon);
   if (!cachedGeometry && typeof SecretDoors !== 'undefined') SecretDoors.install(dungeon);
+  require('./surfaceArtPlacement').restoreFloorMosaics(dungeon);
   require('./cityCirculation').install(dungeon);
   if (!dungeon.environment) dungeon.environment = buildEnvironment(dungeon);
   dungeon.geoKey = geoKey;
@@ -839,7 +840,7 @@ function applyLevelAndHpAdjustments(updatedGameConsole) {
 // Function to restart gameServer2
 function restartGameServer2() {
     return new Promise((resolve, reject) => {
-        exec('pm2 restart gameServer4', (error, stdout, stderr) => {
+        exec('pm2 restart gameServer4', { windowsHide: true }, (error, stdout, stderr) => {
             if (error) {
                 console.error(`Error restarting gameServer2: ${error.message}`);
                 reject(error);
@@ -2805,11 +2806,21 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
   const average = mortal.length ? Math.round(mortal.reduce((sum,a) => sum + a.Level, 0) / mortal.length) : 1;
   const min = pc.Name === 'Mortacia' || pc.Name === 'Suzerain' && pc.Level >= 15 ? 1 : Math.max(1, average);
   const max = Math.min(20, pc.Name === 'Mortacia' ? 15 : pc.Name === 'Suzerain' && pc.Level >= 15 ? 13 : average + 2);
+  const encounterPolicy=require('./encounterPolicy');
+  const reservation=encounterPolicy.reserve(records,geoKey,{seed:sharedState.getDungeonRunId()});
+  const roomEncounterPlan=encounterPolicy.budget(room,geoKey,reservation,{party,indoor,
+    hostileTemple:require('./campaignSetting').hostileTemple(room.campaignSetting,roomName),
+    roll:encounterPolicy.unit(`${sharedState.getDungeonRunId()}:${geoKey}:cohort-size`)});
+  if(reservation)sharedState.setRoomNameDatabase(JSON.stringify(records));
+  const pickLevel=require('./encounterBalance').levelPicker(party,{
+    fallback:()=>getRandomInt(min,max),random:getRandomInt,
+    starting:geoKey==='0,0,0'&&!room.cityFloorContext,
+    scripted:!!room.bossGate||encounterPolicy.profile(room,geoKey,{indoor})==='scripted'});
   const result = await generateInhabitants($, { roomName, roomDescription, geoKey, indoor,
-    campaignSetting: room.campaignSetting, rooms: records,
+    campaignSetting: room.campaignSetting, rooms: records, roomEncounterPlan,
     partyNames: party.map(a => a.Name), party, usedNames, quest: sharedState.getCurrentQuest(),
     questSeed: needsQuestIntroduction(sharedState.getCurrentQuest(), records, geoKey, sharedState.getCurrentTaskIndex() || 0) }, {
-    random: getRandomInt, sex: getRandomSex, level: () => getRandomInt(min, max),
+    random: getRandomInt, sex: getRandomSex, level: pickLevel,
     xp: (level, archetype) => calculateCumulativeXp(xpThresholds[archetype] || 3500, level),
     equipment: async actor => {
       const [object] = await require('./itemAuthoring').generate($, { count: 1, types: ['weapon'],
@@ -2860,7 +2871,7 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
 async function generateRoomObjects($, roomName, roomDescription) {
     const database = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
     return require('./itemAuthoring').generate($, {
-        count: Math.floor(Math.random() * 5) + 1, roomName, roomDescription, database,
+        count: Math.floor(Math.random() * 5) + 1, roomName, roomDescription, database, random: Math.random,
         world: database['0,0,0']?.setting || WorldSetting.current(),
         excluded: Object.values(database).flatMap(room => (room?.objects || []).map(item => item.name)).slice(-40),
         purpose: 'objects in this room'
@@ -4639,6 +4650,8 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     dungeon.sceneCheck = checkSceneAgainstDungeon(sceneSpec, dungeon);
     console.log('[SceneSpec] prose check', geoKey, JSON.stringify(dungeon.sceneCheck));
     roomNameDbString = storeSceneSpecInRoomDb(roomNameDbString, geoKey, sceneSpec);
+    updatedGameConsole = await require('./secretRoomLoot').prepare($, sharedState, dungeon, updatedGameConsole);
+    roomNameDbString = sharedState.getRoomNameDatabase();
     const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
     dungeon = finalDungeon;
     sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
@@ -5856,6 +5869,8 @@ try {
   roomNameDatabaseString = storeSceneSpecInRoomDb(roomNameDatabaseString, geoKey, sceneSpec);
   if (enteringRoom) RoomEntry.prepare(dungeon, { geoKey,
     fromKey: `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`, input: userInput });
+  updatedGameConsole = await require('./secretRoomLoot').prepare($, sharedState, dungeon, updatedGameConsole);
+  roomNameDatabaseString = sharedState.getRoomNameDatabase();
   const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
   sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
   sharedState.setLastCoords(geoCoords);
@@ -5866,8 +5881,11 @@ try {
 
   }
 if (enteringRoom && hasRoomDungeon) {
-  const cached = sharedState.getRoomDungeonForSimulation(geoCoords);
+  let cached = sharedState.getRoomDungeonForSimulation(geoCoords);
   if (cached) {
+    updatedGameConsole = await require('./secretRoomLoot').prepare($, sharedState, cached, updatedGameConsole);
+    roomNameDatabaseString = sharedState.getRoomNameDatabase();
+    if(require('./surfaceArtPlacement').restoreFloorMosaics(cached))cached=finalizeRoomDungeon(geoKey,cached,cached.customTiles||[]);
     RoomEntry.prepare(cached, { geoKey, fromKey: `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`, input: userInput });
     sharedState.setRoomDungeon(geoCoords, cached, cached.customTiles || []);
     returnObj.dungeon = cached;
@@ -10373,7 +10391,7 @@ function executePython(pythonCode, maxRetries = 10, delayMs = 1000, regenerateCa
         return new Promise((resolve, reject) => {
             const cleanedCode = cleanPythonCode(pythonCode);
 
-            const process = require('child_process').spawn('python3', ['-c', cleanedCode], { stdio: 'pipe' });
+            const process = require('child_process').spawn('python3', ['-c', cleanedCode], { stdio: 'pipe', windowsHide: true });
 
             let output = '';
             let errorOutput = '';

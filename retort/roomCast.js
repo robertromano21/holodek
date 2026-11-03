@@ -5,6 +5,7 @@
 const Flags = require('./worldFlags');
 const Memory = require('./crossGameMemory');
 const Pantheon = require('../assets/pantheonCharacters');
+const EconomyRules = require('../assets/economyRules');
 const MAX_MEMBERS = 3, MAX_ARCS = 2, STAGES_MIN = 3, STAGES_MAX = 5;
 const REVISIT_GAP_MS = 60000;
 function hash(s) { let h = 2166136261; for (const ch of String(s)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
@@ -20,11 +21,11 @@ function patrons(runId, geoKey) {
 }
 function promptBlock({ runId, geoKey, nearbyRooms = [] }) {
   if (!enabled()) return '';
-  const gods = patrons(runId, geoKey).map(n => { const c = Pantheon.canon(n); return `${n} (${c?.obligation?.[0] || c?.domain || ''})`; });
+  const gods = require('./settingLayer').isCotGPlay() ? patrons(runId, geoKey).map(n => { const c = Pantheon.canon(n); return `${n} (${c?.obligation?.[0] || c?.domain || ''})`; }) : [];
   const avoidPremises = Memory.avoid(runId, 'premises', 30);
   return `RECURRING ROOM CAST (new for this game): choose 1-${MAX_MEMBERS} non-hostile residents as recurring people. They live or work in THIS room and will be met again on every return visit, so give each 2-3 distinct interests (trade, faith, family, scholarship, craft, rivalry, debt, art, food, ritual...), different from each other.
 Also write 1-${MAX_ARCS} arcs: small multi-visit quests owned by a recurring person (giver = exact name). Each arc has ${STAGES_MIN}-${STAGES_MAX} short stage lines in order (meeting, request, complication, return, resolution) and a destinationHint naming ONE nearby room from: ${nearbyRooms.slice(0, 8).map(r => r.name).join('; ') || 'any neighbouring room'}.
-${localBlock()}Their faiths and worries draw on these deities: ${gods.join('; ')}.
+${localBlock()}${gods.length ? 'Their faiths and worries draw on these deities: '+gods.join('; ')+'.' : 'Their customs, institutions and beliefs must come from this campaign, not another setting.'}
 Do not reuse these quest premises: ${avoidPremises.join(' | ') || 'none'}.`;
 }
 // QUEST_LOCAL: arcs begin inside the giver's own room; QUEST_REVEALS: the giver marks what they would plausibly know on the level map.
@@ -45,8 +46,8 @@ function extraFields(Contracts) {
     ...(Flags.on('QUEST_REVEALS') ? { reveals: { type: Contracts.list({ kind: Contracts.choice(REVEAL_KINDS), label: Contracts.nonblankText(80), why: Contracts.nonblankText(140) }), minItems: 1, maxItems: 3 } } : {}) };
 }
 // One small, separate request on first entry (cheap model, bounded tokens). Failure is non-fatal: the room simply has no cast.
-async function generate($, { runId, geoKey, roomName, population, nearbyRooms = [] }) {
-  if (!enabled() || !population?.actors || typeof $?.assistant?.generation !== 'function') return null;
+async function generate($, { runId, geoKey, roomName, room, population, nearbyRooms = [] }) {
+  if (EconomyRules.isStarterRoom(geoKey,room) || !enabled() || !population?.actors || typeof $?.assistant?.generation !== 'function') return null;
   const Contracts = require('./generationContracts');
   const residents = Object.values(population.actors).filter(a => a.allegiance !== 'Hostile' && a.status !== 'gone').slice(0, 8);
   if (!residents.length) return null;
@@ -89,11 +90,17 @@ Return JSON only: {"members":[{"name":"exact resident name","interests":["...","
 }
 // Runs in its own short conversation so it never adds turns to the main Grave Master story.
 async function generateIsolated(state, args) {
+  const room = args.room || JSON.parse(state.getRoomNameDatabase?.() || '{}')[args.geoKey];
+  if (EconomyRules.isStarterRoom(args.geoKey,room)) return null;
   if (!enabled() || process.env.NODE_TEST_CONTEXT && process.env.HOLODEK_LEVEL_CAST !== '1') return null;
   const runtime = require('./graveMasterProtocol').runtimeFor(state);
   return runtime.run(runtime.retort(async $ => { $.model = 'gpt-4.1-mini'; $.temperature = .9;
-    await $.system`You plan recurring local characters for Children of the Grave, an underworld adventure in Tartarus. Answer through the requested JSON function only.`;
-    return generate($, args); }));
+    if (require('./settingLayer').isCotGPlay()) await $.system`You plan recurring local characters for Children of the Grave, an underworld adventure in Tartarus. Answer through the requested JSON function only.`;
+    else {
+      await $.system`Plan recurring local characters and their personal arcs for the current campaign. Answer through the requested JSON function only.`;
+      require('./homebrewStoryPrompts').appendOriginal($);
+    }
+    return generate($, {...args,room}); }));
 }
 // Bound and validate the model's choices; a bad arc is dropped rather than failing the room.
 function accept(parsed, residents, { runId } = {}) {
@@ -153,7 +160,7 @@ function nearbyRooms(db, geoKey) {
 // Install on first entry: tag actors, write room-local history, turn each arc into a minor mission.
 function install(db, geoKey, population, runId) {
   const cast = population?.roomCast, room = db[geoKey];
-  if (!cast || !room) return null;
+  if (!cast || !room || EconomyRules.isStarterRoom(geoKey,room)) return null;
   for (const m of cast.members) { const a = population.actors[m.name]; if (a) { a.recurring = true; a.castInterests = m.interests; } }
   room.localHistory = { version: Flags.VERSION, runId, entries: [{ at: Date.now(), text: `First visit: met ${cast.members.map(m => m.name).join(', ')}.` }] };
   room.minorMissions ||= {};
@@ -192,7 +199,7 @@ function install(db, geoKey, population, runId) {
 // Revisit: advance each arc a stage (or to resolution when its mission is done) and remember the visit locally.
 function revisit(db, geoKey, population, now = Date.now()) {
   const cast = population?.roomCast, room = db?.[geoKey];
-  if (!cast || cast.version !== Flags.VERSION || !room) return false;
+  if (!cast || cast.version !== Flags.VERSION || !room || EconomyRules.isStarterRoom(geoKey,room)) return false;
   if (cast.lastSeen && now - cast.lastSeen < REVISIT_GAP_MS) { cast.lastSeen = now; return false; }
   const first = !cast.lastSeen; cast.lastSeen = now;
   if (first) return false;
@@ -224,6 +231,7 @@ function syncObjective(mission) {
 function findMission(db, missionId) { for (const [key, room] of Object.entries(db || {})) if (room?.minorMissions?.[missionId]) return { key, room, mission: room.minorMissions[missionId] }; return null; }
 // The hero reached the local spot on foot: advance one local stage. Later stages still need travel.
 function reachObjective(db, geoKey, missionId) {
+  if (EconomyRules.isStarterRoom(geoKey,db[geoKey])) return null;
   const hit = findMission(db, missionId), m = hit?.mission;
   if (!Flags.on('QUEST_LOCAL') || !m?.arc || m.status === 'completed' || m.arc.giverRoomKey !== geoKey || m.arc.stage >= m.arc.localStages) return null;
   m.arc.stage++; const objective = syncObjective(m);

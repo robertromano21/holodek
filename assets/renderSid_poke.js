@@ -789,13 +789,13 @@ console.log(`Wrote ${sidAsmOut}`);
 // ---------- Assemble + wrap ----------
 function haveCmd(cmd) {
   const probe = process.platform === 'win32'
-    ? spawnSync('where.exe', [cmd], { stdio: 'ignore' })
-    : spawnSync('sh', ['-lc', `command -v "${cmd}" >/dev/null 2>&1`], { stdio: 'ignore' });
+    ? spawnSync('where.exe', [cmd], { stdio: 'ignore', windowsHide: true })
+    : spawnSync('sh', ['-lc', `command -v "${cmd}" >/dev/null 2>&1`], { stdio: 'ignore', windowsHide: true });
   return probe.status === 0;
 }
 let prg;
 if (haveCmd('xa')) {
-  const a1 = spawnSync('xa', ['-v', sidAsmOut, '-o', sidPrgOut], {stdio:'inherit'});
+  const a1 = spawnSync('xa', ['-v', sidAsmOut, '-o', sidPrgOut], {stdio:'inherit',windowsHide:true});
   if (a1.status !== 0) throw Error('xa failed on SID-core; .sid not produced.');
   prg = fs.readFileSync(sidPrgOut);
 } else {

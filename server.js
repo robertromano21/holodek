@@ -1161,7 +1161,12 @@ app.get('/poll-task2/:taskId', (req, res) => {
 });
 
 app.post('/updateState7', async (req, res) => {
-    if (inputTaskInFlight || (typeof actionDice !== 'undefined' && actionDice.active)) return res.status(409).json({ error: 'Cannot replace state during an action.' });
+    if (inputTaskInFlight || (typeof actionDice !== 'undefined' && actionDice.active)) {
+      const activeDice = !!(typeof actionDice !== 'undefined' && actionDice.active);
+      const code = activeDice ? 'STATE_SYNC_ACTION_ACTIVE' : 'STATE_SYNC_BUSY';
+      console.warn('[StateSyncRejected]', JSON.stringify({ status: 409, reason: code, retryable: !activeDice }));
+      return res.status(409).json({ error: 'Cannot replace state during an action.', code, retryable: !activeDice });
+    }
     const { personalNarrative, updatedGameConsole, roomNameDatabaseString, combatCharactersString, combatMode, dungeonTestingMode, currentQuest, liveWorldState } = req.body; // New: currentQuest
     let roomSync;
     try {

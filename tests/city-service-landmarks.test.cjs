@@ -12,7 +12,7 @@ test('venue notices distinguish actual trading, healing and lodging from work in
   assert.equal(E.serviceNotice({name:'An unverified shop',type:'unknown'}),null);
 });
 test('service buildings become stable discoverable landmarks at saved entrances without generating prose',()=>{
-  const b=building('library-1','library'),d={geoKey:'0,0,0',cityBlocks:{buildings:[b,building('house','home'),building('park','park')]}};
+  const b=building('library-1','library'),d={geoKey:'1,0,0',cityBlocks:{buildings:[b,building('house','home'),building('park','park')]}};
   const markers=Catalog.catalog(d);assert.equal(markers.length,1);
   assert.equal(markers[0].id,'city-service:library-1');assert.equal(markers[0].x,26.5);assert.equal(markers[0].y,20.5);
   assert.equal(markers[0].label,'Authored library-1 - Work Inquiries Inside');assert.equal(markers[0].glyph,'W');
@@ -21,7 +21,7 @@ test('service buildings become stable discoverable landmarks at saved entrances 
   assert.equal(b.serviceNotice,undefined,'Discovery must not mutate saved architecture');
 });
 test('service landmarks do not consume existing landmark slots or appear on a different building floor',()=>{
-  const d={geoKey:'0,0,0',sceneLandmarks:Array.from({length:60},(_,i)=>({type:'arch',name:'Authored arch '+i,x:i,y:3})),
+  const d={geoKey:'1,0,0',sceneLandmarks:Array.from({length:60},(_,i)=>({type:'arch',name:'Authored arch '+i,x:i,y:3})),
     cityBlocks:{buildings:Array.from({length:80},(_,i)=>building('venue'+i,'shop'))}};
   const markers=Catalog.catalog(d);assert.equal(markers.filter(m=>m.kind==='arch').length,48);
   assert.equal(markers.filter(m=>m.notice).length,80);

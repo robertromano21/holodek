@@ -12,13 +12,43 @@
   function resetPacing(travel) {
     travel.distance = 0; travel.movingMs = 0; travel.walkedDistance = 0; travel.excursion = 0; delete travel.cycleOrigin;
   }
+  function city(d) {
+    return !d?.cityFloorContext && !!(Array.isArray(d?.cityBlocks) ? d.cityBlocks.length : d?.cityBlocks?.buildings);
+  }
+  function publicPoint(d, p) {
+    if (!point(p) || !I.pointWalkable(d, p.x, p.y)) return false;
+    const parcel = d.cells[`${Math.floor(p.x)},${Math.floor(p.y)}`]?.cityParcel;
+    return !city(d) || !parcel || (d.cityBlocks.parks || []).some(park => park.id === parcel);
+  }
   function eligible(d) {
+    if (city(d)) return d.geoKey !== '0,0,0' && Math.min(d.layout?.width || 0, d.layout?.height || 0) >= 64;
     return d?.classification?.indoor === false && d.geoKey !== '0,0,0' &&
       Math.max(d.layout?.width || 0, d.layout?.height || 0) >= 192 && (d.layout?.width || 0) * (d.layout?.height || 0) >= 32768;
   }
   function itemNames(consoleText) {
     const line = String(consoleText || '').match(/^Objects in Room:[ \t]*([^\r\n]*)/m)?.[1];
     return line === undefined ? null : new Set(/^(?:none|empty|nothing)\.?$/i.test(line.trim()) ? [] : line.split(',').map(norm).filter(Boolean));
+  }
+  function known(group, records) {
+    return group.status !== 'unseen' || group.introPlayed || records.length !== group.members.length || records.some(a =>
+      a.status !== 'present' || a.encounteredAt > 0 || a.lastSpokeAt > 0 || a.pursuit?.lastSeenAt > 0 || (a.hp ?? 1) <= 0);
+  }
+  function siteBound(d, p, group, records, protect) {
+    // A quest can name an ordinary patrol without binding it to an arbitrary tile in this room.
+    const roaming = group.setEncounter && records.length === group.members.length &&
+      records.every(a => ['wander', 'patrol', 'forage'].includes(a.routine));
+    return !city(d) && p.settlement?.hub && !roaming || group.fixed || group.questBound || records.some(a =>
+      a.fixed || a.questBound || a.deityId || a.regionalStoryId || a.deliverySuccessorId ||
+      protect.has(norm(a.name)) && !roaming || a.name === p.questIntroduction?.speaker || a.serviceRole || a.unitId ||
+      p.serviceProviders?.includes(a.name) || a.homeSite && a.homeSite !== 'commons' || a.occupation?.mode === 'work' ||
+      city(d) && ['work', 'rest', 'guard'].includes(a.routine)) ||
+      records.every(a => ['guard', 'work', 'rest'].includes(a.routine)) && (d.sceneLandmarks || []).some(lm =>
+        /ruin|tower|altar|shrine|gate|fort|keep|tomb|cave|camp/i.test(lm.type || '') && point(group.site) && distance(lm, group.site) < 14);
+  }
+  function defer(p, group, records) {
+    group.discoveryState = 'pending'; group.site = null;
+    for (const record of records) { record.discoveryState = 'pending'; record.position = null; record.home = null; }
+    if (p.travelDiscovery.active?.groupId === group.id) { delete p.travelDiscovery.active; resetPacing(p.travelDiscovery); }
   }
   function setup(d, p, { protectedNames = [], fresh = false, player = d?.start, bossRoom = false } = {}) {
     if (!eligible(d) || !p || p.starting || bossRoom) return false;
@@ -37,24 +67,24 @@
       travel.nextAllegiance = latest && p.actors[latest.members[0]]?.allegiance !== 'Hostile' ? 'Hostile' : 'Neutral';
       changed = true;
     }
-    const landmarks = (d.sceneLandmarks || []).filter(a => /ruin|tower|altar|shrine|gate|fort|keep|tomb|cave/i.test(a.type || ''));
     for (const group of p.groups || []) {
       const records = group.members.map(name => p.actors[name]).filter(Boolean);
-      const bound = p.settlement?.hub || records.some(a => protect.has(norm(a.name)) || a.name === p.questIntroduction?.speaker);
-      const anchored = records.every(a => ['guard', 'work', 'rest'].includes(a.routine)) &&
-        landmarks.some(lm => point(group.site) && distance(lm, group.site) < 14);
-      if (bound || anchored || group.status !== 'unseen' || group.introPlayed) {
+      if (siteBound(d, p, group, records, protect) || known(group, records)) {
         if (group.discoveryState === 'pending') { group.discoveryState = 'fixed'; changed = true; }
       } else if (!group.discoveryState) {
-        const observed = point(player) && records.some(a => point(a.position) && distance(player, a.position) <= 24);
+        const observed = point(player) && records.some(a => point(a.position) && distance(player, a.position) <= 24 &&
+          I.lineClear(d, player, { x: a.position.x + .5, y: a.position.y + .5 }));
         group.discoveryState = observed ? 'fixed' : 'pending'; changed = true;
+      } else if (group.discoveryState === 'fixed' && point(player) && records.every(a =>
+          !point(a.position) || distance(player, a.position) >= ABANDON_RANGE)) {
+        defer(p, group, records); changed = true;
       }
       for (const record of records) record.discoveryState = group.discoveryState || 'fixed';
     }
     for (const item of (d.sceneObjects || []).slice(0, 64)) {
       const key = norm(item.name);
       if (!key) continue;
-      const anchored = protect.has(key) || /key|artifact/i.test(item.type || '') || item.fixed || item.questBound;
+      const anchored = city(d) || protect.has(key) || /key|artifact/i.test(item.type || '') || item.fixed || item.questBound;
       if (travel.objects[key]) {
         if (anchored && travel.objects[key].status === 'pending') { travel.objects[key].status = 'fixed'; changed = true; }
         continue;
@@ -71,8 +101,12 @@
     const previous = travel.sample;
     travel.sample = { x: player.x, y: player.y, at: now };
     if (!previous || now <= previous.at || now - previous.at > 6500) return false;
+    if (city(d) && (!publicPoint(d, player) || !publicPoint(d, previous) || !I.lineClear(d, previous, player))) return false;
     const delta = distance(previous, player);
     if (delta < 0.3 || delta > 48) return false;
+    if (city(d)) for (let n=1,steps=Math.ceil(delta);n<steps;n++) {
+      if (!publicPoint(d,{x:previous.x+(player.x-previous.x)*n/steps,y:previous.y+(player.y-previous.y)*n/steps})) return false;
+    }
     travel.heading = Math.atan2(player.y - previous.y, player.x - previous.x);
     travel.movingMs += Math.min(3500, now - previous.at);
     travel.cycleOrigin ||= { x: previous.x, y: previous.y };
@@ -99,7 +133,7 @@
     for (let n = 0; n < queue.length && n < MAX_SEARCH; n++) {
       const p = queue[n], cell = d.cells[`${p.x},${p.y}`], range = Math.hypot(p.x + .5 - player.x, p.y + .5 - player.y);
       const key = `${p.x},${p.y}`;
-      if (range >= SPAWN_MIN && range <= SPAWN_MAX && cell?.tile === 'floor' && !cell.object && !cell.exitMarker && !cell.complexExit &&
+      if (range >= SPAWN_MIN && range <= SPAWN_MAX && publicPoint(d, {x:p.x+.5,y:p.y+.5}) && cell?.tile === 'floor' && !cell.object && !cell.exitMarker && !cell.complexExit &&
           !cell.feature && !cell.door && !occupied.has(key)) {
         const alignment = Math.cos(Math.atan2(p.y + .5 - player.y, p.x + .5 - player.x) - heading);
         if (alignment > .65 && I.lineClear(d, player, { x: p.x + .5, y: p.y + .5 }))
@@ -108,7 +142,7 @@
       for (const [dx, dy] of [[1, 0], [0, 1], [-1, 0], [0, -1]]) {
         const next = { x: p.x + dx, y: p.y + dy }, key = `${next.x},${next.y}`;
         if (seen.has(key) || seen.size >= MAX_SEARCH || Math.hypot(next.x + .5 - player.x, next.y + .5 - player.y) > SPAWN_MAX + 2 ||
-            !I.canTraverse(d, p, next)) continue;
+            !I.canTraverse(d, p, next) || city(d) && !publicPoint(d, {x:next.x+.5,y:next.y+.5})) continue;
         seen.add(key); queue.push(next);
       }
     }
@@ -118,7 +152,7 @@
     const spaces = [], queue = [candidate], seen = new Set([`${candidate.x},${candidate.y}`]);
     for (let index = 0; index < queue.length && spaces.length < count && index < 64; index++) {
       const from = queue[index], key = `${from.x},${from.y}`, cell = d.cells[key];
-      if (occupied.has(key) || cell?.tile !== 'floor' || cell.feature || cell.object || cell.door || cell.exitMarker || cell.complexExit ||
+      if (occupied.has(key) || !publicPoint(d, {x:from.x+.5,y:from.y+.5}) || cell?.tile !== 'floor' || cell.feature || cell.object || cell.door || cell.exitMarker || cell.complexExit ||
           player && !I.lineClear(d, player, { x: from.x + .5, y: from.y + .5 })) continue;
       spaces.push({ x: from.x, y: from.y });
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
@@ -135,6 +169,7 @@
     const wanted = itemNames(consoleText), protectedSet = new Set(protectedNames.map(norm));
     let changed = false;
     const finish = (waitReason, discoveries = []) => ({ changed, discoveries, waitReason });
+    if (city(d) && !publicPoint(d, player)) { travel.sample = {...player,at:now}; return finish('inside-building'); }
     for (const [key, item] of Object.entries(travel.objects)) if (wanted && !wanted.has(key) && item.status !== 'exhausted') {
       item.status = 'exhausted'; changed = true;
     }
@@ -144,13 +179,10 @@
     if (!sample(travel, d, player, now)) return finish('not-moving');
     // A missed opportunity is not an exhausted encounter. Reuse only wholly unseen, unbound groups offscreen.
     for (const group of p.groups) {
-      const records = group.members.map(name => p.actors[name]);
-      if (group.discoveryState !== 'placed' || group.status !== 'unseen' || group.introPlayed ||
-          records.some(a => !a || a.status !== 'present' || a.encounteredAt > 0 || protectedSet.has(norm(a.name)) ||
-            a.name === p.questIntroduction?.speaker || !point(a.position) || distance(player, a.position) < ABANDON_RANGE)) continue;
-      group.discoveryState = 'pending'; group.site = null;
-      for (const record of records) { record.discoveryState = 'pending'; record.position = null; record.home = null; }
-      if (travel.active?.groupId === group.id) { delete travel.active; resetPacing(travel); }
+      const records = group.members.map(name => p.actors[name]).filter(Boolean);
+      if (!['placed', 'fixed'].includes(group.discoveryState) || known(group, records) || siteBound(d, p, group, records, protectedSet) ||
+          records.some(a => point(a.position) && distance(player, a.position) < ABANDON_RANGE)) continue;
+      defer(p, group, records);
       changed = true;
     }
     // Discovery opportunities cannot overlap a nearby hostile encounter or an unresolved arrival.
@@ -162,15 +194,17 @@
     if (travel.active) { delete travel.active; resetPacing(travel); changed = true; return finish('left-opportunity'); }
     if (travel.movingMs < MIN_MOVING_MS || (travel.distance < travel.nextDistance &&
         !(travel.movingMs >= QUIET_MOVING_MS && travel.walkedDistance >= 24 && travel.excursion >= 8))) return finish('insufficient-travel');
-    const groups = p.groups.filter(g => g.discoveryState === 'pending' && g.status === 'unseen' && !g.introPlayed &&
-      g.members.length <= 6 && g.members.every(name => p.actors[name]?.status === 'present' &&
-        (p.actors[name].hp ?? 1) > 0 && !protectedSet.has(norm(name))));
+    const groups = p.groups.filter(g => {
+      const records = g.members.map(name => p.actors[name]).filter(Boolean);
+      return g.discoveryState === 'pending' && g.members.length <= 6 && !known(g, records) && !siteBound(d, p, g, records, protectedSet);
+    });
     const objects = Object.entries(travel.objects).filter(([key, item]) => item.status === 'pending' &&
       wanted?.has(key) && !protectedSet.has(key));
     const kinds = travel.nextKind === 'people' ? ['people', 'object'] : ['object', 'people'];
     const kind = kinds.find(value => value === 'people' ? groups.length : objects.length);
     if (!kind) return finish('no-pending-content');
     const occupied = new Set(roster.filter(a => Number.isFinite(a.mazeX) && Number.isFinite(a.mazeY)).map(a => `${a.mazeX},${a.mazeY}`));
+    if(city(d))for(const a of Object.values(d.cityCrowd?.actors || {}))if(a.status==='ambient'&&point(a.position))occupied.add(`${a.position.x},${a.position.y}`);
     for (const item of d.sceneObjects || []) if (point(item)) occupied.add(`${item.x},${item.y}`);
     const pool = candidates(d, player, travel.heading || 0, occupied);
     let site, group, spaces, objectKey;
@@ -202,7 +236,7 @@
     travel.nextKind = kind === 'people' ? 'object' : 'people'; travel.nextDistance = nextDistance(id);
     resetPacing(travel); changed = true;
     return finish('placed', [{ id, kind, groupId: group?.id, x: site.x, y: site.y,
-      text: `${kind === 'people' ? 'Figures are moving through the wastes' : 'Something glints on the ground'} ahead (${bearing}).` }]);
+      text: `${kind === 'people' ? city(d) ? 'Figures are moving along the street' : 'Figures are moving through the wastes' : 'Something glints on the ground'} ahead (${bearing}).` }]);
   }
   function release(p, groupId) {
     if (p?.travelDiscovery?.active?.groupId === groupId) {
@@ -218,5 +252,5 @@
       return [placement?.status === 'placed' ? { ...item, x: placement.x, y: placement.y } : item];
     });
   }
-  return { eligible, setup, tick, release, objects, candidates, groupSpaces, MAX_SEARCH, QUIET_MOVING_MS, SPAWN_MIN, SPAWN_MAX };
+  return { eligible, city, publicPoint, sample, resetPacing, setup, tick, release, objects, candidates, groupSpaces, MAX_SEARCH, QUIET_MOVING_MS, SPAWN_MIN, SPAWN_MAX };
 });

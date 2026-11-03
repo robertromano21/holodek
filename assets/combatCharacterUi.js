@@ -42,7 +42,27 @@
     const name=link.getAttribute('data-pc')||link.getAttribute('data-npc')||link.getAttribute('data-monster');
     return name ? open({name}) : false;
   }
-  function open(selected){
+  function addRecruitAction(popup,name,{close=()=>{},blocked=()=>false}={}){
+    const eligible=actor=>actor?.type==='monster'&&(actor.hp??1)>0&&actor.recruitable!==false&&
+      !['Dead','Dying','Unconscious'].includes(actor.state)&&(root.PantheonCharacters?.canRecruit(actor)??true);
+    const actor=(root.combatCharacters||[]).find(a=>a.name===name);
+    if(!popup||!eligible(actor)||popup.querySelector?.('[data-recruit-action]'))return null;
+    const runId=root.dungeonRunId,geoKey=root.currentDungeon?.geoKey,floorToken=root.CityFloorScope?.token();
+    const button=document.createElement('button');button.type='button';button.className='popup-button';
+    button.textContent='Add to Party';button.setAttribute('data-recruit-action',name);
+    button.addEventListener('click',()=>{
+      const current=(root.combatCharacters||[]).find(a=>a.name===name),input=document.getElementById('chatuserinput');
+      if(popup.isConnected===false||runId!==root.dungeonRunId||geoKey!==root.currentDungeon?.geoKey||floorToken!==root.CityFloorScope?.token()||
+        !eligible(current)||current.discoveryState==='pending'||root.isDungeonActorPresent&&!root.isDungeonActorPresent(current)||
+        !input||input.value.trim()||typeof root.chatbotprocessinput!=='function'||blocked()||root.GameCommandGate?.busy?.()||
+        root._characterStartupPending||root._combatCommandPending||root.actionDiceState?.active||root.gamePaused||
+        root._combatRoundActiveUntil>Date.now()||root._gameOver||root._playerUnconscious||root._deathSceneActive)return;
+      // Use the normal command path so party limits and quest obligations stay authoritative.
+      close();input.value='add '+name+' to party';root.chatbotprocessinput();
+    });
+    popup.appendChild(button);return button;
+  }
+  function open(selected,{services=true}={}){
     if(selected.ambient)return root.CityCrowdUi?.open(selected)||false;
     const actor=(root.combatCharacters||[]).find(a=>a.name===selected.name);
     if(!actor||actor.discoveryState==='pending'||root.isDungeonActorPresent&&!root.isDungeonActorPresent(actor))return false;
@@ -58,7 +78,7 @@
       positionActions(popup);return true;
     }
     const allegiance=root.DungeonLife?.actorAllegiance?.(actor)||actor.allegiance||actor.state;
-    if(actor.type==='monster'&&(actor.hp??1)>0&&!['Hostile','Dead','Dying','Unconscious'].includes(allegiance)&&root.CommerceUi?.invite?.(actor.name))return true;
+    if(services&&actor.type==='monster'&&(actor.hp??1)>0&&!['Hostile','Dead','Dying','Unconscious'].includes(allegiance)&&root.CommerceUi?.invite?.(actor.name))return true;
     if(typeof root.openCombatCharacterSheet!=='function')return false;
     const type=actor.type;
     document.querySelectorAll('.popup-container').forEach(p=>p.remove());
@@ -91,7 +111,7 @@
     if(!combatActions) {
       if(actor.type==='npc') { button('Remove','remove '+actor.name+' from party'); button('Attack','attack '+actor.name); }
       else{
-        if (actor.recruitable !== false && (root.PantheonCharacters?.canRecruit(actor) ?? true)) button('Add to Party','add '+actor.name+' to party');
+        addRecruitAction(popup,actor.name,{close});
         button('Attack','attack '+actor.name);
         const give=document.createElement('button');give.className='popup-button';give.textContent='Give Item';
         give.addEventListener('click',()=>root.ItemGiveUi?.open(actor.name));popup.appendChild(give);
@@ -115,5 +135,5 @@
     Object.assign(popup.style,{left:left/zoom+'px',top:top/zoom+'px',width:width/zoom+'px',maxHeight:(root.innerHeight-top-12)/zoom+'px'});
   }
   root.addEventListener?.('resize',()=>document.querySelectorAll('.combat-target-actions, .combat-spell-targets').forEach(positionActions));
-  return{pick,pickScene,open,openConsoleTarget,confirmAttackCommand,positionActions};
+  return{pick,pickScene,open,openConsoleTarget,addRecruitAction,confirmAttackCommand,positionActions};
 });

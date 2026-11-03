@@ -13,6 +13,7 @@ function install(dungeon) {
   const origin = { x: Math.floor(dungeon.start.x), y: Math.floor(dungeon.start.y) };
   let connected = reachable(makeNavigation(dungeon), origin);
   const occupied = new Set((dungeon.sceneObjects || []).map(o => `${Math.floor(o.x)},${Math.floor(o.y)}`));
+  for(const art of dungeon.surfaceArt||[])if(art.surface==='floor')for(const key of art.keys||[art.key])occupied.add(key);
   const protectedCell = (k, c) => !c || occupied.has(k) || c.feature || c.exit || c.complexExit || c.door || c.navigationReserved ||
     c.puzzleFixture || c.interactable || c.blocked || c.obstacle || c.trail || c.exteriorRole || c.vegetationRole || c.secretChamber;
   const walls = [], floors = [];

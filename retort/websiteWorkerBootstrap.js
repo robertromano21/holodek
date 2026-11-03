@@ -60,7 +60,7 @@ function bootstrap() {
         const target = path.join(directory, 'active-engine.json');
         fs.writeFileSync(target + '.tmp', JSON.stringify({ hash: packet.engineHash }), { mode: 0o600 }); fs.renameSync(target + '.tmp', target);
       }
-      const result = require('node:child_process').spawnSync(process.execPath, [main, '--start'], { encoding: 'utf8', timeout: 90000 });
+      const result = require('node:child_process').spawnSync(process.execPath, [main, '--start'], { encoding: 'utf8', timeout: 90000, windowsHide: true });
       process.stdout.write(result.stdout || JSON.stringify({ error: 'Worker pool setup failed.' })); process.exitCode = result.status || 0;
     } catch (error) { process.stdout.write(JSON.stringify({ error: error.message })); process.exitCode = 1; }
   });

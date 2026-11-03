@@ -141,7 +141,9 @@
     hit: [0.8, 70, true], crit: [0.9, 100, true], miss: [0.7, 70, true], hurt: [0.8, 120, true],
     monster_death: [0.85, 250, true], death: [0.9, 2000, true], levelup: [0.85, 2000, true], combat_start: [0.85, 3000, true],
     door: [0.8, 600, true], pickup: [0.75, 200, true], coins: [0.75, 200, true], spell: [0.8, 300, true],
-    fireball: [0.85, 300, true], heal: [0.8, 400, true], quest: [0.8, 1500, true], room_enter: [0.6, 1200, false] };
+    fireball: [0.85, 300, true], heal: [0.8, 400, true], quest: [0.8, 1500, true], room_enter: [0.6, 1200, false],
+    secret_door: [0.9, 1500, true], secret_reveal: [0.6, 800, false], equip: [0.75, 150, false], unequip: [0.7, 150, false], drop: [0.75, 150, false],
+    puzzle_click: [0.7, 90, false], puzzle_reset: [0.7, 400, false], puzzle_solve: [0.9, 2000, true], quest_accept: [0.8, 1500, true], quest_fanfare: [0.9, 2500, true], potion: [0.7, 400, false] };
   async function play(name, opts = {}) {
     if (settings.muted || settings.sfx <= 0) return;
     const spec = SPEC[name] || [0.7, 100, true], now = performance.now();
@@ -885,7 +887,10 @@
   function noticeSound(n) {
     const words = `${n.activity || ''} ${n.title || ''} ${n.message || ''}`;
     if (n.kind === 'defeat') return play('monster_death');
-    if (n.kind === 'puzzle-complete') return play('quest');
+    if (n.kind === 'puzzle-complete') return play('quest', { delay: 1.6 }); // after the mechanism's own solve cue
+    if (n.kind === 'quest-seeded') return play('quest_accept');
+    if (n.kind === 'quest-complete') return play('quest_fanfare');
+    if (n.kind === 'door' && /concealed passage/i.test(n.title || '')) return play('puzzle_reset', { vol: 0.6 });
     if (n.kind === 'item-taken') return play(/gold|coin|gem|jewel/i.test(words) ? 'coins' : 'pickup');
     if (n.kind === 'object-discovered') return play('quest', { vol: 0.6 });
     if (n.kind === 'pursuit') return play('combat_start');
@@ -1316,7 +1321,28 @@
   const state = () => ({ pending: pendingSong && pendingSong.url, playingUrl, shownRoom, crossfading, userPaused: !!settings.userPaused, compositionChip: compositionChip(), voiceChip: voiceChip(), clock: sidMode(), active: music() && music().id, ctx: ctx && ctx.state, sfxGain: sfxBus && sfxBus.gain.value, ambGain: ambBus && ambBus.gain.value, ambLayers: ambLayers.length, liveEffects:effectPlayers.size+shortEffectNodes.size,effectCache:effectCache?.stats()||null,
     sid:window.HolodekSidPlayer?.stats?.()||null,
     music: [...musicEls(),...sidPlayers].map(a => ({ id: a.id, volume: +a.volume.toFixed(2), muted: a.muted, paused: a.paused, format:a.dispose?'sid':'media',time:a.currentTime,failed:!!a.failed,error:a.error||null })) });
+  // --- world interaction cues: concealed doors and puzzle mechanisms (called before the dungeon delta is applied) ---
+  function worldDelta(dungeon, data) {
+    if (!dungeon || !data) return;
+    const oldDoors = dungeon.secretDoors?.doors || [];
+    for (const d of data.secretDoors?.doors || []) {
+      const old = oldDoors.find(o => o.id === d.id); if (!old) continue;
+      const at = { name: 'secret:' + d.id, mazeX: d.x, mazeY: d.y };
+      if (d.open && !old.open) play('secret_door', { at });
+      else if (d.discovered && !old.discovered) play('secret_reveal', { at });
+    }
+    const was = dungeon.physicalPuzzle?.state, now = data.physicalPuzzle?.state;
+    if (was && now && now.revision > was.revision) {
+      if (now.status === 'complete' && was.status !== 'complete') play('puzzle_solve');
+      else if ((was.progress || []).length > 0 && (now.progress || []).length <= (was.progress || []).length && (now.progress || []).length < 2) play('puzzle_reset');
+      else play('puzzle_click', { rate: 0.9 + Math.min(0.5, (now.progress || []).length * 0.08) });
+    }
+  }
+  function gear(kind) {
+    const name = { equip: 'equip', unequip: 'unequip', drop: 'drop', 'drop-all': 'drop', drink: 'potion' }[kind];
+    if (name) play(name);
+  }
   window.HolodekSfx = { voiceSpecOf, speakLine, stopSpeech, voicePrefetch, speechLog: () => speechLog.slice(), stereo: stereoInfo, listener, ctxNow: () => ctx && ctx.currentTime, speakVoice, voiceSound, voiceProfile, renderVoiceDemo, voices: () => voiceLog.slice(), play, onServerEvent, setAmbience, keywordAmbience, settings, applyVolumes, state, musicPlay, musicPause, rewind, fastForward, queueRoomMusic, roomShown, songKeyNow, rhythm: () => ({ mode: rhythmMode, clkOff, evLog: evLog.slice(-200) }), ambLayersInfo: () => ambLayers.map(l => ({ tag: l.tag, keyed: l.keyed || null, rate: l.src ? +l.src.playbackRate.value.toFixed(4) : null })) };
-  Object.assign(window.HolodekSfx, { checkpoint, restoreCheckpoint, setVoiceTimbre, voiceTimbre, effectsLog:()=>effectLog.slice() });
+  Object.assign(window.HolodekSfx, { worldDelta, gear, checkpoint, restoreCheckpoint, setVoiceTimbre, voiceTimbre, effectsLog:()=>effectLog.slice() });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 })();

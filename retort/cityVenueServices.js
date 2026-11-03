@@ -3,6 +3,7 @@ const I = require('../assets/dungeonInhabitants');
 const E = require('../assets/cityEstablishments');
 const WORK = new Set(['inn', 'bar', 'foodhall', 'workshop', 'warehouse', 'guild', 'library', 'civic', 'court', 'transit', 'temple', 'clinic', 'theatre', 'bathhouse', 'arena', 'shop']);
 function seed(room, population, geoKey) {
+  if (require('../assets/economyRules').isStarterRoom(geoKey,room)) return;
   const type = room?.cityRoom?.establishmentType;
   if (!WORK.has(type) || room.venueDesk) return;
   const candidates = Object.values(population?.actors || {}).filter(a => a.status === 'present' && a.hp > 0 &&
@@ -22,6 +23,7 @@ function describe(room, actorName) {
 }
 function forActor(room,name){return[room?.venueDesk,...Object.values(room?.venueDesks||{})].find(d=>E.operators(d).includes(name));}
 function bind(room,actor,occupation,key){
+  if(require('../assets/economyRules').isStarterRoom(key,room))return null;
   const type=occupation?.venueType;if(occupation?.mode!=='work'||!occupation.venueId||!WORK.has(type)||!['Friendly','Neutral'].includes(I.allegiance(actor)))return null;
   const existing=forActor(room,actor.name);if(existing)return existing;
   room.venueDesks||={};const id=`venue-desk:${key}:${occupation.venueId}`;

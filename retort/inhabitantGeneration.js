@@ -33,18 +33,21 @@ function needsQuestIntroduction(quest, rooms, geoKey, taskIndex = 0) {
 
 // Regular residents and supplemental encounters share this generation path.
 async function generateInhabitants(...args) { return Policy.scope(() => generateInhabitantsScoped(...args)); }
-async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey, indoor, campaignSetting, rooms = {}, partyNames = [], party = [], usedNames = [], quest = '', questSeed = false, encounter = null }, rules) {
+async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey, indoor, campaignSetting, rooms = {}, partyNames = [], party = [], usedNames = [], quest = '', questSeed = false, encounter = null, roomEncounterPlan = null }, rules) {
   questSeed = questSeed && geoKey !== '0,0,0' && !!String(quest).trim() && !/^none$/i.test(String(quest).trim());
   const starting = !encounter && geoKey === '0,0,0' && !rooms[geoKey]?.cityFloorContext;
-  const venue=rooms[geoKey]?.cityRoom?.venue||campaignSetting?.city?.venue;
-  const market = !encounter && require('./serviceRoles').market(rooms[geoKey], campaignSetting);
+  const venue=starting?null:rooms[geoKey]?.cityRoom?.venue||campaignSetting?.city?.venue;
+  const market = !starting && !encounter && require('./serviceRoles').market(rooms[geoKey], campaignSetting);
   const local = require('./graveMasterStoryPrompts').isHolodek1(), batchSize = local ? 1 : BATCH_SIZE;
   const floorProgram=rooms[geoKey]?.cityRoom?.floorProgram;
   const floorResidents=Number.isInteger(floorProgram?.residents)?Math.max(8,Math.min(24,floorProgram.namedResidents??floorProgram.residents)):8;
   const hostileTemple = !starting && require('./campaignSetting').hostileTemple(campaignSetting, roomName);
   const settled = Balance.settlement(campaignSetting, rooms[geoKey]) && !hostileTemple;
   const routineResidents = indoor && !settled && party.length ? Math.max(floorResidents, Math.min(16, Balance.partySummary(party).size + 4)) : floorResidents;
-  const count = starting ? rules.random(require('./settingLayer').current() ? market ? 3 : 2 : 1, 5) : encounter ? Math.max(1, Math.min(6, encounter.count || 1)) : indoor ? routineResidents : 16;
+  const budget=!starting&&!encounter&&!hostileTemple?roomEncounterPlan:null;
+  const baseCount = starting ? rules.random(require('./settingLayer').current() ? market ? 3 : 2 : 1, 5) : encounter ? Math.max(1, Math.min(6, encounter.count || 1)) : indoor ? routineResidents : 16;
+  const count=baseCount;
+  if(count>24)throw Error('The planned population exceeds the room population limit.');
   const village = !!campaignSetting?.village;
   const civicMajority = !encounter && !hostileTemple && require('./worldFlags').on('CITY_COMPLETE') && campaignSetting?.city?.population?.civilianMajority;
   const homeSites = ['commons', ...(campaignSetting?.village?.directions || [])];
@@ -53,9 +56,9 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
       campaignSetting.faction?.allegiance === 'Hostile' || i === count - 1 ? 'Hostile' : 'Neutral' : i < 6 || i < 10 && i > 6 ? 'Hostile' : 'Neutral',
     encounterId: i === 0 && questSeed ? 'quest-contact' : i < 3 ? 'residents' : i < 6 ? 'guards' : i === 6 ? 'pilgrim' : i < 10 ? 'raiders' : i < 13 ? 'wayfarers' : 'keepers' }));
   const accepted = [], totalCount = count, originalUsedNames = usedNames, introduceQuest = questSeed;
-  if (market && !hostileTemple && (!starting || require('./settingLayer').current())) Object.assign(slots[1], { serviceRole: 'shop', encounterId: 'market-vendor' });
+  if (market && !hostileTemple) Object.assign(slots[1], { serviceRole: 'shop', encounterId: 'market-vendor' });
   if(!encounter&&venue&&!hostileTemple){
-    if(venue.service&&(!starting||require('./settingLayer').current()))Object.assign(slots[1],{serviceRole:venue.service,encounterId:'venue-operator'});
+    if(venue.service)Object.assign(slots[1],{serviceRole:venue.service,encounterId:'venue-operator'});
     for(const slot of slots)if(!(slot.slot===0&&questSeed)){
       slot.venueDuty=venue.roles?.[slot.slot===1?0:slot.slot%venue.roles.length];
       if(floorProgram)slot.unitId=`floor-${floorProgram.floor}:unit-${1+Math.floor(slot.slot/2)%floorProgram.units}`;
@@ -63,8 +66,10 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
       else if(slot.slot<3)slot.encounterId='venue-visitors';
     }
   }
-  Balance.plan(slots, { party, starting, encounter, hostileTemple, settled,
+  if(budget)require('./encounterPolicy').apply(slots,budget);
+  else Balance.plan(slots, { party, starting, encounter, hostileTemple, settled,
     roll: Inhabitants.hash(`${geoKey}:cohort-size`) / 4294967296 });
+  const civilianTotal=slots.filter(slot=>!slot.engineEncounter).length;
   const ecology=require('./settingEcology'),table=ecology.get(rooms),nameProfiles=new Map();
   if(table&&!encounter)for(const slot of slots){
     if(slot.slot===0&&questSeed)continue; // Existing quest contacts retain their authored identity bindings.
@@ -91,14 +96,16 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
     }
     const questSeed = introduceQuest && slots.some(slot => slot.slot === 0);
     const majorityBudgets = [
-      ...(village && !hostileTemple ? [{ label: 'neutral', qualifies: row => row.allegiance === 'Neutral' }] : []),
-      ...(civicMajority ? [{ label: 'non-hostile (Neutral or Friendly)', qualifies: row => ['Neutral', 'Friendly'].includes(row.allegiance) }] : [])
-    ].map(budget => ({ ...budget, minimum: Math.max(0, Math.floor(totalCount / 2) + 1 -
-      accepted.filter(budget.qualifies).length - (totalCount - accepted.length - count)) }));
+      ...(village && !hostileTemple ? [{ label: 'neutral', qualifies: row => !row.engineEncounter&&row.allegiance === 'Neutral' }] : []),
+      ...(civicMajority ? [{ label: 'non-hostile (Neutral or Friendly)', qualifies: row => !row.engineEncounter&&['Neutral', 'Friendly'].includes(row.allegiance) }] : [])
+    ].map(requirement => ({ ...requirement, minimum: Math.max(0, Math.floor(civilianTotal / 2) + 1 -
+      accepted.filter(requirement.qualifies).length - (civilianTotal - accepted.filter(row=>!row.engineEncounter).length - slots.filter(slot=>!slot.engineEncounter).length)) }));
     $.model = 'gpt-4.1-mini';
     $.temperature = 0.85;
     const encounterGuidance = Balance.guidance(slots, accepted);
     if (encounterGuidance) await $.user(encounterGuidance);
+    if(budget)await $.user('SAVED ENCOUNTER DISPOSITIONS: '+JSON.stringify({profile:budget.profile,groups:budget.groups})+
+      '. The engine independently rolls each ordinary encounter: 60% Hostile, 20% Neutral, 20% Friendly. Preserve every supplied cohort allegiance, membership and routine; do not reroll or soften hostile encounters. engineEncounter slots are roaming encounters, not civilian staff or the local government. Service operators, quest contacts and other protected residents remain peaceful. Author distinct setting-native creatures, motives and dialogue; no prefab names or biographies. Civilian-majority requirements exclude engineEncounter slots.');
     if(!local&&slots.some(s=>s.lineage))await $.user`SAVED WORLD POPULATION SAMPLE: ${JSON.stringify(slots.map(s=>({slot:s.slot,lineage:s.lineage,description:s.lineageDescription})))}. For these slots use the sampled lineage as the exact race, but author each individual's own name, personality, history, occupation and current situation. These are setting-authored population proportions, not prefab characters or a fixed plot. Preserve all fixed allegiances and quest contacts.`;
     if(venue&&!encounter)await $.user(local?
       'VENUE FUNCTION: '+JSON.stringify({name:venue.name,type:venue.type,spaces:venue.spaces})+'. slot.venueDuty and serviceRole bind occupations here: shop=exchange operator, temple=healer in this world. Preserve fixed allegiances. No imaginary workers, transactions, crowds as combatants, or new quests.':
@@ -142,6 +149,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     const Variety = require('./inhabitantVariety');
     await $.user`${Variety.prompt(Variety.brief(rooms, geoKey, { includeCurrent: !!encounter }), { starting, encounter: !!encounter })}`;
     }
+    if(encounter?.required)await $.user('ENGINE-SELECTED ENCOUNTER: author every requested slot with the supplied cohort allegiance. This encounter was already rolled by the engine; skip:true is not permitted. Do not reroll its disposition or replace it with peaceful workers.');
     if(local)await $.user`Use each supplied slot.lineage as its exact race, when present. slot.nameSuggestion is optional for NEW random individuals. Vary first names, surnames and sound patterns. Author their own lives and voices. Preserve all fixed quest contacts, cultivated characters and saved names; never rename them.`;
     else{
       if(require('./settingLayer').current())await $.user`${GeneratedNames.instructions}`;
@@ -154,16 +162,17 @@ Each individual needs a UNIQUE short history and personality that suit their rac
       strictAnswer: true,
       retryHint: 'For each resident, dialogue must be an array of exactly 3 separate, nonblank authored remarks: a greeting or threat, a local remark, and a personal remark. Do not return one combined entry, duplicate a remark, pad missing entries, or split one sentence to fake three remarks. There is no dialogue word-count limit. If a name is duplicated or reserved, invent a genuinely different identity, not a one-letter spelling variant of the rejected name.',
       maxTokens: encounter ? 4000 : 8000,
-      parameters: { ...(encounter ? { skip: Boolean } : {}), inhabitants: { type: Contracts.list({ slot: { type: Number, minimum: slots[0].slot, maximum: slots.at(-1).slot, enum: slots.map(s => s.slot), multipleOf: 1 }, name: encounter?.identity?Contracts.choice([encounter.identity.name]):Contracts.nonblankText(70),
+      parameters: { ...(encounter && !encounter.required ? { skip: Boolean } : {}), inhabitants: { type: Contracts.list({ slot: { type: Number, minimum: slots[0].slot, maximum: slots.at(-1).slot, enum: slots.map(s => s.slot), multipleOf: 1 }, name: encounter?.identity?Contracts.choice([encounter.identity.name]):Contracts.nonblankText(70),
         race: encounter ? Contracts.choice(encounter.races) : Contracts.nonblankText(55), class: Contracts.nonblankText(80), combatRole: Contracts.choice(['Warrior', 'Spellcaster']),
         combatArchetype: Contracts.choice(SpellRules.archetypes), spellPreferences: [String],
         job: Contracts.nonblankText(70), activity: Contracts.nonblankText(140), personality: Contracts.nonblankText(220), voice: Contracts.nonblankText(140),
         history: Contracts.nonblankText(), motivation: Contracts.nonblankText(), routine: Contracts.choice(['guard', 'patrol', 'work', 'forage', 'wander', 'rest']),
-        dialogue: { type: [Contracts.nonblankText()], minItems: 3, maxItems: 3 }, allegiance: Contracts.choice(['Friendly', 'Neutral', 'Hostile']),
-        encounterId: Contracts.nonblankText(40), homeSite: Contracts.choice(homeSites) }), minItems: encounter ? 0 : count, maxItems: count } },
+        dialogue: { type: [Contracts.nonblankText()], minItems: 3, maxItems: 3 }, allegiance: Contracts.choice(encounter?.allegiance?[encounter.allegiance]:['Friendly', 'Neutral', 'Hostile']),
+        encounterId: Contracts.nonblankText(40), homeSite: Contracts.choice(homeSites) }), minItems: encounter && !encounter.required ? 0 : count, maxItems: count } },
       validate: parsed => {
         if (encounter && parsed.skip === true) {
           if(encounter.identity)throw Error('Author this existing citizen; do not skip their introduction.');
+          if(encounter.required)throw Error('The engine-selected encounter must be authored; do not skip it.');
           if(accepted.length)throw Error('An accepted encounter must be completed, not partially skipped.');
           if (!Array.isArray(parsed.inhabitants) || parsed.inhabitants.length) throw Error('A skipped encounter must return an empty inhabitants array.');
           return { skipped: true };
@@ -234,19 +243,19 @@ Each individual needs a UNIQUE short history and personality that suit their rac
       }
     }
     descriptors = accepted;
-    if (village && !hostileTemple && descriptors.filter(row => row.allegiance === 'Neutral').length <= count / 2)
+    if (village && !hostileTemple && descriptors.filter(row => !row.engineEncounter&&row.allegiance === 'Neutral').length <= civilianTotal / 2)
       throw Error('A village needs a majority of neutral residents; guards do not make all civilians hostile.');
     if (civicMajority &&
-        descriptors.filter(row => ['Neutral','Friendly'].includes(row.allegiance)).length <= count / 2)
+        descriptors.filter(row => !row.engineEncounter&&['Neutral','Friendly'].includes(row.allegiance)).length <= civilianTotal / 2)
       throw Error('A civic city district needs a majority of non-hostile residents.');
   } catch (error) {
     console.error('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'failed', reason: error.message, response: response.slice(0, 2000) }));
     throw new Error(`Inhabitant generation failed in ${roomName}: ${error.message}`, { cause: error });
   }
-  const normalized = Inhabitants.normalizeDescriptors(descriptors, { limit: starting ? 4 : indoor ? Math.max(10,routineResidents) : 20, starting, excluded: partyNames });
+  const normalized = Inhabitants.normalizeDescriptors(descriptors, { limit: starting ? 4 : budget ? count : indoor ? Math.max(10,routineResidents) : 20, starting, excluded: partyNames });
   const characters = [], equipment = [];
   for (const descriptor of normalized) {
-    const level = rules.level(), hp = Array.from({ length: level }, () => rules.random(1, SpellRules.nativeHp[descriptor.combatArchetype] + 1)).reduce((a,b) => a+b, 0);
+    const level = rules.level(descriptor), hp = Array.from({ length: level }, () => rules.random(1, SpellRules.nativeHp[descriptor.combatArchetype] + 1)).reduce((a,b) => a+b, 0);
     const actor = { Name: descriptor.name, Sex: rules.sex(), Race: descriptor.race, Class: descriptor.className,
       Level: level, AC: 10 + Math.floor(level / 10), XP: rules.xp(level, descriptor.combatArchetype), HP: hp, MaxHP: hp, State: descriptor.allegiance,
       Equipped: { Weapon: null, Armor: null, Shield: null, Other: null },
@@ -262,8 +271,20 @@ Each individual needs a UNIQUE short history and personality that suit their rac
   }
   const sheets = characters.map(actor => `${actor.Name}\n      ${actor.Sex}\n      ${actor.Race}\n      ${actor.Class}\n      Level: ${actor.Level}\n      AC: ${actor.AC}\n      XP: ${actor.XP}\n      HP: ${actor.HP}\n      MaxHP: ${actor.MaxHP}\n      Equipped: ${Object.entries(actor.Equipped).map(([slot,item]) => `${slot}: ${item?.name || 'None'}`).join(', ')}\n      Attack: ${actor.Attack}\n      Damage: ${actor.Damage}\n      Armor: ${actor.Armor}\n      Magic: ${actor.Magic}\n      State: ${actor.State}`).join('\n');
   const population = Inhabitants.createPopulation(geoKey, normalized, { indoor, starting,groupLimit:6,
-    ...(floorProgram || routineResidents > 8 ? {residentLimit:routineResidents} : {}) });
-  if (party.length && !encounter?.identity) population.encounterBalance = { version: 1, settled, partySize: Balance.partySummary(party).size };
+    ...(budget ? {residentLimit:count} : floorProgram || routineResidents > 8 ? {residentLimit:routineResidents} : {}) });
+  if(budget){
+    const groups=budget.groups.map(plan=>{
+      const members=descriptors.filter(row=>row.cohort===plan.cohort).map(row=>row.name);
+      const group=population.groups.find(group=>group.members.includes(members[0]));
+      if(!group||group.members.length!==plan.size||members.length!==plan.size||
+        members.some(name=>!group.members.includes(name)||population.actors[name]?.allegiance!==plan.allegiance))
+        throw Error('The authored population does not match its saved encounter disposition plan.');
+      group.setEncounter=true;return{...plan,id:group.id};
+    });
+    population.encounterBudget={...budget,groups};
+  }
+  if (party.length && !encounter?.identity) population.encounterBalance = { version: 1, settled, partySize: Balance.partySummary(party).size,
+    partyLevel:Balance.partySummary(party).level };
   if(venue&&!encounter)population.venue={version:1,id:venue.id,type:venue.type};
   if(venue&&!encounter)for(const [i,actor]of Object.values(population.actors).entries())actor.occupation={
     ...require('./cityActivities').assignment(venue.type,i,`${geoKey}:${actor.name}`,venue),activity:actor.activity,duty:actor.job,routine:actor.routine};
@@ -274,7 +295,9 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     questId: String(Inhabitants.hash(String(quest).trim())), speaker: normalized[0].name, status: 'pending',
     hook: String(normalized[0].dialogue[0] || '') };
   console.info('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'generated', names: normalized.map(actor => actor.name), starting,
+    ...(budget?{encounterGroups:population.encounterBudget.groups.map(group=>({id:group.id,allegiance:group.allegiance,members:group.size}))}:{}),
     ...(population.encounterBalance ? {partySize:population.encounterBalance.partySize,settled,
+      partyLevel:population.encounterBalance.partyLevel,hostileLevels:characters.filter(actor=>actor.State==='Hostile').map(actor=>actor.Level),
       hostileGroups:population.groups.filter(group=>population.actors[group.members[0]]?.allegiance==='Hostile').map(group=>group.members.length)} : {}) }));
   return { population, sheets, equipment };
 }

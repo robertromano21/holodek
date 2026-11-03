@@ -19,6 +19,7 @@ function route(db,from,to){
   return null;
 }
 function candidate(db,originKey,population,{patron}={}){
+  if(require('../assets/economyRules').isStarterRoom(originKey,db[originKey]))return null;
   const origin=db[originKey];if(!origin?.campaignSetting?.inhabited||origin.deliveryMissionId)return null;
   const giver=Object.values(population?.actors||{}).find(a=>['Neutral','Friendly'].includes(a.allegiance)&&a.status==='present'&&a.hp>0&&!a.deityId&&
     (patron?a.name===patron:!a.serviceId));

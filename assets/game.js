@@ -640,6 +640,7 @@ window.applyLivingEnvironmentDelta = function(data) {
     console.error('[DungeonAction] Geometry revision mismatch; ignoring stale update.', data);
     return;
   }
+  try { window.HolodekSfx?.worldDelta?.(currentDungeon, data); } catch (error) { console.warn('[sfx]', error.message); }
   if (data.physicalPuzzle) window.PhysicalPuzzles?.beginMotion(currentDungeon, currentDungeon.physicalPuzzle, data.physicalPuzzle);
   if (data.secretDoors) window.SecretDoorsUi?.begin(currentDungeon, data.secretDoors);
   Object.assign(currentDungeon.cells, data.cells);
@@ -9419,6 +9420,7 @@ window.applySpellEquipment = text => {
 };
 window.getEconomyResidentInfo = name => {
   const room = roomNameDatabase.get(currentDungeon?.geoKey);
+  if (window.EconomyRules.isStarterRoom(currentDungeon?.geoKey,room || currentDungeon)) return null;
   const introduced=!!room?.inhabitants?.actors?.[name]?.servicesAcceptedAt;
   if (room?.inhabitants?.actors?.[name]?.deityId) return { kind: 'divine', introduced };
   const operators=b=>window.CityEstablishments?.operators(b)||[b?.operator];
@@ -9431,6 +9433,36 @@ window.getEconomyResidentInfo = name => {
     return { kind: service?.kind || 'venue', venue:!!desk, introduced, jobs:inquiries&&hasJobs(room), inquiries };
   }
   return [...roomNameDatabase.values()].some(hasJobs)?{kind:'mission',jobs:true,introduced}:null;
+};
+window.commitLocalPartyChange = async text => {
+  const I = window.DungeonInhabitants;
+  const party = I.parseSheets(text,'NPCs in Party'), residents = I.parseSheets(text);
+  const names = new Set(party.map(a=>a.name.toLowerCase()));
+  const sheets = [...I.parseSheets(text,'PC'),...party,...residents.filter(a=>!names.has(a.name.toLowerCase()))], roster = window.combatCharacters || [];
+  for (const sheet of sheets) {
+    const actor = roster.find(a=>String(a.name||'').toLowerCase()===sheet.name.toLowerCase());
+    if (actor) Object.assign(actor,{type:sheet.type,hp:sheet.hp,state:I.state(sheet)});
+    else roster.push({...sheet,state:I.state(sheet)});
+  }
+  window.combatCharacters = roster;
+  const room = roomNameDatabase.get(currentDungeon?.geoKey), population = room?.inhabitants;
+  if (population) {
+    for (const record of Object.values(population.actors)) if (record.status==='recruited'&&!names.has(record.name.toLowerCase())&&residents.some(a=>a.name===record.name))
+      record.status='present';
+    I.sync(population,residents,party);
+  }
+  window.lastServerGameConsole = text;
+  window.latestUpdatedData = I.consoleView(text,window.latestUpdatedData);
+  window._partyInfoPCString = window.latestUpdatedData.pc;
+  window._partyInfoNPCString = window.latestUpdatedData.npcs;
+  window._combatMonsterSheets = window.latestUpdatedData.monsters;
+  window._partyChangeSyncPending = true;
+  try {
+    await syncGameStateBeforeCommand({updatedGameConsole:text,roomNameDatabaseString:JSON.stringify(Object.fromEntries(roomNameDatabase)),
+      combatCharactersString:JSON.stringify(roster)});
+    window._partyChangeSyncPending = false;
+  } finally { window.GameCommandGate?.end(); }
+  window.renderPartyIconDock?.();
 };
 window.prepareEconomyState = async () => {
   const conversationId = localStorage.getItem('conversationId');
@@ -10211,6 +10243,7 @@ async function syncGameStateBeforeCommand(payload, transport = fetch, resyncAtte
   roomDatabaseSyncClient.acknowledge(payload.roomNameDatabaseString, acknowledgement.roomDatabaseSyncToken);
   if (acknowledgement.economyResult) await window.applyRealtimeCombatResult?.(acknowledgement.economyResult);
   if (acknowledgement.spellResult) await window.applyRealtimeCombatResult?.(acknowledgement.spellResult);
+  if (payload.updatedGameConsole === window.lastServerGameConsole) window._partyChangeSyncPending = false;
   return acknowledgement;
   } catch (error) {
     window.GameCommandGate?.end();
@@ -12663,6 +12696,8 @@ if (userWords.length > 3 && userWords[0] === "add" && userWords[userWords.length
     
     console.log("Game Console:", updatedGameConsole);
     console.log('itemsInRoom:', itemsInRoom);
+    try { await window.commitLocalPartyChange(updatedGameConsole); }
+    catch (error) { updateChatLog('<br>The party changed locally but has not synchronized. Retry before saving.<br>'); console.error('[PartySyncFailed]',error); }
     turns++;
     return;
 }
@@ -12851,6 +12886,8 @@ if (userWords.length > 3 && userWords[0] === "remove" && userWords[userWords.len
     
     console.log("Game Console:", updatedGameConsole);
     console.log('itemsInRoom:', itemsInRoom);
+    try { await window.commitLocalPartyChange(updatedGameConsole); }
+    catch (error) { updateChatLog('<br>The party changed locally but has not synchronized. Retry before saving.<br>'); console.error('[PartySyncFailed]',error); }
     turns++;
     return;
 }

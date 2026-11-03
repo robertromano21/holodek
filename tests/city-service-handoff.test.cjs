@@ -45,7 +45,7 @@ test('the browser recognizes a shared desk attendant and distinguishes inquiries
   const f=fixture(),db=f.db(),room=db['1,0,0'],occupation={mode:'work',venueId:'hall',venueType:'civic'};room.inhabitants=f.p;
   V.bind(room,f.p.actors.Keeper,occupation,'1,0,0');V.bind(room,f.p.actors[f.name],occupation,'1,0,0');
   const source=fs.readFileSync(require.resolve('../assets/game'),'utf8'),start=source.indexOf('window.getEconomyResidentInfo ='),end=source.indexOf('window.prepareEconomyState =',start);
-  const root={CityEstablishments:Bindings};vm.runInNewContext(source.slice(start,end),{window:root,roomNameDatabase:new Map(Object.entries(db)),currentDungeon:{geoKey:'1,0,0'}});
+  const root={CityEstablishments:Bindings,EconomyRules:require('../assets/economyRules')};vm.runInNewContext(source.slice(start,end),{window:root,roomNameDatabase:new Map(Object.entries(db)),currentDungeon:{geoKey:'1,0,0'}});
   const business=root.getEconomyResidentInfo(f.name);assert.equal(business.venue,true);assert.equal(business.inquiries,true);assert.equal(business.jobs,false);
   room.services={shop:{operator:'Keeper',attendants:[f.name],kind:'shop'}};
   assert.equal(root.getEconomyResidentInfo(f.name).kind,'shop');assert.equal(root.getEconomyResidentInfo(f.name).inquiries,false);

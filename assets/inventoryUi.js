@@ -4,6 +4,7 @@
   else { root.InventoryUi = api; document.addEventListener('DOMContentLoaded', api.init); }
 })(typeof window === 'undefined' ? globalThis : window, function(root) {
   'use strict';
+  const Readables = typeof module === 'object' && module.exports ? require('./readableItems') : null;
   const CATEGORIES = [['weapon', 'Weapons'], ['armor', 'Armor'], ['shield', 'Shields'], ['other', 'Other']];
   const key = name => String(name || '').trim().toLowerCase();
   const valid = name => !!key(name) && !/^(none|empty|nothing|null|undefined)\.?$/i.test(key(name));
@@ -54,19 +55,21 @@
   }
 
   function describeItem(item, readable) {
-    if (readable?.backstory) return `${readable.title || item.name}. ${readable.backstory} Read its stored chapters to explore its contents.`;
+    const hasText = (root.ReadableItems || Readables)?.hasContent(readable);
+    if (readable?.backstory) return `${readable.title || item.name}. ${readable.backstory}${hasText ? ' Use Read to open its stored chapters.' : ''}`;
     if (item.description || item.purpose) return String(item.description || item.purpose);
     if (item.consumable_kind === 'healing' || /^healing potion(?: \d+ hp)?$/i.test(item.name) && item.magic >= 3 && item.magic <= 10)
       return `Drink to restore up to ${item.magic} HP (Magic ${item.magic}) to a living party member. Consumed after use; cannot resurrect the dead.`;
     const name = key(item.name);
-    if (item.readable_kind === 'spellbook' || /\b(spellbook|grimoire)\b/.test(name)) return 'Scribe real spell scrolls into this book to learn spells, then prepare them in the Spells menu. Reading alone does not cast or teach spells.';
-    if (item.readable_kind === 'book' || /\b(book|tome|codex|ledger|journal|chronicle)\b/.test(name)) return 'A readable volume of history, lore or recorded instructions. Use Read to open its stored chapters.';
-    if (item.readable_kind === 'scroll' || /\bscroll\b/.test(name)) return 'A portable written record. Use Read to examine its stored text and any recorded clues.';
-    if (item.readable_kind === 'map' || /\bmap\b/.test(name)) return 'A readable geographic or historical document, not a guarantee of current dungeon exits.';
+    if (hasText) return `${readable.title || item.name}. Use Read to examine its stored text.`;
+    if (item.type === 'key' || /\bkey\b/.test(name)) return 'Use with its matching locked door or mechanism; it does not open every lock.';
     if (item.type === 'weapon') return 'Equip as a weapon for combat. Its listed modifiers affect attacks and damage.';
     if (item.type === 'armor') return 'Equip as armor for protection. Its listed armor modifier contributes to defense.';
     if (item.type === 'shield') return 'Equip as a shield for defense. Its listed modifiers apply while equipped.';
-    if (item.type === 'key' || /\bkey\b/.test(name)) return 'Use with its matching locked door or mechanism; it does not open every lock.';
+    if (item.readable_kind === 'spellbook' || /\b(spellbook|grimoire)\b/.test(name)) return 'Scribe real spell scrolls into this book to learn spells, then prepare them in the Spells menu. Reading alone does not cast or teach spells.';
+    if (item.readable_kind === 'book' || /\b(book|tome|codex|ledger|journal|chronicle)\b/.test(name)) return 'No readable text is stored for this volume.';
+    if (item.readable_kind === 'scroll' || /\bscroll\b/.test(name)) return 'No readable text is stored for this scroll.';
+    if (item.readable_kind === 'map' || /\bmap\b/.test(name)) return 'A map is not a guarantee of current dungeon exits. No readable text is stored for this item.';
     return 'An Other-slot item. Inspect it for its role in the story; any listed modifiers apply when equipped.';
   }
   function itemDescription(item) {

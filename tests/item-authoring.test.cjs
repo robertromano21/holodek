@@ -24,7 +24,42 @@ test('one item batch writes its own descriptions and receives the supplied genre
   const messages = []; let calls = 0;
   const agent = { user: async text => messages.push(text), assistant: { generation: async () => { calls++; return { content: JSON.stringify({ items: [item()] }) }; } } };
   const world = require('./fixtures/authored-world.cjs')('cyberpunk'); world.kind = 'homebrew';
-  const result = await Items.generate(agent, { count: 1, roomName: 'Supply Counter', roomDescription: 'A clinic supply counter.', world });
+  const result = await Items.generate(agent, { count: 1, roomName: 'Supply Counter', roomDescription: 'A clinic supply counter.', world, random:()=>0 });
   assert.equal(calls, 1); assert.equal(result[0].description, item().description);
   assert.doesNotMatch(messages.join('\n'), /Tartarus|Mortacia|Arithus/);
+});
+
+test('ordinary item categories restore the original independent equal 25 percent odds',()=>{
+  const totals={weapon:0,armor:0,shield:0,other:0};
+  for(let i=0;i<10000;i++)totals[Items.selectTypes(1,{random:()=>(i+.5)/10000})[0]]++;
+  assert.deepEqual(totals,{weapon:2500,armor:2500,shield:2500,other:2500});
+  let i=0;assert.deepEqual(Items.selectTypes(4,{random:()=>[0,.25,.5,.75][i++]}),Items.TYPES);
+  assert.deepEqual(Items.selectTypes(3,{random:()=>.9}),['other','other','other'],'Independent rolls do not promise one of each category');
+});
+
+test('special healing and explicitly restricted equipment keep their required types',()=>{
+  assert.deepEqual(Items.selectTypes(4,{healingOnly:true,random:()=>assert.fail('Healing stock must not roll weapon types')}),Array(4).fill('other'));
+  assert.deepEqual(Items.selectTypes(3,{types:['weapon'],random:()=>.9}),Array(3).fill('weapon'));
+  assert.throws(()=>Items.selectTypes(1,{types:['weapon'],healingOnly:true}),/other/);
+});
+
+test('the model cannot turn a selected weapon, armor or shield into an other object',()=>{
+  for(const type of ['weapon','armor','shield'])assert.throws(()=>Items.validate({items:[item({type:'other'})]},
+    {count:1,typePlan:[type]}),/engine-selected/);
+});
+
+test('a mixed batch authors all four rolled types in one call using the same game modifier rules',async()=>{
+  let slot=0,calls=0;const messages=[];
+  const agent={user:async text=>messages.push(text),assistant:{generation:async()=>{calls++;return{content:JSON.stringify({items:Items.TYPES.map((type,i)=>
+    item({name:['bronze knife','leather coat','wooden shield','glass charm'][i],type}))})};}}};
+  const result=await Items.generate(agent,{count:4,roomName:'Hall',random:()=>slot++/4});
+  assert.equal(calls,1);assert.equal(slot,4);assert.deepEqual(result.map(item=>item.type),Items.TYPES);
+  assert.ok(messages.some(text=>text.includes('Engine-selected item types')&&text.includes(JSON.stringify(Items.TYPES))));
+});
+
+test('generation retries cannot reroll equipment slots or silently accept an all-other response',async()=>{
+  let calls=0,rolls=0;
+  const agent={user:async()=>{},assistant:{generation:async()=>{calls++;return{content:JSON.stringify({items:[item({type:'other'})]})};}}};
+  await assert.rejects(Items.generate(agent,{count:1,random:()=>{rolls++;return 0;}}),/engine-selected/);
+  assert.ok(calls>1);assert.equal(rolls,1);
 });

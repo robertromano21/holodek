@@ -9,11 +9,14 @@ function prepare({input,consoleText,database,dungeon,actor,geoKey}){
   for(const sheet of [...I.parseSheets(consoleText,'PC'),...I.parseSheets(consoleText,'NPCs in Party')])
     if(sheet.hp>0&&sheet.equipped?.Other)inventory.push(R.key(sheet.equipped.Other));
   const floorNames=String(consoleText.match(/^Objects in Room:[ \t]*([^\r\n]*)/m)?.[1]||'').split(',').map(R.key);
-  const entries=Object.entries(database).flatMap(([sourceKey,room])=>[...(room.readables||[]),...(room.inscriptions||[])].map(record=>({record,sourceKey,room})));
+  const seen=new Set();
+  const entries=Object.entries(database).flatMap(([sourceKey,room])=>[...(room.readables||[]),...(room.inscriptions||[])].map(record=>({record,sourceKey,room})))
+    .filter(entry=>{const id=entry.sourceKey+':'+JSON.stringify(entry.record);if(seen.has(id))return false;seen.add(id);return true;});
   const named=action.name?entries.filter(e=>R.key(e.record.name).replace(/^the /,'')===action.name.replace(/^the /,'')):entries.filter(e=>inventory.includes(R.key(e.record.name))||e.sourceKey===geoKey&&floorNames.includes(R.key(e.record.name)));
   if(!named.length)return null;
   const focus=database[geoKey]?.readableFocus?.[actor?.name];
-  const preferred=!action.name&&focus?named.filter(e=>e.record.mechanismId+':'+e.record.id===focus):named;
+  const local=action.name?named.filter(e=>e.sourceKey===geoKey):[];
+  const preferred=local.length?local:!action.name&&focus?named.filter(e=>e.record.mechanismId+':'+e.record.id===focus):named;
   const pool=preferred.length?preferred:named;
   if(pool.length!==1)return{allowed:false,message:'Name the document or inscribed fixture you want to read; more than one matches.'};
   const {record,sourceKey,room}=pool[0],fixed=record.kind==='inscription',owned=!fixed&&inventory.includes(R.key(record.name));

@@ -44,7 +44,7 @@ function record(song,context={},directory=DIRECTORY){
   }
   fs.mkdirSync(dir,{recursive:true});const scoreFile=path.join(dir,'score.json'),asm=path.join(dir,'song.asm');
   fs.writeFileSync(scoreFile,score);
-  const built=spawnSync(process.execPath,[path.join(ROOT,'assets/renderSid_poke.js'),scoreFile,asm],{cwd:ROOT,encoding:'utf8',timeout:30000});
+  const built=spawnSync(process.execPath,[path.join(ROOT,'assets/renderSid_poke.js'),scoreFile,asm],{cwd:ROOT,encoding:'utf8',timeout:30000,windowsHide:true});
   if(built.error||built.status!==0)throw built.error||Error('SID archive compilation failed: '+built.stderr.slice(0,1600));
   const core=fs.readFileSync(path.join(dir,'song.sid'));require('../tools/analyze-sid-reference.cjs').header(core);
   const units=song.voices[0].order.flatMap(i=>song.voices[0].patterns[i]).filter(s=>!s.cmd).reduce((n,s)=>n+16/s.duration,0);

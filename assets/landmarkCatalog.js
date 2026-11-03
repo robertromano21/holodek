@@ -1,8 +1,9 @@
 (function(root, factory) {
-  const api = factory(typeof module === 'object' && module.exports ? require('./cityEstablishments') : root.CityEstablishments);
+  const api = factory(typeof module === 'object' && module.exports ? require('./cityEstablishments') : root.CityEstablishments,
+    typeof module === 'object' && module.exports ? require('./economyRules') : root.EconomyRules);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.LandmarkCatalog = api;
-})(typeof window === 'undefined' ? globalThis : window, function(establishments) {
+})(typeof window === 'undefined' ? globalThis : window, function(establishments, economy) {
   'use strict';
   const cache = new WeakMap(), prefixes = ['Ashen', 'Whispering', 'Sundered', 'Bonewhite', 'Veiled', 'Cinder', 'Forgotten', 'Silent'];
   function hash(text) { let h = 2166136261; for (const c of text) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
@@ -29,7 +30,7 @@
     let recognized = 0;
     for (const marker of markers) marker.knownOnArrival = marker.major && recognized++ < 2;
     const result = markers.slice(0, 48);
-    if (!d.cityFloorContext) for (const b of (buildings || []).slice(0, 750)) {
+    if (!d.cityFloorContext && !economy?.isStarterRoom(d.geoKey,d)) for (const b of (buildings || []).slice(0, 750)) {
       const notice = establishments?.serviceNotice(b);
       if (!notice) continue;
       const p = b.doors?.find(p => Number.isFinite(p.x) && Number.isFinite(p.y)) ||

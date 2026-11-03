@@ -114,14 +114,14 @@ test('actual classification keeps native city results and never sends canonical 
 
 test('genre object names remain model-authored on non-local models, without a stock item fallback', async () => {
   await Setting.withDraft(world('cyberpunk'), async () => {
-    const a = agent({ items: [{ name: 'signal probe', type: 'other', attack_modifier: 0, damage_modifier: 0, ac: 0, magic: 1,
-      consumable_kind: 'none', description: 'A pocket probe with a shielded contact tip.' }] }), context = { WorldSetting: Setting, console: quiet,
+    const a = agent({ items: [{ name: 'ceramic knife', type: 'weapon', attack_modifier: 3, damage_modifier: 4, ac: 0, magic: 0,
+      consumable_kind: 'none', description: 'A ceramic blade with a shielded polymer grip.' }] }), context = { WorldSetting: Setting, console: quiet,
       StoryPrompts: { isHolodek1: () => false }, getDelayedUpdatedGameConsole: async () => '',
       sharedState: { getRoomNameDatabase: () => '{}' }, isReservedBossKeyName: () => false,
       Math: Object.assign(Object.create(Math), { random: () => 0 }), require: id => require('../retort/' + id.slice(2)) };
     vm.runInNewContext(slice('async function generateRoomObjects(', 'async function generateObjectModifiers('), context);
     const items = await context.generateRoomObjects(a.$, 'Rainline Exchange', 'A covered neon exchange.');
-    assert.equal(items[0].name, 'signal probe'); assert.doesNotMatch(a.prompts.join('\n'), foreign);
+    assert.equal(items[0].name, 'ceramic knife'); assert.equal(items[0].type,'weapon'); assert.doesNotMatch(a.prompts.join('\n'), foreign);
     await assert.rejects(require('../retort/holodekObjectName').generate(agent({ name: '' }).$, {
       objectType: 'weapon', roomName: 'Rainline Exchange', roomDescription: 'Neon exchange.' }), /Original-world item naming failed/);
   });

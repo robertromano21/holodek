@@ -68,8 +68,20 @@ test('item purposes use stored descriptions and explain combat and readable role
   const readable = { title: 'History of the Pale Court', backstory: 'Kept by the ancient archivist.' };
   assert.match(Inventory.describeItem({ name: 'chronicle' }, readable), /ancient archivist/);
   assert.match(Inventory.describeItem({ name: 'old grimoire', type: 'other' }), /does not cast or teach/);
-  assert.match(Inventory.describeItem({ name: 'old scroll', type: 'other' }), /stored text/);
+  assert.match(Inventory.describeItem({ name: 'old scroll', type: 'other' }), /No readable text/);
   assert.match(Inventory.describeItem({ name: 'historical map', type: 'other' }), /not a guarantee/);
+});
+
+test('item descriptions never promise reading without stored text, or mistake a ledger key for a book', () => {
+  for (const item of [{ name: 'rain ledger key', type: 'key' }, { name: 'rain ledger key', type: 'other' }]) {
+    assert.match(Inventory.describeItem(item), /matching locked door/);
+    assert.doesNotMatch(Inventory.describeItem(item), /Use Read|readable volume/);
+  }
+  const cover = { title: 'Rain Ledger', backstory: 'An existing cover description.', bookLore: { pending: true }, chapters: [{ text: ' ' }] };
+  assert.doesNotMatch(Inventory.describeItem({ name: 'rain ledger' }, cover), /Use Read|Read its/);
+  cover.chapters[0].text = 'An existing chapter passage.';
+  assert.match(Inventory.describeItem({ name: 'rain ledger' }, cover), /Use Read/);
+  assert.match(Inventory.describeItem({ name: 'ledger blade', type: 'weapon' }), /Equip as a weapon/);
 });
 
 function ground() {

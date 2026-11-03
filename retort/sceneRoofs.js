@@ -193,7 +193,8 @@ function applySceneRoofs(dungeon, spec = {}) {
   const tileFor = (shape, mat = material) => {
     if (genreRoof) { shape = Assets.replacement(shape, approved); mat = approved.material; }
     const tile = `custom_structure_v${VERSION}_${shape}_${mat}`;
-    dungeon.tiles[tile] ||= { url: dungeon.tiles.pillar?.url || dungeon.tiles.wall?.url,
+    const surfaceSource = dungeon.tiles.pillar?.url ? 'pillar' : 'wall';
+    dungeon.tiles[tile] ||= { url: dungeon.tiles[surfaceSource]?.url, surfaceSource,
       spriteSpec: { voxelShape: shape, material: mat, ...(genreRoof ? { palette: approved.palette } : {}), profile: 'flat', heightRatio: 1,
         baseWidth: 0.85, gridWidth: 0.85, collisionRadius: 0.43 } };
     return tile;

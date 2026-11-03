@@ -6,6 +6,8 @@ test.beforeEach(() => { process.env.HOLODEK_ADJACENT_ROOMS = '1'; process.env.HO
 test.afterEach(() => { A._reset(); delete process.env.HOLODEK_ADJACENT_ROOMS; delete process.env.HOLODEK_BG_OLLAMA_URLS; });
 const db = { '0,0,0': { name: 'Hall', exits: { north: { targetCoordinates: '0,1,0' } } },
   '0,1,0': { name: 'Crypt' }, '1,0,0': { name: 'Done', description: 'Already here.' }, '0,0,1': { name: 'Loft' }, '-1,0,0': { name: 'Well' } };
+// Legacy-pool tests must not read the live local/website helper setting.
+const off = { backgroundEnabled: () => false, view: () => ({ revision: 0 }) };
 const wait = ms => new Promise(r => setTimeout(r, ms));
 function fake({ down = [] } = {}) {
   const calls = [];
@@ -26,8 +28,8 @@ test('candidates: only exit directions, skips described rooms', () => {
 test('explicit legacy pool, non-blocking, deduped, both endpoints used, take once', async () => {
   A._reset(); assert.deepStrictEqual(A.URLS(), [W, L]);
   const { calls, fetchImpl } = fake();
-  const q1 = A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north', 'up', 'west'], runId: 'r', deps: { fetchImpl } });
-  assert.deepStrictEqual(A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], runId: 'r', deps: { fetchImpl } }), []);
+  const q1 = A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north', 'up', 'west'], runId: 'r', deps: { fetchImpl, website: off } });
+  assert.deepStrictEqual(A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], runId: 'r', deps: { fetchImpl, website: off } }), []);
   assert.strictEqual(q1.length, 3); assert.strictEqual(calls.length, 0);
   await wait(1700 + 200);
   assert.strictEqual(calls.length, 3);
@@ -38,24 +40,24 @@ test('explicit legacy pool, non-blocking, deduped, both endpoints used, take onc
 test('background endpoints and jobs are off without explicit configuration', () => {
   delete process.env.HOLODEK_BG_OLLAMA_URLS; delete process.env.HOLODEK_ADJACENT_ROOMS;
   assert.deepStrictEqual(A.URLS(), []);
-  assert.deepStrictEqual(A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'] }), []);
+  assert.deepStrictEqual(A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], deps: { website: off } }), []);
 });
 test('one endpoint down: the other serves everything', async () => {
   A._reset(); const { calls, fetchImpl } = fake({ down: [W] });
-  A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north', 'up'], runId: 'd', deps: { fetchImpl } });
+  A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north', 'up'], runId: 'd', deps: { fetchImpl, website: off } });
   await wait(1900);
   assert.strictEqual(calls.length, 2); assert.ok(calls.every(c => c.base === L));
 });
 test('both down: skipped silently', async () => {
   A._reset(); const { calls, fetchImpl } = fake({ down: [W, L] });
-  A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], runId: 'x', deps: { fetchImpl } });
+  A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], runId: 'x', deps: { fetchImpl, website: off } });
   await wait(50);
   assert.strictEqual(calls.length, 0); assert.strictEqual(A._state().inFlight, 0); assert.strictEqual(A.take('0,1,0', 'Crypt', 'x'), null);
 });
 test('local endpoint yields to a foreground local call', async () => {
   A._reset(); const { calls, fetchImpl } = fake({ down: [W] }); let release;
   const fg = A.foreground(() => new Promise(r => { release = r; }));
-  A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], runId: 'f', deps: { fetchImpl } });
+  A.queueNeighbors({ db, currentKey: '0,0,0', exits: ['north'], runId: 'f', deps: { fetchImpl, website: off } });
   await wait(100); assert.strictEqual(calls.length, 0);
   release(); await fg; await wait(1700);
   assert.strictEqual(calls.length, 1); assert.strictEqual(calls[0].base, L);

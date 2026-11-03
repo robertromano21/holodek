@@ -111,11 +111,11 @@ function seedRoom(db, geoKey, population, seed = '', consoleText = '', { deferCo
     }
   }
   const n = R.hash(`${seed}:${geoKey}:services`), setting = room.campaignSetting;
-  const kind = Campaign.hostileTemple(setting, room.name) ? null : room.cityRoom?.establishmentType ? require('./serviceRoles').kind(room) : require('./serviceRoles').market(room,setting) ? 'shop' : require('./cityCompletion').serviceKind(room) || (/temple|basilica|sanctuary|shrine|chapel/i.test(room.name) ? 'temple' :
+  const kind = R.isStarterRoom(geoKey, room) || Campaign.hostileTemple(setting, room.name) ? null : room.cityRoom?.establishmentType ? require('./serviceRoles').kind(room) : require('./serviceRoles').market(room,setting) ? 'shop' : require('./cityCompletion').serviceKind(room) || (/temple|basilica|sanctuary|shrine|chapel/i.test(room.name) ? 'temple' :
     ['market', 'inn', 'guildhall'].includes(setting?.siteKind) || n % 7 === 0 ? 'shop' : n % 17 === 0 ? 'temple' : null);
   const bound = actors.find(a => a.serviceRole === kind && ['Friendly','Neutral'].includes(a.allegiance));
   const operator = bound || actors.find((a, index) => index > 0 && a.allegiance === 'Neutral');
-  if ((geoKey !== '0,0,0' || bound && require('./settingLayer').current()) && kind && operator) {
+  if (kind && operator) {
     const id = `service:${geoKey}:${kind}`;
     operator.serviceId = id; operator.routine = 'work';
     if (!bound) operator.job = kind === 'temple' ? 'neutral temple healer' : 'neutral equipment merchant';
@@ -149,12 +149,13 @@ function seedRoom(db, geoKey, population, seed = '', consoleText = '', { deferCo
       kind: 'scroll', title: scroll.name, chapters: [{ title: 'Spell Formula', text: SpellRules.templates[scroll.spell_scroll].description +
         `\nMagic: ${scroll.magic}. That is the exact casting cost. ` + SpellRules.scroll(scroll.spell_scroll)?.description }] });
   }
-  if (room.services && Object.values(room.services).some(x => x.kind === 'shop')) Market.seed(room, geoKey, seed);
+  if (!R.isStarterRoom(geoKey, room) && room.services && Object.values(room.services).some(x => x.kind === 'shop')) Market.seed(room, geoKey, seed);
   require('./tradeRoutes').connect(db,geoKey);
   if (deferCommunity) room.pendingCommunityActivation = { version: 1 };
   else activateRoom(db, geoKey, population, seed, consoleText);
 }
 function activateRoom(db, geoKey, population, seed, consoleText) {
+  if (R.isStarterRoom(geoKey, db[geoKey])) { delete db[geoKey].pendingCommunityActivation; return; }
   // City desks author their commission only when the player asks; no eager job call per resident/floor.
   if (!db[geoKey].venueDesk) {
     seedMission(db, geoKey, population, seed);
@@ -408,7 +409,9 @@ function changeEquipment(text, input) {
 }
 function view(state, actorName, counterId) {
   try {
-    const ctx = context(state), resident = operatorReach(ctx, actorName, counterId);
+    const ctx = context(state);
+    if (R.isStarterRoom(ctx.geoKey, ctx.room)) throw Error('Services and local work are unavailable in the starter room.');
+    const resident = operatorReach(ctx, actorName, counterId);
     const service = Object.values(ctx.room.services || {}).find(s => require('../assets/cityEstablishments').operators(s).includes(actorName));
     const venue = require('./cityVenueServices').describe(ctx.room, actorName);
     const missions = Object.values(ctx.db).flatMap(r => Object.values(r?.minorMissions || {}))
@@ -436,6 +439,8 @@ function action(state, service, input) {
     if (state.getGamePaused?.()) throw Error('Resume the game first.');
     if (!/^[\w:-]{8,100}$/.test(input.nonce || '')) throw Error('A transaction identifier is required.');
     const ctx = context(state), { db, room, book, geoKey, roster } = ctx;
+    if (R.isStarterRoom(geoKey, room) && ['buy','sell','heal','resurrect','lodge','accept-mission'].includes(input.kind))
+      throw Error('Services and local work are unavailable in the starter room.');
     const old = book.receipts.find(r => r.nonce === input.nonce);
     if (old) {
       if (old.roomKey !== geoKey || old.kind !== input.kind || old.actor !== input.actor || old.item !== input.item || old.target !== input.target||old.missionId!==input.missionId)
@@ -843,6 +848,7 @@ function preserveInventory(oldText, incomingText, databaseJSON = '{}') {
 }
 function venueContext(state, actorName, counterId) {
   const ctx = context(state);
+  if (R.isStarterRoom(ctx.geoKey, ctx.room)) throw Error('Services and local work are unavailable in the starter room.');
   operatorReach(ctx, actorName, counterId);
   const venue = require('./cityVenueServices').describe(ctx.room, actorName);
   if (!venue?.capabilities.includes('commission')) throw Error('This resident does not offer local work here.');
@@ -851,6 +857,7 @@ function venueContext(state, actorName, counterId) {
 }
 function roomKeyFromText(text) { return I.roomKey(field(text, 'Coordinates')); }
 function bindVenueTrader(db,key,actor,occupation,consoleText='') {
+  if(R.isStarterRoom(key,db[key]))return null;
   if(occupation?.mode!=='work'||!occupation.venueId||!['Friendly','Neutral'].includes(I.allegiance(actor)))return null;
   const kind=require('../assets/cityEstablishments').servicePlan({type:occupation.venueType})?.kind;
   if(!['shop','temple'].includes(kind))return null;

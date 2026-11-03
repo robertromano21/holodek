@@ -9,8 +9,8 @@ const NOTE_TO_INDEX = new Map([
 
 function hasCommand(cmd) {
   const probe = process.platform === 'win32'
-    ? spawnSync('where.exe', [cmd], { stdio: 'ignore' })
-    : spawnSync('sh', ['-lc', `command -v "${cmd}" >/dev/null 2>&1`], { stdio: 'ignore' });
+    ? spawnSync('where.exe', [cmd], { stdio: 'ignore', windowsHide: true })
+    : spawnSync('sh', ['-lc', `command -v "${cmd}" >/dev/null 2>&1`], { stdio: 'ignore', windowsHide: true });
   return probe.status === 0;
 }
 
@@ -43,7 +43,7 @@ function renderRoomMusic(sidPath, outBaseNoExt, seconds = 20) {
   // outBaseNoExt example: /home/.../sid/current_room  (no .wav suffix)
   // sidplayfp on some builds appends ".wav" even if you pass one.
   const sidArgs = [`-w${outBaseNoExt}`, `-t${seconds}`, sidPath];
-  const run = spawnSync('sidplayfp', sidArgs, { stdio: 'inherit' });
+  const run = spawnSync('sidplayfp', sidArgs, { stdio: 'inherit', windowsHide: true });
   if (run.status !== 0) throw new Error('sidplayfp failed');
   return normalizeRenderedWav(outBaseNoExt);
 }
@@ -323,7 +323,7 @@ function renderSidParallel(musicJson, sidOut, outBaseNoExt) {
   const jobPath = `${outBaseNoExt}.render-job.json`;
   fs.writeFileSync(jobPath, JSON.stringify({ sid: sidOut, out: want, freq: 44100, chunks }), 'utf8');
   const t0 = Date.now();
-  const run = spawnSync(process.execPath, [path.join(__dirname, 'sidParallelRender.js'), jobPath], { stdio: 'inherit' });
+  const run = spawnSync(process.execPath, [path.join(__dirname, 'sidParallelRender.js'), jobPath], { stdio: 'inherit', windowsHide: true });
   try { fs.unlinkSync(jobPath); } catch {}
   if (run.status !== 0 || !fs.existsSync(want)) { console.warn('Parallel SID render failed; rendering in one pass.'); return null; }
   console.log(`SID rendered in ${chunks.length} parallel movements, ${chunks.reduce((a, c) => a + c.seconds, 0).toFixed(1)}s of music in ${Date.now() - t0}ms`);
@@ -359,7 +359,7 @@ function renderArrangementToWav(musicJson, options = {}) {
   }
 
   if (renderJsPath && jsonPath && asmOut && sidOut) {
-    const build = spawnSync('node', [renderJsPath, jsonPath, asmOut], { cwd, stdio: 'inherit' });
+    const build = spawnSync('node', [renderJsPath, jsonPath, asmOut], { cwd, stdio: 'inherit', windowsHide: true });
 
     if (build.error) {
       console.warn(`Music renderer launch failed (${build.error.message}); using JS WAV fallback.`);

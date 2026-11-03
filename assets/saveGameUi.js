@@ -31,6 +31,7 @@
     return r.json();
   }
   function idle() {
+    if (root._partyChangeSyncPending) throw Error('The party change has not synchronized yet. Retry the command before saving.');
     const c = root.getDungeonLifeContext?.();
     if (!c?.dungeon || !root.dungeonRunId) throw Error('Enter the adventure before saving.');
     if (c.busy || root.actionDiceState?.active || root._combatCommandPending || root.GameCommandGate?.busy()) throw Error('Finish the current command and combat round first.');
@@ -90,7 +91,9 @@
       position: { x: context.player.x, y: context.player.y, angle: root.playerAngle, z: root.playerZ ?? null } });
   }
   async function save(slot, label, options = {}) {
-    if (working) throw Error('Wait for the current save or load.'); idle(); working = true;
+    if (working) throw Error('Wait for the current save or load.');
+    if (root._partyChangeSyncPending) await root.prepareEconomyState?.();
+    idle(); working = true;
     const paused = !!root.gamePaused;
     try {
       if (!paused) await api('/game/pause', { runId: root.dungeonRunId, paused: true });
@@ -155,7 +158,7 @@
     characters = d.characters; npcs = d.npcs; inventory = d.inventory; inventoryProperties = d.inventoryProperties; equippedInventory = d.equippedInventory;
     Object.assign(root, { characters, npcs, inventory: inventory.slice(), roomImages: d.roomImages, _partyCharacterRegistry: d.partyRegistry,
       _partySpriteRegistry: d.spriteRegistry, _selectedPCSprite: d.selectedPCSprite, _statsRolled: true,
-      _characterStartupPending: false, _combatCommandPending: false, _combatRoundActiveUntil: 0, gamePaused: true });
+      _characterStartupPending: false, _combatCommandPending: false, _combatRoundActiveUntil: 0, _partyChangeSyncPending: false, gamePaused: true });
     if (root._traitRequestTimer) root.clearTimeout(root._traitRequestTimer);
     root._traitRequestTimer = null; root._traitRequestQueue = new Map(); root._traitRequested = {}; root._traitReadyWaiters = [];
     root._proceduralSpriteCache = {}; root._characterSheetIndex = d.characterSheets || {};

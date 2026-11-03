@@ -161,6 +161,7 @@ test('chatbotprocessinput preserves its baseline except travel, camera, recovery
   const source = fs.readFileSync('assets/game.js', 'utf8'), start = source.indexOf('async function chatbotprocessinput(');
   const end = start + 1 + source.slice(start + 1).search(/^(?:async )?function /m);
   const body = source.slice(start, end)
+    .replace(/^    try \{ await window\.commitLocalPartyChange\(updatedGameConsole\); \}\r?\n    catch \(error\) \{ updateChatLog\('<br>The party changed locally but has not synchronized\. Retry before saving\.<br>'\); console\.error\('\[PartySyncFailed\]',error\); \}\r?\n/gm, '')
     .replace(/^  if\(!completedStartResult&&userInput\)window\.DungeonLife\?\.playerResponded\?\.\(\);\r?\n\r?\n/m, '')
     .replace(/^  const endedRunMenu = window\.GameOverStartUi\?\.active\(\);\r?\n  if \(endedRunMenu && !window\.GameOverStartUi\.allowCommand\([^\r\n]*\r?\n    creating: isCharacterCreationInProgress\(\), completed: !!textin\?\.completedStartResult }\)\) return;\r?\n/m, '')
     .replace('if (!endedRunMenu && (window._deathSceneActive || window._playerUnconscious))', 'if (window._deathSceneActive || window._playerUnconscious)')
@@ -188,6 +189,7 @@ test('chatbotprocessinput preserves its baseline except travel, camera, recovery
     ].map(line => indent + line).join(source.includes('\r\n') ? '\r\n' : '\n'))
     .replace('unlock door with <keyname>', 'unlock door with &lt;keyname&gt;');
   // The normalized handler matches the reconciled committed baseline, independent of checkout line endings.
+  assert.equal((source.slice(start,end).match(/await window\.commitLocalPartyChange\(updatedGameConsole\)/g)||[]).length,2);
   assert.equal(require('node:crypto').createHash('sha256').update(body.replace(/if \(window\.DEBUG_LOGS\) (?=console\.log\()/g, '').replace(/\r\n/g, '\n')).digest('hex'),
     '2959bbd25e5fca3079f836b0a29b8017fda2ca140a10ef2710fff30910f9a226');
 });

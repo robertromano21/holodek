@@ -6,22 +6,31 @@ const Shape = require('./saveGameState');
 function rebuildRoom(dungeon, geoKey, options = {}) {
   const generateSpriteFromStyle = options.generateSprite || require('./assets/renderSprite_poke').generateSpriteFromStyle;
   const rebuildSceneGraphics = options.sceneGraphics || require('./retort/sceneRoomBuilder').rebuildSceneGraphics;
+  const spriteName = require('./retort/roomVisualAssets').spriteName;
+  require('./retort/savedTileSurfaces').rebind(dungeon);
+  const baseTiles = new Set(['floor', 'wall', 'door', 'torch', 'pillar']);
+  const customTiles = new Map((dungeon.customTiles || []).map((tile, i) => [tile.name || `custom_${tile.type}_${i}`, tile]));
   const aliases = new Map(), first = new Map();
+  const rank = name => baseTiles.has(name) ? 2 : customTiles.has(name) ? 1 : 0;
   for (const [name, tile] of Object.entries(dungeon.tiles || {})) if (tile.url?.startsWith('/sid/sprites/')) {
     const url = tile.url.split('?')[0];
-    if (first.has(url)) aliases.set(name, first.get(url)); else first.set(url, name);
+    if (!first.has(url) || rank(name) > rank(first.get(url))) first.set(url, name);
+  }
+  for (const [name, tile] of Object.entries(dungeon.tiles || {})) if (tile.url?.startsWith('/sid/sprites/')) {
+    const source = first.get(tile.url.split('?')[0]);
+    if (source !== name) aliases.set(name, source);
   }
   const style = dungeon.visualStyle;
   for (const [name, tile] of Object.entries(dungeon.tiles || {})) {
       if (!tile.url?.startsWith('/sid/sprites/')) continue;
       if (aliases.has(name)) continue;
       if (!style) throw Error('Saved graphics lack a drawing recipe: ' + geoKey + '/' + name);
-      if (['floor', 'wall', 'door', 'torch', 'pillar'].includes(name)) {
-        tile.url = generateSpriteFromStyle(name === 'floor' && style.floorPalette ? { ...style, palette: style.floorPalette } : style, name, `${geoKey}_${name}`);
+      if (baseTiles.has(name)) {
+        tile.url = generateSpriteFromStyle(name === 'floor' && style.floorPalette ? { ...style, palette: style.floorPalette } : style, name, spriteName(`${geoKey}_${name}`));
       } else if (name.startsWith('custom_')) {
-        const custom = dungeon.customTiles?.find((t, i) => (t.name || `custom_${t.type}_${i}`) === name);
+        const custom = customTiles.get(name);
         if (!custom) throw Error('Saved custom tile lacks a drawing recipe: ' + geoKey + '/' + name);
-        tile.url = generateSpriteFromStyle({ palette: style.palette, procedure: custom.procedure || {}, spriteSpec: custom.spriteSpec }, `custom_${custom.type}`, `${geoKey}_${name}`);
+        tile.url = generateSpriteFromStyle({ palette: style.palette, procedure: custom.procedure || {}, spriteSpec: custom.spriteSpec }, `custom_${custom.type}`, spriteName(`${geoKey}_${name}`));
       }
   }
   rebuildSceneGraphics(dungeon, geoKey);

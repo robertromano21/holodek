@@ -18,7 +18,7 @@ const Masonry = require('../assets/masonryPatterns');
 const SculptureForms = require('../assets/sculptureForms');
 const SurfaceArt = require('../assets/surfaceArt');
 const ArtPresentation = require('../assets/artPresentation');
-const {wallFaces,mountWall}=require('./surfaceArtPlacement');
+const {wallFaces,mountWall,mountFloorMosaic}=require('./surfaceArtPlacement');
 const { roofStyle } = require('./sceneRoofs');
 const { appearanceKind } = require('./undergroundEnvironments');
 
@@ -573,7 +573,8 @@ function applySurfaceArt(dungeon,spec) {
     if(row.surface==='wall')mount=mountWall(walls,row,used,groups,centers);
     const floorCandidates=row.surface==='floor'?(row.puzzleClue?candidates:candidates.slice().sort((a,b)=>
       Math.hypot(a.x-dungeon.start.x,a.y-dungeon.start.y)-Math.hypot(b.x-dungeon.start.x,b.y-dungeon.start.y))):[];
-    for(const c of floorCandidates){
+    if(row.surface==='floor')mount=mountFloorMosaic(dungeon,row,floorCandidates,used);
+    for(const c of row.kind==='mosaic'&&!row.puzzleClue&&row.format==='mural'?[]:floorCandidates){
       if(mount||row.surface==='object')break;
       if(used.has(c.key))continue;
       const z=dungeon.cells[c.key].floorHeight||0;
@@ -606,6 +607,7 @@ function applySurfaceArt(dungeon,spec) {
     for(const key of mount.keys||[mount.key])used.add(key);
   }
   dungeon.surfaceArt=placed;
+  dungeon.floorMosaicScaleVersion=1;
   dungeon.artLamps=placed.flatMap(art=>ArtPresentation.plan(art,dungeon));
   // world1 MOLDINGS: mounted after (never instead of) the authored art, with the same wall-safety rules.
   const moldings=[];

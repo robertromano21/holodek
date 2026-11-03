@@ -13,6 +13,7 @@ function pending() { return { stock: [], stockAuthorship: { version: Items.VERSI
 async function prepare($, state, geoKey, { serviceId, author = Items.generate } = {}) {
   const db = JSON.parse(state.getRoomNameDatabase() || '{}'), room = db[geoKey];
   if (!room) throw Error('The shop room is unavailable.');
+  if (require('../assets/economyRules').isStarterRoom(geoKey,room)) return;
   let active = flights.get(state); if (!active) flights.set(state, active = new Map());
   for (const service of Object.values(room.services || {}).filter(s => (!serviceId || s.id === serviceId) && needed(s))) {
     const runId = state.getDungeonRunId(), floor = require('./hostLocalFloors').token(state);

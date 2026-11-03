@@ -81,8 +81,10 @@
       const p = book.position, s = book.size, bx = p.x + s.x / 2, by = p.y + s.y / 2, distance = Math.hypot(bx - player.x, by - player.y);
       if (distance > 6) continue;
       const known = root.getReadableItemMetadata?.(book.name);
+      const hasText = root.ReadableItems?.hasContent(known);
       result.push({ type: 'book', key: book.id, x: bx, y: by, width: Math.max(s.x, s.y), height: s.z, box: { ...p, sx: Math.max(.03, s.x), sy: Math.max(.03, s.y), sz: s.z },
-        label: known?.title || 'Unread tome', book, enabled: distance <= 2.5, command: 'read ' + book.name, hint: 'Walk closer to read' });
+        label: known?.title || 'Uncatalogued volume', book, enabled: distance <= 2.5,
+        command: hasText ? 'read ' + book.name : 'inspect volume', hint: hasText ? 'Walk closer to read' : 'Walk closer to inspect' });
     }
     for (const f of e?.fixtures || []) {
       const [x, y] = f.key.split(',').map(Number), i = e.definition.controls.findIndex(c => c.id === f.id);
@@ -218,8 +220,8 @@
       screen:{left:screenX-screenW/2,right:screenX+screenW/2,top:bottom-screenH,bottom} };
     return visibleBillboards(dungeon, { ...c, billboards:[target] }, 'item').length > 0;
   }
-  function readBlocked() {
-    return busy || root.PlayerControls?.blocked?.() || root.GameCommandGate?.busy() || root.gamePaused || document.hidden || root._characterStartupPending || root._combatCommandPending ||
+  function readBlocked(popup = null) {
+    return busy || root.PlayerControls?.blocked?.(false, { ignorePopup: popup }) || root.GameCommandGate?.busy() || root.gamePaused || document.hidden || root._characterStartupPending || root._combatCommandPending ||
       root.actionDiceState?.active || root._combatRoundActiveUntil > Date.now();
   }
   function interactionBlocked() {
@@ -299,7 +301,7 @@
   }
   async function requestRead(name){
     const input=document.getElementById('chatuserinput');
-    if(readBlocked()||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
+    if(readBlocked()||!hasReadableContent(name)||!input||input.value.trim()||typeof root.chatbotprocessinput!=='function')return false;
     busy=true;input.value='read '+String(name).trim();clear();
     try{await root.chatbotprocessinput();if(root.getReadableItemMetadata?.(name)?.questHooks?.length)root.QuestSceneUi?.open(null,{silent:true});
       if(root.HolodekFlags?.LIBRARY_BOOKS&&root.getReadableItemMetadata?.(name)?.bookLore)root.BookReaderUi?.render(name,0);return true;}
@@ -308,11 +310,10 @@
   }
   function hasReadableContent(name){
     const wanted=String(name||'').trim().toLowerCase();
-    const find=dungeon=>dungeon?.readables?.find(r=>String(r.name||'').trim().toLowerCase()===wanted);
-    const record=root.getReadableItemMetadata?.(name)||find(root.currentDungeon)||find(frame?.dungeon);
-    // world1 LIBRARY_BOOKS: any book-like item is readable; its contents are generated on first open.
-    if(root.HolodekFlags?.LIBRARY_BOOKS&&(record?.bookLore||root.LibraryBooks?.isBookName(name)))return true;
-    return !!root.ReadableItems?.hasContent(record);
+    const records=dungeon=>[...(dungeon?.readables||[]),...(dungeon?.inscriptions||[]),
+      ...(dungeon?.questWritings||[]).map(w=>w.inscription)].filter(r=>String(r?.name||'').trim().toLowerCase()===wanted);
+    return [root.getReadableItemMetadata?.(name),...records(root.currentDungeon),...records(frame?.dungeon)]
+      .some(record=>root.ReadableItems?.hasContent(record));
   }
   function addReadAction(popup,name){
     if(!popup||!hasReadableContent(name))return null;
@@ -320,7 +321,7 @@
     const read=document.createElement('button');read.id='read-item-button';read.type='button';read.className='popup-button';read.textContent='Read';
     read.addEventListener('click',event=>{
       event.preventDefault();event.stopPropagation();
-      if(readBlocked()||drag?.active||!hasReadableContent(name)||document.getElementById('chatuserinput')?.value.trim())return;
+      if(readBlocked(popup)||drag?.active||!hasReadableContent(name)||document.getElementById('chatuserinput')?.value.trim())return;
       popup.remove();root.InventoryUi?.toggle(false);requestRead(name);
     });
     popup.insertBefore(read,popup.querySelector('#cancel-button'));

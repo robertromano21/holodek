@@ -279,7 +279,7 @@ test('real snapshot includes dynamic SID support and only the required npm closu
     'assets/renderCharacterSprite.js', 'assets/renderSceneTextures.js', 'retort/sceneRoomBuilder.js',
     'retort/sidLocalWork.js', 'retort/sidMusicTheory.js', 'retort/sidAssembler.js', 'retort/sidVoice/jsid.js', 'retort/sidEffectsGains.json',
     'tools/analyze-sid-reference.cjs', 'tools/sfx-build/effects.js', 'tools/sfx-build/keyedStems.js',
-    'tools/sfx-build/voices.js', 'tools/sfx-build/rangedEffects.js', 'retort/remoteRoomWorker.js',
+    'tools/sfx-build/voices.js', 'tools/sfx-build/rangedEffects.js', 'tools/sfx-build/worldEffects.js', 'retort/remoteRoomWorker.js',
     'tools/website-worker/worker.cjs', 'tools/website-worker/workerPool.cjs',
     'tools/website-worker/roomWire.cjs', 'tools/website-worker/roomTask.cjs']) assert.ok(files.has(file), file);
   for (const file of ['server.js', 'retort/memoryEmbeddingWorker.js', 'retort/sidVoice/worker.js']) assert.ok(!files.has(file), file);

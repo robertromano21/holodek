@@ -87,9 +87,12 @@ function merge(base, generated, current, at = 'room') {
   return out;
 }
 function protectDatabase(currentJson, nextJson, runId) {
-  if (!currentJson || !/"(?:preparedBuild|backgroundTopology)"/.test(currentJson)) return nextJson;
+  if (!currentJson || !/"(?:preparedBuild|backgroundTopology|encounterRoll)"/.test(currentJson)) return nextJson;
   const current = JSON.parse(currentJson), next = JSON.parse(nextJson || '{}'); let changed = false;
   for (const [key, room] of Object.entries(current)) {
+    if([1,2].includes(room?.encounterRoll?.version)&&room.encounterRoll.runId===runId&&next[key]&&!equal(room.encounterRoll,next[key].encounterRoll)){
+      next[key]={...next[key],encounterRoll:clone(room.encounterRoll)};changed=true;
+    }
     if (room?.backgroundTopology?.runId === runId && next[key] && !next[key].backgroundTopology &&
         next[key].name === room.name && !next[key].preparedBuild) {
       next[key] = { ...next[key], exits: clone(room.exits), backgroundTopology: clone(room.backgroundTopology) }; changed = true;

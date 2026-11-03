@@ -13,7 +13,7 @@ function fixture() {
     querySelectorAll() { return this.children.flatMap(c => [c, ...c.querySelectorAll()]).filter(c => c.tag === 'button'); }
     querySelector(selector) { return this.children.find(c => selector === '#equip-button' && c.id === 'equip-button') || null; }
     remove() { this.removed = true; }
-    get isConnected() { return !this.removed; }
+    get isConnected() { return !this.removed && (!this.parent || this.parent.isConnected); }
     click() { return this.listeners.click?.(); }
   }
   const body = new Element('body'), input = new Element('textarea'); input.value = 'unfinished draft';
@@ -39,8 +39,56 @@ function fixture() {
   vm.runInNewContext(fs.readFileSync('assets/commerceUi.js', 'utf8'), { window, document, fetch, console });
   vm.runInNewContext(fs.readFileSync('assets/objectDiscovery.js', 'utf8'), { window, document });
   return { window, document, nodes, requests, applied, notices, input, body, events, hook: cb => hook = cb,
-    button: label => nodes.find(n => n.tag === 'button' && n.textContent === label && !n.removed) };
+    button: label => nodes.find(n => n.tag === 'button' && n.textContent === label && n.isConnected) };
 }
+
+function installGate(f) {
+  vm.runInNewContext(fs.readFileSync('assets/commandGate.js','utf8'), {
+    window:f.window,document:{addEventListener(){},getElementById:()=>f.input},setTimeout });
+  return f.window.GameCommandGate;
+}
+
+test('the first accepted service click waits for native resident work and opens once without waiting for speech',async()=>{
+  const f=fixture(),gate=installGate(f);let release;
+  f.window.DungeonLife={hasPendingSpeech:()=>true};
+  f.window.CommerceUi.invite('Keeper');
+  const native=gate.trackNative(()=>new Promise(resolve=>release=resolve));
+  const button=f.button('Access Services'),opening=button.click();
+  assert.equal(button.disabled,true);assert.equal(f.requests.length,0);await button.click();
+  release();await native;await opening;
+  assert.ok(f.button('Buy healing potion 3 hp (1 silver; 2 in stock)'));
+  assert.equal(f.requests.filter(r=>r.path==='/economy/view').length,1);assert.equal(gate.busy(),false);
+});
+
+test('a service invitation can wait through a world action but cannot follow it into another room',async()=>{
+  for(const travel of [false,true]){
+    const f=fixture(),gate=installGate(f);f.window.CommerceUi.invite('Keeper');gate.begin();
+    const opening=f.button('Access Services').click();assert.equal(f.requests.length,0);
+    if(travel)f.window.currentDungeon={geoKey:'0,2,0'};
+    gate.end();await opening;
+    assert.equal(f.requests.length,travel?0:1);
+    if(travel)assert.ok(f.nodes.some(n=>/room or game changed/.test(n.textContent||'')));
+  }
+});
+
+test('a dismissed queued service invitation cannot perform its old acceptance later',async()=>{
+  const f=fixture(),gate=installGate(f);let release;
+  f.window.CommerceUi.invite('Keeper');
+  const native=gate.trackNative(()=>new Promise(resolve=>release=resolve));
+  const opening=f.button('Access Services').click();await f.button('Not Now').click();
+  release();await native;await opening;assert.equal(f.requests.length,0);
+});
+
+test('world commands wait for service state application without opening an obsolete menu',async()=>{
+  const f=fixture(),gate=installGate(f);let release,applied=false,calls=0;
+  f.hook(async()=>{await new Promise(resolve=>release=resolve);return{ok:true,json:async()=>({silver:2,revision:1,missions:[],economyResult:{}})};});
+  f.window.applyRealtimeCombatResult=async()=>{applied=true;};
+  const opening=f.window.CommerceUi.open('Keeper');
+  for(let i=0;i<8;i++)await Promise.resolve();
+  const command=gate.wrap(async()=>{assert.equal(applied,true);calls++;})();assert.equal(calls,0);
+  release();await opening;await command;assert.equal(calls,1);
+  assert.equal(f.nodes.filter(n=>n.tag==='h3'&&n.textContent==='Local Contracts').length,0);
+});
 test('Drink offers real party targets, sends no client healing amount, and preserves the command draft', async () => {
   const f = fixture(); assert.equal(f.window.CommerceUi.drink('healing potion 3 hp'), true);
   await f.button('Drink: Ally').click();

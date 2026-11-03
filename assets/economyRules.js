@@ -8,6 +8,7 @@
     price_silver: PRICES.potion, attack_modifier: 0, damage_modifier: 0, ac: 0, magic: 10,
     description: 'Drink to restore up to 10 HP to a living party member. Consumed after use; cannot resurrect the dead.' });
   const key = v => String(v || '').trim().toLowerCase();
+  function isStarterRoom(geoKey, room) { return geoKey === '0,0,0' && !room?.cityFloorContext; }
   function healingPotion(magic = 10) {
     if (!Number.isInteger(magic) || magic < 3 || magic > 10) throw Error('Healing potion Magic must be an integer from 3 to 10.');
     return { ...POTION, name: `healing potion ${magic} hp`, magic, price_silver: Math.ceil(magic / 5),
@@ -39,5 +40,5 @@
       ['attack_modifier', 'damage_modifier', 'ac', 'magic'].reduce((sum, field) => sum + Math.max(0, Number(item[field]) || 0), 0)));
   }
   function resurrectionPrice(level) { return Math.max(PRICES.resurrectionMinimum, Math.ceil(Math.max(1, Number(level) || 1) / 2)); }
-  return { PRICES, POTION, healingPotion, isHealingPotion, key, hash, startingSilver, wallet, price, resurrectionPrice };
+  return { PRICES, POTION, healingPotion, isHealingPotion, isStarterRoom, key, hash, startingSilver, wallet, price, resurrectionPrice };
 });

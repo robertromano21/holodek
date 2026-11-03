@@ -83,4 +83,42 @@ function mountWall({faces,map,dungeon,viewKeys},row,used,groups=new Map(),center
   return mount;
 }
 
-module.exports={wallFaces,mountWall,viewingPoint,visible};
+function mountFloorMosaic(dungeon,row,candidates,used=new Set()){
+  if(row.kind!=='mosaic'||row.surface!=='floor'||row.puzzleClue||row.format!=='mural')return null;
+  const options=candidates.filter(c=>Math.hypot(c.x-dungeon.start.x,c.y-dungeon.start.y)<=12);
+  // Search every large placement before accepting a smaller one near a pillar or doorway.
+  for(let span=6;span>=2;span--)for(const c of options){
+    const z=dungeon.cells[c.key]?.floorHeight||0,keys=[];
+    for(let dy=0;dy<span;dy++)for(let dx=0;dx<span;dx++){
+      const key=`${c.x+dx},${c.y+dy}`,cell=dungeon.cells[key];
+      if(cell?.tile!=='floor'||used.has(key)||cell.feature||cell.exit||cell.complexExit||cell.interactable||cell.navigationReserved||
+        cell.blocked||cell.obstacle||cell.secretChamber||Math.abs((cell.floorHeight||0)-z)>.01)continue;
+      keys.push(key);
+    }
+    if(keys.length===span*span)return{key:c.key,keys,axis:'y',sign:-1,surface:'floor',
+      position:{x:c.x+.05,y:c.y+.05,z:z+.01},size:{x:span-.1,y:span-.1,z:.02}};
+  }
+  return null;
+}
+function restoreFloorMosaics(dungeon){
+  if(!dungeon?.surfaceArt||dungeon.floorMosaicScaleVersion===1||!dungeon.start||!dungeon.layout)return false;
+  const mosaics=dungeon.surfaceArt.filter(art=>art.kind==='mosaic'&&art.surface==='floor'&&art.format==='mural'&&!art.puzzleClue);
+  if(!mosaics.length){dungeon.floorMosaicScaleVersion=1;return false;}
+  const {makeNavigation,reachable}=require('./sceneArchitecture'),reach=reachable(makeNavigation(dungeon),dungeon.start),candidates=[];
+  for(const [key,cell] of Object.entries(dungeon.cells)){
+    const [x,y]=key.split(',').map(Number);
+    if(cell.tile==='floor'&&reach.seen[y*dungeon.layout.width+x])candidates.push({key,x,y});
+  }
+  candidates.sort((a,b)=>Math.hypot(a.x-dungeon.start.x,a.y-dungeon.start.y)-Math.hypot(b.x-dungeon.start.x,b.y-dungeon.start.y));
+  const used=new Set(dungeon.surfaceArt.flatMap(art=>art.keys||[art.key]));let changed=false;
+  dungeon.surfaceArt=dungeon.surfaceArt.map(art=>{
+    if(!mosaics.includes(art))return art;
+    for(const key of art.keys||[art.key])used.delete(key);
+    const mount=mountFloorMosaic(dungeon,art,candidates,used);
+    const next=mount&&mount.size.x>art.size.x+.01?{...art,...mount}:art;
+    for(const key of next.keys||[next.key])used.add(key);
+    changed ||=next!==art;return next;
+  });
+  dungeon.floorMosaicScaleVersion=1;return changed;
+}
+module.exports={wallFaces,mountWall,viewingPoint,visible,mountFloorMosaic,restoreFloorMosaics};

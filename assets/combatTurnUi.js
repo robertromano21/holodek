@@ -173,6 +173,7 @@
       const result = await response.json(); if (!response.ok) throw Error(result.error || 'Equipment could not change.');
       if (result.runId !== root.dungeonRunId || result.geoKey !== root.currentDungeon?.geoKey) throw Error('The room or game changed during the equipment request.');
       await root.applyRealtimeCombatResult?.(result);
+      root.HolodekSfx?.gear?.(kind);
       if (prompt?.turnId === current.turnId && result.turn?.turnId === current.turnId) prompt = result.turn;
       return true;
     } catch (err) { notice(err.message); return false; }

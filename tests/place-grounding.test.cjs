@@ -60,17 +60,17 @@ test('currency display reverses cleanly between worlds without rewriting its sou
   vm.runInNewContext(fs.readFileSync('assets/resourceLabelUi.js','utf8'),{window});await window.ResourceLabelUi.refresh();assert.equal(text.nodeValue,'Scrip: 17. Tech: 4');
   currency=Money.forWorld(null);await window.ResourceLabelUi.refresh();assert.equal(text.nodeValue,'Silver Pieces: 17. Tech: 4');
 });
-test('market service roles are engine-bound and starting markets keep two other friendly guides',async()=>{
+test('starting markets keep friendly guides without service roles or job offers',async()=>{
   S.setActive(bible('cyberpunk'));
   try{
     const G=require('../retort/inhabitantGeneration'),rows=require('./fixtures/inhabitants.cjs')(3),prompts=[];
     const $={user:t=>prompts.push(String(t)),assistant:{generation:async req=>({content:JSON.stringify({inhabitants:require('./fixtures/inhabitant-batch.cjs').batchRows(rows,req)})})}};
     const result=await G.generateInhabitants($,{geoKey:'0,0,0',roomName:'Market',rooms:{'0,0,0':{environmentIntent:{template:'market',citySite:{name:'City'}}}}},
       {random:min=>min,level:()=>1,sex:()=>'Female',xp:()=>0,equipment:async()=>null});
-    const actors=Object.values(result.population.actors);assert.equal(actors.length,3);assert.equal(actors.filter(a=>a.serviceRole==='shop').length,1);assert.ok(actors.every(a=>a.allegiance==='Friendly'));
+    const actors=Object.values(result.population.actors);assert.equal(actors.length,2);assert.equal(actors.filter(a=>a.serviceRole==='shop').length,0);assert.ok(actors.every(a=>a.allegiance==='Friendly'));
     const db={'0,0,0':{name:'Market',environmentIntent:{template:'market',citySite:{name:'City'}}}};
     require('../retort/economy').seedRoom(db,'0,0,0',result.population,'future','',{deferCommunity:true});
-    assert.equal(Object.values(db['0,0,0'].services)[0].operator,actors[1].name);assert.equal(actors[1].job,rows[1].job);assert.match(actors[1].dialogue[0],/scrip/);
+    assert.equal(db['0,0,0'].services,undefined);assert.equal(actors[1].job,rows[1].job);assert.equal(db['0,0,0'].minorMissions,undefined);
     const before=JSON.stringify(db);require('../retort/economy').seedRoom(db,'0,0,0',result.population,'future','',{deferCommunity:true});assert.equal(JSON.stringify(db),before);
   }finally{S.setActive(null);}
 });

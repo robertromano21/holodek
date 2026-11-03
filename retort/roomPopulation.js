@@ -74,9 +74,9 @@ function createPopulationService(state) {
       const alreadyPlaced = population.groups.some(group => group.site || group.introPlayed || group.status !== 'unseen');
       Inhabitants.place(population, dungeon);
       const bossKey = Inhabitants.roomKey(consoleText?.match(/^Boss Room Coordinates:[ \t]*([^\r\n]*)/m)?.[1]);
-      Discovery.setup(dungeon, population, { protectedNames: discoveryProtection(), fresh: !previousStamp && !alreadyPlaced,
+      if (Discovery.setup(dungeon, population, { protectedNames: discoveryProtection(), fresh: !previousStamp && !alreadyPlaced,
         bossRoom: bossKey === geoKey,
-        player: observer || dungeon.start });
+        player: observer || dungeon.start })) population.revision++;
       if (previousStamp !== population.placementStamp) console.info('[RoomPopulation]', JSON.stringify({
         phase: 'placement', geoKey, starting: population.starting, indoor: population.indoor, entry: dungeon.start,
         groups: population.groups.map(group => ({ id: group.id, site: group.site, members: group.members,

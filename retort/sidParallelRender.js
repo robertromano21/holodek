@@ -32,7 +32,7 @@ function renderOne(chunk, idx) {
   return new Promise((resolve, reject) => {
     const base = path.join(tmpDir, `part${idx}`);
     const args = [`-f${freq}`, `-o${chunk.track}`, `-t${chunk.seconds.toFixed(3)}`, `-w${base}`, job.sid];
-    const p = spawn('sidplayfp', args, { stdio: 'ignore' });
+    const p = spawn('sidplayfp', args, { stdio: 'ignore', windowsHide: true });
     p.on('error', reject);
     p.on('close', code => {
       const f = findWav(base);

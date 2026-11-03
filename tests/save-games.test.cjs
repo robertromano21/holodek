@@ -93,6 +93,62 @@ test('structural variants retain voxel definitions and share the reconstructed s
   assert.equal(next.tiles.custom_structure_carved.url, '/sid/sprites/new-wall.png'); assert.deepEqual(next.tiles.custom_structure_carved.spriteSpec, dungeon.tiles.custom_structure_carved.spriteSpec);
 });
 
+test('old genre structures retain their voxel recipes when genre painting replaced the original pillar PNG', () => {
+  const p = fixture(), d = p.server.roomDungeonDatabase['0,0,0'];
+  d.tiles.pillar = { url: 'data:image/png;base64,saved-pillar', spriteSpec: { voxelShape: 'g_cyberpunk_support' } };
+  for (const shape of ['g_cyberpunk_support', 'g_cyberpunk_beam', 'g_cyberpunk_roof_panel']) {
+    d.tiles[`custom_structure_v7_${shape}_metal`] = { url: '/sid/sprites/0,0,0_pillar.png?old',
+      spriteSpec: { voxelShape: shape, material: 'metal', palette: { primary: '#334455' } } };
+  }
+  const before = structuredClone(p.server);
+  const next = Assets.rebuild(p.server, '0,0,0', { generateSprite() { assert.fail('An embedded saved surface must not be redrawn.'); }, sceneGraphics() {} });
+  for (const [name, tile] of Object.entries(next.roomDungeonDatabase['0,0,0'].tiles)) {
+    assert.equal(tile.url, d.tiles.pillar.url); assert.deepEqual(tile.spriteSpec, d.tiles[name].spriteSpec);
+  }
+  assert.deepEqual(next.roomDungeonDatabase['0,0,0'].cells, d.cells); assert.deepEqual(p.server, before);
+});
+
+test('surface aliases prefer a real drawing recipe regardless of saved tile order or old URL query strings', () => {
+  const p = fixture(), d = p.server.roomDungeonDatabase['0,0,0'], calls = [];
+  d.visualStyle = { palette: {} };
+  d.tiles = { custom_future_beam: { surfaceSource: 'wall', url: '/sid/sprites/old.png', spriteSpec: { voxelShape: 'beam' } },
+    custom_older_variant: { url: '/sid/sprites/wall.png?older', spriteSpec: { carving: 'laurel' } }, wall: { url: '/sid/sprites/wall.png?newer' } };
+  const next = Assets.rebuild(p.server, '0,0,0', { generateSprite(_s, type) { calls.push(type); return '/sid/sprites/rebuilt.png'; }, sceneGraphics() {} });
+  assert.deepEqual(calls, ['wall']);
+  for (const tile of Object.values(next.roomDungeonDatabase['0,0,0'].tiles)) assert.equal(tile.url, '/sid/sprites/rebuilt.png');
+  assert.deepEqual(next.roomDungeonDatabase['0,0,0'].tiles.custom_future_beam.spriteSpec, d.tiles.custom_future_beam.spriteSpec);
+});
+
+test('missing custom drawing recipes still fail rather than inventing a prop or accepting unrelated structural names', () => {
+  for (const name of ['custom_missing_prop', 'custom_structure_v7_invented_metal', 'custom_structure_v99_g_cyberpunk_support_metal']) {
+    const p = fixture(), d = p.server.roomDungeonDatabase['0,0,0'];
+    d.visualStyle = { palette: {} };
+    d.tiles = { pillar: { url: 'data:image/png;base64,pillar' }, [name]: { url: '/sid/sprites/missing.png',
+      spriteSpec: { voxelShape: 'g_cyberpunk_support', material: 'metal' } } };
+    assert.throws(() => Assets.rebuild(p.server, '0,0,0', { generateSprite() { assert.fail('No recipe exists.'); }, sceneGraphics() {} }), /lacks a drawing recipe/);
+  }
+});
+
+test('legacy structural inference does not overwrite an explicit custom drawing recipe', () => {
+  const p = fixture(), d = p.server.roomDungeonDatabase['0,0,0'], name = 'custom_structure_v7_g_cyberpunk_support_metal', calls = [];
+  d.visualStyle = { palette: {} };d.tiles = { pillar: { url: 'data:image/png;base64,pillar' },
+    [name]: { url: '/sid/sprites/custom.png', spriteSpec: { voxelShape: 'g_cyberpunk_support', material: 'metal' } } };
+  d.customTiles = [{ name, type: 'support', procedure: { material: 'metal' }, spriteSpec: d.tiles[name].spriteSpec }];
+  Assets.rebuild(p.server, '0,0,0', { generateSprite(_style, type) { calls.push(type); return 'data:image/png;base64,custom'; }, sceneGraphics() {} });
+  assert.deepEqual(calls, ['custom_support']);
+});
+
+test('restore hashes authored tile labels into safe filenames without renaming the saved tile or recipe', () => {
+  const p = fixture(), d = p.server.roomDungeonDatabase['0,0,0'], name = 'custom_covered market_0', calls = [];
+  d.visualStyle = { palette: {} };
+  d.tiles = { [name]: { url: '/sid/sprites/previous.png', spriteSpec: { voxelShape: 'g_cyberpunk_support' } } };
+  d.customTiles = [{ name, type: 'covered market', procedure: {}, spriteSpec: d.tiles[name].spriteSpec }];
+  const next = Assets.rebuild(p.server, '0,0,0', { generateSprite(_s, _type, id) { calls.push(id); return '/sid/sprites/'+id+'.png'; }, sceneGraphics() {} });
+  assert.match(calls[0], /^asset_[a-f0-9]{64}$/);
+  assert.deepEqual(Object.keys(next.roomDungeonDatabase['0,0,0'].tiles), [name]);
+  assert.deepEqual(next.roomDungeonDatabase['0,0,0'].customTiles, d.customTiles);
+});
+
 test('old bridge saves recover complete character recipes from their existing actor sprites', () => {
   const p = fixture();
   p.browser.data.combatCharacters = [{ sprite: { spec: { kind: 'procedural', source: 'llm', name: 'The Keeper', sex: 'Female', race: 'Shade', class: 'Witch', level: 3, salt: 44, variant: 2, traits: { bodyPlan: 'humanoid' } } } }];

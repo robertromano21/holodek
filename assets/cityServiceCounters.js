@@ -1,10 +1,11 @@
-(function(root,factory){const api=factory(typeof module==='object'&&module.exports?require('./cityEstablishments'):root.CityEstablishments);
+(function(root,factory){const api=factory(typeof module==='object'&&module.exports?require('./cityEstablishments'):root.CityEstablishments,
+  typeof module==='object'&&module.exports?require('./economyRules'):root.EconomyRules);
   if(typeof module==='object'&&module.exports)module.exports=api;else root.CityServiceCounters=api;
-})(typeof window==='object'?window:globalThis,function(E){
+})(typeof window==='object'?window:globalThis,function(E,Economy){
   'use strict';
   const cache=new WeakMap();
   function catalog(d){
-    if(!d)return[];
+    if(!d||Economy?.isStarterRoom(d.geoKey,d))return[];
     const stamp=`${d._geometryStamp||''}:${d.sceneStructures?.length||0}:${d.cityBlocks?.buildings?.length||0}`;
     const prior=cache.get(d);if(prior?.stamp===stamp&&prior.parts===d.sceneStructures)return prior.rows;
     const venues=new Map((d.cityBlocks?.buildings||[]).filter(b=>E.serviceNotice(b)).map(b=>[b.id,b]));

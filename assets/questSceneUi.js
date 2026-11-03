@@ -59,6 +59,7 @@
           finally {pending=false;buttons.forEach(b=>b.disabled=false);}
         });
       }
+      root.CombatCharacterUi?.addRecruitAction?.(popup,scene.actor,{close,blocked});
       const cancel=document.createElement('button');cancel.className='popup-button';cancel.type='button';cancel.textContent='Later';
       cancel.addEventListener('click',()=>{if(!pending){serial++;close();}});popup.appendChild(cancel);
       const escape=event=>{if(event.key==='Escape'&&!pending){serial++;close();}};

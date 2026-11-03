@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict'), Stock = require('../retort/merchantStock');
 function fixture() {
-  let run = 'stock-run', db = { '0,0,0': { name: 'Market', services: { stall: { id: 'stall', kind: 'shop', operator: 'Keeper',
+  let run = 'stock-run', db = { '0,0,0': { name: 'Market', cityFloorContext: { floor: 1 }, services: { stall: { id: 'stall', kind: 'shop', operator: 'Keeper',
     till: 37, revision: 1, ...Stock.pending() } } } };
   return { getDungeonRunId: () => run, getRoomNameDatabase: () => JSON.stringify(db), setRoomNameDatabase: text => { db = JSON.parse(text); },
     newRun: () => { run = 'another-run'; }, db: () => db };

@@ -1,10 +1,14 @@
 (function(root) {
   'use strict';
   let pending = false, currentClose = null, interaction = null;
-  const blocked = () => !!(pending || root.GameCommandGate?.busy() || root.gamePaused || root.actionDiceState?.active || root._combatCommandPending || root._characterStartupPending);
+  const actionBlocked = () => !!(root.gamePaused || root.actionDiceState?.active || root._combatCommandPending || root._characterStartupPending ||
+    root._combatRoundActiveUntil > Date.now() || root._gameOver || root._playerUnconscious || root._deathSceneActive);
+  const blocked = () => !!(pending || root.GameCommandGate?.busy() || actionBlocked());
+  const track = work => root.GameCommandGate?.trackNative ? root.GameCommandGate.trackNative(work) : work();
   const blockedMessage = () => root.gamePaused ? 'Resume the game before trading.' : 'Finish the current action or arrival story before trading.';
   const key = s => String(s || '').trim().toLowerCase();
   const serviceVenues = new Set(['shop','temple','clinic','inn','bar','foodhall','workshop','warehouse','guild','library','civic','court','transit','theatre','bathhouse','arena']);
+  const starterRoom = () => root.EconomyRules?.isStarterRoom(root.currentDungeon?.geoKey,root.currentDungeon);
   function observer() {
     const ctx = root.getDungeonLifeContext?.();
     if (!ctx?.dungeon || !ctx.player) throw Error('The room is not ready.');
@@ -33,6 +37,7 @@
     return interaction;
   }
   async function transact(request) {
+    return track(async () => {
     const ctx = observer();
     if (request.kind === 'take' && !root.ObjectDiscovery?.isVisible(root.currentDungeon, request.item)) throw Error('That object is no longer in view.');
     const selected = request.kind === 'take' ? root.currentDungeon.sceneObjects?.find(item => key(item.name) === key(request.item)) : null;
@@ -60,6 +65,7 @@
       nonce: request.nonce || root.crypto?.randomUUID?.() || 'transaction:' + Date.now() + ':' + Math.random().toString(36).slice(2) });
     if (sameRoom(ctx)) await root.applyRealtimeCombatResult?.(event);
     return event;
+    });
   }
   function popup(title, text) {
     const origin = observer();
@@ -103,33 +109,48 @@
     const access = document.createElement('button'); access.type = 'button'; access.className = 'popup-button'; access.textContent = jobs ? 'View Job Offers' : inquiries ? 'Work Inquiries' : 'Access Services';
     access.addEventListener('click', async () => {
       if (!sameRoom(held)) { box.close(); notice('That invitation belonged to another room or game.'); return; }
-      if (blocked()) { box.info.textContent = blockedMessage(); return; }
       if(held.phase==='loading')return;
+      if (actionBlocked() || blocked() && !root.GameCommandGate?.waitForIdle) { box.info.textContent = blockedMessage(); return; }
       held.phase='loading';box.info.textContent=inquiries?'Opening the work desk...':'Preparing services and the resident introduction...';
       box.element.setAttribute('aria-busy','true');box.element.querySelectorAll('button').forEach(b=>b.disabled=true);
       try {
+        if (root.GameCommandGate?.waitForIdle) await root.GameCommandGate.waitForIdle({includeCommands:true});
+        if(currentClose!==box.close)return;
+        if(!sameRoom(held))throw Error('That invitation belonged to another room or game.');
+        if(blocked())throw Error(blockedMessage());
         const opened=await accept();
         if(currentClose===box.close){if(opened===false)box.info.textContent='The menu could not open. Check the action notice and try again.';else box.close();}
       } catch(error){if(currentClose===box.close)box.info.textContent=error.message;else notice(error.message);}
       finally{if(currentClose===box.close){held.phase='offer';box.element.setAttribute('aria-busy','false');box.element.querySelectorAll('button').forEach(b=>b.disabled=false);}}
     });
-    box.rows.appendChild(access); box.add('Not Now');
+    box.rows.appendChild(access);
+    root.CombatCharacterUi?.addRecruitAction?.(box.rows,actor,{close:box.close,blocked});
+    const later=document.createElement('button');later.type='button';later.className='popup-button';later.textContent='Not Now';
+    later.addEventListener('click',()=>{
+      if(pending)return;
+      box.close();
+      if(sameRoom(held))root.CombatCharacterUi?.open?.({name:actor},{services:false});
+    });box.rows.appendChild(later);
     return true;
   }
   function invite(actor) {
+    if(starterRoom())return false;
     const business = root.getEconomyResidentInfo?.(actor);
     if (!business || !business.jobs && !business.venue && !['shop', 'temple', 'venue', 'divine'].includes(business.kind)) return false;
     return invitation(actor, () => open(actor), business.jobs && (business.kind === 'mission'||business.inquiries),business.inquiries);
   }
   function inviteAmbient(actor, accept) {
+    if(starterRoom())return false;
     const row=root.currentDungeon?.cityCrowd?.actors?.[actor.crowdId];
     if(!row||row.status!=='ambient'||row.name!==actor.name||row.occupation?.mode!=='work'||
       !serviceVenues.has(row.occupation.venueType)||typeof accept!=='function')return false;
     return invitation(actor.name,accept,false,root.CityEstablishments? !root.CityEstablishments.profile(row.occupation.venueType)?.service:false);
   }
   async function openCounter(counterId) {
+    if(starterRoom())return false;
     if(blocked()){notice(blockedMessage());return false;}
     const origin=observer();pending=true;
+    return track(async()=>{
     try{
       await root.prepareEconomyState?.();if(!sameRoom(origin))return false;
       const result=await post('/city/services/counter',{...observer(),counterId});
@@ -139,10 +160,13 @@
       return await open(result.actor,{counterId});
     }catch(error){if(sameRoom(origin))notice(error.message);return false;}
     finally{pending=false;}
+    });
   }
   async function open(actor,{counterId}={}) {
+    if(starterRoom())return false;
     if (blocked()) { notice(blockedMessage()); return false; }
     pending = true; let held,loading;
+    return track(async()=>{
     try {
       held = beginInteraction(actor);
       if(counterId)held.counterId=counterId;
@@ -160,6 +184,7 @@
       const ctx = observer(), data = await post('/economy/view', { ...ctx, actor });
       if (!sameRoom(ctx)) return false;
       if (data.economyResult) await root.applyRealtimeCombatResult?.(data.economyResult);
+      if (!sameRoom(ctx) || root.GameCommandGate?.waitingNative?.()) return false;
       const box = popup(data.divine ? 'Divine Audience: ' + data.divine.name : data.venue?.name || data.service?.name || 'Local Contracts',
         `Silver Pieces: ${data.silver}` + (data.divine ? `\n${data.divine.domain}\n${data.divine.interest}\nVisit ${data.divine.visits}. This deity travels independently and cannot join the party.` : ''));
       held.element = box.element;held.phase='menu';interaction=held;
@@ -201,9 +226,11 @@
           give.addEventListener('click', () => { if (!blocked()) { box.close(); root.ItemGiveUi?.open(mission.recipient); } }); box.info.after(give);
         }
       }
+      root.CombatCharacterUi?.addRecruitAction?.(box.rows,actor,{close:box.close,blocked});
       box.add('Close'); return true;
     } catch (error) { notice(error.message); return false; }
     finally { if(held?.phase==='loading')loading?.close();if (interaction === held && !held?.element) interaction = null; pending = false; }
+    });
   }
   function metadata(name) {
     return root.InventoryUi?.parseProperties(root.latestUpdatedData?.inventoryProperties || '').find(i => key(i.name) === key(name));
@@ -270,8 +297,9 @@
       } else if (equip || unequip) {
         const gear = equip || unequip;
         await transact({ kind: equip ? 'equip' : 'unequip', item: gear[1], ...(gear[2] ? { target: gear[2] } : {}) });
-      } else if (consume) await transact({ kind: 'drink', item: consume[1], target: consume[2] });
-      else if (drop) await transact(/^all$/i.test(drop[1]) ? { kind: 'drop-all' } : { kind: 'drop', item: drop[1] });
+        root.HolodekSfx?.gear?.(equip ? 'equip' : 'unequip');
+      } else if (consume) { await transact({ kind: 'drink', item: consume[1], target: consume[2] }); root.HolodekSfx?.gear?.('drink'); }
+      else if (drop) { await transact(/^all$/i.test(drop[1]) ? { kind: 'drop-all' } : { kind: 'drop', item: drop[1] }); root.HolodekSfx?.gear?.('drop'); }
       else {
         const ctx = root.getDungeonLifeContext(), selection = root.ObjectDiscovery?.takeRequest(ctx.dungeon, command);
         if (!selection || selection.error) throw Error(selection?.error || 'The current object view is not ready.');

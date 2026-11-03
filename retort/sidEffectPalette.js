@@ -9,6 +9,7 @@ function designs() {
   require('../tools/sfx-build/keyedStems')(api);
   require('../tools/sfx-build/voices')(api);
   require('../tools/sfx-build/rangedEffects')(api); // world1 ranged weapons (additive)
+  require('../tools/sfx-build/worldEffects')(api); // concealed doors, gear, puzzles, quest stingers (additive)
   return out;
 }
 const names = [...designs().keys()];

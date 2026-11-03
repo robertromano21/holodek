@@ -93,7 +93,10 @@ function createService(state, { models = require('./gameModels'), website = requ
       if (!target || target.name !== job.name || target.visited || target.preparedBuild?.ready || target.builder?.mode === 'hand') return finish(job, 'skipped');
       // Reserve frontier coordinates before paying for any model work, not at its first checkpoint.
       const topology = registry.plan(job, db);
-      if (topology.changed) state.setRoomNameDatabase(JSON.stringify(db));
+      // Reserve encounter rolls centrally before concurrent helpers take their snapshots.
+      const hadRoll=!!target.encounterRoll;
+      const encounterRoll=require('./encounterPolicy').reserve(db,job.key,{seed:job.runId});
+      if (topology.changed || !hadRoll&&encounterRoll) state.setRoomNameDatabase(JSON.stringify(db));
       topology.publish();
       // Take a fresh snapshot at execution, not when queued, to include earlier neighbors and player discoveries.
       job.base = structuredClone(db);

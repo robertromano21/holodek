@@ -99,7 +99,9 @@ function install(app, options) {
   router.post('/:slot', handle(async (req, res) => {
     const result = await exclusive(req, async () => {
       if (!state.getGamePaused()) throw error('Pause the game before creating a checkpoint.', 409);
-      const snapshot = Shape.validate(await capture()), browser = Shape.clone(req.body.browser);
+      const browser = Shape.clone(req.body.browser);
+      const party = require('./retort/partyCheckpoint').reconcile(Shape.validate(await capture()),browser), snapshot = party.server;
+      if(party.changed)console.info('[PartyCheckpoint]',JSON.stringify({stage:'save',runId:snapshot.dungeonRunId,recovered:party.recovered}));
       const geo = `${snapshot.lastCoords.x},${snapshot.lastCoords.y},${snapshot.lastCoords.z}`;
       const rooms = JSON.parse(snapshot.roomNameDatabaseString), text = snapshot.updatedGameConsole;
       return store.write(req.params.slot, { savedAt: new Date().toISOString(), label: String(req.body.label || 'Adventure').trim().slice(0, 80),
@@ -120,7 +122,9 @@ function install(app, options) {
       if (!Models.catalog.some(m => m.id === p.settings.model) && p.settings.model !== 'original') throw error('Saved game model is not supported by this build.');
       // Render just this room before committing. Returning to another saved
       // room lazily rebuilds its graphics from its own recipe in sharedState.
-      const server = options.rebuild ? await options.rebuild(p.server, p.roomKey) : require('./saveGameAssets').rebuild(p.server, p.roomKey);
+      const rebuilt = options.rebuild ? await options.rebuild(p.server, p.roomKey) : require('./saveGameAssets').rebuild(p.server, p.roomKey);
+      const party = require('./retort/partyCheckpoint').reconcile(rebuilt,p.browser), server = party.server;
+      if(party.changed)console.info('[PartyCheckpoint]',JSON.stringify({stage:'load',runId:server.dungeonRunId,recovered:party.recovered}));
       Shape.validate(server);
       const characterTraits = require('./saveGameAssets').characterTraits(p);
       Traits.restoreCachedTraitSpecs(characterTraits);

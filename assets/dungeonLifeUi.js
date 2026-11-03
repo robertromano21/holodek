@@ -428,7 +428,7 @@
     if (!visitPending && now - lastVisit >= 3000) {
       visitPending = true; lastVisit = now;
       const geoKey = ctx.dungeon.geoKey, runId = root.dungeonRunId, epoch = timeline;
-      post('/room-population/visit', { geoKey, runId, geometryStamp:ctx.dungeon._geometryStamp, crowdRevision:ctx.dungeon.cityCrowd?.revision,
+      const visit = () => post('/room-population/visit', { geoKey, runId, geometryStamp:ctx.dungeon._geometryStamp, crowdRevision:ctx.dungeon.cityCrowd?.revision,
         crowdMovements:root.CityCrowdMotion?.observations(ctx.dungeon),player: ctx.player,
         actors: ctx.actors.map(a => ({ name: a.name, mazeX: a.mazeX, mazeY: a.mazeY, discoveryRevision: a.discoveryRevision, mazePoint: I.dialoguePoint(speakingActor(a)) })) })
         .then(result => { if (result && epoch === timeline && root.dungeonRunId === runId && context()?.dungeon?.geoKey === geoKey) {
@@ -438,7 +438,8 @@
           if (result.story) receiveEncounter(result.story);
           else receiveDialogue({ dialogue: result.dialogue, geoKey, runId, source: 'room-visit' });
           for (const discovery of result.discoveries || []) root.DungeonAreaTitles?.notice?.(discovery);
-        } })
+        } });
+      (root.GameCommandGate?.trackNative ? root.GameCommandGate.trackNative(visit) : visit())
         .catch(error => console.warn('[RoomPopulation]', error.message)).finally(() => { if (epoch === timeline) visitPending = false; });
     }
     if (!autonomyPending && ![...attention.values()].some(a=>a.awaitingReply||a.responding) && now - lastAutonomy >= I.DIALOGUE_REFRESH_MS) {
