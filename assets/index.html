@@ -831,6 +831,30 @@ function toggleCombatMode() {
       if(popup){popup.style.display='block';centerPartySheet();}
     }
 
+    function partySpriteBounds(source) {
+      const full = { x: 0, y: 0, w: source.width, h: source.height };
+      try {
+        const c = document.createElement('canvas'); c.width = source.width; c.height = source.height;
+        const g = c.getContext('2d'); g.drawImage(source, 0, 0);
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+        for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) if (d[(x + y * c.width) * 4 + 3]) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+        return x1 < 0 ? full : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+      } catch (_) { return full; }
+    }
+
+    // Visible body height in cells, exactly as Combat Mode sizes the grid token.
+    function partyCombatBodyCells(entry) {
+      if (typeof combatMapActorSize !== 'function') return null;
+      const name = String(entry.label || '').toLowerCase();
+      const live = (window.combatCharacters || []).find(c => String(c?.name || c?.Name || '').replace(/^Name:\s*/i, '').trim().toLowerCase() === name);
+      const character = live || { ...(entry.source || {}), name: entry.label, sprite: entry.sprite || entry.source?.sprite };
+      const cells = combatMapActorSize(character, 1) * (character._combatBodyFraction || 1);
+      return Number.isFinite(cells) && cells > 0 ? cells : null;
+    }
+
     function drawPartySpriteCanvas(canvas, entry) {
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
@@ -843,15 +867,23 @@ function toggleCombatMode() {
 
       const renderCanvas = (sourceCanvas) => {
         if (!sourceCanvas || canvas._partySpriteDrawId !== drawId) return false;
-        const fit = Math.min(canvas.width / sourceCanvas.width, canvas.height / sourceCanvas.height);
-        // Integer upscaling stays crisp; smaller avatars must contain the entire sprite.
-        const scale = fit >= 1 ? Math.floor(fit) : fit;
-        const drawW = sourceCanvas.width * scale;
-        const drawH = sourceCanvas.height * scale;
+        // Combat Mode relative size: crop to the visible body, then size it by the same
+        // combatMapActorSize ratio the grid uses (absolute size, in game pixels).
+        const crop = partySpriteBounds(sourceCanvas);
+        const bodyPx = entry._combatBodyPx;
+        if (bodyPx) {
+          // Actual Combat Mode size: body height = grid token body height in game pixels.
+          canvas.width = Math.max(36, Math.ceil(crop.w * bodyPx / crop.h)); canvas.height = Math.max(36, Math.ceil(bodyPx));
+          canvas.style.width = canvas.width + 'px'; canvas.style.height = canvas.height + 'px'; ctx.imageSmoothingEnabled = false;
+        }
+        const fit = bodyPx ? bodyPx / crop.h : Math.min(canvas.width / crop.w, canvas.height / crop.h);
+        const scale = fit >= 1 && !bodyPx ? Math.floor(fit) : fit;
+        const drawW = crop.w * scale;
+        const drawH = crop.h * scale;
         const x = Math.floor((canvas.width - drawW) / 2);
-        const y = Math.floor((canvas.height - drawH) / 2);
+        const y = !bodyPx ? Math.floor((canvas.height - drawH) / 2) : Math.floor(canvas.height - drawH);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(sourceCanvas, x, y, drawW, drawH);
+        ctx.drawImage(sourceCanvas, crop.x, crop.y, crop.w, crop.h, x, y, drawW, drawH);
         return true;
       };
 
@@ -913,7 +945,9 @@ function toggleCombatMode() {
           <span class="party-icon-hp">${entry.hp || '--/--'}</span>
         </button></div>`;
       }).join('');
+      const bodyCells = entries.map(partyCombatBodyCells);
       entries.forEach((entry, index) => {
+        entry._combatBodyPx = bodyCells[index] && typeof COMBAT_CELL_SIZE === 'number' ? bodyCells[index] * COMBAT_CELL_SIZE : 0;
         drawPartySpriteCanvas(document.getElementById(`party-icon-canvas-${index}`), entry);
       });
       window.renderPartyDice?.(dock, entries);

@@ -9,6 +9,16 @@ const prose = 'Nyssara\u2019s ethereal gaze sharpens, her voice a low murmur, \u
 const expected = [{ speaker: 'Nyssara', line: 'The path ahead is fraught with shadows.' },
   { speaker: 'Voranyx', line: 'Each step we take risks stirring old betrayals.' }];
 
+test('the logged Calthokael refusal survives short-name possessive activity attribution without speech labels',()=>{
+  const line='I won’t promise myself to a road I haven’t heard. But I’ll keep listening. A song can carry a name farther than a vow can carry a body.';
+  const prose='Mortacia’s tale has been told to the nearby listeners. Calthokael Qyas heard it; Veyr Ashkettle, Dorga Flintlaugh, and Oruun of the Still Pool were close enough to hear and react.\n\nCalthokael’s shell-tapping falters for a beat. “'+line+'”\n\nVyth Aerir had said he would consider joining, but he is not among those close enough to answer now.';
+  const names=['Calthokael Qyas','Veyr Ashkettle','Dorga Flintlaugh','Oruun of the Still Pool'];
+  const result=I.extractDialogue(prose+'[[CHARACTER_DIALOGUE]]'+JSON.stringify({spoken:[{speaker:'Calthokael Qyas',remember:'Declined the invitation.'}],replies:[]})+'[[/CHARACTER_DIALOGUE]]',names,{audibleNames:names});
+  assert.equal(result.content,prose);assert.equal(result.dialogue.length,1);assert.equal(result.dialogue[0].speaker,'Calthokael Qyas');assert.equal(result.dialogue[0].line,line);
+  assert.deepEqual(I.extractAttributedSpeech('Calthokael’s inscription reads, “Stay here.”',names),[]);
+  assert.deepEqual(I.extractAttributedSpeech('Calthokael’s shell-tapping falters. “Stay here.”',['Calthokael Qyas','Calthokael Reed']),[]);
+});
+
 test('the Wind Ledger Flats reply recovers Dorrik and Pellin speech when the model omits backend labels', () => {
   const names = ['Dorrik Slatehymn', 'Pellin Reedcup'];
   const lines = [

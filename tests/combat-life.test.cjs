@@ -26,6 +26,57 @@ test('automatic survival saves distinguish stable unconsciousness from dying, wi
   }
 });
 
+test('hostile defeats award and log XP once across unconsciousness, healing, repeat defeat and later death', () => {
+  for (const save of [1, 20]) {
+    const f = fixture(), notices = [];
+    f.state.setUpdatedGameConsole(f.state.getUpdatedGameConsole().replace(/(Monsters in Room:[\s\S]*?State: )Friendly/, '$1Hostile'));
+    f.state.emitter.on('combat_life_action', n => notices.push(n));
+    const before = f.actor('PC').xp;
+    f.injure('Enemy', save);
+    const reward = f.life().defeatXP[0];
+    assert.ok(reward.total >= 1000 && reward.total <= 1500);
+    assert.equal(f.actor('PC').xp, before + Math.floor(reward.total/2));
+    assert.match(notices.find(n => n.kind === 'defeat-xp').message, /party earns \d+ XP.*PC: \+\d+ XP.*Ally: \+\d+ XP/);
+    Life.commit(f.state, JSON.parse(f.state.getRoomNameDatabase()));
+    let db = JSON.parse(f.state.getRoomNameDatabase());
+    Life.apply(db, 'life-run', f.actor('Enemy'), 10, null, { geoKey: '0,0,0' }); Life.commit(f.state, db);
+    f.injure('Enemy', save); Life.advance(f.state); Life.advance(f.state);
+    assert.equal(f.actor('PC').xp, before + Math.floor(reward.total/2));
+    assert.equal(notices.filter(n => n.kind === 'defeat-xp').length, 1);
+    const stale = f.state.getUpdatedGameConsole().replace(/(PC:[\s\S]*?XP:)\s*\d+/, '$1 0');
+    assert.equal(Life.actors(Life.preserve(f.state, stale).text).find(a => a.name === 'PC').xp, f.actor('PC').xp);
+  }
+});
+
+test('neutral defeats never grant hostile XP', () => {
+  const f = fixture(); f.injure('Enemy',20);
+  assert.equal(f.life().defeatXP, undefined);
+});
+
+test('natural recovery waits through all combat rounds and ten post-combat turns; healing still wakes during combat', () => {
+  const f = fixture(); Life.beginCombat(f.state); f.injure('Enemy',20);
+  for(let i=0;i<30;i++) Life.advance(f.state);
+  assert.equal(f.actor('Enemy').hp,0);
+  Life.settle(f.state);
+  for(let i=1;i<Life.RECOVERY_TURNS;i++) { Life.advance(f.state); Life.settle(f.state); assert.equal(f.actor('Enemy').hp,0); }
+  Life.advance(f.state); assert.equal(f.actor('Enemy').hp,1);
+  Life.beginCombat(f.state); f.injure('Ally',20);
+  const db=JSON.parse(f.state.getRoomNameDatabase());
+  Life.apply(db,'life-run',f.actor('Ally'),5,null,{geoKey:'0,0,0'}); Life.commit(f.state,db);
+  assert.equal(f.actor('Ally').hp,5); assert.equal(f.actor('Ally').state,'Friendly');
+});
+
+test('legacy unconscious timers and a new fight cannot cause premature natural recovery', () => {
+  const f=fixture(); f.injure('Enemy',20);
+  let db=JSON.parse(f.state.getRoomNameDatabase());
+  db['0,0,0'].combatLife.actors.enemy.recoverAt=0; delete db['0,0,0'].combatLife.actors.enemy.recoveryVersion;
+  f.state.setRoomNameDatabase(JSON.stringify(db)); Life.advance(f.state);
+  assert.equal(f.actor('Enemy').hp,0);
+  Life.beginCombat(f.state); for(let i=0;i<20;i++) Life.advance(f.state);
+  assert.equal(f.actor('Enemy').hp,0); Life.settle(f.state);
+  assert.equal(f.life().actors.enemy.recoverAt,f.life().clock+Life.RECOVERY_TURNS);
+});
+
 test('monster defeat evidence survives healing and recovery but cannot cross rooms or adventures', () => {
   const Defeats=require('../retort/questDefeatEvidence'),f=fixture();
   f.injure('Enemy',20);
@@ -52,7 +103,7 @@ test('bandaging is adjacent, turn-consuming, idempotent and stabilizes without r
   assert.equal(f.actor('Ally').state, 'Unconscious'); assert.equal(f.actor('Ally').hp, 0);
   assert.equal(Life.care(f.state, request).duplicate, true);
   assert.ok(Life.care(f.state, { ...request, target: 'Enemy' }).error);
-  Life.advance(f.state); assert.equal(f.actor('Ally').hp, 0);
+  for (let i=1;i<Life.RECOVERY_TURNS;i++) { Life.advance(f.state); assert.equal(f.actor('Ally').hp, 0); }
   Life.advance(f.state); assert.equal(f.actor('Ally').hp, 1, 'Stable characters eventually recover instead of soft-locking a solo PC');
 });
 
@@ -73,7 +124,7 @@ test('survival, countdown, aid and death publish committed outcomes exactly once
   assert.match(events.at(-1).message, /bandages Ally.*countdown has stopped/);
   assert.equal(events.at(-1).roll, undefined);
   const count = events.length; Life.care(f.state, input); assert.equal(events.length, count);
-  Life.advance(f.state); Life.advance(f.state); assert.equal(f.actor('Ally').state, 'Friendly');
+  for(let i=0;i<Life.RECOVERY_TURNS;i++) Life.advance(f.state); assert.equal(f.actor('Ally').state, 'Friendly');
 
   const dying = fixture(), deaths = []; dying.state.emitter.on('combat_life_action', notice => deaths.push(notice));
   dying.injure('Ally'); Life.advance(dying.state); Life.advance(dying.state); Life.advance(dying.state);
@@ -117,7 +168,7 @@ test('deliberate mercy stabilizes a dying opponent as Neutral, but automated aid
   assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a => a.name === 'Enemy').allegiance, 'Neutral');
   assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a => a.name === 'Enemy').pursuit, undefined);
   assert.deepEqual(Life.claimDeaths(f.state), []);
-  Life.advance(f.state); Life.advance(f.state);
+  for(let i=0;i<Life.RECOVERY_TURNS;i++) Life.advance(f.state);
   assert.equal(f.actor('Enemy').state, 'Neutral'); assert.equal(f.actor('Enemy').type, 'monster');
   assert.equal(Life.care(f.state, input).duplicate, true);
 });

@@ -178,6 +178,9 @@ function context(state, input, options = {}) {
   if (state.getGamePaused?.()) throw Error('Resume the game before casting.');
   const caster = (options.monster ? allActors(text) : party(text)).find(a => a.name === input.caster && a.hp > 0);
   if (!caster) throw Error('Only a living equipped party member can cast.');
+  const casting = pool.casting;
+  if (casting && casting.blocked?.[Rules.key(caster.name)] === casting.round) throw Error('Spells are unavailable for the rest of this round after taking damage.');
+  if (casting?.pending?.[Rules.key(caster.name)] && !options.continuing) throw Error('This character is already casting a spell.');
   if (turned(state, caster)) throw Error('A turned character must withdraw before acting again.');
   const innate = pool.casters?.[caster.name];
   const entry = pool.items[input.itemId] || (innate?.id === input.itemId ? innate : null), slot = entry?.classSource ?
@@ -194,7 +197,7 @@ function context(state, input, options = {}) {
   const from = Reach.position(a, geoKey), to = Reach.position(t, geoKey);
   if (!target || !dungeon || !from || !to || t.discoveryState === 'pending' || !Reach.lineClear(dungeon, from, to)) throw Error('Choose a living target in the same room with a clear line of sight.');
   const friendly = ['heal', 'ward'].includes(spell.effect);
-  const team = a => ['pc', 'npc'].includes(a.type) ? 'Friendly' : I.allegiance(a);
+  const team = a => ['pc', 'npc'].includes(a.type) ? 'Friendly' : db['0,0,0']?.combatLife?.actors?.[Rules.key(a.name)]?.allegiance || I.allegiance(a);
   // A player may deliberately spare an opponent; autonomous healing remains team-only.
   const mercyHealing = spell.effect === 'heal' && !options.monster;
   if (friendly ? !mercyHealing && team(target) !== team(caster) : team(target) === team(caster) || !options.monster && I.allegiance(target) !== 'Hostile') throw Error(friendly ? 'Choose a living ally.' : 'Choose an enemy.');
@@ -211,7 +214,9 @@ function choices(state, casterName, targets, options = {}) {
     for (const a of candidates) {
       const input = { runId: state.getDungeonRunId(), geoKey, caster: casterName, itemId: item.id, spellId: spell.id, target: a.name };
       try { context(state, input, { ...options, combat: true, allowedTargets: targets }); choices.push({ ...input, revision: v.revision, name: spell.name, itemName: item.name,
-        cost: spell.cost, magic: item.magic, effect: spell.effect, destroysItem: spell.destroysItem, description: spell.description }); } catch {}
+        cost: spell.cost, magic: item.magic, effect: spell.effect, castingRounds: require('./combatCasting').timing(spell), range: spell.range,
+        radius: spell.radius, dice: spell.dice, sides: spell.sides, bonus: spell.bonus, absorb: spell.absorb,
+        destroysItem: spell.destroysItem, description: spell.description }); } catch {}
     }
   }
   return choices;
@@ -372,6 +377,8 @@ function cast(state, service, input, options = {}) {
     state.setRoomNameDatabase(JSON.stringify(db));
     if (service) { const population = service.get(geoKey, state.getUpdatedGameConsole()); I.sync(population, I.parseSheets(state.getUpdatedGameConsole())); service.save(population); }
     if (ash) require('./questFailure').itemDestroyed(state, entry.name);
+    console.info('[CombatSpell]', JSON.stringify({ phase: 'resolved', caster: caster.name, type: caster.type,
+      spell: spell.name, target: target.name, cost: spell.cost, remaining: entry.remaining, changes }));
     return result;
   } catch (error) { return { error: error.message }; }
 }
@@ -424,18 +431,55 @@ function preserve(state, incomingText, incomingDB) {
   return { text, database: incomingDB };
 }
 const opening = new WeakMap();
+function forfeit(db, text, casterName, itemId, cost) {
+  const pool = db['0,0,0']?.spellSystem, entry = pool?.items[itemId] || pool?.casters?.[casterName];
+  if (!entry || entry.id !== itemId || entry.remaining < cost) return text;
+  if (entry.classSource && entry.remaining === entry.capacity) entry.nextRecharge = pool.clock + entry.settings.rechargeEvery;
+  entry.remaining -= cost; pool.revision++;
+  const ash = entry.remaining === 0 && !entry.artifact && !entry.classSource;
+  const binding = Object.entries(pool.bindings).find(([binding, id]) => binding.startsWith(casterName + ':') && id === itemId);
+  const slot = binding?.[0].slice(casterName.length + 1);
+  if (ash) { entry.status = 'ash'; if (binding) delete pool.bindings[binding[0]]; }
+  else if (!entry.remaining && entry.artifact) { entry.status = 'recharging'; entry.rechargeAt = pool.clock + Rules.ARTIFACT_RECHARGE_TURNS; }
+  return paint(changeActor(text, casterName, (sheet, actor) => {
+    sheet = stat(sheet, 'Magic', Math.max(0, actor.magic - cost));
+    if (ash && slot) {
+      const eq = I.parseEquipment(actor.lines[9]); eq[slot] = 'None';
+      sheet = sheet.replace(/^([ \t]*Equipped:)[^\r\n]*/m, (_, h) => h + ' ' + Object.entries(eq).map(([s, n]) => s + ': ' + n).join(', '));
+      for (const [label, property] of [['Attack', 'attack_modifier'], ['Damage', 'damage_modifier'], ['Armor', 'ac'], ['AC', 'ac']])
+        sheet = stat(sheet, label, (actor[label.toLowerCase()] || 0) - (Number(entry.properties[property]) || 0));
+    }
+    return sheet;
+  }), pool);
+}
 function queue(state, input) { opening.set(state, input); }
 function takeOpening(state, caster) { const input = opening.get(state); if (input?.caster !== caster) return null; opening.delete(state); return input; }
 function clearOpening(state) { opening.delete(state); }
 function aiChoice(state, caster, targets) {
-  const choicesNow = choices(state, caster.name, targets, { monster: true }), pool = dbOf(state)['0,0,0']?.spellSystem;
-  const hurt = choicesNow.find(c => c.effect === 'heal' && allActors(state.getUpdatedGameConsole()).some(a => a.name === c.target && a.hp < a.maxHp / 2));
-  if (hurt) return hurt;
-  return choicesNow.find(c => c.effect === 'turn') || choicesNow.find(c => ['damage', 'curse', 'blast'].includes(c.effect) && (c.effect !== 'blast' ||
-    !allActors(state.getUpdatedGameConsole()).some(a => I.allegiance(a) === I.allegiance(caster) && a.hp > 0 && a.name !== c.target && (() => {
-      const roster = JSON.parse(state.getCombatCharactersString()), key = c.geoKey, p = Reach.position(roster.find(r => r.name === a.name), key), q = Reach.position(roster.find(r => r.name === c.target), key);
-      return p && q && Math.hypot(p.x - q.x, p.y - q.y) <= 2;
-    })()))) || choicesNow.find(c => c.effect === 'ward' && !pool.effects.some(e => e.target === c.target && e.kind === 'ward' && e.expires > pool.clock && e.remaining > 0));
+  const list = choices(state, caster.name, targets, { monster: true }), pool = dbOf(state)['0,0,0']?.spellSystem;
+  const actors = allActors(state.getUpdatedGameConsole()), roster = JSON.parse(state.getCombatCharactersString() || '[]');
+  const life = dbOf(state)['0,0,0']?.combatLife;
+  const team = a => a.type === 'pc' || a.type === 'npc' ? 'Friendly' : life?.actors?.[Rules.key(a.name)]?.allegiance || I.allegiance(a);
+  const position = name => Reach.position(roster.find(a => a.name === name), I.roomKey(field(state.getUpdatedGameConsole(), 'Coordinates')));
+  const distance = (a, b) => { const p = position(a), q = position(b); return p && q ? Math.hypot(p.x-q.x,p.y-q.y) : Infinity; };
+  const usable = list.filter(c => distance(caster.name, c.target) <= (c.range || Infinity));
+  const hurt = usable.filter(c => c.effect === 'heal').map(c => ({ c, a: actors.find(a => a.name === c.target) }))
+    .filter(({a}) => a && a.hp < a.maxHp / 2).sort((a,b) => (a.a.state === 'Dying' ? -2 : a.a.hp/a.a.maxHp) - (b.a.state === 'Dying' ? -2 : b.a.hp/b.a.maxHp) || a.c.cost-b.c.cost);
+  if (hurt.length) return hurt[0].c;
+  const safe = usable.filter(c => c.effect !== 'blast' || !actors.some(a => I.isAlive(a) && team(a) === team(caster) && distance(a.name,c.target) <= (c.radius || 2)));
+  const blast = safe.find(c => c.effect === 'blast' && actors.filter(a => a.hp > 0 && team(a) !== team(caster) && targets.includes(a.name) && distance(a.name,c.target) <= (c.radius || 2)).length >= 2);
+  if (blast) return blast;
+  const turn = safe.find(c => c.effect === 'turn'); if (turn) return turn;
+  if (caster.hp < caster.maxHp / 2) {
+    const ward = safe.find(c => c.effect === 'ward' && c.target === caster.name && !pool.effects.some(e => e.target === c.target && e.kind === 'ward' && e.expires > pool.clock && e.remaining > 0));
+    if (ward) return ward;
+  }
+  const damage = safe.filter(c => c.effect === 'damage').sort((a,b) => {
+    const score = c => { const target = actors.find(a => a.name === c.target), expected = (c.dice || 0) * ((c.sides || 0)+1)/2 + (c.bonus || 0); return Math.min(expected,target?.hp || 0)/Math.max(1,c.cost); };
+    return score(b)-score(a) || a.cost-b.cost;
+  });
+  if (damage.length) return damage[0];
+  return safe.find(c => c.effect === 'curse' && !pool.effects.some(e => e.target === c.target && e.kind === 'curse' && e.expires > pool.clock));
 }
-module.exports = { Rules, field, write, party, allActors, changeActor, stat, book, metadata, synchronize, developRecipes, adoptRoomRecipes, advance, view, context, choices, cast, rollPlan, survivalPlan, absorb, penalty, turned, consumeTurn, preserve, artifact,
+module.exports = { forfeit, Rules, field, write, party, allActors, changeActor, stat, book, metadata, synchronize, developRecipes, adoptRoomRecipes, advance, view, context, choices, cast, rollPlan, survivalPlan, absorb, penalty, turned, consumeTurn, preserve, artifact,
   queue, takeOpening, clearOpening, aiChoice };

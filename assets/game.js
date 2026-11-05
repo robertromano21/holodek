@@ -7018,6 +7018,16 @@ Coordinates of Connected Rooms: ${connectedRoomsString}
 return; 
 }
 
+// Commit authoritative sheet sources together before rendering the party panels.
+window.refreshPartyPanels = function(data) {
+  if (!data) return;
+  if (typeof data.pc === 'string') window._partyInfoPCString = data.pc;
+  if (typeof data.npcs === 'string') window._partyInfoNPCString = data.npcs;
+  if (typeof data.monsters === 'string') window._combatMonsterSheets = data.monsters;
+  window.renderPartyIconDock?.();
+  window.renderPartyInfoPopup?.();
+};
+
 // Function to display PC data in the PC column
 function displayPCData(charactersString) {
   window._partyInfoPCString = charactersString || '';
@@ -9422,17 +9432,19 @@ window.getEconomyResidentInfo = name => {
   const room = roomNameDatabase.get(currentDungeon?.geoKey);
   if (window.EconomyRules.isStarterRoom(currentDungeon?.geoKey,room || currentDungeon)) return null;
   const introduced=!!room?.inhabitants?.actors?.[name]?.servicesAcceptedAt;
+  const recruitmentCondition=Object.values(room?.minorMissions||{}).find(m=>m.source==='engine-resident-favor-v1' && m.type==='resident-favor' &&
+    m.recipient===name && m.runId===window.dungeonRunId && ['offered','accepted'].includes(m.status));
   if (room?.inhabitants?.actors?.[name]?.deityId) return { kind: 'divine', introduced };
   const operators=b=>window.CityEstablishments?.operators(b)||[b?.operator];
   const service = Object.values(room?.services || {}).find(s => operators(s).includes(name));
   const desk = [room?.venueDesk,...Object.values(room?.venueDesks||{})].find(d=>operators(d).includes(name));
-  const hasJobs=r=>Object.values(r?.minorMissions||{}).some(m=>m.status!=='completed'&&
+  const hasJobs=r=>Object.values(r?.minorMissions||{}).some(m=>!['completed','withdrawn'].includes(m.status)&&
     (m.recipient===name&&m.roomKey===currentDungeon?.geoKey||m.patron===name&&(!m.originRoomKey||m.originRoomKey===currentDungeon?.geoKey)));
   if (service || desk) {
     const inquiries=!service&&desk?.capabilities?.includes('commission')&&!desk.capabilities.includes('lodging');
-    return { kind: service?.kind || 'venue', venue:!!desk, introduced, jobs:inquiries&&hasJobs(room), inquiries };
+    return { kind: service?.kind || 'venue', venue:!!desk, introduced, jobs:inquiries&&hasJobs(room), inquiries, recruitmentCondition };
   }
-  return [...roomNameDatabase.values()].some(hasJobs)?{kind:'mission',jobs:true,introduced}:null;
+  return [...roomNameDatabase.values()].some(hasJobs)?{kind:'mission',jobs:true,introduced,recruitmentCondition}:null;
 };
 window.commitLocalPartyChange = async text => {
   const I = window.DungeonInhabitants;
@@ -9500,7 +9512,7 @@ window.refreshDungeonConsoleStates = () => {
   const population = window.DungeonLife?.population();
   const active = currentDungeon?.geoKey === container.dataset.consoleGeoKey;
   const nearby = active ? new Set(window.DungeonInhabitants.nearbyMonsterNames(currentDungeon,
-    window.combatCharacters || [], population, { x: playerPosX, y: playerPosY })) : null;
+    window.combatCharacters || [], population, { x: playerPosX, y: playerPosY }, { conversation:true })) : null;
   let visible = 0;
   for (const block of container.querySelectorAll('[data-monster-name]')) {
     const name = block.dataset.monsterName;
@@ -9646,6 +9658,7 @@ window.applyPreparedRoomEntry = event => {
   updateCharacterSheetsFromConsole(text);
   window.latestUpdatedData = api.consoleView(text, window.latestUpdatedData);
   updateGameConsole('', currentCoordinates, text, null, text);
+  window.refreshPartyPanels?.(window.latestUpdatedData);
   window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
   // Keep the command gate closed: the same serialized turn is still authoring its quest/story.
   return true;
@@ -9685,6 +9698,7 @@ window.applyRealtimeCombatResult = async event => {
     for(const [key,room] of Object.entries(database))roomNameDatabase.set(key,room);
   }
   if (event.type === 'economy_result' || event.type === 'spell_result') roomDatabaseSyncClient.reset();
+  window.CommerceUi?.receiveResult?.(event);
   if (Array.isArray(event.sceneObjects)) currentDungeon.sceneObjects = event.sceneObjects;
   window.lastServerGameConsole = text;
   updateCharacterSheetsFromConsole(text);
@@ -9697,6 +9711,7 @@ window.applyRealtimeCombatResult = async event => {
   generateMonstersForRoom(event.geoKey, text);
   updateGameConsole('', currentCoordinates, text, null, text);
   window.latestUpdatedData = window.DungeonInhabitants.consoleView(text, window.latestUpdatedData);
+  window.refreshPartyPanels?.(window.latestUpdatedData);
   window.SpellUi?.hydrate(text);
   window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
   const entry = document.createElement('p'); entry.style.whiteSpace = 'pre-wrap'; entry.textContent = event.content;
@@ -13109,6 +13124,8 @@ const taskRequest = {
                 console.log("Updated local roomNameDatabase from server");
               }
         
+              window.CommerceUi?.receiveResult?.({ ...result, runId: window.dungeonRunId, geoKey: coordsKey });
+
               // Update client combatMode and UI
               if (serverCombatMode) {
                 window.combatMode = serverCombatMode;
@@ -13235,7 +13252,7 @@ const taskRequest = {
         ensureKnownSpritesInCombatList(window.combatCharacters);
         syncPartyMazeToCombatPositions(false);
         newCombatCharacters = window.combatCharacters;
-                const combatScene = window.combatGame.scene.getScene('CombatScene');
+                const combatScene = window.combatGame?.scene?.getScene('CombatScene');
                 if (combatScene) {
                     if (!combatScene.initialized) {
                         console.log("Initializing CombatScene for the first time with:", newCombatCharacters);
@@ -13262,6 +13279,10 @@ const taskRequest = {
             addPromptAndResponse(userInput, messages[0].content, messages[1].content, content, personalNarrative, conversationId, updatedGameConsole);
     
             updatedGameConsole = updateGameConsole(userInput, currentCoordinates, conversationHistory, objectsInRoomString, serverGameConsole);
+            // The legacy console builder can redraw from the previous local NPC array.
+            // Finish with the server's complete membership, after that redraw and roster reconciliation.
+            updatedGameConsole = serverGameConsole;
+            window.refreshPartyPanels?.(window.DungeonInhabitants.consoleView(serverGameConsole, window.latestUpdatedData));
             if (window.DEBUG_LOGS) console.log(updatedGameConsole);
             conversationHistory = conversationHistory + "\n" + updatedGameConsole;
             turns++;

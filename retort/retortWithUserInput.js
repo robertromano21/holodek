@@ -114,6 +114,8 @@ const Economy = require('./economy');
 const AdjacentRooms = require('./adjacentRooms');
 const SpellSystem = require('./spellSystem');
 const CombatLife = require('./combatLife');
+const ResidentFavors = require('./residentFavors');
+const CombatCasting = require('./combatCasting');
 const QuestFailure = require('./questFailure');
 const AdjudicationMetadata = require('./adjudicationMetadata');
 const PuzzleRewards = require('./puzzleRewards');
@@ -981,6 +983,8 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   if (stagedRecruitment) return {...stagedRecruitment,updatedGameConsole:sharedState.getUpdatedGameConsole(),
     combatCharactersString:sharedState.getCombatCharactersString(),roomNameDatabaseString:sharedState.getRoomNameDatabase()};
   const giveResult = options.realtimeEncounter || directCombat || typeof ItemTransfer === 'undefined' ? null : ItemTransfer.give(sharedState, populationService, userInput);
+  const favorAction = options.realtimeEncounter || directCombat || typeof ResidentFavors === 'undefined' ? null : ResidentFavors.command(sharedState,populationService,userInput);
+  if (favorAction) return favorAction;
   if (giveResult) {
     if (typeof QuestScenes !== 'undefined') QuestScenes.refresh(sharedState);
     if (typeof Economy !== 'undefined') {
@@ -8777,7 +8781,7 @@ function gameConsoleForPerception(consoleText = updatedGameConsole) {
   const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
   const population = key && sharedState.getRoomPopulation(key);
   const perception = Inhabitants.perceive(dungeon, roster, population);
-  const perceived = Inhabitants.perceivedConsole(consoleText, Inhabitants.nearbyMonsterNames(dungeon, roster, population, perception.player));
+  const perceived = Inhabitants.perceivedConsole(consoleText, Inhabitants.nearbyMonsterNames(dungeon, roster, population, perception.player, { conversation:true }));
   return require('../assets/gameLogContent').withoutLootLists(perceived, { inventory: false });
 }
 async function handleCombatRound($, userInput, combatMode) {
@@ -8796,6 +8800,7 @@ async function handleCombatRound($, userInput, combatMode) {
     const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
     combatSpace = dungeon ? createCombatSpace(dungeon, roster, geoKey) : null;
     combatPopulation = sharedState.getRoomPopulation ? populationService.get(geoKey, updatedGameConsole, dungeon) : null;
+    if (typeof CombatLife !== 'undefined' && sharedState.getRoomNameDatabase) CombatLife.beginCombat?.(sharedState);
     actionDice.begin('combat', geoKey, broadcast);
     combatTurnFlow = typeof CombatTurnFlow !== 'undefined' ? CombatTurnFlow.create(actionDice, sharedState) : null;
     try {
@@ -8810,7 +8815,6 @@ async function handleCombatRound($, userInput, combatMode) {
               for (const actor of CombatLife.claimDeaths(sharedState)) {
                 logs.push(`${actor.name} dies from untreated injuries.`);
                 if (actor.type === 'monster') {
-                  if (actor.allegiance === 'Hostile') allocateXP(pc, npcs, 1000 * (actor.level || 1));
                   dropMonsterItemsToRoom(actor);
                 }
               }
@@ -8848,6 +8852,7 @@ async function handleCombatRound($, userInput, combatMode) {
                 if (aidLog.length) logs.push(aidLog.join('\n'));
             }
             CombatLife.settle(sharedState);
+            if (typeof CombatCasting !== 'undefined') CombatCasting.end(sharedState);
         }
         return { ...result, combatLog: logs.join('\n\n'), retreated: combatTurnFlow.retreated };
     } finally {
@@ -9088,17 +9093,30 @@ function automaticCombatSpell(combatant, targets) {
     if (typeof SpellSystem === 'undefined' || !sharedState.getRoomNameDatabase) return null;
     if (combatant.type === 'npc') {
       const queued = SpellSystem.takeOpening(sharedState, combatant.name);
-      if (!queued) return null;
-      const choice = SpellSystem.choices(sharedState, combatant.name, targets.map(a => a.name)).find(s => s.itemId === queued.itemId && s.spellId === queued.spellId && s.target === queued.target);
-      return choice && { cast: { ...choice, nonce: queued.nonce } };
+      if (queued) {
+        const choice = SpellSystem.choices(sharedState, combatant.name, targets.map(a => a.name)).find(s => s.itemId === queued.itemId && s.spellId === queued.spellId && s.target === queued.target);
+        if (choice) return { cast: { ...choice, nonce: queued.nonce } };
+      }
     }
-    if (combatant.type !== 'monster') return null;
+    if (combatant.type !== 'monster' && combatant.type !== 'npc') return null;
     const choice = SpellSystem.aiChoice(sharedState, combatant, targets.map(a => a.name));
     return choice && { cast: { ...choice, nonce: require('node:crypto').randomUUID() } };
 }
+async function continueCombatCasting(combatant, pc, npcs, monsters, alreadyKilled, combatLog, targets) {
+    if (typeof CombatCasting === 'undefined' || !sharedState.getRoomNameDatabase) return false;
+    const pending = CombatCasting.take(sharedState, combatant); if (!pending) return false;
+    if (pending.waiting) { combatLog.push(pending.waiting); return true; }
+    await resolveCombatSpell(pending.choice, combatant, pc, npcs, monsters, alreadyKilled, combatLog, targets);
+    return true;
+}
 async function resolveCombatSpell(choice, combatant, pc, npcs, monsters, alreadyKilled, combatLog, targets) {
-    const options = { combat: true, monster: combatant.type === 'monster', allowedTargets: targets.map(a => a.name) }, rolled = [];
+    const options = { combat: true, monster: combatant.type === 'monster', continuing: choice.continuing === true, allowedTargets: targets.map(a => a.name) }, rolled = [];
     try {
+      if (typeof CombatCasting !== 'undefined' && !choice.continuing) {
+        const started = CombatCasting.prepare(sharedState, choice, options);
+        if (started) { combatLog.push(started); actionDice.recordCombat?.({ kind: 'notice', text: started });
+          console.info('[CombatSpell]', JSON.stringify({ phase: 'casting', caster: combatant.name, type: combatant.type, spell: choice.name, target: choice.target, castingRounds: choice.castingRounds })); return true; }
+      }
       for (const spec of SpellSystem.rollPlan(sharedState, choice, options)) {
         const roll = await actionDice.roll(spec); if (!roll) { combatLog.push('The spell roll was interrupted. No Magic spent.'); return false; }
         rolled.push(roll.natural);
@@ -9121,7 +9139,7 @@ async function resolveCombatSpell(choice, combatant, pc, npcs, monsters, already
         alreadyKilled.add(actor.name); ActionFeedback.publish(broadcast, sharedState, ActionFeedback.defeat(actor, combatant));
         if (actor.type === 'monster') {
           const xp = Inhabitants.allegiance(actor) === 'Hostile' ? getRandomInt(1000, 1500) * actor.level : 0;
-          if (xp) allocateXP(pc, npcs, xp); dropMonsterItemsToRoom(actor);
+          if (xp && (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase)) allocateXP(pc, npcs, xp); dropMonsterItemsToRoom(actor);
         }
       }
     }
@@ -9246,6 +9264,7 @@ async function resolveCombatRound($, userInput, combatMode) {
         if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
+        if (await continueCombatCasting(combatant, pc, npcs, aliveMonsters, alreadyKilled, combatLog, targets)) { needsUpdate = true; continue; }
         if (await automaticCombatAid(combatant, pc, npcs, aliveMonsters, combatLog, alreadyKilled, targets)) { needsUpdate = true; continue; }
 
         if (targets.length === 0) {
@@ -9307,7 +9326,7 @@ async function resolveCombatRound($, userInput, combatMode) {
                 } else if (npcs.some(npcItem => npcItem.name.trim() === target.name.trim())) {
                     combatLog.push(`${target.name} is killed by ${combatant.name}.`);
                 } else if (aliveMonsters.some(monster => monster.name.trim() === target.name.trim())) {
-                    const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
+                    const xpEarned = (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase) && Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
                     combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
 
                     if (xpEarned) allocateXP(pc, npcs, xpEarned);
@@ -9587,6 +9606,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
         if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
+        if (await continueCombatCasting(combatant, pc, npcs, aliveMonsters, alreadyKilled, combatLog, targets)) { needsUpdate = true; continue; }
         if (await automaticCombatAid(combatant, pc, npcs, aliveMonsters, combatLog, alreadyKilled, targets)) { needsUpdate = true; continue; }
 
         if (targets.length === 0) {
@@ -9728,7 +9748,7 @@ async function handleCombatRoundWithMap($, broadcast, userInput, clientCombatCha
                         combatLog.push(`${target.name} is killed by ${combatant.name}.`);
                     } else if (aliveMonsters.some(m => m.name === target.name)) {
                         killedThisRound.push(target);
-                        const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
+                        const xpEarned = (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase) && Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
                         combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
                         if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
@@ -10112,6 +10132,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
         if (await resolveTurnedCombatant(combatant, combatLog)) continue;
 
         const targets = combatTeams.targets(combatant).filter(target => !alreadyKilled.has(target.name));
+        if (await continueCombatCasting(combatant, pc, npcs, aliveMonsters, alreadyKilled, combatLog, targets)) { needsUpdate = true; continue; }
         if (await automaticCombatAid(combatant, pc, npcs, aliveMonsters, combatLog, alreadyKilled, targets)) { needsUpdate = true; continue; }
 
         if (targets.length === 0) {
@@ -10227,7 +10248,7 @@ async function handleInteractiveCombatRoundWithMap($, broadcast, userInput, clie
                     } else if (npcs.some(n => n.name === target.name)) {
                         combatLog.push(`${target.name} is killed by ${combatant.name}.`);
                     } else if (aliveMonsters.some(m => m.name === target.name)) {
-                        const xpEarned = Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
+                        const xpEarned = (typeof CombatLife === 'undefined' || !sharedState.getRoomNameDatabase) && Inhabitants.allegiance(target) === 'Hostile' ? getRandomInt(1000, 1500) * target.level : 0;
                         combatLog.push(`${target.name} is killed by ${combatant.name}${xpEarned ? ` and the party earns ${xpEarned} XP` : ''}.`);
                         if (xpEarned) allocateXP(pc, npcs, xpEarned);
                         dropMonsterItemsToRoom(target);
@@ -13072,7 +13093,10 @@ if (typeof CharacterAuthorship !== 'undefined' && population) {
     populationService.save(population);
   }
 }
-const perception = Inhabitants.perceive(activeDungeonForPopulation,dialogueRoster,population,enteringRoom);
+const playerConversation = !enteringRoom && !(typeof isAutoSimAdvance!=='undefined' && isAutoSimAdvance) && typeof userInput==='string' && !!userInput.trim();
+if(playerConversation && Inhabitants.noticeConversationResidents(activeDungeonForPopulation,dialogueRoster,population))populationService.save?.(population);
+const perception = Inhabitants.perceive(activeDungeonForPopulation,dialogueRoster,population,enteringRoom,{conversation:playerConversation});
+const narrationDialogueRange = playerConversation ? Inhabitants.RESIDENT_CONVERSATION_RANGE : Inhabitants.MONSTER_DIALOGUE_RANGE;
 const entryQuestContact = enteringRoom && typeof prepareEntryQuestContact !== 'undefined' ? prepareEntryQuestContact(
   population, activeDungeonForPopulation, dialogueRoster, perception, sharedState.getCurrentQuest()) : null;
 // A planned spawn position is not proof that the player has met a resident.
@@ -13082,6 +13106,10 @@ const audibleNames = narrationSpeakers.map(a=>a.name);
 const initialArrival = enteringRoom && typeof isFirstTurn !== 'undefined' && isFirstTurn && geoKey === '0,0,0';
 const responseAudience = !enteringRoom && typeof DialogueAudience !== 'undefined' ? DialogueAudience.resolve(
   typeof userInput === 'string' ? userInput : '', dialogueRoster, audibleNames) : null;
+const residentFavorOffers = !enteringRoom && typeof ResidentFavors !== 'undefined' ? await ResidentFavors.prepare(sharedState,$,userInput || '',
+  { audibleNames,responseAudience,population }) : [];
+const residentFavorContext = typeof ResidentFavors !== 'undefined' ? ResidentFavors.context(sharedState,audibleNames) : [];
+if (residentFavorOffers.length) { require('./economy').refresh(sharedState); updatedGameConsole = sharedState.getUpdatedGameConsole(); }
 const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabitants.state(a)!=='Dead'&&
   (a.type==='npc'||population?.actors?.[a.name]?.status==='present')).map(a=>a.name);
 {
@@ -13091,6 +13119,7 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   else if (enteringRoom) await $.user`ROOM ENTRY NARRATION: Finish the full Retort entry scene using the room, puzzle, current quest, task-seeding instructions and history already supplied. Carry through the established quest hook and let nearby companions react to the place and its implications. This is not a two-greeting cache update. Do not duplicate the static room description or puzzle that the game already displays. Do not invent quest completion, rewards, equipment, exits, a replacement boss, or dialogue from distant or undiscovered inhabitants.`;
   if (entryQuestContact) await $.user`The entry quest hook has a real, visibly encountered ${entryQuestContact.state} contact within speaking distance: ${JSON.stringify(entryQuestContact)}. Introduce this character naturally and have them seed the EXISTING quest in actual labelled speech, with an invitation or useful next lead supported by the established task instructions. They are not an enemy, and their greeting is not quest completion. No other unseen group members are introduced by association. Do not invent a different quest giver or relay private facts from distant inhabitants.`;
   if (responseAudience?.directed) await $.user(DialogueAudience.prompt(responseAudience));
+  if (residentFavorContext.length) await $.user`VERIFIED LOCAL FAVOR CONTRACTS: ${JSON.stringify(residentFavorContext)}. These are separate from the main quest. Explain the named resident's actual offer, concrete objective and invitation reward naturally. An offered task has NOT been accepted. Work and recruitment require their real actions; prose cannot complete them. Do not substitute a vague untracked errand or additional conditions.`;
   if (typeof CampaignMemory !== 'undefined') {
     const cacheCharacters = describeCharacters(dialogueRoster, population).filter(actor => replyNames.includes(actor.name));
     const cacheMemories = CampaignMemory.dialogueContext(sharedState, cacheCharacters, typeof userInput === 'string' ? userInput : '');
@@ -13107,7 +13136,7 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   if(directions.length)await $.user(QuestDirectionFacts.prompt(directions));
   await $.user`Visible dialogue formatting is required in the Game Log: give each speaker a natural visible attribution or named action, then enclose their actual words in quotation marks. Backend SPEECH labels are invisible and do not replace quotation marks or a reader-visible speaker identity. A speech-only paragraph must identify its speaker, for example: the nearby speaker says, "Welcome, traveler." Use the actual nearby speaker's name.`;
   await $.user`In each spoken metadata row, optionally set recipient to "PC" or the exact existing character name being addressed. This identifies who should be approached during speech; mentioning a third person is not addressing them. Do not invent a recipient.`;
-  await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${Inhabitants.MONSTER_DIALOGUE_RANGE} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
+  await $.user`Perception is authoritative. Only these characters are nearby and may speak to the player now: ${JSON.stringify(audibleNames)}. Normal resident conversation requires being within ${narrationDialogueRange} tiles along a clear nearby hearing path, even if a resident is still visible farther away in the Game Console. A pillar can hide someone from view without preventing nearby speech or removing an already engaged opponent from combat. Walls and closed doors still block speech; attacks still require their own clear line of sight. Other visible residents continue their activities silently; do not make them whisper, greet, taunt or join this conversation. Distant inhabitants cannot hear this conversation, cannot attack and must not appear in prose just because their sheets are in the game console. No whole-level chorus or encounter mob.`;
   await $.user`Preserve the existing flowing narrative: prose, actions, quotation marks and paragraph breaks stay natural, not a screenplay or JSON document. Mark EVERY actual spoken passage inside its normal quotation marks with invisible backend labels: [[SPEECH:"exact nearby name"]]all words spoken in this quote[[/SPEECH]]. Use the JSON-quoted exact name from ${JSON.stringify(audibleNames)}. Label every continuation and later paragraph, even when the prose uses he, she, their voice, an epithet, or omits the name. Do not summarize, truncate, omit later sentences or repeat the speech elsewhere. Never label narration, thoughts, inscriptions, the PC's words or distant characters. At most ${initialArrival ? 6 : 4} nearby speakers; allow complete natural monologues, not a 40-word metadata excerpt. The server removes only these labels before displaying the unchanged narrative in the Game Log.
 After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearby name","remember":"optional brief new promise or disclosure"}],"replies":[{"speaker":"exact cached character name","lines":["new short contextual remark","another different remark"]}],"exchanges":[]} [[/CHARACTER_DIALOGUE]]. Spoken metadata stores only genuinely new information actually exchanged; speech text comes from the inline labels and must not be duplicated here. Replies: refresh the planned batch of 20-word cached lines for every living NPC/resident from ${JSON.stringify(replyNames)}. Base the batch on this turn's actual conversation as well as the witnessed recap, without assuming these future lines were already said. Unseen inhabitants keep their own perspective and do not learn the player conversation or quest secrets remotely. Cached lines are future possibilities, not speech or completed actions. No changes to allegiance, jobs, stats, items, exits or quest progress.`;
   // holodek-1 only: pack relevant campaign memory into the current context window
@@ -13127,9 +13156,15 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
     }
   }
   await $.user`${retrievedContext}FINAL STORY RESPONSE: Follow the full Integrate and interactive-fiction action/dialogue instructions above. Write the player-facing narrative FIRST, then append the CHARACTER_DIALOGUE metadata. Cache planning is secondary and must not replace the story. ${initialArrival ? 'This is the full opening scene: develop the established TURN 0 premise and the call to adventure without deciding actions for the PC.' : enteringRoom ? 'This is a full room-entry story continuation, not another static room or puzzle description.' : 'Resolve the latest player input and continue the scene; a genuine automatic idle tick keeps its requested short format.'} If no characters are permitted to speak, still narrate an appropriate environmental or story development without inventing dialogue, discoveries or completed actions. Preserve player agency, current mechanics, exact names and the nearby-speaker limits. Return actual prose before metadata, not a metadata-only answer.`;
-  const result = isHolodek1 ? await require('./holodekNarration').generate($, {
+  // Social mechanics are model-independent; all live resident replies use the same enum contract.
+  const socialInteractions = typeof ResidentFavors !== 'undefined' && !enteringRoom && userInput?.trim() && !isAutoSimAdvance ?
+    ResidentFavors.dialogueOptions(sharedState,audibleNames.filter(name=>!responseAudience?.directed || responseAudience.responders.includes(name))) : [];
+  const result = isHolodek1 || socialInteractions.length ? await require('./holodekNarration').generate($, {
     consoleText: perceivedGameConsole, userInput, currentSituation, characters: describeCharacters(dialogueRoster, population),
     audibleNames, responseAudience, initialArrival, enteringRoom, quest: sharedState.getCurrentQuest(), task: activeTask,
+    localFavors: residentFavorContext, requiredSpeakers: residentFavorOffers.map(m=>m.recipient),
+    socialInteractions,
+    onSocialAction: typeof ResidentFavors !== 'undefined' ? (event,option)=>ResidentFavors.applyDialogue(sharedState,populationService,event,option) : undefined,
     questUpdate, entryQuestContact, committedPuzzle: physicalPuzzleResult?.completed ? physicalPuzzleResult.narrative : null,
     recollections: characterMemory, journey: population?.journey,
     personalMemories: typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState,
@@ -13141,12 +13176,26 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
       race: actor.race, className: actor.className, background: actor.originProfile })),
       arrival: WorldSetting.isCotGPlay() ? 'Newly dead souls awaken without knowledge of their companions; an established divine visitor retains her own prior identity.' : WorldSetting.creationPrompt() } : null
   }) : await $.assistant.generation({maxTokens:Math.min(6000,autoMax+replyNames.length*160+400)});
+  if(result.socialResults?.length) {
+    require('./economy').refresh(sharedState);updatedGameConsole=sharedState.getUpdatedGameConsole();
+    dialogueRoster.splice(0,dialogueRoster.length,...JSON.parse(sharedState.getCombatCharactersString() || '[]'));
+    Inhabitants.attach(dialogueRoster,population);
+    if(typeof residentFavorOffers!=='undefined') {
+      const committed=JSON.parse(sharedState.getRoomNameDatabase() || '{}');
+      for(const offer of residentFavorOffers) {
+        const current=committed[offer.roomKey]?.minorMissions?.[offer.id];if(current)Object.assign(offer,current);
+      }
+    }
+  }
   spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
   spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
   response = spoken.content;
+  if (residentFavorOffers.length) response += '\n\n'+residentFavorOffers.map(m=>`Local favor (${m.status}): ${m.description}`+
+    (m.status==='offered'?` Accept with "accept favor from ${m.recipient}" or open their Local Contract menu. Decline with "decline favor from ${m.recipient}".`:'')).join('\n');
+  if (residentFavorOffers.errors?.length) response += '\n\n'+residentFavorOffers.errors.join('\n');
   console.info('[StoryNarration]', JSON.stringify({ geoKey, phase: initialArrival ? 'arrival' : enteringRoom ? 'entry' : 'turn',
     status: response.trim() ? 'story' : 'metadata-only', storyChars: response.length, rawChars: String(result.content || result).length,
-    permittedSpeakers: audibleNames.length, protocolWarnings: spoken.dialogueProtocolWarnings || [] }));
+    permittedSpeakers: audibleNames.length, spokenPassages: spoken.dialogue.length, protocolWarnings: spoken.dialogueProtocolWarnings || [] }));
   if (initialArrival) console.info('[ArrivalNarration]', JSON.stringify({ geoKey, speakers: spoken.dialogue.map(row => row.speaker) }));
   if (enteringRoom) console.info('[EntryDialogue]',JSON.stringify({geoKey,mode:'full-retort',nearby:audibleNames,
     questContact:entryQuestContact?.speaker || null,
@@ -13159,7 +13208,7 @@ if (population && responseAudience?.directed) {
   population.dialogueFocus = { responders: responseAudience.responders, until: Date.now() + Math.min(180000, duration + 15000) };
 } else if (population) delete population.dialogueFocus;
 Inhabitants.applyReplies(population,spoken.replies,dialogueRoster,{exchanges:spoken.exchanges});
-Inhabitants.noteSpoken(population,spoken.dialogue,enteringRoom);
+Inhabitants.noteSpoken(population,spoken.dialogue,enteringRoom || playerConversation);
 
 // Include musicArrangement here
 if (userInput.toLowerCase().includes("attack") && monstersInRoom && monstersInRoom.toLowerCase() !== 'none') {

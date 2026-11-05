@@ -31,13 +31,19 @@ async function narrateEncounter({ state, service, visit, isCurrent = () => true,
   const history = state.getPersonalNarrative?.() || '';
   const records = Campaign.exportRecords(state).filter(row => row.kind !== 'biography').slice(Prompts.isHolodek1() ? -6 : -24);
   const sequence = state.getCampaignMemory?.()?.sequence;
+  const Favors = require('./residentFavors');
+  const socialInteractions = Favors.dialogueOptions(state, targets).map(option => ({ ...option,
+    actions: option.actions.filter(action => ['none','offer-favor','discuss-favor'].includes(action)) })), socialActions = [];
   console.info('[EncounterNarration]', JSON.stringify({ status: 'requested', runId, geoKey, targets, historyChars: history.length, records: records.length }));
   const parsed = await runtime.run(runtime.retort(async $ => {
     $.model = 'gpt-4.1-mini'; $.temperature = 1.2;
-    if (Prompts.isHolodek1()) {
+    if (Prompts.isHolodek1() || socialInteractions.length) {
       const result = await require('./holodekNarration').generate($, { consoleText: I.perceivedConsole(before, names),
         userInput: 'Approach ' + targets.join(', '), characters, audibleNames: names, requiredSpeakers: targets.slice(0, 4),
         encounter: true, quest: state.getCurrentQuest?.(), task: state.getActiveTask?.(),
+        localFavors: Favors.context(state, targets), socialInteractions,
+        // Generate proposals only. Never commit a favor until the encounter passes its stale-result checks.
+        onSocialAction: (event, option) => { socialActions.push({ event, option }); },
         memory: records.filter(row => targets.includes(row.speaker)).slice(-4),
         recollections: Memory.memoryContext(state, names, population, 2400),
         personalMemories: Campaign.dialogueContext(state, characters, 'Approach ' + targets.join(', '), 3000), journey: population.journey });
@@ -74,6 +80,13 @@ Automatic encounter: the player has just approached these existing residents: ${
   const allowed = new Set(I.perceive(dungeon, currentRoster, population).conversational
     .filter(a => I.hasEncountered(a, population)).map(a => a.name));
   if (parsed.dialogue.some(row => !allowed.has(row.speaker))) return { ...visit, dialogue: [], stale: true };
+  for (const { event, option } of socialActions) {
+    if (!parsed.dialogue.some(row => row.speaker === event.speaker && row.line === event.line)) continue;
+    // An approach is not a player invitation or agreement to undertake work.
+    if (!['offer-favor', 'discuss-favor'].includes(event.socialAction) || event.playerInvited) continue;
+    const outcome = Favors.applyDialogue(state, service, event, option);
+    if (outcome?.content) parsed.content += '\n\n' + outcome.content;
+  }
   I.applyReplies(population, parsed.replies, currentRoster, { exchanges: parsed.exchanges });
   I.noteSpoken(population, parsed.dialogue, true);
   Memory.rememberDialogue(state, population, parsed.dialogue, 'encounter');
@@ -82,6 +95,6 @@ Automatic encounter: the player has just approached these existing residents: ${
   service.save(population);
   console.info('[EncounterNarration]', JSON.stringify({ status: 'delivered', runId, geoKey, speakers: parsed.dialogue.map(row => row.speaker), storyChars: parsed.content.length }));
   return { ...visit, dialogue: parsed.dialogue, story: { content: parsed.content, dialogue: parsed.dialogue,
-    geoKey, runId, eventId: require('node:crypto').randomUUID(), population, consoleText: before } };
+    geoKey, runId, eventId: require('node:crypto').randomUUID(), population, consoleText: state.getUpdatedGameConsole() } };
 }
 module.exports = { narrateEncounter, replayHistory };

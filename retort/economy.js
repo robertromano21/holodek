@@ -189,7 +189,7 @@ function ensureSuccessors(state, db, roomKey, text) {
   const room = db[roomKey], population = state.getRoomPopulation?.(roomKey) || room?.inhabitants;
   if (!population || !room) return text;
   const contracts = [...Object.values(room.services || {}).map(service => ({ contract: service, field: 'operator', idField: 'serviceId' })),
-    ...Object.values(db).flatMap(r=>Object.values(r?.minorMissions||{})).filter(m => m.status !== 'completed'&&m.roomKey===roomKey).map(m => ({ contract: m, field: 'recipient', idField: 'minorMissionId' }))];
+    ...Object.values(db).flatMap(r=>Object.values(r?.minorMissions||{})).filter(m => m.source!=='engine-resident-favor-v1'&&m.status !== 'completed'&&m.roomKey===roomKey).map(m => ({ contract: m, field: 'recipient', idField: 'minorMissionId' }))];
   for (const { contract, field: actorField, idField } of contracts) {
     const oldName = contract[actorField], old = population.actors[oldName];
     if (!old || old.status === 'present' && I.isAlive(old)) continue;
@@ -415,7 +415,8 @@ function view(state, actorName, counterId) {
     const service = Object.values(ctx.room.services || {}).find(s => require('../assets/cityEstablishments').operators(s).includes(actorName));
     const venue = require('./cityVenueServices').describe(ctx.room, actorName);
     const missions = Object.values(ctx.db).flatMap(r => Object.values(r?.minorMissions || {}))
-      .filter(m => m.patron === actorName&&(!m.originRoomKey||m.originRoomKey===ctx.geoKey) || m.recipient === actorName && m.roomKey === ctx.geoKey);
+      .filter(m => m.status!=='withdrawn' && (m.patron === actorName&&(!m.originRoomKey||m.originRoomKey===ctx.geoKey) || m.recipient === actorName && m.roomKey === ctx.geoKey));
+    const recruitmentCondition=missions.find(m=>m.source==='engine-resident-favor-v1' && m.type==='resident-favor' && m.runId===state.getDungeonRunId() && m.recipient===actorName && ['offered','accepted'].includes(m.status));
     const deity = resident.deityId && Pantheon.canon(actorName);
     if (!service && !venue && !missions.length && !deity) throw Error('This resident has no shop, temple or local contract.');
     const storedProperties = propertiesOf(ctx.text);
@@ -426,7 +427,8 @@ function view(state, actorName, counterId) {
         visits: ctx.db['0,0,0']?.divineCourt?.actors?.[deity.name]?.visits || 1,
         completedCommissions: ctx.db['0,0,0']?.divineCourt?.actors?.[deity.name]?.completedCommissions || [],
         possessions: (resident.inventory || []).map(o => ({ name: o.name, type: o.type, magic: o.magic || 0 })) } : null,
-      missions, sceneObjects: ctx.dungeon?.sceneObjects, saleItems: Inventory.inventoryItems(namesOf(ctx.text), storedProperties)
+      missions, recruitmentCondition:recruitmentCondition?{missionId:recruitmentCondition.id,description:recruitmentCondition.description}:null,
+      sceneObjects: ctx.dungeon?.sceneObjects, saleItems: Inventory.inventoryItems(namesOf(ctx.text), storedProperties)
         .filter(i => !protectedItem(state, ctx.db, storedProperties.find(p => R.key(p.name) === R.key(i.name)) || i))
         .map(i => ({ ...i, salePrice: Market.salePrice(ctx.room, i, R.price(i)) })),
       party: [...I.parseSheets(ctx.text, 'PC'), ...I.parseSheets(ctx.text, 'NPCs in Party')].map(a => ({ name: a.name, hp: a.hp, state: I.state(a),
@@ -584,8 +586,14 @@ function action(state, service, input) {
         if(mission.patron!==input.actor||mission.originRoomKey!==geoKey||!mission.dispatchItem||mission.dispatchItem.minor_mission_id!==mission.id)throw Error('Accept this dispatch from its sender at the origin.');
         text=addItem(text,mission.dispatchItem);mission.issuedAt=Date.now();mission.issued=true;
       }
+      if(mission.source===require('./residentFavors').SOURCE) require('./residentFavors').accept(state,mission);
       mission.status = 'accepted'; content = `Local contract accepted: ${mission.description}`;
       if (mission.source === 'world1-room-arc') { const line = require('./roomCast').onAccepted(db, mission); if (line) content += ` ${line}`; }
+    } else if (['report-favor','decline-favor'].includes(input.kind)) {
+      operatorReach(ctx,input.actor,input.counterId);
+      const mission=room.minorMissions?.[input.missionId];
+      if(!mission || mission.recipient!==input.actor) throw Error('That resident did not offer this favor.');
+      content=require('./residentFavors').transact(state,db,mission,input.kind);
     } else throw Error('Unsupported economy action.');
     book.silver += amount; book.revision++;
     const receipt = { id: randomUUID(), nonce: input.nonce, kind: input.kind, amount, roomKey: geoKey, actor: input.actor,
@@ -599,19 +607,26 @@ function action(state, service, input) {
     if (ctx.dungeon && ctx.player) Objects.sync(ctx.dungeon, syncGround(text, room), { player: ctx.player });
     if (room.inhabitants) { state.setRoomPopulation?.(geoKey, room.inhabitants); service?.save(room.inhabitants); }
     refresh(state);
+    if(input.kind==='report-favor') {
+      const joined=require('./residentFavors').settleConsent(state,service,input.missionId);
+      if(joined){content+='\n'+joined;receipt.content=content;
+        const latest=databaseOf(state),saved=latest['0,0,0']?.economy?.receipts.find(r=>r.id===receipt.id);if(saved)saved.content=content;state.setRoomNameDatabase(JSON.stringify(latest));}
+    }
     if (input.kind === 'accept-mission') state.emitter?.emit('quest:minorMission');
     return { content, sceneObjects: ctx.dungeon?.sceneObjects };
   } catch (error) { return { error: error.message }; }
 }
 function refresh(state) {
   const db = databaseOf(state), book = ledger(state, db); let text = state.getUpdatedGameConsole(), changed = false;
-  const notices = [], completions = []; let missionCompleted = false;
+  const favorNotices=require('./residentFavors').refresh(state,db);
+  changed ||= favorNotices.length > 0;
+  const notices = [...favorNotices], completions = []; let missionCompleted = false;
   const geoKey = roomKey(state), active = db[geoKey], coords = state.getLastCoords();
   // Older room generation saved the console loot but overwrote the database with its puzzle-only snapshot.
   // Import that saved metadata once; receipts prevent spent or collected items from being recreated.
   if (active && geoKey === `${coords.x},${coords.y},${coords.z}` && active.groundInventoryVersion !== 1) {
     const excluded = new Set([...namesOf(text), ...book.receipts.filter(r => r.kind === 'take' && r.roomKey === geoKey).map(r => r.item)].map(R.key));
-    changed = registerGround(active, text, geoKey, excluded);
+    changed = registerGround(active, text, geoKey, excluded) || changed;
   }
   const partyNames = new Set([...I.parseSheets(text, 'PC'), ...I.parseSheets(text, 'NPCs in Party')].map(a => R.key(a.name)));
   for (const [key, room] of Object.entries(db)) {
@@ -691,6 +706,7 @@ function refresh(state) {
 }
 function preserve(oldJSON, incomingJSON, options = {}) {
   const old = JSON.parse(oldJSON || '{}'), next = JSON.parse(incomingJSON || '{}');
+  const favorRecruits=require('./residentFavors').recruitedNames(old);
   const raidRooms = new Set(Object.values(old).flatMap(r => Object.values(r?.minorMissions || {}))
     .filter(m => m.type === 'raid').map(m => m.sourceRoomKey));
   const fields = ['economy', 'services', 'minorMissions', 'economySeeded', 'groundInventoryVersion', 'campaignSetting', 'campaignAtlas', 'itemTransfers', 'divineCourt', 'divineVisitChecked', 'templeSuppression', 'spellSystem', 'questFailures',
@@ -744,7 +760,7 @@ function preserve(oldJSON, incomingJSON, options = {}) {
     next[key].objects = [...(next[key].objects || []).filter(o => !o.currency_kind && !o.economyItemId && !o.minor_mission_id), ...protectedObjects];
     if (room.groundInventoryVersion === 1 && !options.trustedNewFields) next[key].objects = structuredClone(room.objects || []);
     for (const [name, actor] of Object.entries(room.inhabitants?.actors || {})) {
-      if (actor.deityId || actor.regionalStoryId) {
+      if (actor.deityId || actor.regionalStoryId || favorRecruits.has(R.key(name))) {
         next[key].inhabitants ||= structuredClone(room.inhabitants);
         next[key].inhabitants.actors ||= {};
         next[key].inhabitants.actors[name] ||= structuredClone(actor);
@@ -772,11 +788,13 @@ function preserve(oldJSON, incomingJSON, options = {}) {
       if (actor.combatArchetype) a.className = actor.className;
       if (actor.deityId) for (const field of ['deityId', 'recruitable', 'hp', 'maxHp', 'sheet', 'status', 'allegiance', 'divineMissionId', 'profile', 'memory', 'history', 'personality', 'motivation', 'dialogue']) a[field] = actor[field];
       if (actor.regionalStoryId) for (const field of ['regionalStoryId', 'hp', 'maxHp', 'sheet', 'status', 'allegiance', 'profile', 'history', 'personality']) a[field] = actor[field];
+      if (favorRecruits.has(R.key(name))) for (const field of ['status','allegiance']) a[field]=actor[field];
     }
   }
   return JSON.stringify(next);
 }
 function preserveInventory(oldText, incomingText, databaseJSON = '{}') {
+  incomingText=require('./residentFavors').preserveConsole(oldText,incomingText,JSON.parse(databaseJSON || '{}'));
   Divinity.validateParty(incomingText);
   if (roomKeyFromText(oldText) === roomKeyFromText(incomingText)) {
     const oldGods = new Map(I.parseSheets(oldText).filter(a => !Pantheon.canRecruit(a)).map(a => [a.name, a]));
@@ -875,4 +893,5 @@ function bindVenueTrader(db,key,actor,occupation,consoleText='') {
   return service;
 }
 module.exports = { start, project, seedRoom, activateRoom, corpseDrops, playerDeathDrops, refresh, view, action, preserve, preserveInventory, field, write, syncGround, registerGround, protectedItem,
-  venueContext,bindVenueTrader, prepareStocks: Stock.prepare, needsStock: Stock.needed, validateDivineRoster: Divinity.validateRoster };
+  venueContext,bindVenueTrader, prepareStocks: Stock.prepare, needsStock: Stock.needed, validateDivineRoster: Divinity.validateRoster,
+  preserveFavorRoster:(state,roster)=>require('./residentFavors').preserveRoster(state,roster) };

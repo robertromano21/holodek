@@ -32,6 +32,9 @@
     if (!current) { const message = document.createElement('p'); message.textContent = 'Wait for your turn to choose a combat action.'; popup.appendChild(message); return true; }
     const disabled = submitting || prompt.movement?.busy || root.gamePaused || root.actionDiceState?.paused;
     const before = popup.children.length;
+    if (current.spellUnavailableReason && actor.name === current.combatant) {
+      const reason = document.createElement('p'); reason.textContent = current.spellUnavailableReason; popup.appendChild(reason);
+    }
     const button = (label, action, target, option, unavailable = false) => {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'popup-button'; b.textContent = label;
       b.disabled = !!disabled || unavailable;
@@ -47,7 +50,7 @@
       button((approach ? `Move + Attack ${name} (${approach.cost} tiles)` : 'Attack ' + name) + (reachable ? '' : ' (out of range/sight)'), 'attack', name, null, !reachable);
     }
     for (const spell of (prompt.spells || []).filter(s => s.target === actor.name)) {
-      button(`${spell.name} (${spell.cost} Magic from ${spell.itemName}; ${spell.magic} left)` + (spell.destroysItem ? ' [turns to ash]' : ''), 'cast', spell.target, spell);
+      button(`${spell.name} (${spell.cost} Magic from ${spell.itemName}; ${spell.magic} left; ${spell.castingRounds ? spell.castingRounds + ' casting rounds' : 'instant'})` + (spell.destroysItem ? ' [turns to ash]' : ''), 'cast', spell.target, spell);
     }
     for (const care of (prompt.care || []).filter(c => c.target === actor.name)) button(care.label + ' (one turn)', 'care', care.target, care);
     if (popup.children.length === before) {
@@ -119,12 +122,12 @@
     const choices = current?.combatant === caster ? (current.spells || []).filter(s => s.spellId === spellId) : [];
     if (!choices.length) {
       const message = document.createElement('p');
-      message.textContent = current?.combatant === caster ? 'No valid targets in this room and clear sight for this spell.' : 'Wait for ' + caster + "'s turn to cast.";
+      message.textContent = current?.combatant === caster ? current.spellUnavailableReason || 'No valid targets in this room and clear sight for this spell.' : 'Wait for ' + caster + "'s turn to cast.";
       box.appendChild(message);
     }
     for (const choice of choices) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'popup-button';
-      b.textContent = choice.name + ' on ' + choice.target + ` (${choice.cost} Magic)`;
+      b.textContent = choice.name + ' on ' + choice.target + ` (${choice.cost} Magic; ${choice.castingRounds ? choice.castingRounds + ' casting rounds' : 'instant'})`;
       b.disabled = !!(submitting || current.movement?.busy || root.gamePaused || root.actionDiceState?.paused);
       b.addEventListener('click', () => {
         if (prompt?.turnId !== current.turnId) { box.remove(); notice('That turn has changed. Choose a spell again.'); return; }

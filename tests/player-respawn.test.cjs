@@ -88,7 +88,7 @@ test('the first recorded spawn for a level is stable across later room entries',
 test('stable unconsciousness restores HP through time without spending a life', () => {
   const f = fixture(); f.injure('Hero', 20); Life.settle(f.state);
   assert.equal(Life.status(f.state).recovery.afterBattle, true);
-  Life.advance(f.state); assert.equal(Life.status(f.state).recovery.state, 'Unconscious');
+  for(let i=1;i<Life.RECOVERY_TURNS;i++) { Life.advance(f.state); assert.equal(Life.status(f.state).recovery.state, 'Unconscious'); }
   Life.advance(f.state); assert.equal(Life.actors(f.state.getUpdatedGameConsole()).find(a => a.type === 'pc').hp, 1);
   assert.equal(Life.status(f.state).rescuesUsed, 0); assert.equal(Life.status(f.state).pendingRespawn, false);
 });

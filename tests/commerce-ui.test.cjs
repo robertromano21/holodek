@@ -48,6 +48,27 @@ function installGate(f) {
   return f.window.GameCommandGate;
 }
 
+test('accepting a local job closes its popup and releases the interaction without reopening the menu',async()=>{
+  const f=fixture();f.hook(async request=>({ok:true,json:async()=>request.path==='/economy/view'?{silver:2,revision:7,
+    missions:[{id:'wind-job',type:'resident-favor',recipient:'Keeper',status:'offered',description:'Watch the wind, then report.',offer:'Please watch the wind.'}]}:
+    {type:'economy_result',eventId:'accepted',runId:'run',geoKey:'1,0,0',content:'Favor accepted.'}}));
+  await f.window.CommerceUi.open('Keeper');assert.ok(f.button('Accept Local Contract'));const before=f.requests.filter(r=>r.path==='/economy/view').length;
+  await f.button('Accept Local Contract').click();
+  assert.equal(f.button('Accept Local Contract'),undefined);assert.equal(f.button('Report Findings'),undefined);
+  assert.equal(f.window.CommerceUi.hasInteraction(),false);assert.equal(f.requests.filter(r=>r.path==='/economy/view').length,before+1,'Only the transaction revision refresh runs; the menu does not reopen.');
+  assert.equal(f.requests.filter(r=>r.path==='/economy/action').length,1);
+});
+
+test('dialogue acceptance closes the current offer menu; stale or unrelated job results cannot close it',async()=>{
+  const f=fixture();f.hook(async()=>({ok:true,json:async()=>({silver:2,revision:7,missions:[{id:'wind-job',status:'offered',description:'Watch the wind.'}]})}));
+  await f.window.CommerceUi.open('Keeper');
+  const event={runId:'run',geoKey:'1,0,0',roomNameDatabaseString:JSON.stringify({'1,0,0':{minorMissions:{job:{id:'wind-job',status:'accepted'}}}})};
+  f.window.CommerceUi.receiveResult({...event,runId:'old-run'});assert.ok(f.button('Accept Local Contract'));
+  f.window.CommerceUi.receiveResult({...event,geoKey:'2,0,0'});assert.ok(f.button('Accept Local Contract'));
+  f.window.CommerceUi.receiveResult({...event,roomNameDatabaseString:JSON.stringify({'1,0,0':{minorMissions:{job:{id:'other-job',status:'accepted'}}}})});assert.ok(f.button('Accept Local Contract'));
+  f.window.CommerceUi.receiveResult(event);assert.equal(f.button('Accept Local Contract'),undefined);assert.equal(f.window.CommerceUi.hasInteraction(),false);
+});
+
 test('the first accepted service click waits for native resident work and opens once without waiting for speech',async()=>{
   const f=fixture(),gate=installGate(f);let release;
   f.window.DungeonLife={hasPendingSpeech:()=>true};

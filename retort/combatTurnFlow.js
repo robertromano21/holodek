@@ -21,6 +21,7 @@ function create(dice, state) {
     round: 0, teams: null, pc: null, retreated: false,
     startRound() {
       if (state.getRoomNameDatabase) { Spells.synchronize(state); Spells.advance(state); }
+      if (state.getRoomNameDatabase) require('./combatCasting').beginRound(state);
       this.round++; dice.results.clear(); dice.active.round = this.round;
       if (dice.active.ledger) { dice.active.ledger.round = this.round; dice.active.ledger.initiative = []; }
       dice.publish();
@@ -46,6 +47,7 @@ function create(dice, state) {
       const prompt = { type: 'target_prompt', actionId: dice.active.id, turnId: randomUUID(), round: this.round,
         combatant: combatant.name, targets: targets.map(a => a.name), positions, allowRetreat,
         spells: state.getRoomNameDatabase ? Spells.choices(state, combatant.name, targets.map(a => a.name)) : [],
+        spellUnavailableReason: state.getRoomNameDatabase && require('./combatCasting').status(state, combatant)?.blocked ? 'Spells unavailable: damage disrupted concentration for the rest of this round.' : '',
         care: state.getRoomNameDatabase ? Life.careChoices(state, combatant.name) : [],
         initiative: this.teams.combatants.filter(I.canAct).map(a => ({ name: a.name, roll: a.initiative })).sort((a, b) => b.roll - a.roll) };
       dice.active.turn = prompt; dice.publish(); return prompt;

@@ -44,7 +44,8 @@ function project(state) {
       status: history.some(h => h.from === rumor.resolvedBy) ? 'Checked against the records' : 'Unverified; not a completion requirement' }] : [])].slice(-24),
     factions: Factions.project(database), history: archive,
     contracts: Object.values(database).flatMap(r => Object.values(r?.minorMissions || {}))
-      .filter(m => ['accepted', 'completed'].includes(m.status)).slice(-32)
-      .map(m => ({ description: m.description, status: m.status, recipient: m.recipient, room: database[m.roomKey]?.name })) };
+      .filter(m => ['accepted', 'completed'].includes(m.status) || m.source==='engine-resident-favor-v1' && ['offered','failed'].includes(m.status)).slice(-32)
+      .map(m => ({ description: m.description, status: m.status, recipient: m.recipient, room: database[m.roomKey]?.name,
+        ...(m.source==='engine-resident-favor-v1'?{progress:m.progress,reward:m.reward,recruited:!!m.recruitedAt}: {}) })) };
 }
 module.exports = { archive, project };

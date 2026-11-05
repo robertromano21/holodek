@@ -56,7 +56,7 @@
     if (blocked()) return false; pending = true;
     try {
       const { data, origin } = await load(casterName), box = popup(filter?.target ? 'Magic for ' + filter.target : scrollName ? 'Scribe ' + scrollName : 'Spells and Magic');
-      line(box, 'Casting uses one initiative action. Ordinary equipment turns to ash at zero Magic. Campaign artifacts recharge after five turns.');
+      line(box, 'Quick spells resolve on your turn. Slower spells take casting rounds; damage interrupts them and spends their Magic. Ordinary equipment turns to ash at zero Magic. Campaign artifacts recharge after five turns.');
       if (filter) {
         let count = 0;
         for (const caster of data.casters) for (const choice of caster.choices || []) {

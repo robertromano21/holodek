@@ -12,6 +12,8 @@ function fixture() {
   const profile = { personality: 'Patient and curious.', voice: 'Warm practical observations.', history: 'Carved the old bridge with her sister.', motivation: 'Repair the memorial.' };
   const p = I.createPopulation(d.geoKey, [{ name: 'Mason', allegiance: 'Neutral', dialogue: ['Old stored greeting.'], ...profile }]);
   I.place(p, d);
+  // Exercise the original story-only branch; recruitable encounters use the enum transport tested separately.
+  p.actors.Mason.recruitable = false;
   const spot = p.actors.Mason.position;
   const body = { geoKey: d.geoKey, runId: 'run', player: { x: spot.x + .5, y: spot.y + 1.5 } };
   const sheet = (Name, State) => formatStartingCharacterSheet({ Name, HP: 20, MaxHP: 20, Level: 1, Race: 'Human', Class: 'Mason', State });

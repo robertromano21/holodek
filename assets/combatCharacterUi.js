@@ -42,9 +42,10 @@
     const name=link.getAttribute('data-pc')||link.getAttribute('data-npc')||link.getAttribute('data-monster');
     return name ? open({name}) : false;
   }
-  function addRecruitAction(popup,name,{close=()=>{},blocked=()=>false}={}){
+  function addRecruitAction(popup,name,{close=()=>{},blocked=()=>false,recruitmentCondition=null}={}){
     const eligible=actor=>actor?.type==='monster'&&(actor.hp??1)>0&&actor.recruitable!==false&&
-      !['Dead','Dying','Unconscious'].includes(actor.state)&&(root.PantheonCharacters?.canRecruit(actor)??true);
+      !['Dead','Dying','Unconscious'].includes(actor.state)&&(root.PantheonCharacters?.canRecruit(actor)??true)&&
+      !recruitmentCondition&&!root.getEconomyResidentInfo?.(actor.name)?.recruitmentCondition;
     const actor=(root.combatCharacters||[]).find(a=>a.name===name);
     if(!popup||!eligible(actor)||popup.querySelector?.('[data-recruit-action]'))return null;
     const runId=root.dungeonRunId,geoKey=root.currentDungeon?.geoKey,floorToken=root.CityFloorScope?.token();

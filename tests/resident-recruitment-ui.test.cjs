@@ -20,11 +20,11 @@ function fixture(){
     querySelectorAll:()=>nodes.filter(node=>node.isConnected&&node.className?.includes('popup-container')),
     addEventListener:(type,fn)=>events.set(type,fn),removeEventListener:(type,fn)=>{if(events.get(type)===fn)events.delete(type);}};
   const actor={name:'Resident With Work',type:'monster',hp:12,state:'Neutral',allegiance:'Neutral'},dungeon={geoKey:'1,0,0'};
-  let floor='floor-a',busy=false,present=true;
+  let floor='floor-a',busy=false,present=true,conditional=false;
   const window={combatCharacters:[actor],dungeonRunId:'run-a',currentDungeon:dungeon,
     CityFloorScope:{token:()=>floor},GameCommandGate:{busy:()=>busy},isDungeonActorPresent:()=>present,
     getDungeonLifeContext:()=>({dungeon,player:{x:5,y:5},actors:[actor]}),
-    getEconomyResidentInfo:()=>({kind:'mission',jobs:true,introduced:true}),prepareEconomyState:async()=>{},
+    getEconomyResidentInfo:()=>({kind:'mission',jobs:true,introduced:true,recruitmentCondition:conditional?{missionId:'job'}:null}),prepareEconomyState:async()=>{},
     openCombatCharacterSheet:()=>{sheet.style.display='block';},centerPartySheet(){},
     chatbotprocessinput:()=>commands.push(input.value)};
   const fetch=async(path,options)=>{
@@ -32,13 +32,13 @@ function fixture(){
     const result=path==='/quest-scenes/view'?{scene:{title:'A Local Job',actor:actor.name,text:'Authored job offer.',
       description:'Authored objective.',storyId:'story',stageId:'offer',revision:3,
       options:[{id:'accept',label:'Accept Job'},{id:'reject',label:'Reject Job'}]}}:
-      {silver:3,revision:1,missions:[{id:'job',status:'offered',description:'Authored job offer.'}]};
+      {silver:3,revision:1,recruitmentCondition:conditional?{missionId:'job'}:null,missions:[{id:'job',recipient:actor.name,type:conditional?'resident-favor':'ordinary',status:'offered',description:'Authored job offer.'}]};
     return{ok:true,json:async()=>result};
   };
   const context={window,document,fetch,console};
   for(const file of ['combatCharacterUi','commerceUi','questSceneUi'])vm.runInNewContext(fs.readFileSync('assets/'+file+'.js','utf8'),context);
   return{window,document,actor,input,nodes,requests,commands,events,sheet,
-    floor:value=>floor=value,busy:value=>busy=value,present:value=>present=value,
+    floor:value=>floor=value,busy:value=>busy=value,present:value=>present=value,conditional:value=>conditional=value,
     buttons:label=>nodes.filter(node=>node.isConnected&&node.tag==='button'&&node.textContent===label),
     button:label=>nodes.find(node=>node.isConnected&&node.tag==='button'&&node.textContent===label)};
 }
@@ -129,4 +129,30 @@ test('the changed browser scripts carry a matching cache version',()=>{
   const html=fs.readFileSync('assets/index.html','utf8');
   for(const file of ['combatCharacterUi','questSceneUi'])assert.ok(html.includes(file+'.js?v=resident-recruitment-1'));
   assert.ok(html.includes('commerceUi.js?v=starter-room-protection-1'));
+});
+
+test('conditional recruitment has no Add to Party button in the invitation, contract menu or character sheet',async()=>{
+  const f=fixture();f.conditional(true);
+  f.window.CombatCharacterUi.open(f.actor);assert.ok(f.button('View Job Offers'));assert.equal(f.button('Add to Party'),undefined);
+  await f.button('View Job Offers').click();assert.ok(f.button('Accept Local Contract'));assert.equal(f.button('Add to Party'),undefined);
+  f.window.CombatCharacterUi.open(f.actor,{services:false});assert.equal(f.button('Add to Party'),undefined);
+  assert.deepEqual(f.commands,[]);
+});
+test('a previously rendered recruitment button cannot bypass a newly created favor condition',()=>{
+  const f=fixture();f.window.CombatCharacterUi.open(f.actor);const add=f.button('Add to Party');f.conditional(true);add.click();assert.deepEqual(f.commands,[]);
+});
+test('the real browser metadata derives conditional recruitment from current saved job status',()=>{
+  const f=fixture(),source=fs.readFileSync('assets/game.js','utf8');
+  const room={name:'Pale Wind Approach',inhabitants:{actors:{}},minorMissions:{job:{source:'engine-resident-favor-v1',type:'resident-favor',recipient:f.actor.name,
+    roomKey:'1,0,0',runId:'run-a',status:'offered'}}};
+  f.window.EconomyRules=require('../assets/economyRules');
+  vm.runInNewContext(source.slice(source.indexOf('window.getEconomyResidentInfo ='),source.indexOf('window.commitLocalPartyChange =')),
+    {window:f.window,currentDungeon:f.window.currentDungeon,roomNameDatabase:new Map([['1,0,0',room]])});
+  for(const status of ['offered','accepted']){room.minorMissions.job.status=status;assert.ok(f.window.getEconomyResidentInfo(f.actor.name).recruitmentCondition);}
+  for(const status of ['completed','withdrawn']){room.minorMissions.job.status=status;assert.equal(f.window.getEconomyResidentInfo(f.actor.name),null);}
+});
+test('accepting a quest job closes the popup without opening the follow-up scene automatically',async()=>{
+  const f=fixture();await f.window.QuestSceneUi.open(f.actor.name);await f.button('Accept Job').click();
+  assert.equal(f.button('Accept Job'),undefined);assert.equal(f.button('Later'),undefined);
+  assert.equal(f.requests.filter(r=>r.path==='/quest-scenes/view').length,1);
 });

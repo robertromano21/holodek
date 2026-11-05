@@ -53,7 +53,7 @@
             } else {
               await root.applyRealtimeCombatResult?.(event);
               pending=false;
-              await open(null,{silent:true});
+              if(option.id!=='accept' && option.action!=='accept')await open(null,{silent:true});
             }
           } catch(error) {goal.textContent=error.message;}
           finally {pending=false;buttons.forEach(b=>b.disabled=false);}

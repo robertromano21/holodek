@@ -52,6 +52,26 @@ metadata across browser inventory synchronization.
 
 ## Spellbook
 
+Hostile enemies award XP once when reduced to dead, dying or unconscious. The
+party reward is 1,000–1,500 times enemy level, split among conscious party
+members, with the total and shares in the Game Log. Recovery, mercy and a later
+death cannot award that opponent again in the same room/adventure.
+
+Natural waking is suspended during combat. Unconscious characters recover to
+1 HP after ten post-combat turns; entering another fight resets that wait.
+Healing spells and potions can restore consciousness during combat.
+
+NPCs and monsters choose actual affordable spells using health, teams, range,
+available Magic and friendly-fire checks, without an LLM. Quick spells resolve
+on their action; wards, curses and turning take one casting round, and blasts
+or spells costing four or more Magic take two. Explicit `castingRounds`
+metadata overrides these defaults. Pending casts consume each casting turn.
+HP damage blocks new spells for the rest of that round; damage during a pending
+cast disrupts it and spends the source's Magic cost, without applying its
+effect. The next round permits casting again. This hybrid adapts interruption
+rather than implementing AD&D memorization loss. Casts and interruptions have
+explicit server and Game Log records.
+
 The Spellbook icon sits to the left of the backpack, above the command prompt's
 upper-right corner; the Journal and Map continue down the right-hand side.
 Both references are also available in the game menu. Every party member has a portrait/name

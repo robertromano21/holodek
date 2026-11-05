@@ -3,6 +3,7 @@
   const VERSION = 1;
   const DIALOGUE_REFRESH_MS = 5 * 60 * 1000;
   const MONSTER_DIALOGUE_RANGE = 10;
+  const RESIDENT_CONVERSATION_RANGE = 32;
   const COMPANION_DIALOGUE_RANGE = 8;
   const MAX_SPEECH_LENGTH = 24000;
   const collision = typeof module !== 'undefined' && module.exports ? require('./voxelCollision') : root.VoxelCollision;
@@ -243,6 +244,12 @@
     const records = new Map(Object.values(population?.actors || {}).map(a => [keyOf(a.name), a]));
     for (const actor of roster || []) {
       const record = records.get(keyOf(actor.name || actor.Name));
+      // A population push can arrive before the turn's full roster. Apply its committed recruitment before visibility filters.
+      if(actor.type==='monster' && record?.status==='recruited' && (!actor.mazeRoomKey || roomKey(actor.mazeRoomKey)===roomKey(population.geoKey))) {
+        actor.type='npc';actor.allegiance='Friendly';
+        if(!['Dead','Unconscious','Dying'].includes(state(actor)))actor.state='Friendly';
+        if(!actor.sprite && record.sprite)actor.sprite=record.sprite;
+      }
       actor.allegiance = allegiance(actor.type === 'monster' && record ? { ...record, state: record.allegiance } : actor, fallback);
       actor.state = state({ ...actor, state: ['Dead', 'Unconscious', 'Dying'].includes(actor.state) ? actor.state : actor.allegiance,
         status: actor.type === 'monster' ? record?.status : undefined });
@@ -359,6 +366,37 @@
     return Number.isFinite(point?.x) && Number.isFinite(point?.y) && Math.hypot(point.x - center.x, point.y - center.y) <= 1.5 ?
       { x: point.x, y: point.y } : center;
   }
+  const residentBodyRadii = new Map();
+  function residentBodyRadius(actor) {
+    const spec=actor?.sprite?.spec, stature=spec?.stature || actor?.stature;
+    if(Number.isFinite(stature?.scale))return .3*Math.max(1,Math.min(2,stature.scale));
+    if(!spec?.traits && !actor?.race)return .3;
+    const api=typeof module!=='undefined' && module.exports ? require('./renderCharacterProcedural') : root.ProceduralCharacters;
+    if(!api?.characterStature || !api?.deriveFallbackTraits)return .3;
+    if(spec?.traits)return .3*Math.max(1,Math.min(2,api.characterStature(spec)?.scale || 1));
+    // Population records also need the generator's deterministic size before a sprite is attached.
+    const key=JSON.stringify([actor?.name,actor?.race]);
+    if(residentBodyRadii.has(key))return residentBodyRadii.get(key);
+    const traits=api.deriveFallbackTraits(actor || {}), size=api.characterStature({name:actor?.name,race:actor?.race,traits});
+    const radius=.3*Math.max(1,Math.min(2,size?.scale || 1));
+    if(residentBodyRadii.size>=256)residentBodyRadii.delete(residentBodyRadii.keys().next().value);
+    residentBodyRadii.set(key,radius);return radius;
+  }
+  function residentSight(dungeon, actor, player) {
+    const center=dialoguePoint(actor);
+    if(!dungeon || !center || !Number.isFinite(player?.x) || !Number.isFinite(player?.y))return {visible:false,centerVisible:false,point:null};
+    if(lineClear(dungeon,player,center))return {visible:true,centerVisible:true,point:center};
+    if(!pointWalkable(dungeon,center.x,center.y))return {visible:false,centerVisible:false,point:null};
+    // An exposed shoulder can be visible around a corner while the actor's centre is hidden.
+    // These bounded body probes are for perception; attack and movement still use their strict rays.
+    const radius=residentBodyRadius(actor),diagonal=radius/Math.SQRT2,floorAt=p=>dungeon.cells?.[`${Math.floor(p.x)},${Math.floor(p.y)}`]?.floorHeight || 0;
+    for(const [dx,dy] of [[radius,0],[-radius,0],[0,radius],[0,-radius],[diagonal,diagonal],[-diagonal,diagonal],[diagonal,-diagonal],[-diagonal,-diagonal]]) {
+      const point={x:center.x+dx,y:center.y+dy};
+      if(Math.abs(floorAt(point)-floorAt(center))>1.5 || !pointWalkable(dungeon,point.x,point.y) || !lineClear(dungeon,player,point))continue;
+      return {visible:true,centerVisible:false,point};
+    }
+    return {visible:false,centerVisible:false,point:null};
+  }
   function hearingClear(dungeon, a, b, range) {
     if (!a || !b || !Number.isFinite(range) || range <= 0 ||
         ![a.x, a.y, b.x, b.y].every(Number.isFinite) || Math.hypot(b.x - a.x, b.y - a.y) > range ||
@@ -391,15 +429,15 @@
     }
     return false;
   }
-  function dialogueReach(dungeon, actor, player) {
-    const range = actor?.type === 'npc' ? COMPANION_DIALOGUE_RANGE : MONSTER_DIALOGUE_RANGE;
+  function dialogueReach(dungeon, actor, player, { conversation = false } = {}) {
+    const range = actor?.type === 'npc' ? COMPANION_DIALOGUE_RANGE : conversation ? RESIDENT_CONVERSATION_RANGE : MONSTER_DIALOGUE_RANGE;
     const point = dialoguePoint(actor);
     const floorAt = p => dungeon?.cells?.[`${Math.floor(p.x)},${Math.floor(p.y)}`]?.floorHeight || 0;
     const distance = point && Number.isFinite(player?.x) && Number.isFinite(player?.y) ?
       Math.hypot(point.x - player.x, point.y - player.y, floorAt(point) - floorAt(player)) : Infinity;
     const present = !!dungeon && actor?.discoveryState !== 'pending' && (actor?.hp ?? 1) > 0 && state(actor) !== 'Dead' && actor?.type !== 'pc' &&
       roomKey(actor?.mazeRoomKey) === dungeon.geoKey && (actor?.type !== 'monster' || !['dead', 'recruited', 'departed'].includes(actor?.status));
-    const lineOfSight = present && distance <= range && lineClear(dungeon, player, point);
+    const lineOfSight = present && distance <= range && residentSight(dungeon, actor, player).visible;
     const canHear = !!lineOfSight || present && distance <= range && hearingClear(dungeon, player, point, range);
     return { canSpeak: !!canHear, canHear: !!canHear, distance, range, lineOfSight: !!lineOfSight };
   }
@@ -818,7 +856,7 @@
     const normalized = value => String(value || '').replace(/\s+/g, ' ').trim();
     const witnesses = (Array.isArray(evidence) ? evidence : []).filter(row => allowed.includes(row?.speaker) && typeof row.line === 'string');
     const vocal = '\\b(?:voice|tone|gaze|eyes|lips|mouth|expression|face)\\b';
-    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed|gives?|gave|shrugs?|shrugged|grunts?|grunted|steadies|steadied|checks?|checked)';
+    const action = '(?:pauses?|paused|nods?|nodded|turns?|turned|smiles?|smiled|hesitates?|hesitated|leans?|leaned|stands?|stood|shifts?|shifted|looks?|looked|raises?|raised|lowers?|lowered|draws?|drew|steps?|stepped|sighs?|sighed|stills?|stilled|slows?|slowed|keeps?|kept|remains?|remained|holds?|held|rests?|rested|brushes|brushed|rubs?|rubbed|wipes?|wiped|folds?|folded|presses|pressed|gives?|gave|shrugs?|shrugged|grunts?|grunted|steadies|steadied|checks?|checked|falters?|faltered)';
     // Resolve the narrative subject clause by clause, rather than requiring a
     // name immediately beside every quote or possessive voice/gaze reference.
     function narrativeOwner(prefix, previous) {
@@ -844,7 +882,7 @@
           const object = /\b(?:to|toward|towards|at|with|beside|near|behind|about|from|of)\s*$/i.test(before);
           const bodyOwner = /\b(?:carapace|body|face|eyes|gaze|voice|tone|lips|mouth|hands|wings)\b[^,;.!?]{0,50}\bof\s*$/i.test(before);
           const predicate = new RegExp(`^\\s+(?:[\\w-]+\\s+){0,2}(?:${verb}|${action})\\b`, 'i').test(after);
-          const possession = new RegExp(`^['\\u2019]s\\b[^,;.!?]*${vocal}`, 'i').test(after);
+          const possession = new RegExp(`^['\\u2019]s\\b[^,;.!?]*(?:${vocal}|\\b${action}\\b)`, 'i').test(after);
           if ((!object || bodyOwner) && (predicate || possession || bodyOwner)) agents.push(ref.name);
         }
         const owners = [...new Set(agents)], grouped = references.length > 1 && references.some(ref => /\b(?:and|or)\s*$/i.test(clause.slice(0, ref.start)));
@@ -1103,7 +1141,7 @@
       }
     }
   }
-  function perceive(dungeon, roster, population, entry = false) {
+  function perceive(dungeon, roster, population, entry = false, { conversation = false } = {}) {
     const pc = roster.find(a=>a.type==='pc');
     const continuous=pc?.mazePoint;
     const player = !entry && roomKey(pc?.mazeRoomKey)===dungeon?.geoKey && Number.isFinite(pc?.mazeX) ?
@@ -1115,10 +1153,22 @@
     const nearby = living.filter(a=>a.type==='npc' && entry || roomKey(a.mazeRoomKey)===dungeon.geoKey &&
       Math.hypot(a.mazeX+0.5-player.x,a.mazeY+0.5-player.y)<=(population?.indoor ? 8 : 12) &&
       lineClear(dungeon,player,{x:a.mazeX+0.5,y:a.mazeY+0.5}));
-    const conversational = living.filter(a => a.type === 'npc' && entry || dialogueReach(dungeon, a, player).canSpeak);
+    const conversational = living.filter(a => a.type === 'npc' && entry || dialogueReach(dungeon, a, player, { conversation }).canSpeak);
     return { player, nearby, conversational, distant: living.filter(a=>!nearby.includes(a)) };
   }
-  function nearbyMonsterNames(dungeon, roster, population, player) {
+  function noticeConversationResidents(dungeon, roster, population) {
+    if(!population || population.geoKey!==dungeon?.geoKey)return false;
+    const view=perceive(dungeon,roster,population,false,{conversation:true});let changed=false;
+    for(const actor of view.conversational) {
+      if(actor.type!=='monster' || hasEncountered(actor,population) || !dialogueReach(dungeon,actor,view.player,{conversation:true}).lineOfSight)continue;
+      const record=population.actors?.[actor.name];if(!record || record.discoveryState==='pending')continue;
+      record.encounteredAt=Date.now();changed=true;
+      const group=population.groups?.find(g=>g.id===record.encounterId);if(group?.status==='unseen')group.status='discovered';
+    }
+    if(changed)population.revision++;
+    return changed;
+  }
+  function nearbyMonsterNames(dungeon, roster, population, player, { conversation = false } = {}) {
     if (!dungeon || !player || !Number.isFinite(player.x) || !Number.isFinite(player.y)) return [];
     const metadata = population?.geoKey === dungeon.geoKey ? population.actors : {};
     const records = new Map(Object.values(metadata || {}).filter(a => a.discoveryState !== 'pending' && ['present', 'dead'].includes(a.status)).map(a => [a.name, a]));
@@ -1126,20 +1176,23 @@
         Number.isFinite(actor.mazeX) && Number.isFinite(actor.mazeY)) {
       const record = records.get(actor.name);
       if (actor.discoveryState === 'pending' || metadata?.[actor.name] && !record) continue;
-      records.set(actor.name, { ...record, name: actor.name, position: { x: actor.mazeX, y: actor.mazeY } });
+      records.set(actor.name, { ...record, name: actor.name, race:actor.race || record?.race, sprite:actor.sprite,
+        stature:actor.stature || record?.stature, mazePoint:actor.mazePoint, position: { x: actor.mazeX, y: actor.mazeY } });
     }
     const engaged = new Set(population?.geoKey === dungeon.geoKey ?
       population.groups.filter(g => g.status === 'engaged').map(g => g.id) : []);
     return [...records.values()].filter(a => {
       if (!a.position) return false;
       const point = { x: a.position.x + 0.5, y: a.position.y + 0.5 };
-      if (Math.hypot(point.x - player.x, point.y - player.y) >
-          ((population?.indoor ?? dungeon.classification?.indoor) ? 8 : 12)) return false;
+      const nearbyRange=(population?.indoor ?? dungeon.classification?.indoor) ? 8 : 12;
+      const floorAt=p=>dungeon.cells?.[`${Math.floor(p.x)},${Math.floor(p.y)}`]?.floorHeight || 0;
+      const distance=Math.hypot(point.x-player.x,point.y-player.y,conversation?floorAt(point)-floorAt(player):0);
+      if (distance > (conversation ? RESIDENT_CONVERSATION_RANGE : nearbyRange)) return false;
       // Engagement preserves nearby opponents behind cover, never remote or spared residents.
-      if (engaged.has(a.encounterId) && canAct(a) && allegiance(a) === 'Hostile') return true;
-      return lineClear(dungeon, player, point) || a.encounteredAt > 0 &&
-        dialogueReach(dungeon, { ...a, type: 'monster', mazeX: a.position.x, mazeY: a.position.y,
-          mazeRoomKey: dungeon.geoKey }, player).canSpeak;
+      if (distance<=nearbyRange && engaged.has(a.encounterId) && canAct(a) && allegiance(a) === 'Hostile') return true;
+      const actor={ ...a, type:'monster', mazeX:a.position.x, mazeY:a.position.y, mazeRoomKey:dungeon.geoKey };
+      return (conversation ? residentSight(dungeon,actor,player).visible : lineClear(dungeon,player,point)) ||
+        a.encounteredAt > 0 && dialogueReach(dungeon,actor,player,{conversation}).canSpeak;
     }).map(a => a.name);
   }
   function hostileEncounterNames(dungeon, roster, population, player) {
@@ -1200,10 +1253,10 @@
     const elapsed = Math.max(0, now - (population?.lastDialogueRefreshAt || now));
     return Math.max(0, DIALOGUE_REFRESH_MS - elapsed);
   }
-  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, dialogueRecipient, dialogueRefreshDelay, isDown, isAlive, canAct,
+  const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, RESIDENT_CONVERSATION_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, residentBodyRadius, residentSight, dialogueRecipient, dialogueRefreshDelay, isDown, isAlive, canAct,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
-    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
+    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, noticeConversationResidents, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DungeonInhabitants = api;
 })(typeof window === 'undefined' ? globalThis : window);

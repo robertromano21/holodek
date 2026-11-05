@@ -187,7 +187,7 @@
       if (!sameRoom(ctx) || root.GameCommandGate?.waitingNative?.()) return false;
       const box = popup(data.divine ? 'Divine Audience: ' + data.divine.name : data.venue?.name || data.service?.name || 'Local Contracts',
         `Silver Pieces: ${data.silver}` + (data.divine ? `\n${data.divine.domain}\n${data.divine.interest}\nVisit ${data.divine.visits}. This deity travels independently and cannot join the party.` : ''));
-      held.element = box.element;held.phase='menu';interaction=held;
+      held.element = box.element;held.phase='menu';held.offeredMissionIds=data.missions.filter(m=>m.status==='offered').map(m=>m.id);interaction=held;
       for (const item of data.divine?.possessions || []) box.add('Receive ' + item.name, { kind: 'receive', actor, item: item.name }, true);
       if (data.venue) {
         const detail = document.createElement('p');
@@ -219,14 +219,20 @@
       }
       for (const mission of data.missions) {
         const line = document.createElement('p'); line.textContent = `${mission.status}: ${mission.description}${mission.pendingReward ? '\nRequirements verified; free an inventory slot to receive your payment.' : ''}`; box.info.after(line);
-        if (mission.status === 'offered'&&(mission.type!=='delivery'||mission.patron===actor)) box.add('Accept Local Contract', { kind: 'accept-mission', actor, missionId: mission.id }, true);
+        if (mission.status === 'offered'&&(mission.type!=='delivery'||mission.patron===actor)) box.add('Accept Local Contract', { kind: 'accept-mission', actor, missionId: mission.id });
+        if (mission.type === 'resident-favor') {
+          const progress = document.createElement('p'); progress.textContent = mission.progress || mission.offer; box.info.after(progress);
+          if (mission.status === 'offered') box.add('Decline Favor', { kind: 'decline-favor', actor, missionId: mission.id }, true);
+          if (mission.status === 'accepted') box.add('Report Findings', { kind: 'report-favor', actor, missionId: mission.id }, true);
+        }
         if (mission.status === 'accepted' && mission.item&&(mission.type!=='delivery'||mission.recipient===actor)) {
           const give = document.createElement('button'); give.type = 'button'; give.className = 'popup-button'; give.textContent = 'Give Requested Item';
           give.textContent = 'Give Requested Item to ' + mission.recipient;
           give.addEventListener('click', () => { if (!blocked()) { box.close(); root.ItemGiveUi?.open(mission.recipient); } }); box.info.after(give);
         }
       }
-      root.CombatCharacterUi?.addRecruitAction?.(box.rows,actor,{close:box.close,blocked});
+      root.CombatCharacterUi?.addRecruitAction?.(box.rows,actor,{close:box.close,blocked,recruitmentCondition:data.recruitmentCondition ||
+        data.missions.find(m=>m.type==='resident-favor'&&m.recipient===actor&&['offered','accepted'].includes(m.status))});
       box.add('Close'); return true;
     } catch (error) { notice(error.message); return false; }
     finally { if(held?.phase==='loading')loading?.close();if (interaction === held && !held?.element) interaction = null; pending = false; }
@@ -317,7 +323,14 @@
     return options.receipt?receipt:true;
   }
   const hasInteraction=()=>!!interaction&&isInteracting(interaction.actor);
+  function receiveResult(event) {
+    if(!interaction || interaction.phase!=='menu' || !sameRoom(interaction) || event?.runId!==root.dungeonRunId || event.geoKey!==interaction.geoKey) return;
+    let database;try{database=JSON.parse(event.roomNameDatabaseString);}catch{return;}
+    const jobs=Object.values(database?.[interaction.geoKey]?.minorMissions || {});
+    if(jobs.some(m=>interaction.offeredMissionIds?.includes(m.id) && ['accepted','completed','withdrawn'].includes(m.status)))currentClose?.();
+  }
   root.CommerceUi = { open, openCounter, invite, inviteAmbient, isInteracting, hasInteraction,
+    receiveResult,
     invitationPending:()=>hasInteraction()&&interaction.phase==='offer',
     addAction, addDrinkAction, drinkable, drink, handleCommand,isBusy:blocked,
     takeItem:(name,options)=>handleCommand('take '+name,{...options,receipt:true,quietBusy:true}) };

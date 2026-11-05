@@ -41,7 +41,7 @@
   }
   // Speech already printed in the Game Log is not a proximity-triggered ambient line.
   function conversational(row, actor, ctx) {
-    return row?.source === 'retort-response' && !!actor && (actor.hp ?? 1) > 0 && I.state(actor) !== 'Dead' && I.roomKey(actor.mazeRoomKey) === ctx.dungeon.geoKey;
+    return row?.source === 'retort-response' && row.kind === 'turn';
   }
   function speechCheck(actor, ctx) {
     const reach = I.dialogueReach(ctx.dungeon, speakingActor(actor), ctx.player);
@@ -182,7 +182,7 @@
       const message = { ...row, geoKey: event.geoKey, source: event.source || 'dialogue-event' };
       const actor = ctx?.actors.find(a => a.name === row.speaker);
       const logged = message.source === 'retort-response' && row.kind === 'turn';
-      if (!ctx?.dungeon || event.geoKey !== ctx.dungeon.geoKey || (!logged || row.requiresNearby) && (!actor || I.roomKey(actor.mazeRoomKey) !== event.geoKey)) {
+      if (!ctx?.dungeon || event.geoKey !== ctx.dungeon.geoKey || !logged && (!actor || I.roomKey(actor.mazeRoomKey) !== event.geoKey)) {
         if (!event.retry) {
           pendingDialogue.push({ event: { ...event, dialogue: [row], retry: true }, expires: Date.now() + 30000 });
           if (pendingDialogue.length > 8) pendingDialogue.shift();
@@ -191,7 +191,7 @@
         continue;
       }
       const reach = speechCheck(actor, ctx);
-      if ((row.requiresNearby || (row.kind || 'turn') !== 'turn') && !reach.canSpeak &&
+      if (!logged && (row.requiresNearby || (row.kind || 'turn') !== 'turn') && !reach.canSpeak &&
           (row.requiresNearby || !conversational(message, actor, ctx))) { subtitleReport('skipped', message, reach); continue; }
       const key = `${event.geoKey}|${row.speaker}|${row.line}`;
       if (seen.has(key) || queue.some(queued => queued.key === key)) {
@@ -252,9 +252,7 @@
       known.attribution === 'labelled' && known.speaker !== row.speaker &&
       (known.line.includes(row.line) || row.line.includes(known.line))));
     const rows = I.mergeAttributedSpeech(explicit, attributed);
-    const requiresNearby = explicit.some(row => row.requiresNearby === true);
-    receiveDialogue({ ...event, source: 'retort-response', dialogue: rows.map(row => ({ ...row, kind: 'turn',
-      ...(requiresNearby ? { requiresNearby: true } : {}) })) });
+    receiveDialogue({ ...event, source: 'retort-response', dialogue: rows.map(row => ({ ...row, kind: 'turn' })) });
   }
   function flushPendingDialogue(ctx) {
     for (let i = 0; i < pendingDialogue.length;) {
@@ -265,7 +263,7 @@
         pendingDialogue.splice(i, 1); continue;
       }
       const actor = ctx.actors.find(a => a.name === pending.event.dialogue[0].speaker);
-      if (pending.event.geoKey === ctx.dungeon.geoKey && actor && I.roomKey(actor.mazeRoomKey) === ctx.dungeon.geoKey) {
+      if (pending.event.geoKey === ctx.dungeon.geoKey && (pending.event.source === 'retort-response' || actor && I.roomKey(actor.mazeRoomKey) === ctx.dungeon.geoKey)) {
         pendingDialogue.splice(i, 1); receiveDialogue(pending.event);
       } else i++;
     }
@@ -283,7 +281,7 @@
     if (active || !queue.length) return;
     const row = queue.shift(), actor = ctx.actors.find(a => a.name === row.speaker);
     const reach = speechCheck(actor, ctx);
-    if (row.geoKey !== ctx.dungeon.geoKey || ((row.requiresNearby || row.kind !== 'turn') && !reach.canSpeak &&
+    if (row.geoKey !== ctx.dungeon.geoKey || (!conversational(row, actor, ctx) && (row.requiresNearby || row.kind !== 'turn') && !reach.canSpeak &&
         (row.requiresNearby || !conversational(row, actor, ctx)))) {
       subtitleReport('skipped', row, { ...reach, reason: row.geoKey !== ctx.dungeon.geoKey ? 'wrong-room' : reach.reason }); return;
     }

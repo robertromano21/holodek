@@ -444,6 +444,13 @@ function routeFixture() {
     return { status, result };
   } };
 }
+test('a population recruitment arriving before the full turn roster never removes the visible actor',()=>{
+  const f=fixture(),sprite={dataUrl:'data:approved'};f.actor.sprite=sprite;const x=f.actor.mazeX,y=f.actor.mazeY,count=f.ctx.actors.length;
+  const population=I.createPopulation(f.event.geoKey,[{name:f.actor.name,allegiance:'Friendly'}]);
+  population.actors[f.actor.name].status='recruited';f.root.DungeonLife.receivePopulation({population,runId:'run'});
+  assert.equal(f.actor.type,'npc');assert.equal(I.isPresent(f.actor,population),true);assert.equal(f.actor.sprite,sprite);
+  assert.equal(f.actor.mazeX,x);assert.equal(f.actor.mazeY,y);assert.equal(f.ctx.actors.length,count);
+});
 test('subtitle diagnostic endpoint records actual client reports, rejects stale runs and oversized or invalid payloads', () => {
   const f = routeFixture(), row = { runId: 'run', geoKey: '1,0,0', stage: 'displayed', speaker: 'Vyrixa Shadowtide',
     line: 'The wards here falter.', source: 'retort-response', at: 1000, queueDepth: 0, distance: 1, range: 3, lineOfSight: true };
@@ -479,13 +486,14 @@ test('logged speech can be displayed before a known sheet has a positioned world
   assert.equal(f.nodes.get('dungeon-dialogue').hidden, false);
 });
 
-test('entry greetings wait for a positioned actor, even when the same prose is in the Game Log', () => {
+test('logged entry speech displays immediately even when marked requiresNearby and its actor is not positioned', () => {
   const f = fixture(), line = 'The bead is guarded in the sepulchre.', actor = f.actor;
   f.ctx.actors = [];
   f.root.DungeonLife.receiveTurnDialogue(`${actor.name} says, "${line}"`, { ...f.event, consoleText: '',
     dialogue: [{ speaker: actor.name, line, requiresNearby: true }] });
-  assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
-  assert.ok(f.reports.some(row => row.stage === 'deferred'));
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, line);
+  assert.equal(f.nodes.get('dungeon-dialogue').hidden, false);
+  assert.ok(!f.reports.some(row => row.stage === 'deferred'));
   f.ctx.actors = [actor]; f.root.DungeonLife.tick();
   assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, line);
   assert.equal(f.reports.filter(row => row.stage === 'displayed').length, 1);
@@ -504,15 +512,15 @@ test('Dorrik and Pellin action-led replies actually reach consecutive subtitle c
   assert.deepEqual(f.reports.filter(row => row.stage === 'displayed').map(row => row.speaker), ['Dorrik Slatehymn', 'Pellin Reedcup']);
 });
 
-test('an entry greeting cannot speak across the level or through a sealed wall', () => {
+test('entry dialogue already in the Game Log is subtitled across the level and through a sealed wall', () => {
   for (const change of [f => { f.actor.mazeX = 25; }, f => { f.actor.mazeX = 6; f.ctx.dungeon.cells['5,4'].tile = 'wall'; }]) {
     const f = fixture(); change(f);
     const line = 'The bead is guarded in the sepulchre.';
     f.root.DungeonLife.receiveTurnDialogue(`${f.actor.name} says, "${line}"`, { ...f.event, consoleText: '',
       dialogue: [{ speaker: f.actor.name, line, requiresNearby: true }] });
-    assert.equal(f.nodes.get('dungeon-dialogue').hidden, true);
-    assert.ok(f.reports.some(row => row.stage === 'skipped'));
-    assert.ok(!f.reports.some(row => row.stage === 'displayed'));
+    assert.equal(f.nodes.get('dungeon-dialogue-words').textContent, line);
+    assert.ok(!f.reports.some(row => row.stage === 'skipped'));
+    assert.ok(f.reports.some(row => row.stage === 'displayed'));
   }
 });
 
@@ -524,6 +532,24 @@ test('entry range is checked again when a queued greeting reaches the front', ()
   f.actor.mazeX = 25; f.advance(20000); f.root.DungeonLife.tick();
   assert.ok(f.reports.some(row => row.stage === 'skipped' && row.reason === 'out-of-range'));
   assert.equal(f.reports.filter(row => row.stage === 'displayed').length, 1);
+});
+
+test('queued logged dialogue retains every line after the speaker leaves range or the roster', () => {
+  const f=fixture(),lines=['I cannot leave yet.','Help me finish watching the wind.'];
+  f.root.DungeonLife.receiveTurnDialogue('',{...f.event,consoleText:'',dialogue:lines.map(line=>({speaker:f.actor.name,line,requiresNearby:true}))});
+  f.ctx.actors=[];f.advance(20000);f.root.DungeonLife.tick();
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent,lines[1]);
+  assert.deepEqual(f.reports.filter(row=>row.stage==='displayed').map(row=>row.line),lines);
+  assert.ok(!f.reports.some(row=>row.stage==='skipped'));
+});
+
+test('Calthokael’s logged shell-tapping refusal reaches the subtitle system without metadata or nearby range',()=>{
+  const f=fixture();f.actor.name='Calthokael Qyas';f.actor.mazeX=25;
+  const line='I won’t promise myself to a road I haven’t heard. But I’ll keep listening. A song can carry a name farther than a vow can carry a body.';
+  f.root.DungeonLife.receiveTurnDialogue('Calthokael’s shell-tapping falters for a beat. “'+line+'”',{...f.event,dialogue:[],consoleText:''});
+  for(let i=0;i<5;i++){f.advance(20000);f.root.DungeonLife.tick();}
+  assert.equal(f.reports.filter(row=>row.stage==='displayed').map(row=>row.line).join(' '),line);
+  assert.ok(!f.reports.some(row=>row.stage==='skipped'));
 });
 
 test('all action-led Tarn recollections reach subtitles even across the room with no structured speech labels', () => {

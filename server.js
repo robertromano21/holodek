@@ -1191,7 +1191,10 @@ app.post('/updateState7', async (req, res) => {
         const life = CombatLife.preserve(sharedState, consoleSnapshot, roomSnapshot, rosterSnapshot);
         consoleSnapshot = life.text; roomSnapshot = life.database; rosterSnapshot = life.roster;
       }
-      if (combatCharactersString !== undefined) Economy.validateDivineRoster?.(combatCharactersString);
+      if (combatCharactersString !== undefined) {
+        rosterSnapshot = Economy.preserveFavorRoster?.(sharedState,rosterSnapshot) ?? rosterSnapshot;
+        Economy.validateDivineRoster?.(rosterSnapshot);
+      }
     } catch (error) { return res.status(400).json({ error: 'Invalid economy state: ' + error.message }); }
     if (personalNarrative !== undefined) sharedState.setPersonalNarrative(personalNarrative);
     if (consoleSnapshot !== undefined) sharedState.setUpdatedGameConsole(consoleSnapshot);

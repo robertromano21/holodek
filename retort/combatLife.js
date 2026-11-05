@@ -2,7 +2,7 @@
 const { randomInt } = require('node:crypto');
 const I = require('../assets/dungeonInhabitants'), Rules = require('../assets/spellRules');
 const Inventory = require('../assets/inventoryUi'), Reach = require('./dungeonReach');
-const SURVIVAL_DC = 12, DYING_ROUNDS = 2;
+const SURVIVAL_DC = 12, DYING_ROUNDS = 2, RECOVERY_TURNS = 10;
 const key = Rules.key;
 const DeathStory = require('./deathStory');
 const Defeats = require('./questDefeatEvidence');
@@ -20,9 +20,35 @@ function ledger(db, runId) {
 }
 function saveBonus(actor) { return Math.min(5, Math.floor(Rules.casterLevel(actor.className || actor.class || actor.Class, actor.level || actor.Level || 1) / 4)); }
 function survivalPlan(actor) { return { actor: actor.name, label: 'Survival Save', sides: 20, modifier: saveBonus(actor), difficulty: SURVIVAL_DC, player: false }; }
+function beginCombat(state) {
+  const db = dbOf(state), life = ledger(db, state.getDungeonRunId());
+  life.inCombat = true; life.afterBattle = false;
+  for (const r of Object.values(life.actors)) if (r.state === 'Unconscious') delete r.recoverAt;
+  state.setRoomNameDatabase(JSON.stringify(db));
+}
+function defeatXP(text, life) {
+  const notices = [];
+  for (const reward of life.defeatXP || []) {
+    if (reward.awarded) continue;
+    const party = actors(text).filter(a => (a.type === 'pc' || a.type === 'npc') && a.hp > 0);
+    const share = party.length ? Math.floor(reward.total / party.length) : 0;
+    reward.awarded = true; reward.shares = {};
+    for (const member of party) {
+      const total = member.xp + share;
+      reward.shares[member.name] = share;
+      life.xpMinimums ||= {}; life.xpMinimums[key(member.name)] = total;
+      text = text.replace(member.rawSheet, () => member.rawSheet.replace(/^([ \t]*XP:)[^\r\n]*/m, (_, h) => h + ' ' + total));
+    }
+    notices.push({ kind: 'defeat-xp', title: reward.name, subject: reward.name, activity: 'Experience', result: 'success',
+      message: `${reward.name} is defeated. The party earns ${reward.total} XP. ` +
+        (party.length ? party.map(a => `${a.name}: +${share} XP.`).join(' ') : 'No conscious party member can receive XP.') });
+  }
+  return { text, notices };
+}
 function apply(db, runId, actor, nextHp, natural, options = {}) {
   const life = ledger(db, runId);
   if (!actor?.name || !Number.isFinite(nextHp)) throw Error('Invalid injury.');
+  if (options.damage > 0 && nextHp < actor.hp) require('./combatCasting').damage(db, runId, actor, actor.hp - nextHp);
   const previousDefeat = actor.type === 'monster' && Defeats.evidence(db, options.geoKey, actor.name);
   if (previousDefeat) Defeats.remember(life, actor.name, options.geoKey, previousDefeat.at ?? life.clock);
   const prior = I.state(actor), record = { name: actor.name, type: actor.type, geoKey: options.geoKey,
@@ -39,7 +65,15 @@ function apply(db, runId, actor, nextHp, natural, options = {}) {
       record.save = { natural, total, difficulty: SURVIVAL_DC, passed };
     }
     if (record.state === 'Dying') record.remaining = life.actors[key(actor.name)]?.remaining ?? DYING_ROUNDS;
-    if (record.state === 'Unconscious') record.recoverAt = life.actors[key(actor.name)]?.recoverAt ?? life.clock + 2;
+    if (record.state === 'Unconscious') {
+      record.recoveryVersion = 2;
+      if (!life.inCombat) record.recoverAt = life.actors[key(actor.name)]?.recoverAt ?? life.clock + RECOVERY_TURNS;
+    }
+  }
+  if (actor.type === 'monster' && record.hp === 0 && record.allegiance === 'Hostile' && options.damage > 0) {
+    life.defeatXP ||= [];
+    if (!life.defeatXP.some(r => r.geoKey === options.geoKey && key(r.name) === key(actor.name)))
+      life.defeatXP.push({ name: actor.name, geoKey: options.geoKey, total: randomInt(1000, 1501) * (actor.level || 1), awarded: false });
   }
   life.actors[key(actor.name)] = record; life.revision++;
   Object.assign(actor, { hp: record.hp, state: record.state, dyingRounds: record.remaining });
@@ -59,6 +93,10 @@ function paint(text, life) {
       }
       return head + body;
     });
+  for (const a of actors(text)) {
+    const minimum = life.xpMinimums?.[key(a.name)];
+    if (minimum > a.xp) text = text.replace(a.rawSheet, () => a.rawSheet.replace(/^([ \t]*XP:)[^\r\n]*/m, (_, h) => h + ' ' + minimum));
+  }
   if (life.pcName) {
     const label=life.recoveryLabel || 'Divine Rescues';
     const value = `${label}: ${life.rescuesUsed || 0}/2 used`;
@@ -104,7 +142,8 @@ function commit(state, db, text = state.getUpdatedGameConsole(), roster = JSON.p
     life.revision++;
     life.messageRevision = life.revision;
   }
-  const next = paint(text, life);
+  const casting = require('./combatCasting').commit(state, db, paint(text, life));
+  const rewards = defeatXP(casting.text, life), next = rewards.text;
   const sheets = new Map(actors(next).map(a => [key(a.name), a]));
   for (const [geoKey, room] of Object.entries(db)) {
     const p = state.getRoomPopulation?.(geoKey) || room?.inhabitants; if (!p) continue;
@@ -120,6 +159,8 @@ function commit(state, db, text = state.getUpdatedGameConsole(), roster = JSON.p
   }
   state.setRoomNameDatabase(JSON.stringify(db)); state.setUpdatedGameConsole(next);
   state.setCombatCharactersString(JSON.stringify(rosterPaint(roster, life)));
+  for (const notice of rewards.notices) announce(state, notice);
+  for (const notice of casting.notices) announce(state, notice);
   if (life.respawn) require('./economy').playerDeathDrops(state, life.respawn.id);
   for (const actor of actors(state.getUpdatedGameConsole()).filter(a => a.type === 'monster' && (I.isDown(a) || I.state(a) === 'Dead')))
     require('./economy').corpseDrops(state, actor.name);
@@ -163,7 +204,10 @@ function settle(state) {
   const db = dbOf(state), life = ledger(db, state.getDungeonRunId());
   const party = actors(state.getUpdatedGameConsole()).filter(a => a.type === 'pc' || a.type === 'npc');
   const pc = party.find(a => a.type === 'pc');
-  life.afterBattle = true;
+  life.inCombat = false; life.afterBattle = true;
+  for (const r of Object.values(life.actors)) if (r.state === 'Unconscious' && (!Number.isFinite(r.recoverAt) || r.recoveryVersion !== 2)) {
+    r.recoverAt = life.clock + RECOVERY_TURNS; r.recoveryVersion = 2;
+  }
   if (pc && pc.hp <= 0 && !party.some(a => a.hp > 0 || I.state(a) === 'Unconscious')) {
     for (const actor of party.filter(a => I.state(a) === 'Dying')) {
       const r = life.actors[key(actor.name)]; if (r) { r.state = 'Dead'; r.hp = 0; delete r.remaining; }
@@ -180,8 +224,13 @@ function advance(state) {
   for (const r of Object.values(life.actors)) if (r.state === 'Dying' && r.at < life.clock) {
     r.remaining--; life.revision++;
     if (r.remaining <= 0) { r.state = 'Dead'; delete r.remaining; died.push(r.name); }
-  } else if (r.state === 'Unconscious' && r.recoverAt <= life.clock) {
-    r.hp = 1; r.state = r.type === 'pc' ? 'Alive' : r.allegiance || 'Friendly'; delete r.recoverAt; life.revision++;
+  } else if (r.state === 'Unconscious') {
+    if (life.inCombat) { delete r.recoverAt; continue; }
+    if (!Number.isFinite(r.recoverAt) || r.recoveryVersion !== 2) {
+      r.recoverAt = life.clock + RECOVERY_TURNS; r.recoveryVersion = 2;
+    } else if (r.recoverAt <= life.clock) {
+      r.hp = 1; r.state = r.type === 'pc' ? 'Alive' : r.allegiance || 'Friendly'; delete r.recoverAt; life.revision++;
+    }
   }
   commit(state, db);
   const present = new Set(actors(state.getUpdatedGameConsole()).map(a => a.name));
@@ -249,7 +298,9 @@ function care(state, input) {
       if (target.type === 'monster' && healer?.type !== 'monster' && r.allegiance === 'Hostile') {
         r.allegiance = 'Neutral'; r.mercy = { by: input.actor, at: life.clock }; spared = true;
       }
-      r.state = 'Unconscious'; r.recoverAt = life.clock + 2; delete r.remaining; life.revision++;
+      r.state = 'Unconscious'; r.recoveryVersion = 2;
+      if (life.inCombat) delete r.recoverAt; else r.recoverAt = life.clock + RECOVERY_TURNS;
+      delete r.remaining; life.revision++;
     } else {
       const names = text.match(/^Inventory:[ \t]*([^\r\n]*)/m)[1].split(/,\s*/), props = Inventory.parseProperties(text.match(/^Inventory Properties:[ \t]*([^\r\n]*)/m)?.[1]);
       const potion = props.find(p => key(p.name) === key(input.item)), index = names.findIndex(n => key(n) === key(input.item));
@@ -288,5 +339,5 @@ function wait(state, input) {
     state.setRoomNameDatabase(JSON.stringify(db)); return result;
   } catch (error) { return { error: error.message }; }
 }
-module.exports = { SURVIVAL_DC, DYING_ROUNDS, actors, ledger, saveBonus, survivalPlan, apply, paint, rosterPaint, commit, advance, preserve, careChoices, care, wait, status, claimDeaths,
+module.exports = { SURVIVAL_DC, DYING_ROUNDS, RECOVERY_TURNS, beginCombat, actors, ledger, saveBonus, survivalPlan, apply, paint, rosterPaint, commit, advance, preserve, careChoices, care, wait, status, claimDeaths,
   settle, recoveryStatus, natural: () => randomInt(1, 21) };

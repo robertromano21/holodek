@@ -7,6 +7,8 @@ function project(state) {
   const pool = db['0,0,0']?.spellSystem?.runId === state.getDungeonRunId() ? db['0,0,0'].spellSystem : {};
   const casters = [];
   for (const actor of Spells.party(text)) {
+    const casting = require('./combatCasting').status(state, actor);
+    const unavailable = casting?.blocked ? 'Recovering concentration this round' : casting?.pending ? 'Casting ' + casting.pending.spell : '';
     const settings = Rules.classSettings(actor.className, actor.level), c = pool.casters?.[actor.name];
     const castingLevel = Rules.casterLevel(actor.className, actor.level), entries = [];
     const bookPresent = c ? require('./classMagic').ownsBook(state, c) : !settings?.spellbook;
@@ -16,9 +18,9 @@ function project(state) {
       if (c?.learned?.[id]?.cost) spell.cost = c.learned[id].cost;
       const known = !settings.spellbook || c?.known?.includes(id), prepared = !!c?.prepared?.includes(id);
       const cooling = spell.effect === 'turn' && pool.effects?.some(e => e.kind === 'turn-cooldown' && e.target === actor.name && e.expires > pool.clock);
-      entries.push({ ...spell, level, classSource: true, memorizeCost: 0, casts: actor.hp > 0 && bookPresent && prepared && castingLevel >= level && !cooling ? Math.floor((c?.remaining || 0) / spell.cost) : 0,
+      entries.push({ ...spell, castingRounds: require('./combatCasting').timing(spell), level, classSource: true, memorizeCost: 0, casts: !unavailable && actor.hp > 0 && bookPresent && prepared && castingLevel >= level && !cooling ? Math.floor((c?.remaining || 0) / spell.cost) : 0,
         source: settings.spellbook ? 'Spellbook' : settings.tradition + ' weave',
-        status: castingLevel < level ? 'Locked' : !known ? 'Scroll required' : prepared ? 'Prepared' : 'Not prepared',
+        status: unavailable || (castingLevel < level ? 'Locked' : !known ? 'Scroll required' : prepared ? 'Prepared' : 'Not prepared'),
         magic: c?.remaining ?? 0, preview: castingLevel < level });
     }
     for (const [slot, name] of Object.entries(I.parseEquipment(actor.lines[9]))) {
@@ -27,9 +29,9 @@ function project(state) {
       for (const base of item.spells || []) {
         const spell = Rules.levelSpell(base, castingLevel), level = base.castMinLevel || 1;
         const cooling = spell.effect === 'turn' && pool.effects?.some(e => e.kind === 'turn-cooldown' && e.target === actor.name && e.expires > pool.clock);
-        entries.push({ ...spell, level, itemId: item.id, sourceCapacity: item.capacity, casts: actor.hp > 0 && castingLevel >= level && !cooling ? Math.floor(item.remaining / spell.cost) : 0,
+        entries.push({ ...spell, castingRounds: require('./combatCasting').timing(spell), level, itemId: item.id, sourceCapacity: item.capacity, casts: !unavailable && actor.hp > 0 && castingLevel >= level && !cooling ? Math.floor(item.remaining / spell.cost) : 0,
           source: `${name} (${slot})`, magic: item.remaining,
-          status: castingLevel < level ? 'Locked' : item.remaining < spell.cost ? 'Insufficient Magic' : 'Equipped',
+          status: unavailable || (castingLevel < level ? 'Locked' : item.remaining < spell.cost ? 'Insufficient Magic' : 'Equipped'),
           artifact: !!item.artifact, rechargeIn: Math.max(0, (item.rechargeAt || 0) - (pool.clock || 0)) });
       }
     }

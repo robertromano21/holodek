@@ -285,7 +285,7 @@
     if(active||root.actionDiceState?.active?.kind==='combat')for (const a of actors) for (const cell of a.cells) {
       const color = a.hostile ? 0xef766c : 0x67d5ef;
       cellRect(gfx, draw, cell, color, null, .08);
-      cellRect(edges, draw, cell, null, color);
+      cellRect(gfx, draw, cell, null, color); // team border beneath avatars
     }
     const p = scene.combatHoverPoint, tile = p && tileAt(draw, p.x, p.y, scene.PIXEL_SCALE || 1);
     const valid = tile && draw.dungeon.cells[`${tile.x},${tile.y}`];

@@ -212,7 +212,7 @@ function createPopulationService(state) {
       if (group.status === 'exhausted' || group.discoveryState === 'pending' || !group.site) continue;
       const near = group.members.map(name => population.actors[name]).filter(a => a?.status === 'present' && a.position &&
         Math.hypot(a.position.x + 0.5 - player.x, a.position.y + 0.5 - player.y) <= 8 &&
-        Inhabitants.lineClear(dungeon, player, { x: a.position.x + 0.5, y: a.position.y + 0.5 }));
+        Inhabitants.residentSight(dungeon, speakerActor(a), player).visible);
       for (const resident of near) if (!resident.encounteredAt) {
         resident.encounteredAt = Date.now(); persistentChange = true;
       }
