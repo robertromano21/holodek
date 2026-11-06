@@ -7,6 +7,28 @@ const dbOf = state => JSON.parse(state.getRoomNameDatabase() || '{}');
 const clock = state => dbOf(state)['0,0,0']?.spellSystem?.clock ?? Number(state.getUpdatedGameConsole().match(/^Turns:\s*(\d+)/m)?.[1] || 0);
 const floorOf = state => require('./hostLocalFloors').identity(dbOf(state)[`${state.getLastCoords().x},${state.getLastCoords().y},${state.getLastCoords().z}`]?.cityFloorContext);
 const all = db => Object.values(db).flatMap(r => Object.values(r?.minorMissions || {})).filter(m => m.source === SOURCE);
+function recruitmentRefusal(state,name,db=dbOf(state)) {
+  return Object.values(db).map(room=>room?.recruitmentDecisions?.[key(name)])
+    .find(decision=>decision?.runId===state.getDungeonRunId() && decision.status==='declined') || null;
+}
+function refusalMessage(name) {
+  return `${name} has already declined the invitation. Repeating it does not change their decision. Discuss their concerns or offer help; completing an agreed favor can reopen recruitment.`;
+}
+function recordRefusal(state,ctx,consent) {
+  const held=recruitmentRefusal(state,ctx.actor.name,ctx.db);if(held)return held;
+  const decision={...ctx.db[ctx.geoKey].recruitmentDecisions?.[key(ctx.actor.name)],id:randomUUID(),runId:state.getDungeonRunId(),actor:ctx.actor.name,status:'declined',line:consent.line,at:Date.now()};
+  ctx.db[ctx.geoKey].recruitmentDecisions ||= {};ctx.db[ctx.geoKey].recruitmentDecisions[key(ctx.actor.name)]=decision;
+  state.setRoomNameDatabase(JSON.stringify(ctx.db));return decision;
+}
+const invitationIntent=input=>require('./holodekNarration').invitationHint(input);
+function neutralInvitation(state,ctx,{random=Math.random}={}) {
+  const held=Object.values(ctx.db).map(room=>room?.recruitmentDecisions?.[key(ctx.actor.name)]).find(d=>d?.runId===state.getDungeonRunId());
+  if(held)return held;
+  const roll=Number(random());if(!Number.isFinite(roll) || roll<0 || roll>=1)throw Error('Invite roll must be a unit interval random value.');
+  const decision={id:randomUUID(),runId:state.getDungeonRunId(),actor:ctx.actor.name,status:'pending',outcome:roll<.7?'refuse':'favor',roll,at:Date.now()};
+  ctx.db[ctx.geoKey].recruitmentDecisions ||= {};ctx.db[ctx.geoKey].recruitmentDecisions[key(ctx.actor.name)]=decision;
+  state.setRoomNameDatabase(JSON.stringify(ctx.db));console.info('[ResidentRecruitment]',JSON.stringify({actor:ctx.actor.name,outcome:decision.outcome,roll}));return decision;
+}
 const groupOf = (population,name) => population?.groups?.find(g=>g.members.includes(name))?.id || population?.actors?.[name]?.encounterId || 'resident:'+name;
 const ownMission = (ctx,state) => all(ctx.db).find(m=>m.runId===state.getDungeonRunId() && m.roomKey===ctx.geoKey && m.recipient===ctx.actor.name && m.status!=='withdrawn');
 function groupMission(ctx,state) {
@@ -103,6 +125,10 @@ function storeOffer(state,ctx,draft,objective,population,consent=null) {
   mission.description=`${mission.title}: ${conditionsText(mission.conditions,name)} Reward: ${name} `+
     (mission.invitationPending?'has conditionally accepted your invitation and will join after verified completion.':'will join when you invite them after completion.');
   ctx.db[ctx.geoKey].minorMissions ||= {};ctx.db[ctx.geoKey].minorMissions[id]=mission;
+  const decision=ctx.db[ctx.geoKey].recruitmentDecisions?.[key(name)];
+  if(decision?.runId===state.getDungeonRunId() && decision.status==='pending' && decision.outcome==='favor') {
+    decision.status='conditional';decision.missionId=id;
+  }
   const record=population?.actors?.[name] || ctx.record;record.minorMissionId=id;record.servicesAcceptedAt ||= Date.now();ctx.population.actors[name]=record;
   ctx.population.serviceProviders=[...new Set([...(ctx.population.serviceProviders || []),name])];ctx.db[ctx.geoKey].inhabitants=ctx.population;
   state.setRoomNameDatabase(JSON.stringify(ctx.db));state.setRoomPopulation?.(ctx.geoKey,ctx.population);state.emitter?.emit('quest:minorMission');
@@ -113,7 +139,9 @@ function recruit(state,service,name,mission=null,consent=null) {
   if(roster.some(a=>a.type==='npc' && key(a.name)===key(name)))return `${name} has already joined the party.`;
   const ctx=nearby(state,name);
   if(!eligible(state,ctx,{favor:false}))throw Error('This resident cannot join through a conversation.');
+  if(recruitmentRefusal(state,name,ctx.db))throw Error(refusalMessage(name));
   mission=mission?ctx.db[ctx.geoKey]?.minorMissions?.[mission.id]:ownMission(ctx,state);
+  if(I.allegiance(ctx.record)==='Neutral' && !mission)throw Error('A neutral resident must agree to a favor and verify its completion before joining.');
   if(mission && mission.status!=='completed')throw Error(`${name}'s invitation is conditional on the favor. ${mission.description} Status: ${mission.status}. Accept with "accept favor from ${name}"; report with "report to ${name}".`);
   if(!mission && !consent?.playerInvited)throw Error('Joining requires an invitation and the resident’s actual consent.');
   if(I.parseSheets(state.getUpdatedGameConsole(),'NPCs in Party').length>=12)throw Error('The party is full. The resident can join after you make room.');
@@ -131,20 +159,30 @@ function recruit(state,service,name,mission=null,consent=null) {
   console.info('[ResidentFavor]',JSON.stringify({phase:'recruited',id:mission.id,actor:name,origin:consent?'live-dialogue':'invitation-command'}));
   return `${name} joins the party. Their identity, equipment and abilities are preserved.`;
 }
-function dialogueOptions(state,names) {
+function dialogueOptions(state,names,{invitation=false,random=Math.random}={}) {
   const options=[],offerGroups=new Set();
   for(const name of names){try{
     const ctx=nearby(state,name);if(!eligible(state,ctx,{favor:false}))continue;
     const favorAllowed=eligible(state,ctx);
     const mission=ownMission(ctx,state),group=groupMission(ctx,state),groupId=groupOf(ctx.population,name);
-    const actions=['none','decline-invitation'];
-    if(favorAllowed && (!group || group.recipient===name) && !offerGroups.has(groupId) && (!mission || ['offered','declined'].includes(mission.status))) { actions.push('offer-favor');offerGroups.add(groupId); }
+    let actions=['none','decline-invitation'];
+    if(favorAllowed && (!group || group.recipient===name) && !offerGroups.has(groupId) && (!mission || ['offered','declined'].includes(mission.status)))actions.push('offer-favor');
     if(mission)actions.push('discuss-favor');
     else if(group)actions.push('discuss-favor');
     if(mission?.status==='offered') { if(!group || group.id===mission.id)actions.push('accept-favor');actions.push('decline-favor'); }
     if(mission?.status==='accepted' && assess(mission,ctx.db).passed)actions.push('report-favor');
-    if((!mission || mission.status==='completed') && I.parseSheets(state.getUpdatedGameConsole(),'NPCs in Party').length<12)actions.push('accept-invitation');
+    const refusal=recruitmentRefusal(state,name,ctx.db);
+    const neutral=I.allegiance(ctx.record)==='Neutral';
+    if(!refusal && (!neutral || mission?.status==='completed') && (!mission || mission.status==='completed') && I.parseSheets(state.getUpdatedGameConsole(),'NPCs in Party').length<12)actions.push('accept-invitation');
+    const decision=neutral && invitation && !mission && !group && !refusal ? neutralInvitation(state,ctx,{random}) :
+      Object.values(ctx.db).map(room=>room?.recruitmentDecisions?.[key(name)]).find(d=>d?.runId===state.getDungeonRunId());
+    if(decision?.status==='pending' && decision.outcome==='refuse')actions=actions.filter(a=>['none','decline-invitation'].includes(a));
+    if(decision?.status==='pending' && decision.outcome==='favor')actions=actions.includes('offer-favor')?['none','offer-favor']:['none','decline-invitation'];
+    if(invitation && refusal)actions=actions.filter(a=>a!=='offer-favor');
+    if(actions.includes('offer-favor'))offerGroups.add(groupId);
     options.push({name,actions,groupId,groupContract:group?{actor:group.recipient,title:group.title,status:group.status,description:group.description}:null,
+      neutralOutcome:decision?.status==='pending'?(actions.includes('offer-favor')?decision.outcome:'refuse'):null,
+      refusal:refusal?{line:refusal.line,message:refusalMessage(name)}:null,
       candidates:favorAllowed?candidates(state,ctx):[],contract:context(state,[name])[0] || null,
       scope:{runId:state.getDungeonRunId(),geoKey:ctx.geoKey,floor:require('./hostLocalFloors').token(state)}});
   }catch{}}
@@ -155,7 +193,7 @@ function applyDialogue(state,service,event,option) {
   if(!option || event.speaker!==option.name || event.recipient!=='PC' || !event.line?.trim())throw Error('A social action needs the actual resident’s live reply to the player.');
   const coords=state.getLastCoords();if(option.scope.runId!==state.getDungeonRunId() || option.scope.geoKey!==`${coords.x},${coords.y},${coords.z}` ||
     option.scope.floor!==require('./hostLocalFloors').token(state) || state.getGamePaused?.())throw Error('The conversation changed before this reply finished.');
-  const current=dialogueOptions(state,[event.speaker])[0];if(!current?.actions.includes(action))throw Error('That social action is not available for this resident now.');
+  const current=dialogueOptions(state,[event.speaker])[0];if(!option.actions.includes(action) || !current?.actions.includes(action))throw Error('That social action is not available for this resident now.');
   const ctx=nearby(state,event.speaker),consent={speaker:event.speaker,line:event.line,playerInvited:event.playerInvited===true,at:Date.now(),source:'engine-live-dialogue-v1'};
   let mission=ownMission(ctx,state),content;
   if(action==='accept-invitation'){
@@ -181,7 +219,13 @@ function applyDialogue(state,service,event,option) {
     if(consent.playerInvited){mission.invitationPending=true;state.setRoomNameDatabase(JSON.stringify(ctx.db));}
     content=mission.description+'\n'+(mission.progress || 'The favor has not been accepted.');
     }
-  }else content=`${event.speaker} declines the invitation and remains here.`;
+  }else {
+    if(consent.playerInvited || mission?.invitationPending) {
+      if(mission){mission.invitationPending=false;delete mission.conditionalConsent;}
+      recordRefusal(state,ctx,consent);state.setRoomNameDatabase(JSON.stringify(ctx.db));
+    }
+    content=`${event.speaker} declines the invitation and remains here.`;
+  }
   console.info('[ResidentDialogueAction]',JSON.stringify({action,speaker:event.speaker,missionId:mission?.id || null}));
   return {action,content,actor:event.speaker};
 }
@@ -191,7 +235,7 @@ function settleConsent(state,service,missionId) {
   try{return recruit(state,service,mission.recipient,mission,mission.conditionalConsent || null);}catch(error){return error.message;}
 }
 async function prepare(state, $, input, { audibleNames = [], responseAudience, population, author } = {}) {
-  if (!helpIntent(input) || state.getGamePaused?.()) return [];
+  if (!helpIntent(input) || invitationIntent(input) || state.getGamePaused?.()) return [];
   const runId = state.getDungeonRunId(), coords = state.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
   const floor = require('./hostLocalFloors').token(state), names = audibleNames.filter(n => !responseAudience?.directed || responseAudience.responders.includes(n));
   const offers = [];
@@ -283,6 +327,12 @@ function transact(state, db, mission, kind) {
   const proof = assess(mission,db); if (!proof.passed) throw Error('The work is not verified yet. '+(mission.progress || objectiveText(mission.objective,mission.recipient)));
   mission.status = 'completed'; mission.progress=`Favor complete. Invite ${mission.recipient} to claim the agreed recruitment reward.`;
   mission.completionEvidence = structuredClone(proof.evidence); mission.rewardReceiptId = randomUUID();
+  for(const room of Object.values(db)) {
+    const decision=room?.recruitmentDecisions?.[key(mission.recipient)];
+    if(decision?.runId===state.getDungeonRunId() && decision.status==='declined') {
+      decision.status='reconsidered';decision.favorReceiptId=mission.rewardReceiptId;decision.favorId=mission.id;
+    }
+  }
   console.info('[ResidentFavor]', JSON.stringify({phase:'completed',id:mission.id,actor:mission.recipient}));
   return `${mission.title} completed. ${mission.recipient} agrees to join your party. `+
     (mission.invitationPending?'Your conditional invitation is now fulfilled.':'Invite them when you are ready; they have not joined yet.');
@@ -334,6 +384,13 @@ function command(state, service, input) {
 }
 function recruitedNames(db) { return new Set(all(db).filter(m=>m.status==='completed' && m.recruitedAt && m.rewardReceiptId).map(m=>key(m.recipient))); }
 function preserveConsole(oldText, incoming, db) {
+  // Old menus and stale browser snapshots cannot promote a resident who refused.
+  const refused=new Set(Object.values(db).flatMap(room=>Object.values(room?.recruitmentDecisions || {})).filter(d=>d.status==='declined').map(d=>key(d.actor)));
+  for(const actor of I.parseSheets(oldText).filter(a=>refused.has(key(a.name)))) {
+    const promoted=I.parseSheets(incoming,'NPCs in Party').find(a=>key(a.name)===key(actor.name));if(!promoted)continue;
+    incoming=incoming.replace(I.sectionPattern('NPCs in Party'),(_,head,body)=>head+'\n'+(body.replace(promoted.rawSheet,'').trim() || 'None')+'\n');
+    if(!I.parseSheets(incoming).some(a=>key(a.name)===key(actor.name)))incoming=incoming.replace(I.sectionPattern('Monsters in Room'),(_,head,body)=>head+'\n'+(/^\s*None\s*$/i.test(body)?'':body.trim()+'\n')+actor.rawSheet+'\n');
+  }
   const names=recruitedNames(db); if(!names.size || typeof incoming!=='string')return incoming;
   for(const actor of I.parseSheets(oldText,'NPCs in Party').filter(a=>names.has(key(a.name)))) {
     const present=I.parseSheets(incoming,'NPCs in Party').some(a=>key(a.name)===key(actor.name));
@@ -346,8 +403,12 @@ function preserveConsole(oldText, incoming, db) {
 }
 function preserveRoster(state,incoming) {
   if(incoming===undefined)return incoming;
-  const names=recruitedNames(dbOf(state));if(!names.size)return incoming;
+  const db=dbOf(state),names=recruitedNames(db);
   const current=JSON.parse(state.getCombatCharactersString() || '[]'),roster=JSON.parse(incoming);
+  for(const actor of current.filter(a=>a.type==='monster' && recruitmentRefusal(state,a.name,db))) {
+    const row=roster.find(a=>key(a.name)===key(actor.name));
+    if(row?.type==='npc')Object.assign(row,{type:'monster',state:actor.state,allegiance:actor.allegiance});
+  }
   for(const actor of current.filter(a=>a.type==='npc' && names.has(key(a.name)))) {
     const row=roster.find(a=>key(a.name)===key(actor.name));
     if(row){row.type='npc';if(row.state==='Neutral'||row.state==='Hostile')row.state=actor.state;}
@@ -356,4 +417,4 @@ function preserveRoster(state,incoming) {
   return JSON.stringify(roster);
 }
 module.exports={ SOURCE, helpIntent, nearby, candidates, prepare, accept, assess, refresh, transact, command, objectiveText, context, recruitedNames, preserveConsole, preserveRoster,
-  recruit,dialogueOptions,applyDialogue,settleConsent,authoredConditions,conditionParameter };
+  recruit,dialogueOptions,applyDialogue,settleConsent,authoredConditions,conditionParameter,recruitmentRefusal,refusalMessage,invitationIntent,neutralInvitation };

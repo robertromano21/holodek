@@ -9,7 +9,7 @@ function fixture() {
   const geoKey = '1,0,0', d = { geoKey, start: { x: 4, y: 4 }, layout: { width: 16, height: 16 }, cells: {}, sceneObjects: [], tiles: {} };
   for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) d.cells[`${x},${y}`] = { tile: 'floor', floorHeight: 0, ceilHeight: 3 };
   const row = (name, hp = 12) => sheet({ Name: name, Sex: 'Female', Race: 'Human', Class: 'Cleric', Level: 2, AC: 10, HP: hp, MaxHP: 20 }, 6, name === 'Benedict' ? 'pc' : 'npc');
-  const p = I.createPopulation(geoKey, [{ name: 'Vyth Aerir', race: 'Human', className: 'Cleric', allegiance: 'Neutral', job: 'toll-keeper', encounterId: 'keeper' }]);
+  const p = I.createPopulation(geoKey, [{ name: 'Vyth Aerir', race: 'Human', className: 'Cleric', allegiance: 'Friendly', job: 'toll-keeper', encounterId: 'keeper' }]);
   Object.assign(p.actors['Vyth Aerir'], { hp: 12, position: { x: 5, y: 4 }, home: { x: 5, y: 4 }, sheet: row('Vyth Aerir') });
   p.groups[0].site = { x: 5, y: 4 };
   let text = `Room Name: Pale Wind Approach\nCoordinates: X: 1, Y: 0, Z: 0\nSilver Pieces: 0\nCurrent Quest: None\nQuest Progress: None\nInventory: Empty\nInventory Properties: None\nObjects in Room: None\nObjects in Room Properties: None\nPC:\n${row('Benedict')}\nNPCs in Party:\n${row('Ally')}\nMonsters in Room:\n${row('Vyth Aerir').replace('State: Friendly', 'State: Neutral')}\nMonsters Equipped Properties: None\nMonsters State: Neutral\nRooms Visited: 2`;
@@ -105,6 +105,99 @@ test('legacy duplicate offers withdraw the unaccepted job and preserve accepted 
 const Work=require('../retort/holodekRoomWork'),Narration=require('../retort/holodekNarration');
 
 const invited="tell monsters my tale and ask if they'd like to join my quest";
+function neutralFixture(){const f=fixture();ready(f);f.p.actors['Vyth Aerir'].allegiance=f.p.actors['Vyth Aerir'].state='Neutral';f.change(db=>db['1,0,0'].inhabitants=f.p);return f;}
+test('neutral invitation rolls preserve the exact 70/30 boundary and never allow free joining',()=>{
+  const outcomes=[];
+  for(let n=0;n<10;n++){
+    const f=neutralFixture(),option=F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,random:()=> (n+.5)/10})[0];
+    outcomes.push(option.neutralOutcome);assert.ok(!option.actions.includes('accept-invitation'));
+    assert.deepEqual(option.actions,option.neutralOutcome==='refuse'?['none','decline-invitation']:['none','offer-favor']);
+    assert.equal(F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,random:()=>{throw Error('No reroll');}})[0].neutralOutcome,option.neutralOutcome);
+    assert.throws(()=>F.recruit(f.state,f.service,'Vyth Aerir',null,{playerInvited:true}),/neutral resident/);
+  }
+  assert.equal(outcomes.filter(o=>o==='refuse').length,7);assert.equal(outcomes.filter(o=>o==='favor').length,3);
+  for(const [roll,outcome]of [[.699999,'refuse'],[.7,'favor']]){
+    const f=neutralFixture();assert.equal(F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,random:()=>roll})[0].neutralOutcome,outcome);
+  }
+});
+test('a neutral 70-percent refusal is spoken, saved across reloads and never rerolled by another invitation',async()=>{
+  const f=neutralFixture();F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,random:()=>.5});
+  await assert.rejects(converse(f,invited,'accept-invitation'));
+  const {briefs}=await converse(f,invited,'decline-invitation');assert.match(briefs.find(b=>b.component==='npc-live-speech').brief,/NEUTRAL INVITATION OUTCOME.*refuse/);
+  const decision=F.recruitmentRefusal(f.state,'Vyth Aerir');assert.equal(decision.roll,.5);
+  const restored={...f.state,getRoomNameDatabase:()=>JSON.stringify(f.db())};
+  const retry=F.dialogueOptions(restored,['Vyth Aerir'],{invitation:true,random:()=>{throw Error('A refusal cannot be rerolled');}})[0];
+  assert.ok(!retry.actions.includes('accept-invitation'));assert.ok(!retry.actions.includes('offer-favor'));assert.equal(retry.refusal.line,decision.line);
+  assert.equal(require('../retort/partyRecruitInvite').invite(f.state,f.service,'Vyth Aerir').rejected,true);
+});
+test('a mixed help-and-join request cannot bypass the neutral roll by preauthoring a favor',async()=>{
+  const f=neutralFixture(),input='Ask Vyth Aerir to join my party and how we can help.';
+  assert.equal(F.invitationIntent(input),true);
+  assert.deepEqual(await F.prepare(f.state,null,input,{audibleNames:['Vyth Aerir'],population:f.p,author:()=>{throw Error('The neutral outcome must be chosen before authoring.');}}),[]);
+  assert.equal(mission(f),undefined);
+});
+test('one neutral refusal does not consume the groups one available favor offer',()=>{
+  const f=neutralFixture(),mate=addGroupMate(f),rolls=[.5,.85];
+  const options=F.dialogueOptions(f.state,['Vyth Aerir',mate],{invitation:true,random:()=>rolls.shift()});
+  assert.deepEqual(options[0].actions,['none','decline-invitation']);assert.ok(options[1].actions.includes('offer-favor'));
+  assert.equal(options.filter(o=>o.actions.includes('offer-favor')).length,1);
+});
+test('two favorable neutral rolls still expose one group job without asking the second model for an unavailable action',()=>{
+  const f=neutralFixture(),mate=addGroupMate(f),options=F.dialogueOptions(f.state,['Vyth Aerir',mate],{invitation:true,random:()=>.85});
+  assert.equal(options[0].neutralOutcome,'favor');assert.ok(options[0].actions.includes('offer-favor'));
+  assert.equal(options[1].neutralOutcome,'refuse');assert.deepEqual(options[1].actions,['none','decline-invitation']);
+});
+test('the neutral 30-percent branch lets the LLM author a real favor and joins only after accepted, verified work',async()=>{
+  const f=neutralFixture();F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,random:()=>.85});
+  const {briefs}=await converse(f,invited,'offer-favor',{favorTitle:'Vyths Chosen Wind Study',conditions:[{objectiveId:'survey',observationCount:'3',observationInterval:'1'}]});
+  assert.match(briefs.find(b=>b.component==='npc-live-speech').brief,/NEUTRAL INVITATION OUTCOME.*favor/);
+  assert.equal(mission(f).title,'Vyths Chosen Wind Study');assert.equal(mission(f).conditions[0].observations,3);assert.equal(mission(f).status,'offered');
+  assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a=>a.name==='Vyth Aerir').type,'monster');
+  await converse(f,'I accept the study.','accept-favor');
+  for(let n=1;n<=3;n++){tick(f,n);F.command(f.state,f.service,'observe for Vyth Aerir');}
+  const report=F.command(f.state,f.service,'report to Vyth Aerir');assert.match(report.content,/joins the party/);assert.ok(mission(f).rewardReceiptId);
+});
+test('a refusal persists across dialogue and clicks, removes consent enums, and rejects stale or forged acceptance',async()=>{
+  const f=fixture();ready(f);const stale=F.dialogueOptions(f.state,['Vyth Aerir'])[0];
+  await converse(f,invited,'decline-invitation');
+  const decision=F.recruitmentRefusal(f.state,'Vyth Aerir'),next=F.dialogueOptions(f.state,['Vyth Aerir'])[0];
+  assert.ok(decision.id);assert.match(next.refusal.line,/family/);assert.ok(!next.actions.includes('accept-invitation'));assert.ok(next.actions.includes('offer-favor'));
+  assert.throws(()=>F.applyDialogue(f.state,f.service,{speaker:'Vyth Aerir',recipient:'PC',line:'Yes. I join.',socialAction:'accept-invitation',playerInvited:true},stale),/not available/);
+  assert.throws(()=>F.recruit(f.state,f.service,'Vyth Aerir',null,{playerInvited:true,line:'forged consent'}),/already declined/);
+  assert.equal(require('../retort/partyRecruitInvite').invite(f.state,f.service,'Vyth Aerir').rejected,true);
+  const saved=JSON.stringify(f.db()),restored={...f.state,getRoomNameDatabase:()=>saved};assert.equal(F.recruitmentRefusal(restored,'Vyth Aerir').id,decision.id);
+  const again=await converse(f,invited,'decline-invitation');assert.equal(F.recruitmentRefusal(f.state,'Vyth Aerir').id,decision.id);
+  assert.match(again.briefs.find(b=>b.component==='npc-live-speech').brief,/PERSISTED RECRUITMENT REFUSAL/);
+  assert.equal(F.recruitmentRefusal({...restored,getDungeonRunId:()=> 'another-run'},'Vyth Aerir'),null);
+});
+test('stale browser state cannot erase a refusal or promote the rejecting monster',async()=>{
+  const f=fixture(),staleDB=f.state.getRoomNameDatabase(),text=f.state.getUpdatedGameConsole(),wire=f.state.getCombatCharactersString();
+  await converse(f,invited,'decline-invitation');const persisted=E.preserve(f.state.getRoomNameDatabase(),staleDB);
+  assert.ok(JSON.parse(persisted)['1,0,0'].recruitmentDecisions['vyth aerir']);
+  const forged=JSON.parse(wire);forged.find(a=>a.name==='Vyth Aerir').type='npc';
+  assert.equal(JSON.parse(F.preserveRoster(f.state,JSON.stringify(forged))).find(a=>a.name==='Vyth Aerir').type,'monster');
+  const resident=I.parseSheets(text).find(a=>a.name==='Vyth Aerir');
+  const promoted=text.replace(I.sectionPattern('Monsters in Room'),(_,head)=>head+'None\n')
+    .replace(I.sectionPattern('NPCs in Party'),(_,head,body)=>head+body+'\n'+resident.rawSheet+'\n');
+  const protectedText=F.preserveConsole(text,promoted,f.db());assert.ok(!I.parseSheets(protectedText,'NPCs in Party').some(a=>a.name==='Vyth Aerir'));
+  assert.ok(I.parseSheets(protectedText).some(a=>a.name==='Vyth Aerir'));
+});
+test('only verified completion of an agreed favor reopens recruitment after refusal',async()=>{
+  const f=fixture();await converse(f,invited,'decline-invitation');await converse(f,invited,'offer-favor');
+  assert.ok(F.recruitmentRefusal(f.state,'Vyth Aerir'));F.command(f.state,f.service,'accept favor from Vyth Aerir');
+  F.command(f.state,f.service,'report to Vyth Aerir');assert.ok(F.recruitmentRefusal(f.state,'Vyth Aerir'));
+  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
+  const result=F.command(f.state,f.service,'report to Vyth Aerir');assert.equal(F.recruitmentRefusal(f.state,'Vyth Aerir'),null);
+  assert.match(result.content,/joins the party/);assert.ok(mission(f).rewardReceiptId);
+});
+test('a newer refusal revokes old conditional consent so a later report cannot silently recruit',async()=>{
+  const f=fixture();await converse(f,invited,'offer-favor');F.command(f.state,f.service,'accept favor from Vyth Aerir');
+  await converse(f,invited,'decline-invitation');assert.equal(mission(f).invitationPending,false);assert.equal(mission(f).conditionalConsent,undefined);
+  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
+  const result=F.command(f.state,f.service,'report to Vyth Aerir');assert.ok(!result.content.includes('joins the party'));
+  assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a=>a.name==='Vyth Aerir').type,'monster');
+  assert.equal(F.recruitmentRefusal(f.state,'Vyth Aerir'),null);assert.ok(F.dialogueOptions(f.state,['Vyth Aerir'])[0].actions.includes('accept-invitation'));
+});
 test('explicit invitations in a tale bind recruitment without treating ordinary lore or negated invitations as consent',()=>{
   for(const input of [invited,'tell monsters my tale and ask if they would like to join my quest','Would you accompany us?','Please join my party','Invite Vyth to our quest'])
     assert.equal(Narration.invitationHint(input),true,input);

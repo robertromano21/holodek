@@ -1,4 +1,4 @@
-<html>
+﻿<html>
 <head>
   <meta name="robots" content="noindex">
   <meta charset="utf-8">
@@ -54,11 +54,12 @@
  <script src="/assets/readableItems.js?v=venue-reading-2"></script>
  <script src="/assets/physicalPuzzles.js"></script>
  <script src="/assets/commandIntent.js?v=planar-portals-1"></script>
+<script src="/assets/commandAssist.js?v=command-assist-1"></script>
  <script src="/assets/livingEnvironments.js"></script>
  <script defer src="/assets/worldInteractionUi.js?v=stored-read-actions-1"></script>
  <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js?v=world1-expansion-1"></script>
- <script src="/assets/combatCharacterUi.js?v=resident-recruitment-1"></script>
+ <script src="/assets/combatCharacterUi.js?v=recruitment-consent-2"></script>
  <script src="/assets/itemGiveUi.js"></script>
 <script src="/assets/questSceneUi.js?v=resident-recruitment-1"></script>
  <script src="/assets/objectDiscovery.js?v=exploration-icons-1"></script>
@@ -1222,7 +1223,7 @@ function toggleCombatMode() {
         color: white;
         border: 1px solid white;
         border-radius: 8px; /* Rounded corners */
-        z-index: 1500; /* Ensure it’s above other elements */
+        z-index: 1500; /* Ensure itâ€™s above other elements */
         box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); /* Subtle shadow */
         resize: both; /* Allow resizing */
         overflow: hidden; /* Prevent overflow */
@@ -1673,7 +1674,7 @@ function toggleCombatMode() {
         color: white;
         font-family: Arial, sans-serif;
         font-size: 14px;
-        z-index: 3000; /* Ensure it’s above other elements */
+        z-index: 3000; /* Ensure itâ€™s above other elements */
         text-align: center;
     }
 
@@ -2463,7 +2464,7 @@ function toggleCombatMode() {
         }
       } else if (statusEl) {
         if (character.sprite && character.sprite.clientOnly) {
-          statusEl.textContent = 'Fast client preview. Retort LLM artist started on "1" — will auto-refresh with creative sprite shortly (no need to click Reroll).';
+          statusEl.textContent = 'Fast client preview. Retort LLM artist started on "1" â€” will auto-refresh with creative sprite shortly (no need to click Reroll).';
           statusEl.style.color = '#ffaa66';
         } else {
           statusEl.textContent = 'Creative sprite from Retort pixel artist (LLM catalog choice).';
@@ -2653,7 +2654,7 @@ function toggleCombatMode() {
       if (panel) panel.style.display = 'none';
       if (window._reviewAnimRaf) { cancelAnimationFrame(window._reviewAnimRaf); window._reviewAnimRaf = null; }
 
-      console.log('%c[CharacterGen] SAVE clicked — posting finalized character to server...', 'color:#aaffaa', character.Name || character.name);
+      console.log('%c[CharacterGen] SAVE clicked â€” posting finalized character to server...', 'color:#aaffaa', character.Name || character.name);
 
       // Seed so the original charactersString / PC: block building (from the reference last-known-good flow)
       // puts the stats into the game console text above the prompt.

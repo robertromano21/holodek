@@ -157,7 +157,7 @@ test('pending and legacy template biographies are not archived as truth, and old
   assert.equal(C.context(f.state, 'Zharok', f.text()).profiles[0].background.history, profile.history);
   assert.deepEqual(C.rememberProfiles(f.state, [{ ...profile, history: 'A different life.' }]), [], 'A real authored biography stays stable.');
 });
-test('chatbotprocessinput preserves its baseline except travel, camera, recovery, conversation attention, lock feedback and view-checked economy commands', () => {
+test('chatbotprocessinput preserves its baseline including server-adjudicated recruitment, travel, camera, recovery and economy commands', () => {
   const source = fs.readFileSync('assets/game.js', 'utf8'), start = source.indexOf('async function chatbotprocessinput(');
   const end = start + 1 + source.slice(start + 1).search(/^(?:async )?function /m);
   const body = source.slice(start, end)
@@ -179,6 +179,7 @@ test('chatbotprocessinput preserves its baseline except travel, camera, recovery
     .replace(/^  if \(!completedStartResult && \/\^\\s\*\(\?:take\|pick[\s\S]*?^  }\r?\n/m, '')
     .replace(/^  if \(!completedStartResult && userInput && await window\.CommerceUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
     .replace(/^  if \(!completedStartResult && userInput && await window\.SpellUi\?\.handleCommand\(userInput\)\) return;\r?\n/m, '')
+    .replace(/^  if \(!completedStartResult && userInput && await window\.CommandAssist\?\.intercept\(userInput\)\) return;\r?\n/m, '')
     .replace(/^  if \(!completedStartResult && window\.CombatCharacterUi\?\.confirmAttackCommand\(userInput\) === false\) return false;\r?\n/m, '')
     .replace(/^  if \(window\._gameOver\)[^\r\n]*\r?\n/m, '')
     .replace(/^  if \(window\._deathSceneActive \|\| window\._playerUnconscious\)[^\r\n]*\r?\n/m, '')
@@ -188,10 +189,11 @@ test('chatbotprocessinput preserves its baseline except travel, camera, recovery
       '  "<br><br><b></b>" + msg.replace(/\\n/g, "<br>");', 'scrollToBottom();'
     ].map(line => indent + line).join(source.includes('\r\n') ? '\r\n' : '\n'))
     .replace('unlock door with <keyname>', 'unlock door with &lt;keyname&gt;');
-  // The normalized handler matches the reconciled committed baseline, independent of checkout line endings.
-  assert.equal((source.slice(start,end).match(/await window\.commitLocalPartyChange\(updatedGameConsole\)/g)||[]).length,2);
+  // Recruitment no longer mutates locally; removal still synchronizes its console before returning.
+  // This baseline includes Add-to-Party normalization and removal of the legacy recruit shortcut.
+  assert.equal((source.slice(start,end).match(/await window\.commitLocalPartyChange\(updatedGameConsole\)/g)||[]).length,1);
   assert.equal(require('node:crypto').createHash('sha256').update(body.replace(/if \(window\.DEBUG_LOGS\) (?=console\.log\()/g, '').replace(/\r\n/g, '\n')).digest('hex'),
-    '2959bbd25e5fca3079f836b0a29b8017fda2ca140a10ef2710fff30910f9a226');
+    '632ffa0f3e002c7fdb8ab642e0f21aac2809254716dcea8348bfd6b7da7a54fb');
 });
 
 test('unconscious and death-scene guards reject commands before the normal command path', async () => {

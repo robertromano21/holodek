@@ -1,4 +1,4 @@
-(function(root,factory){
+﻿(function(root,factory){
   if(typeof module==='object'&&module.exports)module.exports=factory(root);
   else root.CombatCharacterUi=factory(root);
 })(typeof window==='object'?window:globalThis,function(root){
@@ -55,11 +55,13 @@
       const current=(root.combatCharacters||[]).find(a=>a.name===name),input=document.getElementById('chatuserinput');
       if(popup.isConnected===false||runId!==root.dungeonRunId||geoKey!==root.currentDungeon?.geoKey||floorToken!==root.CityFloorScope?.token()||
         !eligible(current)||current.discoveryState==='pending'||root.isDungeonActorPresent&&!root.isDungeonActorPresent(current)||
-        !input||input.value.trim()||typeof root.chatbotprocessinput!=='function'||blocked()||root.GameCommandGate?.busy?.()||
+        !input||input.value.trim()||blocked()||root.GameCommandGate?.busy?.()||
         root._characterStartupPending||root._combatCommandPending||root.actionDiceState?.active||root.gamePaused||
         root._combatRoundActiveUntil>Date.now()||root._gameOver||root._playerUnconscious||root._deathSceneActive)return;
-      // Use the normal command path so party limits and quest obligations stay authoritative.
-      close();input.value='add '+name+' to party';root.chatbotprocessinput();
+      // This is an invitation, not consent: the normal dialogue turn adjudicates the reply.
+      close();
+      input.value = `Ask ${name} to join my party.`;
+      root.chatbotprocessinput();
     });
     popup.appendChild(button);return button;
   }

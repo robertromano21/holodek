@@ -1,4 +1,4 @@
-const processOwner = require('./gameProcessOwner').install();
+﻿const processOwner = require('./gameProcessOwner').install();
 const serverLog = require('./serverLogger').installServerLogger();
 console.info('[GameProcesses]', JSON.stringify(processOwner));
 // world1 expansion (each feature behind its own flag; see retort/worldFlags.js).
@@ -49,19 +49,21 @@ app.use(cors());
 app.use((req,res,next)=>{
   const token=require('./retort/hostLocalFloors').token(sharedState);
   res.set('X-Holodek-Floor',token);
-  const guarded=/^\/(?:processInput7|room-population\/|city\/|economy\/action|quest-scenes?\/|spell|combat|exits\/traversed|quest\/objective)/.test(req.path);
+  const guarded=/^\/(?:processInput7|room-population\/|city\/|economy\/action|recruit\/|quest-scenes?\/|spell|combat|exits\/traversed|quest\/objective)/.test(req.path);
   if(req.method==='POST'&&guarded&&(sharedState.getActiveCityFloor()||req.get('X-Holodek-Floor'))&&req.get('X-Holodek-Floor')!==token)
     return res.status(409).json({error:'This request belongs to a previous building floor. Refresh the game window.'});
   next();
 });
 require('./retort/roomIllustration').install(app, sharedState);
+require('./retort/commandAssist').install(app);
+require('./retort/partyRecruitInvite').install(app, sharedState, { populationService, busy: () => inputTaskInFlight });
 require('./retort/gameModels').install(app);
 require('./retort/websiteAi').install(app, { onChange: () => require('./retort/gameModels').invalidate() });
 require('./retort/roomPrefetchRoutes').install(app, sharedState, { isBusy: () => inputTaskInFlight });
 SidVoice.install(app, express); // /voice/profiles, /voice/line.wav, /voice/status
 require('./retort/audioPalette').install(app, sharedState); // same-score SID variants; effects rendered off-thread
 require('./retort/sidArchive').install(app, express);
-// Stock / Enhanced SID switch (♫ panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
+// Stock / Enhanced SID switch (â™« panel): one global clock mode for voices, music renders and the effects set (retort/sidMode.js)
 const SidMode = require('./retort/sidMode');
 app.get('/sid-mode', (req, res) => res.json({ mode: SidMode.get() }));
 app.get('/world1-flags', (req, res) => res.json({ ...WorldFlags.snapshot(), ...(require('./retort/devSandbox').enabled(port) ? { DEV_SANDBOX: true } : {}), ...(require('./retort/campaignBuilderRoutes').enabled(port) ? { CAMPAIGN_BUILDER: true } : { CAMPAIGN_BUILDER: false }), GM_NAME: (() => { try { return require('./retort/settingLayer').gmName(); } catch { return 'Grave Master'; } })(),
@@ -757,7 +759,7 @@ app.post('/processInput7', async (req, res) => {
   // If we're still in the character generation / review phase, don't let the main Retort flow
   // (which triggers full dungeon creation) run yet. The client should be showing the Save/Reroll menu.
   if (sharedState.isCharacterGenerationInProgress && sharedState.isCharacterGenerationInProgress()) {
-    console.log('[Server] Blocked /processInput7 — still in character generation phase.');
+    console.log('[Server] Blocked /processInput7 â€” still in character generation phase.');
     // We can still return a polite message so the client knows what's happening.
     const taskId = Date.now().toString();
     tasks.set(taskId, {
@@ -845,7 +847,7 @@ app.post('/processInput7', async (req, res) => {
 });
 
 // New endpoint: Client calls this after the user clicks "Save" on the character sprite review menu.
-// This tells the Retort session "the player has finalized their starting character (with sprite) — now proceed with dungeon generation".
+// This tells the Retort session "the player has finalized their starting character (with sprite) â€” now proceed with dungeon generation".
 app.post('/startGameWithCharacter', async (req, res) => {
   if (!req.body?.character || typeof req.body.character !== 'object' || Array.isArray(req.body.character))
     return res.status(400).json({ error: 'Missing starting character.' });
@@ -883,7 +885,7 @@ app.post('/startGameWithCharacter', async (req, res) => {
       sharedState.setCurrentPC(characterData);
 
       // CRITICAL: clear the character generation phase guard so /processInput7 and normal flow unblock
-      // (prevents "Blocked /processInput7 — still in character generation phase" after Save).
+      // (prevents "Blocked /processInput7 â€” still in character generation phase" after Save).
       sharedState.setCharacterGenerationInProgress(false);
       sharedState.setPendingCharacterForReview(null);
 

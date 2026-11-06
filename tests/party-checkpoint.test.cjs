@@ -98,10 +98,11 @@ test('Save retries a pending party synchronization before capturing any checkpoi
   vm.runInNewContext(source.slice(a,stop),ctx);
   await assert.rejects(ctx.save(3,'Retry'),/stop before checkpoint/);assert.deepEqual(events,['sync','capture-guard']);
 });
-test('both local recruit and remove returns synchronize their console before returning',()=>{
+test('recruitment requires dialogue while local removal synchronizes its console before returning',()=>{
   const source=fs.readFileSync('assets/game.js','utf8');
-  for(const [from,to] of [['// Process adding a monster to the party','// Process removing an NPC from the party'],
-    ['// Process removing an NPC from the party','// Update the game console based on user inputs and get the updated game console']]){
+  assert.ok(!source.includes('// Process adding a monster to the party'));
+  assert.ok(source.includes("'Ask $1 to join my party.'"));
+  for(const [from,to] of [['// Process removing an NPC from the party','// Update the game console based on user inputs and get the updated game console']]){
     const a=source.indexOf(from);assert.ok(source.slice(a,source.indexOf(to,a+from.length)).includes('await window.commitLocalPartyChange(updatedGameConsole)'));
   }
 });

@@ -942,6 +942,11 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   const dungeonTestingMode = sharedState.getDungeonTestingMode && sharedState.getDungeonTestingMode();
   const directCombat = !dungeonTestingMode && typeof CombatProvocation !== 'undefined' &&
     CombatProvocation.attackTarget(sharedState, userInput);
+  const hostileInvitation = !dungeonTestingMode && !options.realtimeEncounter && require('./partyRecruitInvite').hostileInvitation(sharedState,userInput);
+  if(hostileInvitation) {
+    console.info('[CombatStart]',JSON.stringify({source:'hostile-invitation',target:hostileInvitation.name}));
+    options={...options,realtimeEncounter:hostileInvitation.name};
+  }
   let personalNarrative = '';
   if (!dungeonTestingMode && !options.realtimeEncounter && !directCombat) {
     personalNarrative = await getDelayedPersonalNarrative();
@@ -13158,7 +13163,7 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
   await $.user`${retrievedContext}FINAL STORY RESPONSE: Follow the full Integrate and interactive-fiction action/dialogue instructions above. Write the player-facing narrative FIRST, then append the CHARACTER_DIALOGUE metadata. Cache planning is secondary and must not replace the story. ${initialArrival ? 'This is the full opening scene: develop the established TURN 0 premise and the call to adventure without deciding actions for the PC.' : enteringRoom ? 'This is a full room-entry story continuation, not another static room or puzzle description.' : 'Resolve the latest player input and continue the scene; a genuine automatic idle tick keeps its requested short format.'} If no characters are permitted to speak, still narrate an appropriate environmental or story development without inventing dialogue, discoveries or completed actions. Preserve player agency, current mechanics, exact names and the nearby-speaker limits. Return actual prose before metadata, not a metadata-only answer.`;
   // Social mechanics are model-independent; all live resident replies use the same enum contract.
   const socialInteractions = typeof ResidentFavors !== 'undefined' && !enteringRoom && userInput?.trim() && !isAutoSimAdvance ?
-    ResidentFavors.dialogueOptions(sharedState,audibleNames.filter(name=>!responseAudience?.directed || responseAudience.responders.includes(name))) : [];
+    ResidentFavors.dialogueOptions(sharedState,audibleNames.filter(name=>!responseAudience?.directed || responseAudience.responders.includes(name)),{invitation:ResidentFavors.invitationIntent(userInput)}) : [];
   const result = isHolodek1 || socialInteractions.length ? await require('./holodekNarration').generate($, {
     consoleText: perceivedGameConsole, userInput, currentSituation, characters: describeCharacters(dialogueRoster, population),
     audibleNames, responseAudience, initialArrival, enteringRoom, quest: sharedState.getCurrentQuest(), task: activeTask,

@@ -77,3 +77,7 @@ First-approach encounters may also propose favors without a help keyword. Encoun
 
 Speech already delivered in the Game Log enters subtitles regardless of distance, occlusion, entry range hints or actor positioning. Ambient speech retains its hearing checks, and stale rooms/runs remain excluded.
 
+
+Recruitment clicks and legacy typed Add-to-Party commands submit a real dialogue invitation. Friendly disposition alone is never consent. A firm live refusal is persisted per resident and run, removes accept-invitation from subsequent dialogue enums, and blocks direct recruitment and old click endpoints. Repeating the invitation, moving, waiting or reloading cannot clear it. Verified completion of an agreed resident favor records a receipt and reopens recruitment; reopening/accepting a favor alone cannot. Stale browser database, console and roster snapshots preserve the refusal.
+
+Fresh neutral invitations roll once: values below 0.7 require refusal, values at or above 0.7 require a favor-first offer when the group can offer work. The pending result survives generation failures and retries. The model chooses the available favor conditions through enums; it cannot reroll, accept for the player, or grant free recruitment. A spoken refusal persists rather than rerolling on later invitations. Existing group-offer limits and verified completion still apply. Inviting a visible hostile resident immediately uses the enemy-initiated combat path, including when the invitation came from a click.
