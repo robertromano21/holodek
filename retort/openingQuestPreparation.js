@@ -11,6 +11,21 @@ function fingerprint(state, model) {
   return Build.hash([state.getDungeonRunId(), state.getRestoreRevision?.(), model,
     JSON.parse(state.getRoomNameDatabase() || '{}')['0,0,0']?.setting]);
 }
+function placementKeys(database, job, elementType, { excludeNames = [] } = {}) {
+  const keys = Object.keys(database).filter(key => Build.coordinate.test(key) && key !== job?.bossKey);
+  if (!job || elementType !== 'monster') return keys;
+  const reserved = new Set([...(job.assignment?.assignments || []).filter(row => row.owner !== job.id).map(row => row.destination),
+    ...(job.assignment?.reservations || []).filter(row => row.id !== job.id).map(row => row.key)]);
+  const I = require('../assets/dungeonInhabitants');
+  const excluded = new Set(excludeNames.map(name => name.toLowerCase()));
+  // A quest may reuse an already authored cast, but cannot populate another helper's unfinished room.
+  return keys.filter(key => {
+    const room = database[key], protectedCast = key === '0,0,0' || reserved.has(key) || room?.populationComplete || room?.visited;
+    const residents = I.parseBlocks(room?.monsters?.consoleBlock || room?.monsters?.inRoom || '');
+    return !protectedCast || (key === '0,0,0' || room?.populationComplete === true) && residents.some(actor =>
+      actor.hp > 0 && !excluded.has(actor.name.toLowerCase()) && !['dead', 'departed', 'recruited'].includes(room?.inhabitants?.actors?.[actor.name]?.status));
+  });
+}
 function append(base = [], proposed = [], current = [], at) {
   const name = row => row?.id || row?.name || JSON.stringify(row);
   const old = new Map(base.map(row => [name(row), row])), out = structuredClone(current);
@@ -63,6 +78,25 @@ function bindIntroduction(task, db, targetKey) {
   const hook = story.stages.find(stage => stage.id === 'hook');
   Object.assign(hook, { kind: 'read', roomKey: targetKey, name: writing.name, readableId: writing.id, text: writing.chapters[0].text });
   delete hook.actor;
+  const I = require('../assets/dungeonInhabitants'), Q = require('./questProgress');
+  for (const stage of story.stages) {
+    if (!stage.actor) continue;
+    const home = db[stage.roomKey], sheets = I.parseBlocks(home?.monsters?.inRoom || '');
+    const cast = sheets.length ? sheets : I.parseBlocks(home?.monsters?.consoleBlock || '');
+    const present = cast.some(actor => actor.name === stage.actor && actor.hp > 0 &&
+      (home?.inhabitants?.actors?.[actor.name]?.hp ?? actor.hp) > 0 &&
+      !['dead', 'departed', 'recruited'].includes(home?.inhabitants?.actors?.[actor.name]?.status));
+    const required = task.requiredElements?.some(element => element.type === 'monster' && element.name === stage.actor) ||
+      Q.deliveryBindings(task).some(binding => binding.recipient === stage.actor);
+    if (present || required) continue;
+    // Recruitment during private preparation must not resurrect an incidental scene contact.
+    if (stage.kind === 'objective') delete stage.actor;
+    else if (stage.kind === 'dialogue') {
+      delete stage.actor;
+      Object.assign(stage, { roomKey: targetKey, name: writing.name, readableId: writing.id });
+      stage.options = (stage.options || []).filter(option => !['recruit', 'receive'].includes(option.action));
+    }
+  }
   task.hardRequirements = (task.hardRequirements || []).map(r => r.check === 'quest_story_complete' ? { ...r, coords: targetKey } : r);
   room.questStories ||= {}; room.questStories[story.id] = story;
   room.questScenes ||= {}; room.questScenes[story.id] = { source: 'engine-quest-scene-v1',
@@ -257,7 +291,7 @@ function createService(state, { website = require('./websiteAi').service(), mode
 }
 const services = new WeakMap();
 const service = (state, options) => { if (!services.has(state)) services.set(state, createService(state, options)); return services.get(state); };
-module.exports = { createService, service, mergedRooms, bindIntroduction, authorIntroduction, installPhysical, labels, line, needed: empty, entryPending,
+module.exports = { createService, service, mergedRooms, bindIntroduction, authorIntroduction, installPhysical, placementKeys, labels, line, needed: empty, entryPending,
   constructionContext: state => services.get(state)?.constructionContext(),
   cancel: state => services.get(state)?.cancel(),
   close: state => services.get(state)?.close() };

@@ -6,8 +6,8 @@ const coordinate=/^-?\d+,-?\d+,-?\d+$/;
 const LOCAL=new Set(['name','description','roomDescription','indoor','isIndoor','isOutdoor','classification','complexId','exits','objects',
   'monsters','inhabitants','environmentIntent','cityRoom','campaignSetting','populationComplete','startingResidentsComplete','visited',
   'puzzleDescription','puzzleSolution','puzzleMechanism','sceneSpec','blueprint','customTiles','illustration','preparedBuild','builder',
-  'groundInventoryVersion','groundInventory','services','minorMissions','market','venueDesk','venueDesks','readables','bookReadings','bookFacts',
-  'questWritings','questStories','questScenes','deliveryReceipts','deliveryDelegates','templeSuppression','secretDoors','physicalPuzzle',
+  'groundInventoryVersion','groundInventory','services','minorMissions','recruitmentInvitations','recruitmentDecisions','market','venueDesk','venueDesks','readables','bookReadings','bookFacts',
+  'questWritings','questStories','questScenes','itemTransfers','deliveryReceipts','deliveryDelegates','templeSuppression','secretDoors','physicalPuzzle',
   'randomEncounters','encounters','combatDefeats','defeatEvidence','cityFloorContext','namePending','descriptionAuthorship']);
 const clone=v=>v==null?v:structuredClone(v);
 const keyOf=c=>`${c.x},${c.y},${c.z}`;

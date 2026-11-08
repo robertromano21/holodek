@@ -1,0 +1,7 @@
+﻿'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs');
+const E=require('../assets/spriteExpansion'),C=require('../assets/renderCharacterProcedural'),X=require('../assets/genreExpansion');
+test('sprite expansion covers exactly every shared genre profile',()=>assert.deepEqual(Object.keys(E.CATALOG).sort(),Object.keys(X.PROFILES).sort()));
+test('new calling outfits survive complete cached traits while old classes remain untouched',()=>{for(const [genre,g]of Object.entries(E.CATALOG))for(const role of g.roles){const sheet={name:'Cached '+role.key,race:'human',class:role.key},base=C.deriveFallbackTraits(sheet);delete base.genreGarb;const spec=C.buildProceduralSpriteSpec(sheet,base);assert.equal(spec.traits.genreGarb.genre,genre);assert.equal(base.genreGarb,undefined);}assert.equal(C.buildProceduralSpriteSpec({name:'Existing guard',race:'human',class:'Fighter'}).traits.genreGarb,undefined);});
+test('browser loads additive catalog before every consumer with versioned paths',()=>{const html=fs.readFileSync('assets/index.html','utf8'),i=html.indexOf('/assets/spriteExpansion.js?v=');assert.ok(i>=0);for(const f of ['genreWardrobe','genreKits','renderCharacterProcedural'])assert.ok(html.indexOf('/assets/'+f+'.js?v=')>i,f);});
+test('new keywords never match larger compound words',()=>{for(const e of [...E.creatures,...E.roles]){assert.equal(E.creatureFor('prefix'+e.key+'suffix'),null);assert.equal(E.roleFor('prefix'+e.key+'suffix'),null);}});

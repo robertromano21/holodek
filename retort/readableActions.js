@@ -26,7 +26,13 @@ function prepare({input,consoleText,database,dungeon,actor,geoKey}){
   if(!owned){
     const shelfKey=lore&&record.bookLore.shelf;
     const item=shelfKey?(([x,y])=>({x,y}))(shelfKey.split(',').map(Number)):fixed?(dungeon?.questWritings?.find(o=>o.id===record.id&&R.key(o.name)===R.key(record.name))||dungeon?.sceneLandmarks?.find(o=>R.key(o.label)===R.key(record.name)&&
-      dungeon.tiles?.[dungeon.cells[`${o.x},${o.y}`]?.tile]?.spriteSpec?.inscription?.id===record.id)):
+      dungeon.tiles?.[dungeon.cells?.[`${o.x},${o.y}`]?.tile]?.spriteSpec?.inscription?.id===record.id)||Object.entries(dungeon?.cells||{}).flatMap(([key,cell])=>{
+        if(!String(cell?.tile||'').startsWith('custom_'))return[];
+        const inscription=dungeon?.tiles?.[cell.tile]?.spriteSpec?.inscription;
+        if(!inscription||(record.id&&inscription.id?record.id!==inscription.id:R.key(record.name)!==R.key(inscription.name))||
+          record.mechanismId&&inscription.mechanismId&&record.mechanismId!==inscription.mechanismId)return[];
+        const [x,y]=key.split(',').map(Number);return Number.isFinite(x)&&Number.isFinite(y)?[{x,y}]:[];
+      })[0]):
       Discovery.objects(dungeon?.sceneObjects||[],database[geoKey]?.inhabitants).find(o=>R.key(o.name)===R.key(record.name));
     const p=position(actor,geoKey),q=item&&(item.position?{x:item.position.x+item.size.x/2,y:item.position.y+item.size.y/2}:{x:item.x+.5,y:item.y+.5});
     // Stop at the near face of a solid monument; its own stone is not an intervening wall.

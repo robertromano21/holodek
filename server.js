@@ -223,6 +223,11 @@ app.post('/debug/dungeon-rendering', (req, res) => {
     res.json({ recorded: true, comparison });
 });
 
+app.post('/debug/recruitment-ui', (req,res) => {
+  const report=require('./retort/recruitmentDiagnostics').record(sharedState,req.body);
+  if(!report)return res.status(409).json({error:'Invalid or stale recruitment diagnostic.'});
+  console.info('[RecruitmentUi]',JSON.stringify(report));res.json({recorded:true});
+});
 app.post('/debug/dialogue-subtitles', (req, res) => {
   const { runId, reports } = req.body || {};
   const stages = ['queued', 'displayed', 'skipped', 'deferred', 'duplicate', 'dismissed'];
@@ -565,20 +570,22 @@ app.post('/economy/view', async (req, res) => {
       ...(update.changed ? { economyResult: economyStateEvent(req.body.geoKey, update) } : {}) });
   } catch (error) { console.warn('[Economy]', error.message); res.status(503).json({ error: 'The shop stock could not be authored or read. No substitute catalog was installed. Try opening services again.' }); }
 });
-app.post('/economy/action', (req, res) => {
+app.post('/economy/action', async (req, res) => {
   const ready = prepareQuestScene(req); if (ready.error) {
     console.warn('[CommerceRejected]', JSON.stringify({ route: 'action', kind: req.body?.kind, geoKey: req.body?.geoKey, reason: ready.error }));
     return res.status(ready.status).json({ error: ready.error });
   }
   inputTaskInFlight = true;
   try {
-    const result = Economy.action(sharedState, populationService, req.body);
+    let result = Economy.action(sharedState, populationService, req.body);
     if (result.error) {
       if (req.body.kind === 'take') console.warn('[PickupRejected]', JSON.stringify({ geoKey: req.body.geoKey,
         item: req.body.item, player: req.body.player, reason: result.error }));
       else console.warn('[CommerceRejected]', JSON.stringify({ route: 'action', kind: req.body.kind, geoKey: req.body.geoKey, actor: req.body.actor, item: req.body.item, reason: result.error }));
       return res.status(409).json(result);
     }
+    if(result.recruitmentHandoff)result=await require('./retort/recruitmentHandoff').complete({state:sharedState,service:populationService,result,broadcast});
+    if(req.body.kind==='accept-mission')result=await require('./retort/recruitmentProgress').response(sharedState,populationService,result,broadcast);
     if (['equip', 'unequip'].includes(req.body.kind) && typeof SpellSystem !== 'undefined') SpellSystem.synchronize(sharedState);
     const event = { ...result, type: 'economy_result', eventId: require('node:crypto').randomUUID(), runId: sharedState.getDungeonRunId(),
       geoKey: req.body.geoKey, updatedGameConsole: sharedState.getUpdatedGameConsole(), roomNameDatabaseString: sharedState.getRoomNameDatabase(),
@@ -631,8 +638,9 @@ app.post('/city/buildings/prepare',async(req,res)=>{
   if(CombatLife.status(sharedState).gameOver)return res.status(409).json({error:'This adventure has ended.'});
   inputTaskInFlight=true;
   try{
-    const result=await require('./retort/cityInteriors').prepare(sharedState,{...req.body,floorToken:req.get('X-Holodek-Floor')},
+    let result=await require('./retort/cityInteriors').prepare(sharedState,{...req.body,floorToken:req.get('X-Holodek-Floor')},
       {describe:require('./retort/cityFloorTravel').authorContent});
+    result=await require('./retort/recruitmentProgress').response(sharedState,populationService,result,broadcast);
     roomDatabaseReceiver.reset();broadcast(result);
     console.info('[CityInterior]',JSON.stringify({geoKey:result.geoKey,buildingId:result.buildingId,targetKey:result.targetKey}));
     res.json(result);
@@ -644,8 +652,9 @@ app.post('/city/buildings/travel',async(req,res)=>{
   if(CombatLife.status(sharedState).gameOver)return res.status(409).json({error:'This adventure has ended.'});
   inputTaskInFlight=true;
   try{
-    const result=await require('./retort/cityCirculation').travel(sharedState,{...req.body,floorToken:req.get('X-Holodek-Floor')},
+    let result=await require('./retort/cityCirculation').travel(sharedState,{...req.body,floorToken:req.get('X-Holodek-Floor')},
       {describe:require('./retort/cityFloorTravel').authorContent});
+    result=await require('./retort/recruitmentProgress').response(sharedState,populationService,result,broadcast);
     roomDatabaseReceiver.reset();broadcast(result);
     console.info('[CityCirculation]',JSON.stringify({geoKey:result.geoKey,targetKey:result.targetKey,controlId:result.controlId,direction:result.direction}));
     res.json(result);
@@ -775,6 +784,7 @@ app.post('/processInput7', async (req, res) => {
   const taskId = Date.now().toString();
   tasks.set(taskId, { status: 'processing', result: null });
   inputTaskInFlight = true;
+  const travelAttempt = require('./retort/roomTravelRecovery').capture(sharedState);
   // world1: whatever the player types during character creation (their character/party names) is player text: exempt from homebrew renaming.
   try { if (sharedState.getCharacterGenerationInProgress?.() && typeof req.body.userInput === 'string') { const CB = require('./retort/campaignBuilder'); CB.__creation = ((CB.__creation || '') + ' ' + req.body.userInput).slice(-2000); CB.setPlayerText('creation', CB.__creation); } } catch {}
   const puzzleDefinition = sharedState.getRoomDungeon(sharedState.getLastCoords())?.physicalPuzzle?.definition;
@@ -790,9 +800,10 @@ app.post('/processInput7', async (req, res) => {
       }
       const combatMode = sharedState.getCombatMode();
       console.log(`Starting retortWithUserInput for taskId ${taskId}`);
-      const result = await retortWithUserInput(req.body.userInput, broadcast, combatMode, physicalPuzzleCommand ? {
+      let result = await retortWithUserInput(req.body.userInput, broadcast, combatMode, physicalPuzzleCommand ? {
         onPhysicalPuzzlePrepared: result => resolvePuzzleNarration(!result || result.completed)
       } : {});
+      result=await require('./retort/recruitmentProgress').response(sharedState,populationService,result,broadcast);
       console.log(`retortWithUserInput completed for taskId ${taskId}:`, {
         responseChars: result.content?.length || 0, dialogue: (result.dialogue || []).map(row => row.speaker), actionOnly: !!result.actionOnly });
       Economy.refresh(sharedState);
@@ -828,7 +839,11 @@ app.post('/processInput7', async (req, res) => {
         consoleChars: updatedGameConsole.length, rosterChars: combatCharactersString?.length || 0, roomDatabaseChars: roomNameDatabaseString?.length || 0 });
     } catch (err) {
       console.error('Background task error for taskId ' + taskId + ':', err);
-      tasks.set(taskId, { status: 'error', result: err.message });
+      let recovery = null;
+      try { recovery = require('./retort/roomTravelRecovery').recover(sharedState, travelAttempt); }
+      catch (error) { console.error('[RoomTravelRecovery]', error.message); }
+      if (recovery) console.info('[RoomTravelRecovery]', JSON.stringify({ runId: recovery.runId, geoKey: recovery.geoKey, reason: err.code || 'entry-failed' }));
+      tasks.set(taskId, { status: 'error', result: err.message, ...(recovery ? { recovery } : {}) });
     } finally {
       actionDice.end();
       inputTaskInFlight = false;

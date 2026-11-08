@@ -10,7 +10,7 @@ const h = s => crypto.createHash('sha1').update(s).digest('hex').slice(0, 16);
 const Mood = require('./mood'), VOC_VERSION = require('./voc64').VERSION || 1, SidMode = require('../sidMode');
 const VoiceProfile = require('./profile');
 const Timbre = require('./timbre');
-const stats = { jobs: 0, failures: 0, last: [] }, MAX_PREFETCH = 24;
+const stats = { jobs: 0, failures: 0, prefetchDropped: 0, recentFailures: [], last: [] }, MAX_PREFETCH = 24;
 let worker = null, seq = 0, busy = false, disabled = null, closed = false, warmTimer; const pending = new Map(), queue = [];
 function startWorker() {
   if (closed || worker || disabled) return;
@@ -26,7 +26,7 @@ function run(msg, urgent) {
   if (closed) return Promise.reject(Error('Game voice synthesis stopped.'));
   return new Promise((res, rej) => { msg.id = ++seq; const j = { msg, res, rej, urgent };
     if (urgent) { const i = queue.findIndex(q => !q.urgent); i < 0 ? queue.push(j) : queue.splice(i, 0, j); } else {
-      queue.push(j); const pre = queue.filter(q => !q.urgent); if (pre.length > MAX_PREFETCH) { const drop = pre[0]; queue.splice(queue.indexOf(drop), 1); drop.rej(new Error('prefetch queue full')); } }
+      queue.push(j); const pre = queue.filter(q => !q.urgent); if (pre.length > MAX_PREFETCH) { const drop = pre[0]; queue.splice(queue.indexOf(drop), 1); drop.rej(Object.assign(new Error('prefetch queue full'),{code:'SID_PREFETCH_DROPPED'})); } }
     pump(); });
 }
 // --- voice profiles (sent by the client's sfx.js voiceProfile when a room is entered; hashed default otherwise) ---
@@ -94,7 +94,12 @@ function wavFor(speaker, text, urgent, mode, moodHint, chip, notch, options = {}
     b.write('RIFF', 0); b.writeUInt32LE(36 + pcm.length, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
     b.writeUInt32LE(SRo, 24); b.writeUInt32LE(SRo * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(pcm.length, 40);
     e.bytes=b.length+pcm.length;trimLines();return { mood, cad, conf, timbre, articulation, wav: Buffer.concat([b, pcm]), dur: pcm.length / 2 / SRo, ms: Date.now() - t0 }; });
-  e.p.catch(err => { stats.failures++; wavs.delete(key); });
+  e.p.catch(err => {
+    if(err.code==='SID_PREFETCH_DROPPED')stats.prefetchDropped++;
+    else {stats.failures++;const failure={speaker,format,code:err.code || 'SID_SYNTHESIS',error:err.message,at:Date.now()};
+      stats.recentFailures.push(failure);if(stats.recentFailures.length>12)stats.recentFailures.shift();console.warn('[SidVoice] synthesis failed',JSON.stringify(failure));}
+    if(wavs.get(key)===e)wavs.delete(key);
+  });
   lru(wavs, key, e, 200); return e.p;
 }
 function scoreFor(speaker,text,urgent,mode,moodHint,chip,notch,options={}){return wavFor(speaker,text,urgent,mode,moodHint,chip,notch,{...options,format:'score'});}

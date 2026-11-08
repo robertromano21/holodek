@@ -247,8 +247,8 @@ test('cast generation reserves one neutral quest contact only for an explicit in
   const guide = seeded.population.actors[seeded.population.questIntroduction.speaker];
   assert.equal(guide.allegiance, 'Neutral');
   assert.equal(seeded.population.groups.find(g => g.members.includes(guide.name)).members.length, 1);
-  assert.match(prompts[0], /single NEUTRAL or FRIENDLY quest contact/);
-  assert.match(prompts[0], /trash talk/);
+  assert.match(prompts.join('\n'), /single NEUTRAL or FRIENDLY quest contact/);
+  assert.match(prompts.join('\n'), /trash talk/);
   const ordinary = await generateInhabitants(agent, context, rules);
   assert.equal(ordinary.population.questIntroduction, undefined);
 });
@@ -275,7 +275,7 @@ test('the LLM picks individual custom native archetypes and spell preferences, b
   assert.deepEqual(result.population.actors['Keeper One'].spellPreferences, ['prayer_mending']);
   assert.deepEqual(result.population.actors['Keeper Three'].spellPreferences, []);
   assert.deepEqual(result.population.actors['Keeper Four'].spellPreferences, ['curse']);
-  assert.match(prompts[0], /choose exactly one combatArchetype/); assert.match(prompts[0], /Choose spellPreferences individually/);
+  assert.match(prompts.join('\n'), /choose exactly one combatArchetype/); assert.match(prompts.join('\n'), /Choose spellPreferences individually/);
 });
 
 for(const indoor of [true,false]) test(`batched ${indoor?'indoor':'outdoor'} generation creates diverse groups using bounded cast requests`,async()=>{
@@ -287,7 +287,7 @@ for(const indoor of [true,false]) test(`batched ${indoor?'indoor':'outdoor'} gen
   assert.equal(I.parseSheets(`Monsters in Room:\n${result.sheets}\nMonsters Equipped Properties: None`).length,indoor?8:16);
   const states=Object.values(result.population.actors).map(a=>a.allegiance);
   assert.ok(states.includes('Hostile')&&states.includes('Friendly')&&states.includes('Neutral'));
-  assert.ok(prompts[0].includes('not a fixed list of trades'));
+  assert.ok(prompts.join('\n').includes('not a fixed list of trades'));
   assert.ok(prompts.some(p=>p.includes('ROOM-SPECIFIC SCENARIO VARIETY')));
   assert.ok(!prompts[0].includes('ferrymen, grave masons, mourners'));
 });

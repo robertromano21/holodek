@@ -1,0 +1,83 @@
+/* CSS zoom enlarges UI coordinates, but viewport units still need that scale removed. */
+:is(dialog, .popup-container, #character-sprite-review, #party-popup, #inventory-popup, #journal-popup, #party-spellbook-popup):not(#dungeon-popup):not(#phaser-popup):not(#game-log-popup):not(#combat-popup) {
+  box-sizing: border-box !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: calc((100vw - 24px) / var(--game-ui-scale, 1)) !important;
+  max-height: calc((100vh - 24px) / var(--game-ui-scale, 1)) !important;
+  max-height: calc((100dvh - 24px) / var(--game-ui-scale, 1)) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+  scrollbar-color: #bcbcb4 #181818;
+  scrollbar-width: thin;
+}
+
+/* Position belongs to each menu's owner, including the right-anchored exit prompts. */
+
+:is(dialog, .popup-container) :is(button, input, select, textarea) {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+}
+:is(dialog, .popup-container) button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The request scrolls independently; accepting, declining and closing stay reachable. */
+.popup-container.recruitment-dialog {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden !important;
+}
+.recruitment-dialog > .commerce-dialog-content {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 0 12px;
+  scrollbar-gutter: stable;
+}
+.recruitment-dialog > .window-menu-tab ~ .commerce-dialog-content > h3 {
+  display: none;
+}
+.recruitment-dialog > .window-menu-tab {
+  font-size: var(--game-ui-menu-size, 9px);
+  padding: 6px 8px;
+}
+.recruitment-dialog > .commerce-dialog-actions {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 3px;
+  min-height: 0;
+  max-height: calc(42dvh / var(--game-ui-scale, 1));
+  overflow-y: auto;
+  padding: 5px;
+  border-top: 1px solid #78786c;
+  background: #111;
+}
+.recruitment-dialog .popup-button {
+  margin: 0;
+  font-size: var(--game-ui-menu-size, 9px);
+  line-height: 1.5;
+}
+
+/* Override the legacy page-wide hidden scrollbar rule only inside dialogs. */
+:is(dialog, .popup-container, .commerce-dialog-content, .commerce-dialog-actions)::-webkit-scrollbar {
+  display: block;
+  width: 10px;
+  height: 10px;
+}
+:is(dialog, .popup-container, .commerce-dialog-content, .commerce-dialog-actions)::-webkit-scrollbar-track {
+  background: #181818;
+}
+:is(dialog, .popup-container, .commerce-dialog-content, .commerce-dialog-actions)::-webkit-scrollbar-thumb {
+  background: #787878;
+  border: 2px solid #181818;
+}

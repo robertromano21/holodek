@@ -95,7 +95,11 @@ async function maybeGenerate({ state, service, visit, player, isCurrent = () => 
     const generator = runtime || require('./graveMasterProtocol').runtimeFor(state);
     const ecology=require('./settingEcology'),table=ecology.get(db),city=room.campaignSetting?.city;
     if(ecology.enabled()&&db['0,0,0']?.setting?.kind==='homebrew'&&!table)throw Error('This setting has no authored encounter ecology; no CotG prefab was substituted.');
-    const selected=table?ecology.choose(table,city?.populationMix):null;
+    const cotg=!require('./settingLayer').current()&&db['0,0,0']?.setting?.kind!=='homebrew';
+    const cotgAuthorship=cotg?require('./cotgPopulationAuthoring').select({
+      seed:`${runId}:${p.geoKey}:random:${pacing.attempts}`,group:'supplemental',table,mix:city?.populationMix,roll:draw('authorship')
+    }):null;
+    const selected=!cotg&&table?ecology.choose(table,city?.populationMix):null;
     const party = Balance.partyMembers(ready.roster,consoleText), level = levelBudget(party), choices = selected?[selected]:Catalog;
     const pickLevel=Balance.levelPicker(party,{fallback:()=>Math.max(1,level-randomInt(0,2)),random:(min,max)=>randomInt(min,max+1)});
     const result = await generator.run(generator.retort(async $ => {
@@ -107,7 +111,8 @@ async function maybeGenerate({ state, service, visit, player, isCurrent = () => 
         partyNames: ready.roster.filter(a => a.type !== 'monster').map(a => a.name),
         party,
         usedNames: Object.values(db).flatMap(r => Object.keys(r?.inhabitants?.actors || {})), quest: state.getCurrentQuest?.(),
-        encounter: { count: rules.groupSize, allegiance, required:true, races: choices.map(row => row.name), catalog: choices,
+        encounter: { count: rules.groupSize, allegiance, required:true,
+          ...(cotgAuthorship?{cotgAuthorship,races:[],catalog:[]}: {races:choices.map(row => row.name),catalog:choices}),
           theme: `Author one coherent ${rules.groupSize}-member encounter sharing an encounterId. Ordinary hostile groups have 2-6 members, not unrelated solo threats. Suitable for ${room.name || 'this location'} and its ecology, lore and conflicts. Existing residents (do not replace): ${Object.values(p.actors).slice(0, 24).map(a => `${a.race}: ${a.job}`).join('; ')}. Recently selected supplementary races: ${pacing.recentRaces.join(', ') || 'None'}. Prefer a fresh choice unless continuity calls for a repeat. Not every encounter is hostile. Native plane data, when supplied, governs knowledge of the war.` } },
       { level: pickLevel, random: randomInt, sex: () => randomInt(0, 2) ? 'Female' : 'Male', xp, equipment: async () => null });
     }));

@@ -81,7 +81,7 @@
       positionActions(popup);return true;
     }
     const allegiance=root.DungeonLife?.actorAllegiance?.(actor)||actor.allegiance||actor.state;
-    if(services&&actor.type==='monster'&&(actor.hp??1)>0&&!['Hostile','Dead','Dying','Unconscious'].includes(allegiance)&&root.CommerceUi?.invite?.(actor.name))return true;
+    if(services&&actor.type==='monster'&&(actor.hp??1)>0&&!['Hostile','Dead','Dying','Unconscious'].includes(allegiance)&&root.CommerceUi?.invite?.(actor.name,{characterClick:true}))return true;
     if(typeof root.openCombatCharacterSheet!=='function')return false;
     const type=actor.type;
     document.querySelectorAll('.popup-container').forEach(p=>p.remove());
@@ -116,6 +116,10 @@
       else{
         addRecruitAction(popup,actor.name,{close});
         button('Attack','attack '+actor.name);
+        const give=document.createElement('button');give.className='popup-button';give.textContent='Give Item';
+        give.addEventListener('click',()=>root.ItemGiveUi?.open(actor.name));popup.appendChild(give);
+      }
+      if(actor.type==='npc'&&actor.recruitmentLease){
         const give=document.createElement('button');give.className='popup-button';give.textContent='Give Item';
         give.addEventListener('click',()=>root.ItemGiveUi?.open(actor.name));popup.appendChild(give);
       }

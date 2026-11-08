@@ -4074,19 +4074,27 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       // The combat-map clock must not animate a stationary 3D billboard.
       const down = window.DungeonInhabitants?.isDown(actor);
       const frame = down ? 0 : pick.frame;
+      // Action poses (attack / pain / death / idle breathing) from combat cues; anything unknown falls back to walk.
+      let action = 'walk', animFrame = frame;
+      try {
+        const act = typeof api.supportsActionPoses === 'function' && api.supportsActionPoses(spec)
+          ? window.CharacterMotion3D?.actionFor?.(actor?.name, now, { moving: !!pick.moving, down: !!down }) : null;
+        if (act && ['idle', 'attack', 'pain', 'death'].includes(act.action) && Number.isFinite(act.frame)) { action = act.action; animFrame = Math.max(0, Math.min(3, act.frame | 0)); }
+      } catch (e) { action = 'walk'; animFrame = frame; }
+      const posed = action === 'death';
       const retro = window.RetroGraphics?.fullbright?.();
       const bbRev = Number.isFinite(window.CHARACTER_BILLBOARD_REV) ? window.CHARACTER_BILLBOARD_REV : 0;
       // Cache by facing (drawn art), never by bitmap-mirror — keeps weapon on the same hand
-      const key = [spec.key, frame, view, facing > 0 ? 'r' : 'l', bbRev, down ? 'down' : 'standing', retro ? 'retro-world' : 'world'].join('|');
+      const key = [spec.key, animFrame, view, facing > 0 ? 'r' : 'l', 'v40', bbRev, down ? 'down' : 'standing', action, retro ? 'retro-world' : 'world'].join('|');
       this._billboardTexCache = this._billboardTexCache || new Map();
       let entry = this._billboardTexCache.get(key);
       if (!entry) {
-        const renderPixels = f => {
-          const original = api.renderBillboardPixels(spec, { frame: f, view, facing });
+        const renderPixels = (f, a) => {
+          const original = api.renderBillboardPixels(spec, { frame: f, view, facing, action: a || 'walk' });
           return retro ? window.RetroGraphics?.worldCharacterPixels?.(original, actor, spec) || original : original;
         };
-        const original = renderPixels(frame);
-        const pix = down ? window.CombatLifeUi?.laidDownPixels(original) || original : original;
+        const original = renderPixels(animFrame, action);
+        const pix = down && !posed ? window.CombatLifeUi?.laidDownPixels(original) || original : original;
         if (!pix || !pix.bounds) return null;
         const data = new Uint8Array(pix.data.buffer, pix.data.byteOffset, pix.data.byteLength);
         const gl = this.gl;
@@ -4100,14 +4108,14 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, pix.w, pix.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
         if (!retro) try { gl.generateMipmap(gl.TEXTURE_2D); } catch (e) { gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); }
         const ws = Number.isFinite(spec.worldScale) ? Math.max(0.55, Math.min(1.7, spec.worldScale)) : 1;
-        const idle = frame === 0 ? original : renderPixels(0);
+        const idle = animFrame === 0 && action === 'walk' ? original : renderPixels(0, 'walk');
         const stature = api.humanoidWorldStature?.(spec);
         const bodyFraction = (idle?.bodyHeight || (idle?.bounds?.maxY - idle?.bounds?.minY + 1)) / idle?.h;
         // Measure the body, not transparent headroom, wings or a raised weapon.
         // Use the idle measurement for every frame so walking cannot change size.
         const worldHeight = stature > 0 && bodyFraction > 0 ? stature / bodyFraction : 1.22 * ws;
         // Anchor all walking poses to the same idle soles, not frame-specific padding.
-        const footKey = [spec.key, view, facing, bbRev, retro ? 'retro-world' : 'world'].join('|');
+        const footKey = [spec.key, view, facing, 'v40', bbRev, retro ? 'retro-world' : 'world'].join('|');
         this._billboardFootInsets = this._billboardFootInsets || new Map();
         let footInset = this._billboardFootInsets.get(footKey);
         if (!Number.isFinite(footInset)) {
@@ -4116,7 +4124,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
           if (this._billboardFootInsets.size >= 256) this._billboardFootInsets.delete(this._billboardFootInsets.keys().next().value);
           this._billboardFootInsets.set(footKey, footInset);
         }
-        entry = { tex, worldHeight, footInset: down ? 0 : footInset, view, facing, pixels: pix };
+        entry = { tex, worldHeight, footInset: down && !posed ? 0 : footInset, view, facing, action, pixels: pix };
         if (this._billboardTexCache.size >= 256) {
           const oldKey = this._billboardTexCache.keys().next().value;
           const old = this._billboardTexCache.get(oldKey);

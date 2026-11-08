@@ -513,6 +513,8 @@
     for (const raw of String(text || '').split(/\n|<br\s*\/?>/i)) {
       const line = raw.replace(/<[^>]+>/g, '').trim(); if (!line || !fresh(line)) continue;
       try { combatVoices(line); } catch (e) {}
+      try { window.CharacterMotion3D?.cueFromCombatLine?.(line, namesIn(line), performance.now()); } catch (e) {}
+      try { window.CombatMapPoses?.observe?.(line,namesIn(line),performance.now()); } catch (e) {}
       const who = namesIn(line), tgt = /is killed by|is slain|dies\b|falls before|is destroyed|has been defeated|takes \d+ damage/i.test(line) ? who[0] : (who[1] || who[0]);
       const n0 = out.length;
       if (/is killed by|is slain|dies\b|falls before|is destroyed|has been defeated/i.test(line)) out.push('monster_death');
@@ -779,7 +781,7 @@
     const t0 = performance.now();
     const p = fetch(cry?'/voice/cry.sidvoice':'/voice/line.sidvoice', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ speaker: who, text, profile, clock: sidMode(), chip: voiceChip(), notch: voiceNotch(), detail: settings.voiceDetail !== false, timbre }) })
-      .then(async r => { if (!r.ok) throw new Error('voice ' + r.status);const duration=Number(r.headers.get('X-Voice-Dur'));
+      .then(async r => { if (!r.ok) {const detail=await r.json().catch(()=>null);throw new Error('voice '+r.status+(detail?.error?': '+String(detail.error):''));}const duration=Number(r.headers.get('X-Voice-Dur'));
         if(!Number.isFinite(duration)||duration<.05||duration>120)throw Error('Invalid SID voice duration');
         const bytes=await r.arrayBuffer();if(bytes.byteLength>24*1024*1024)throw Error('SID voice score too large');return{bytes,duration}; })
       .then(score => { p.bytes=score.bytes.byteLength;

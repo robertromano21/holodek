@@ -108,5 +108,5 @@
   }
   function cancel(){telemetry('cancelled');transition=null;removeOverlay();}
   if(root.document)root.setInterval(()=>{if(transition?.movement&&!root.GameCommandGate?.busy?.())transition=null;if(transition&&!transition.frame&&now()-transition.at>120000)cancel();if(observed&&Date.now()-lastPoll>6000)refresh();},1500);
-  return{create,onFrame,begin,prepare,shown,reset,cancel,failed,isPending:()=>!!transition,walkingAllowed:()=>!!transition&&transition.runId===root.dungeonRunId&&[transition.fromKey,transition.geoKey].includes(root.currentDungeon?.geoKey),texturesFor:d=>manager?.resources(root.dungeonRunId,d)};
+  return{create,onFrame,begin,prepare,shown,reset,cancel,failed,isPending:()=>!!transition&&!transition.frame,walkingAllowed:()=>!!transition&&transition.runId===root.dungeonRunId&&[transition.fromKey,transition.geoKey].includes(root.currentDungeon?.geoKey),texturesFor:d=>manager?.resources(root.dungeonRunId,d)};
 });

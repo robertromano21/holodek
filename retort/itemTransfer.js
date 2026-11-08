@@ -22,19 +22,25 @@ function give(state, service, input) {
   text = state.getUpdatedGameConsole() || text;
   const dungeon = state.getRoomDungeonForSimulation?.(coords), population = state.getRoomPopulation?.(geoKey) || service.get(geoKey, text, dungeon);
   const roster = JSON.parse(state.getCombatCharactersString() || '[]'); I.attach(roster, population);
-  const matches = roster.filter(a => a.type === 'monster' && (key(a.name) === key(command[2]) || key(a.name).startsWith(key(command[2]) + ' ')));
+  const matches = roster.filter(a => (a.type === 'monster' || a.type==='npc'&&a.recruitmentLease?.source===require('./recruitmentProgress').SOURCE) && (key(a.name) === key(command[2]) || key(a.name).startsWith(key(command[2]) + ' ')));
   const recipient = matches.find(a => key(a.name) === key(command[2])) || (matches.length === 1 ? matches[0] : null);
   const pc = roster.find(a => a.type === 'pc' && (a.hp ?? 1) > 0), record = recipient && population.actors[recipient.name];
   const player = pc && (pc.mazePoint || { x: pc.mazeX + .5, y: pc.mazeY + .5 });
   if (!recipient || !record || !I.isPresent(recipient, population) || recipient.discoveryState === 'pending') return result('That recipient is not present in this room.');
   const reach = I.dialogueReach(dungeon, recipient, player);
-  if (!pc || !reach.canSpeak || !reach.lineOfSight || reach.distance > 3) return result(`Move closer to ${recipient.name} for the handoff.`);
+  const db=JSON.parse(state.getRoomNameDatabase() || '{}'),localRequests=Object.values(db[geoKey]?.minorMissions || {}).filter(m=>
+    m.source==='engine-resident-favor-v1' && m.runId===state.getDungeonRunId() && m.floor===require('./hostLocalFloors').identity(db[geoKey]?.cityFloorContext) &&
+    m.status==='accepted' && m.recipient===recipient.name && (m.conditions || [m.objective]).some(o=>o?.kind==='retrieve'&&key(o.item)===key(command[1])));
+  if (!pc || !I.canAct(recipient) || !I.canAct(record) || !localRequests.length&&(!reach.canSpeak || !reach.lineOfSight || reach.distance > 3)) return result(`Move closer to ${recipient.name} for the handoff.`);
   if (I.allegiance(recipient) === 'Hostile') return result(`${recipient.name} is hostile and will not accept an ordinary handoff.`);
   const names = field(text, 'Inventory').split(/,\s*/).filter(name => name && !/^(none|empty)$/i.test(name));
   const index = names.findIndex(name => key(name) === key(command[1]));
   if (index < 0) return result(`The ${command[1]} is not in inventory. Unequip it first if a party member is using it.`);
   const name = names[index], properties = Inventory.parseProperties(field(text, 'Inventory Properties'));
   const metadata = properties.find(item => key(item.name) === key(name)) || { name, type: 'other', attack_modifier: 0, damage_modifier: 0, ac: 0, magic: 0 };
+  for(const request of localRequests)for(const condition of request.conditions || [request.objective])if(condition.kind==='read'&&key(condition.item)===key(name) &&
+    !require('./residentFavors').assess({...request,conditions:[condition]},db).passed)
+    return result(`Read "${name}", chapter ${condition.chapter}, before this handoff. The book is still in your inventory.`);
   let database; try { database = JSON.parse(state.getRoomNameDatabase() || '{}'); } catch { return result('The room records could not be verified. No item was transferred.'); }
   if (!database[geoKey]) return result('The room records could not be verified. No item was transferred.');
   if ((record.inventory?.length || 0) >= 100) return result(`${recipient.name} cannot carry any more items.`);

@@ -989,7 +989,7 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
     combatCharactersString:sharedState.getCombatCharactersString(),roomNameDatabaseString:sharedState.getRoomNameDatabase()};
   const giveResult = options.realtimeEncounter || directCombat || typeof ItemTransfer === 'undefined' ? null : ItemTransfer.give(sharedState, populationService, userInput);
   const favorAction = options.realtimeEncounter || directCombat || typeof ResidentFavors === 'undefined' ? null : ResidentFavors.command(sharedState,populationService,userInput);
-  if (favorAction) return favorAction;
+  if (favorAction) return favorAction.recruitmentHandoff ? require('./recruitmentHandoff').complete({state:sharedState,service:populationService,result:favorAction,broadcast}) : favorAction;
   if (giveResult) {
     if (typeof QuestScenes !== 'undefined') QuestScenes.refresh(sharedState);
     if (typeof Economy !== 'undefined') {
@@ -7271,7 +7271,7 @@ function writeMonstersDbFromConsole(roomKey, consoleText, db) {
 }
 // ===== end helpers =====
 
-async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast, preparation = false) {
+async function seedAndManageQuest($, updatedGameConsole, userInput, sceneBroadcast, preparation = false, preparationJob = null) {
   const localQuestWork = !!preparation || typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1();
   const questLink = (component, parameters, data, instruction) => require('./holodekRoomWork').questReply($, component, parameters,
     { quest: sharedState.getCurrentQuest(),...(['quest-task-kind','quest-task-description'].includes(component)?{
@@ -7596,6 +7596,12 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
 }
   // Get a robust first monster name for a placement, skipping excluded names
     function getFirstMonsterNameForPlacement(db, placementKey, fallbackBlock, excludeSet) {
+      const room = db?.[placementKey], population = sharedState.getRoomPopulation?.(placementKey) || room?.inhabitants;
+      const savedSheets = Inhabitants.parseBlocks(room?.monsters?.consoleBlock || room?.monsters?.inRoom || '')
+        .filter(actor => !excludeSet?.has(actor.name.toLowerCase()) && actor.hp > 0 &&
+          !['dead', 'departed', 'recruited'].includes(population?.actors?.[actor.name]?.status));
+      if (savedSheets.length) return (savedSheets.find(actor =>
+        Inhabitants.allegiance(population?.actors?.[actor.name] || actor, room.monsters?.state) === 'Hostile') || savedSheets[0]).name;
       const inRoomStr = String(db?.[placementKey]?.monsters?.inRoom || "");
       let pool = inRoomStr.split(/,\s*/).map(s => s.trim()).filter(Boolean);
       if (excludeSet?.size) pool = pool.filter(n => !excludeSet.has(n.toLowerCase()));
@@ -7603,7 +7609,6 @@ function normalizeMonstersDbEntry(db, placementKey, excludeSet) {
       // Avoid picking the header or stat labels
       const bad = /^(Monsters in Room:|Male|Female|Unknown|Level|AC|XP|HP|MaxHP|Equipped|Attack|Damage|Armor|Magic)\b/i;
       let first = pool.find(n => !bad.test(n)) || "";
-      const population = sharedState.getRoomPopulation?.(placementKey) || db?.[placementKey]?.inhabitants;
       const hostile = pool.find(name => population?.actors?.[name]?.allegiance === 'Hostile' && !bad.test(name));
       if (hostile) first = hostile;
    
@@ -7691,7 +7696,7 @@ Use the existing quest and characters for context. Do not place it inside the bo
     }
     // The first regional story supplements the older generator; all later steps keep its existing path.
     if (typeof RegionalAdventure !== 'undefined') {
-      const planning = preparation && options.prepareOpeningQuest;
+      const planning = preparation && preparationJob;
       const reserved = new Set([...(planning?.assignment?.assignments || []).filter(row => row.owner !== planning.id).map(row => row.destination),
         ...(planning?.assignment?.reservations || []).filter(row => row.id !== planning?.id).map(row => row.key)]);
       const proposed = planning && bossGateReport.gate && RegionalAdventure.route(roomNameDatabasePlain, currentRoomKey, bossGateReport.gate.targetKey);
@@ -7746,13 +7751,18 @@ Use the existing quest and characters for context. Do not place it inside the bo
     const partyNpcNames = getNpcPartyNames(updatedGameConsole);
     const npcExcludeSet = new Set(partyNpcNames.map(n => n.toLowerCase()));
     for (let i = 0; i < reqCount; i++) {
-      await $.user`For required element ${i + 1} of ${reqCount}, provide ONLY {"type":"X"} where X ∈ {"object","key","monster"} (non-boss). NEVER pick party NPCs as monsters: ${partyNpcNames}. If monsters are in the current room (${monstersInRoom}), strongly prefer "monster" to incorporate them.`;
-      const typeRespEl = localQuestWork ? await questLink('quest-required-kind', { type: { type: String, enum: ['object', 'key', 'monster'] } },
+      const elementTypes = preparation && preparationJob &&
+        !require('./openingQuestPreparation').placementKeys(roomNameDatabasePlain, preparationJob, 'monster', { excludeNames: partyNpcNames }).length
+        ? ['object', 'key'] : ['object', 'key', 'monster'];
+      await $.user`For required element ${i + 1} of ${reqCount}, provide ONLY {"type":"X"} where X is in ${JSON.stringify(elementTypes)} (non-boss). NEVER pick party NPCs as monsters: ${partyNpcNames}. Reuse an existing appropriate inhabitant only when "monster" is allowed.`;
+      const typeRespEl = localQuestWork ? await questLink('quest-required-kind', { type: { type: String, enum: elementTypes } },
         { index: i, count: reqCount, existingMonsters: monstersInRoom, excludedPartyNames: partyNpcNames }, 'Choose only this required element kind. Prefer an existing appropriate non-boss inhabitant when present.') : await $.assistant.generation({ maxTokens: 50,
-        parameters: { type: { type: String, enum: ["object", "key", "monster"] } }
+        parameters: { type: { type: String, enum: elementTypes } }
       });
       const elType = (parseOnlyJson(typeRespEl.content, { type: "object" }).type || "object").toLowerCase();
-      const placementPlan = require('./questPlacement').plan({ coordinates: allCoords, currentRoomKey,
+      const placementCoordinates = preparation && preparationJob
+        ? require('./openingQuestPreparation').placementKeys(roomNameDatabasePlain, preparationJob, elType, { excludeNames: partyNpcNames }) : allCoords;
+      const placementPlan = require('./questPlacement').plan({ coordinates: placementCoordinates, currentRoomKey,
         bossKey: bossGateReport.gate?.targetKey, elementType: elType, hasMonstersInCurrent, preferElsewhere, alreadyUsed: [...usedPlacements] });
       const enumList = placementPlan.candidates;
       await $.user`${placementPlan.brief}`;
@@ -7823,7 +7833,7 @@ Use the existing quest and characters for context. Do not place it inside the bo
               updatedGameConsole = await syncMonstersOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
             }
           } else {
-            normalizeMonstersDbEntry(roomNameDatabasePlain, placement, npcExcludeSet);
+            if (!preparation) normalizeMonstersDbEntry(roomNameDatabasePlain, placement, npcExcludeSet);
             if (placement === currentRoomKey) {
               updatedGameConsole = await syncMonstersOnRoomEntry($, currentCoords, roomNameDatabasePlain, updatedGameConsole);
             }
@@ -12227,7 +12237,7 @@ async function logThreadMessages() {
       const bossName = Opening.line(updatedGameConsole, 'Next Boss Room');
       database[job.bossKey] ||= { name: bossName, objects: [], exits: {}, monsters: { inRoom: 'None', state: 'None' } };
       sharedState.setRoomNameDatabase(JSON.stringify(database)); roomNameDatabaseString = sharedState.getRoomNameDatabase();
-      const result = await seedAndManageQuest($, updatedGameConsole, '', null, true);
+      const result = await seedAndManageQuest($, updatedGameConsole, '', null, true, job);
       if (!result.activeTask?.id) throw Error('Opening quest has no validated first task.');
       await Opening.authorIntroduction($, sharedState, result.activeTask);
       const artifact = { stage: 'quest', jobId: job.id, runId: job.runId, base,
@@ -13068,6 +13078,11 @@ let returnObj = { content: '', updatedGameConsole, musicArrangement };
 
 const { geoCoords, geoKey } = preparedEntry || await buildGeneratedRoom($, roomDescription, puzzleInRoom, isAutoSimAdvance, returnObj, { enteringRoom, entryPrevious });
 
+if(!isAutoSimAdvance){
+  require('./recruitmentProgress').depart(sharedState,populationService,broadcast);
+  require('./recruitmentProgress').advance(sharedState,populationService);
+  updatedGameConsole=sharedState.getUpdatedGameConsole();
+}
 // Narration runs only after placement, so a room-wide console list cannot become an entrance mob.
 const activeDungeonForPopulation = sharedState.getRoomDungeonForSimulation(geoCoords);
 if (typeof pursuitTransition !== 'undefined' && pursuitTransition && activeDungeonForPopulation) {
@@ -13109,8 +13124,9 @@ const narrationSpeakers = perception.conversational.filter(actor => Inhabitants.
 const audibleNames = narrationSpeakers.map(a=>a.name);
 // Startup must finish the original Retort scene, including its TURN 0 premise.
 const initialArrival = enteringRoom && typeof isFirstTurn !== 'undefined' && isFirstTurn && geoKey === '0,0,0';
-const responseAudience = !enteringRoom && typeof DialogueAudience !== 'undefined' ? DialogueAudience.resolve(
+let responseAudience = !enteringRoom && typeof DialogueAudience !== 'undefined' ? DialogueAudience.resolve(
   typeof userInput === 'string' ? userInput : '', dialogueRoster, audibleNames) : null;
+if(!enteringRoom && typeof ResidentFavors!=='undefined')responseAudience=require('./recruitmentGroups').audience(sharedState,userInput,audibleNames,responseAudience);
 const residentFavorOffers = !enteringRoom && typeof ResidentFavors !== 'undefined' ? await ResidentFavors.prepare(sharedState,$,userInput || '',
   { audibleNames,responseAudience,population }) : [];
 const residentFavorContext = typeof ResidentFavors !== 'undefined' ? ResidentFavors.context(sharedState,audibleNames) : [];
@@ -13163,13 +13179,14 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
   await $.user`${retrievedContext}FINAL STORY RESPONSE: Follow the full Integrate and interactive-fiction action/dialogue instructions above. Write the player-facing narrative FIRST, then append the CHARACTER_DIALOGUE metadata. Cache planning is secondary and must not replace the story. ${initialArrival ? 'This is the full opening scene: develop the established TURN 0 premise and the call to adventure without deciding actions for the PC.' : enteringRoom ? 'This is a full room-entry story continuation, not another static room or puzzle description.' : 'Resolve the latest player input and continue the scene; a genuine automatic idle tick keeps its requested short format.'} If no characters are permitted to speak, still narrate an appropriate environmental or story development without inventing dialogue, discoveries or completed actions. Preserve player agency, current mechanics, exact names and the nearby-speaker limits. Return actual prose before metadata, not a metadata-only answer.`;
   // Social mechanics are model-independent; all live resident replies use the same enum contract.
   const socialInteractions = typeof ResidentFavors !== 'undefined' && !enteringRoom && userInput?.trim() && !isAutoSimAdvance ?
-    ResidentFavors.dialogueOptions(sharedState,audibleNames.filter(name=>!responseAudience?.directed || responseAudience.responders.includes(name)),{invitation:ResidentFavors.invitationIntent(userInput)}) : [];
+    ResidentFavors.dialogueOptions(sharedState,audibleNames.filter(name=>!responseAudience?.directed || responseAudience.responders.includes(name)),{invitation:ResidentFavors.invitationIntent(userInput),userInput}) : [];
   const result = isHolodek1 || socialInteractions.length ? await require('./holodekNarration').generate($, {
     consoleText: perceivedGameConsole, userInput, currentSituation, characters: describeCharacters(dialogueRoster, population),
     audibleNames, responseAudience, initialArrival, enteringRoom, quest: sharedState.getCurrentQuest(), task: activeTask,
     localFavors: residentFavorContext, requiredSpeakers: residentFavorOffers.map(m=>m.recipient),
     socialInteractions,
     onSocialAction: typeof ResidentFavors !== 'undefined' ? (event,option)=>ResidentFavors.applyDialogue(sharedState,populationService,event,option) : undefined,
+    onConversationAdjudication: typeof ResidentFavors !== 'undefined' ? judgment=>ResidentFavors.adjudicateConversation(sharedState,populationService,judgment) : undefined,
     questUpdate, entryQuestContact, committedPuzzle: physicalPuzzleResult?.completed ? physicalPuzzleResult.narrative : null,
     recollections: characterMemory, journey: population?.journey,
     personalMemories: typeof CampaignMemory !== 'undefined' ? CampaignMemory.dialogueContext(sharedState,
@@ -13195,8 +13212,8 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
   spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
   spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
   response = spoken.content;
-  if (residentFavorOffers.length) response += '\n\n'+residentFavorOffers.map(m=>`Local favor (${m.status}): ${m.description}`+
-    (m.status==='offered'?` Accept with "accept favor from ${m.recipient}" or open their Local Contract menu. Decline with "decline favor from ${m.recipient}".`:'')).join('\n');
+  if (residentFavorOffers.length) response += '\n\n'+residentFavorOffers.map(m=>`${m.invitationPending?'Recruitment Invitation':'Local Request'} (${m.status}): ${m.invitationPending?m.description:ResidentFavors.requestDescription(m)}`+
+    (m.status==='offered'?` Review the request and choose whether to accept it. You can also use "accept request from ${m.recipient}" or "decline request from ${m.recipient}".`:'')).join('\n');
   if (residentFavorOffers.errors?.length) response += '\n\n'+residentFavorOffers.errors.join('\n');
   console.info('[StoryNarration]', JSON.stringify({ geoKey, phase: initialArrival ? 'arrival' : enteringRoom ? 'entry' : 'turn',
     status: response.trim() ? 'story' : 'metadata-only', storyChars: response.length, rawChars: String(result.content || result).length,

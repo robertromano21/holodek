@@ -20,11 +20,13 @@ function fixture(){
     querySelectorAll:()=>nodes.filter(node=>node.isConnected&&node.className?.includes('popup-container')),
     addEventListener:(type,fn)=>events.set(type,fn),removeEventListener:(type,fn)=>{if(events.get(type)===fn)events.delete(type);}};
   const actor={name:'Resident With Work',type:'monster',hp:12,state:'Neutral',allegiance:'Neutral'},dungeon={geoKey:'1,0,0'};
+  const request={id:'job',source:'engine-resident-favor-v1',type:'resident-favor',runId:'run-a',roomKey:'1,0,0',floor:'street',
+    recipient:actor.name,status:'offered',description:'Return the existing ring before I join your party.',invitationPending:true};
   let floor='floor-a',busy=false,present=true,conditional=false;
   const window={combatCharacters:[actor],dungeonRunId:'run-a',currentDungeon:dungeon,
     CityFloorScope:{token:()=>floor},GameCommandGate:{busy:()=>busy},isDungeonActorPresent:()=>present,
     getDungeonLifeContext:()=>({dungeon,player:{x:5,y:5},actors:[actor]}),
-    getEconomyResidentInfo:()=>({kind:'mission',jobs:true,introduced:true,recruitmentCondition:conditional?{missionId:'job'}:null}),prepareEconomyState:async()=>{},
+    getEconomyResidentInfo:()=>({kind:'mission',jobs:true,introduced:true,recruitmentCondition:conditional?request:null}),prepareEconomyState:async()=>{},
     openCombatCharacterSheet:()=>{sheet.style.display='block';},centerPartySheet(){},
     chatbotprocessinput:()=>commands.push(input.value)};
   window.applyRealtimeCombatResult=async event=>applied.push(event);
@@ -131,9 +133,11 @@ test('a recruitment click while a job acceptance is in flight cannot submit a co
 
 test('the changed browser scripts carry a matching cache version',()=>{
   const html=fs.readFileSync('assets/index.html','utf8');
-  assert.ok(html.includes('combatCharacterUi.js?v=recruitment-consent-2'));
+  assert.ok(html.includes('combatCharacterUi.js?v=recruitment-local-tasks-1'));
   assert.ok(html.includes('questSceneUi.js?v=resident-recruitment-1'));
-  assert.ok(html.includes('commerceUi.js?v=starter-room-protection-1'));
+  assert.ok(html.includes('commerceUi.js?v=recruitment-local-tasks-1'));
+  assert.ok(html.includes('dungeonLifeUi.js?v=group-recruitment-1'));
+  assert.ok(html.includes('game.js?v=quest-handoff-recovery-1'));
 });
 test('typed Add-to-Party commands become dialogue invitations and the legacy party mutations are absent',()=>{
   const source=fs.readFileSync('assets/game.js','utf8'),start=source.indexOf('  // Legacy typed/menu commands share the dialogue invitation path.');
@@ -146,12 +150,14 @@ test('typed Add-to-Party commands become dialogue invitations and the legacy par
   assert.ok(!source.includes('// Process adding a monster to the party'));
 });
 
-test('conditional recruitment has no Add to Party button in the invitation, contract menu or character sheet',async()=>{
+test('clicking a conditional recruitment contact opens the character sheet with a separate request action',async()=>{
   const f=fixture();f.conditional(true);
-  f.window.CombatCharacterUi.open(f.actor);assert.ok(f.button('View Job Offers'));assert.equal(f.button('Add to Party'),undefined);
-  await f.button('View Job Offers').click();assert.ok(f.button('Accept Local Contract'));assert.equal(f.button('Add to Party'),undefined);
+  f.window.CombatCharacterUi.open(f.actor);assert.equal(f.sheet.style.display,'block');assert.ok(f.button('Recruitment Invitation'));
+  assert.equal(f.button('Accept Request'),undefined);assert.equal(f.button('Decline Request'),undefined);
+  assert.equal(f.button('View Job Offers'),undefined);assert.equal(f.button('Accept Local Contract'),undefined);assert.equal(f.button('Add to Party'),undefined);
+  await f.button('Recruitment Invitation').click();assert.ok(f.button('Accept Request'));assert.ok(f.button('Decline Request'));
   f.window.CombatCharacterUi.open(f.actor,{services:false});assert.equal(f.button('Add to Party'),undefined);
-  assert.deepEqual(f.commands,[]);
+  assert.deepEqual(f.commands,[]);assert.equal(f.requests.length,0);
 });
 test('a previously rendered recruitment button cannot bypass a newly created favor condition',()=>{
   const f=fixture();f.window.CombatCharacterUi.open(f.actor);const add=f.button('Add to Party');f.conditional(true);add.click();assert.deepEqual(f.commands,[]);

@@ -346,11 +346,13 @@ function context(state) {
 function operatorReach(ctx, name, counterId) {
   const actor = ctx.roster.find(a => a.name === name && a.type === 'monster');
   const record = ctx.room.inhabitants?.actors?.[name];
-  if (!actor || !record || actor.hp <= 0 || record.status !== 'present' || actor.discoveryState === 'pending' ||
+  if (!actor || !record || !I.canAct(actor) || !I.canAct(record) || !I.isPresent(actor,ctx.room.inhabitants) || record.status !== 'present' || actor.discoveryState === 'pending' ||
       I.allegiance(actor) === 'Hostile' || record.allegiance === 'Hostile') throw Error('That resident is not available for peaceful business.');
-  const reach = I.dialogueReach(ctx.dungeon, actor, ctx.player);
+  const introduced=I.hasEncountered(actor,ctx.room.inhabitants) || !!record.servicesAcceptedAt;
+  const reach = !introduced && I.dialogueReach(ctx.dungeon, actor, ctx.player);
   const atCounter=counterId&&require('./serviceCounters').allows(ctx.dungeon,ctx.room,record,counterId,ctx.player);
-  if (!ctx.pc || !reach.canSpeak || !reach.lineOfSight || reach.distance > 3 && !atCounter) throw Error(`Move closer to ${name}.`);
+  if(counterId&&!atCounter)throw Error('That service counter is not available here.');
+  if (!ctx.pc || !ctx.player || !introduced && (!reach.canSpeak || !reach.lineOfSight) && !atCounter) throw Error(`Approach ${name} for the first introduction.`);
   return record;
 }
 function health(text, name, hp) {
@@ -410,19 +412,21 @@ function changeEquipment(text, input) {
 function view(state, actorName, counterId) {
   try {
     const ctx = context(state);
-    if (R.isStarterRoom(ctx.geoKey, ctx.room)) throw Error('Services and local work are unavailable in the starter room.');
+    const starter=R.isStarterRoom(ctx.geoKey,ctx.room),starterFavor=m=>require('./cotgStarterRecruitment').favor(ctx.room,m,state.getDungeonRunId());
+    if (starter && !Object.values(ctx.room.minorMissions || {}).some(m=>starterFavor(m)&&m.recipient===actorName)) throw Error('Services and local work are unavailable in the starter room.');
     const resident = operatorReach(ctx, actorName, counterId);
-    const service = Object.values(ctx.room.services || {}).find(s => require('../assets/cityEstablishments').operators(s).includes(actorName));
-    const venue = require('./cityVenueServices').describe(ctx.room, actorName);
+    const service = !starter && Object.values(ctx.room.services || {}).find(s => require('../assets/cityEstablishments').operators(s).includes(actorName));
+    const venue = !starter && require('./cityVenueServices').describe(ctx.room, actorName);
     const missions = Object.values(ctx.db).flatMap(r => Object.values(r?.minorMissions || {}))
-      .filter(m => m.status!=='withdrawn' && (m.patron === actorName&&(!m.originRoomKey||m.originRoomKey===ctx.geoKey) || m.recipient === actorName && m.roomKey === ctx.geoKey));
+      .filter(m => (!starter || starterFavor(m)) && m.status!=='withdrawn' && (m.patron === actorName&&(!m.originRoomKey||m.originRoomKey===ctx.geoKey) || m.recipient === actorName && m.roomKey === ctx.geoKey))
+      .map(m=>({...m,...(m.recruitmentGroupId?{recruitmentGroup:require('./recruitmentGroups').describe(state,m,ctx.db)}:{})}));
     const recruitmentCondition=missions.find(m=>m.source==='engine-resident-favor-v1' && m.type==='resident-favor' && m.runId===state.getDungeonRunId() && m.recipient===actorName && ['offered','accepted'].includes(m.status));
-    const deity = resident.deityId && Pantheon.canon(actorName);
+    const deity = !starter && resident.deityId && Pantheon.canon(actorName);
     if (!service && !venue && !missions.length && !deity) throw Error('This resident has no shop, temple or local contract.');
     const storedProperties = propertiesOf(ctx.text);
     return { silver: ctx.book.silver, revision: ctx.book.revision, service: service ? { ...service,
       stock: service.stock.filter(i => i.quantity > 0).map(i => ({ ...i, price: Market.price(ctx.room, i, R.price(i)) })) } : null,
-      venue, market: Market.view(ctx.room),
+      venue:venue || null, market: starter?null:Market.view(ctx.room),
       divine: deity ? { name: deity.name, domain: deity.domain, interest: resident.motivation,
         visits: ctx.db['0,0,0']?.divineCourt?.actors?.[deity.name]?.visits || 1,
         completedCommissions: ctx.db['0,0,0']?.divineCourt?.actors?.[deity.name]?.completedCommissions || [],
@@ -441,16 +445,17 @@ function action(state, service, input) {
     if (state.getGamePaused?.()) throw Error('Resume the game first.');
     if (!/^[\w:-]{8,100}$/.test(input.nonce || '')) throw Error('A transaction identifier is required.');
     const ctx = context(state), { db, room, book, geoKey, roster } = ctx;
-    if (R.isStarterRoom(geoKey, room) && ['buy','sell','heal','resurrect','lodge','accept-mission'].includes(input.kind))
+    const starterFavor=require('./cotgStarterRecruitment').favor(room,room.minorMissions?.[input.missionId],state.getDungeonRunId());
+    if (R.isStarterRoom(geoKey, room) && (['buy','sell','heal','resurrect','lodge'].includes(input.kind) || input.kind==='accept-mission'&&!starterFavor))
       throw Error('Services and local work are unavailable in the starter room.');
     const old = book.receipts.find(r => r.nonce === input.nonce);
     if (old) {
       if (old.roomKey !== geoKey || old.kind !== input.kind || old.actor !== input.actor || old.item !== input.item || old.target !== input.target||old.missionId!==input.missionId)
         throw Error('That transaction identifier was already used for a different action.');
-      return { content: old.content, duplicate: true };
+      return { content: old.content, duplicate: true,...(old.recruitmentHandoff?{recruitmentHandoff:old.recruitmentHandoff}:{}) };
     }
     if (input.revision !== book.revision) throw Error('The balance changed. Reopen the menu and try again.');
-    let text = ctx.text, content, amount = 0, business, equipmentOwner;
+    let text = ctx.text, content, amount = 0, business, equipmentOwner, handoffMissionId;
     if (['buy', 'sell', 'heal', 'resurrect'].includes(input.kind)) {
       operatorReach(ctx, input.actor, input.counterId);
       business = Object.values(room.services || {}).find(s => require('../assets/cityEstablishments').operators(s).includes(input.actor));
@@ -586,19 +591,26 @@ function action(state, service, input) {
         if(mission.patron!==input.actor||mission.originRoomKey!==geoKey||!mission.dispatchItem||mission.dispatchItem.minor_mission_id!==mission.id)throw Error('Accept this dispatch from its sender at the origin.');
         text=addItem(text,mission.dispatchItem);mission.issuedAt=Date.now();mission.issued=true;
       }
-      if(mission.source===require('./residentFavors').SOURCE) require('./residentFavors').accept(state,mission);
-      mission.status = 'accepted'; content = `Local contract accepted: ${mission.description}`;
+      if(mission.source===require('./residentFavors').SOURCE && !require('./recruitmentGroups').accept(state,db,mission)) require('./residentFavors').accept(state,mission);
+      mission.status = 'accepted'; content = `${mission.source===require('./residentFavors').SOURCE?'Request accepted':'Local contract accepted'}: ${mission.description}`;
       if (mission.source === 'world1-room-arc') { const line = require('./roomCast').onAccepted(db, mission); if (line) content += ` ${line}`; }
-    } else if (['report-favor','decline-favor'].includes(input.kind)) {
+    } else if (['report-favor','decline-favor','complete-recruitment'].includes(input.kind)) {
       operatorReach(ctx,input.actor,input.counterId);
       const mission=room.minorMissions?.[input.missionId];
-      if(!mission || mission.recipient!==input.actor) throw Error('That resident did not offer this favor.');
-      content=require('./residentFavors').transact(state,db,mission,input.kind);
+      if(!mission || mission.recipient!==input.actor) throw Error('That resident did not make this request.');
+      const previous=mission.status;
+      if(input.kind==='complete-recruitment' && mission.recruitmentGroupId){
+        const outcome=require('./recruitmentGroups').complete(state,db,mission);content=outcome.content;handoffMissionId=outcome.missionId;
+      }else{
+        content=require('./residentFavors').transact(state,db,mission,input.kind);
+        if(['report-favor','complete-recruitment'].includes(input.kind) && previous!=='completed' && mission.status==='completed')handoffMissionId=mission.id;
+      }
     } else throw Error('Unsupported economy action.');
     book.silver += amount; book.revision++;
     const receipt = { id: randomUUID(), nonce: input.nonce, kind: input.kind, amount, roomKey: geoKey, actor: input.actor,
       item: input.item, target: input.target, missionId:input.missionId,equipmentOwner, ...(input.kind === 'drop-all' ? { items: namesOf(ctx.text) } : {}),
       at: Date.now(), content, source: 'engine-economy-v1' };
+    if(handoffMissionId)receipt.recruitmentHandoff={missionId:handoffMissionId,completionId:room.minorMissions[handoffMissionId].rewardReceiptId};
     book.receipts.push(receipt); if (book.receipts.length > 2048) book.receipts.shift();
     if (business) business.revision++;
     if (['buy','sell'].includes(input.kind)) require('./tradeRoutes').balance(db,geoKey);
@@ -607,13 +619,15 @@ function action(state, service, input) {
     if (ctx.dungeon && ctx.player) Objects.sync(ctx.dungeon, syncGround(text, room), { player: ctx.player });
     if (room.inhabitants) { state.setRoomPopulation?.(geoKey, room.inhabitants); service?.save(room.inhabitants); }
     refresh(state);
-    if(input.kind==='report-favor') {
-      const joined=require('./residentFavors').settleConsent(state,service,input.missionId);
+    if(['report-favor','complete-recruitment'].includes(input.kind) || input.kind==='accept-mission' && room.minorMissions?.[input.missionId]?.source===require('./residentFavors').SOURCE) {
+      const joined=require('./residentFavors').settleConsent(state,service,handoffMissionId || input.missionId);
       if(joined){content+='\n'+joined;receipt.content=content;
         const latest=databaseOf(state),saved=latest['0,0,0']?.economy?.receipts.find(r=>r.id===receipt.id);if(saved)saved.content=content;state.setRoomNameDatabase(JSON.stringify(latest));}
     }
     if (input.kind === 'accept-mission') state.emitter?.emit('quest:minorMission');
-    return { content, sceneObjects: ctx.dungeon?.sceneObjects };
+    const completed=handoffMissionId&&databaseOf(state)[geoKey]?.minorMissions?.[handoffMissionId];
+    return { content, sceneObjects: ctx.dungeon?.sceneObjects,
+      ...(completed?{recruitmentHandoff:{missionId:completed.id,completionId:completed.rewardReceiptId}}:{}) };
   } catch (error) { return { error: error.message }; }
 }
 function refresh(state) {
@@ -692,7 +706,7 @@ function refresh(state) {
     }
   }
   if (changed) book.revision++;
-  const missions = Object.values(active?.minorMissions || {});
+  const missions = Object.values(active?.minorMissions || {}).filter(m=>!m.retiredTask);
   if (missions.length) text = write(text, 'Local Missions', missions.map(m => `${m.status}: ${m.description}`).join(' | '));
   else text = write(text, 'Local Missions', 'None');
   const setting = require('./genreAbilities').region(db, geoKey) || active?.campaignSetting;

@@ -154,6 +154,8 @@ function compile(raw, database, origin, gate, text, runId) {
         { id: 'caravan-stewards', label: 'Entrust the route to the Ashroad Fellowship', action: 'finish', next: 'complete', factionEffects: { salvagers: 2, wellkeepers: -1 } }] },
     { id: 'complete', kind: 'complete', roomKey: oasis, text: 'The regional obligation is settled. The existing boss-key task comes next.' }
   ];
+  if(!require('../assets/economyRules').isStarterRoom(origin,db[origin]) && require('../assets/pantheonCharacters').canRecruit(contact) && I.allegiance(contact)!=='Hostile')
+    stages[0].options.push({id:'join-rescue',label:'Join forces to rescue '+prisoner.name,action:'recruit',next:'investigation'});
   if (native) {
     stages[0].options[0].label = 'Investigate the report';
     stages[1].options[0].label = 'Read the investigation record';

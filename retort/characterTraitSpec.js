@@ -13,6 +13,7 @@ const path = require('path');
 const PC = require('../assets/renderCharacterProcedural.js');
 const Pantheon = require('../assets/pantheonCharacters');
 
+const Wardrobe = require('../assets/genreWardrobe');
 const CACHE_FILE = process.env.HOLODEK_TRAIT_CACHE || path.join(__dirname, '..', '.retort-data', 'character-traits.json');
 const MODEL = process.env.HOLODEK_TRAIT_MODEL || 'gpt-4.1-mini';
 const MAX_ATTEMPTS = 3;
@@ -47,6 +48,11 @@ function loadCache() {
     if (fs.existsSync(CACHE_FILE)) {
       const data = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
       if (data && typeof data === 'object' && data.entries) cache = data.entries;
+      // Stored anatomy never carries world clothing: genre garb is stamped per world on the outgoing copy only.
+      // Older caches (and restored saves) baked one world's garb in, which leaked into other worlds.
+      let stripped = 0;
+      for (const e of Object.values(cache)) if (e && e.traits && e.traits.genreGarb) { e.traits = Wardrobe.stripGarb(e.traits); stripped++; }
+      if (stripped) { console.log(`[traits] removed stored genre garb from ${stripped} cached character(s)`); saveCacheSoon(); }
     }
   } catch (e) {
     console.warn('[traits] cache load failed:', e.message);
@@ -92,11 +98,13 @@ function publicEntry(e) {
 // world1 GENRE_ARCH: homebrew worlds dress humanoid sprites in their genre's garb (hat/coat/belt/gear), chosen by
 // genre weight per character; stamped on the outgoing copy only (the cached anatomy is untouched). CotG -> no garb.
 function withGenreGarb(e) {
-  const t = e.traits || null; if (!t) return t;
+  const t = Wardrobe.stripGarb(e.traits || null); if (!t) return t;
   try {
     const Flags = require('./worldFlags'); if (!Flags.on('GENRE_ARCH') || !Flags.on('GENRE_KITS')) return t;
     const Layer = require('./genreLayer'), r = require('../assets/genreKits').resolve({}, Layer.activeSetting()); if (!r.homebrew || r.locked) return t;
-    const garb = require('../assets/genreArchitecture').garbFor(r.mix, keyOf(e.name)); return garb ? { ...t, genreGarb: garb } : t;
+    const garb = require('../assets/genreArchitecture').garbFor(r.mix, keyOf(e.name), t.bodyPlan);
+    const clean = garb && Wardrobe.sanitizeGarb(garb, { homebrew: true, genres: r.mix.map(x => x.genre) });
+    return clean ? { ...t, genreGarb: clean } : t;
   } catch { return t; }
 }
 function randomSalt() { return (Math.floor(Math.random() * 0xffffffff) >>> 0); }
@@ -354,7 +362,7 @@ function restoreCachedTraitSpecs(entries) {
   for (const e of Object.values(entries)) {
     if (!e?.name || e.source !== 'llm' || !e.traits) continue;
     const sheet = PC.normalizeSheet(e.appearance || { name: e.name });
-    restored[keyOf(e.name)] = { ...e, sheet, sheetKey: sheetKeyOf(sheet) };
+    restored[keyOf(e.name)] = { ...e, traits: Wardrobe.stripGarb(e.traits), sheet, sheetKey: sheetKeyOf(sheet) };
   }
   loadCache(); Object.assign(cache, restored);
   for (const key of Object.keys(restored)) { const retry = retryState.get(key); if (retry?.timer) clearTimeout(retry.timer); retryState.delete(key); }

@@ -262,7 +262,20 @@
     const close = root.document.createElement('button'); close.textContent = 'Close'; close.onclick = () => panel.close();
     status = root.document.createElement('p'); status.setAttribute('role', 'status'); rows = root.document.createElement('div');
     panel.append(heading, close, status, rows); root.document.body.appendChild(panel);
-    const style = root.document.createElement('style'); style.textContent = '#save-game-dialog{background:#171510;color:#ead5a6;border:2px solid #9b8556;border-radius:10px;padding:22px;width:min(850px,90vw);max-height:82vh;overflow:auto;font:17px Georgia,serif}#save-game-dialog::backdrop{background:#0009}#save-game-dialog h2{margin:0 0 12px}#save-game-dialog p{line-height:1.4}#save-game-dialog button,#save-game-dialog input{font:inherit;padding:7px;background:#33312b;color:#f5e4bb;border:1px solid #89764e;border-radius:4px}#save-game-dialog button{cursor:pointer}#save-game-dialog button:disabled{opacity:.4;cursor:default}.save-slot{display:grid;grid-template-columns:64px minmax(100px,1fr) auto auto;gap:8px;padding:12px 0;border-top:1px solid #665a41;align-items:center}.save-slot div{grid-column:2 / -1;font-size:13px;color:#c8bfae}.save-slot input{min-width:0}@media(max-width:500px){.save-slot{grid-template-columns:54px minmax(65px,1fr) auto auto;font-size:14px}}';
+    const style = root.document.createElement('style'); style.textContent = `
+      #save-game-dialog{background:#171510;color:#ead5a6;border:2px solid #9b8556;border-radius:10px;padding:16px;
+        width:680px;max-height:82vh;overflow:auto;font:11px/1.7 var(--game-ui-font,monospace)}
+      #save-game-dialog::backdrop{background:#0009}
+      #save-game-dialog h2{margin:0 0 12px}
+      #save-game-dialog p{line-height:1.6}
+      #save-game-dialog button,#save-game-dialog input{font:inherit;padding:7px;background:#33312b;color:#f5e4bb;border:1px solid #89764e;border-radius:4px}
+      #save-game-dialog button{cursor:pointer}
+      #save-game-dialog button:disabled{opacity:.4;cursor:default}
+      .save-slot{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;padding:12px 0;border-top:1px solid #665a41;align-items:center}
+      .save-slot strong,.save-slot div{grid-column:1 / -1}
+      .save-slot div{font-size:9px;color:#c8bfae;overflow-wrap:anywhere}
+      .save-slot input{min-width:0;width:100%}
+    `;
     root.document.head.appendChild(style);
     for (const name of ['keydown', 'keyup', 'pointerdown', 'pointerup', 'click', 'wheel']) panel.addEventListener(name, e => e.stopPropagation());
     panel.addEventListener('cancel', e => { if (working) e.preventDefault(); });

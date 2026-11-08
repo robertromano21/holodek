@@ -34,8 +34,8 @@ test('the actual inhabitant grammar survives Retort, strict schema, setting laye
   const { result, requests } = await runtime($ => generateInhabitants($, {
     roomName: 'Ruined Temple Entrance', roomDescription: 'An ash garden beside a ruined temple.', geoKey: '0,0,0', indoor: true
   }, { random: min => min, level: () => 1, sex: () => 'Female', xp: () => 0, equipment: async () => null }),
-  (_body, index) => json(index === 1 ? { inhabitants: [{ ...row, dialogue: ['One combined remark.'] }] } : { fix_0: row.dialogue }));
-  assert.equal(requests.length, 2);
+  (_body, index) => json(index === 1 ? { inhabitants: [{ ...row, dialogue: ['One combined remark.'] }] } : index===2 ? { fix_0: row.dialogue } : {inhabitants:[{...require('./fixtures/inhabitants.cjs')(2)[1],allegiance:'Friendly',homeSite:'commons',encounterId:'residents'}]}));
+  assert.equal(requests.length, 3);
   for (const body of requests.slice(0, 1)) {
     const top = wireSchema(body), inhabitant = top.properties.inhabitants.items;
     const dialogue = inhabitant.properties.dialogue;
@@ -116,10 +116,10 @@ test('bounded localWork cannot replace an original array count with a conflictin
 });
 
 test('inhabitant semantic correction also reports the received count when using a non-wire test adapter', async () => {
-  const row = require('./fixtures/inhabitants.cjs')(1)[0], prompts = [];
+  const rows = require('./fixtures/inhabitants.cjs')(2),row=rows[0], prompts = [];
   row.dialogue = ['One combined greeting.'];
   const $ = { user: async (parts, ...values) => prompts.push(require('retort-js/dist/message').templateContent(parts, ...values)),
-    assistant: { generation: async () => json({ inhabitants: [row] }) } };
+    assistant: { generation: async () => json({ inhabitants: rows }) } };
   await assert.rejects(generateInhabitants($, { roomName: 'Temple', roomDescription: 'A hall.', geoKey: '0,0,0', indoor: true },
     { random: () => 1 }), /requires three nonempty remarks; received 1 entries/);
   assert.match(prompts.at(-1), /3 separate nonblank entries/);

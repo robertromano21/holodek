@@ -46,7 +46,7 @@ test('new named venue operators start near their counter while saved resident po
 });
 test('counter resolution uses its saved operator; transactions remain priced and nonce-protected',()=>{
   const f=fixture(),selection=S.resolve(f.state,f.request);assert.equal(selection.actor,'Keeper');
-  assert.match(E.view(f.state,'Keeper').error,/Move closer/,'Ordinary remote clicks retain the three-cell limit');
+  assert.equal(E.view(f.state,'Keeper').error,undefined,'An ordinary resident click is no longer limited to three cells.');
   assert.ok(!E.view(f.state,'Keeper',selection.counterId).error);
   const request={kind:'buy',actor:'Keeper',item:'healing potion 6 hp',counterId:selection.counterId};
   assert.ok(!f.action(request).error);assert.equal(f.book().silver,0);
@@ -60,7 +60,7 @@ test('counter validation rejects wrong venues, missing geometry, out-of-range ob
     f=>{const a=JSON.parse(f.state.getCombatCharactersString());a.find(a=>a.name==='Keeper').state='Hostile';f.state.setCombatCharactersString(JSON.stringify(a));},
     f=>f.d.cells['6,4']={tile:'wall'}]){
     const f=fixture();alter(f);assert.throws(()=>S.resolve(f.state,f.request));
-    if(f.request.counterId==='forged')assert.match(E.view(f.state,'Keeper','forged').error,/Move closer/);
+    if(f.request.counterId==='forged')assert.match(E.view(f.state,'Keeper','forged').error,/counter.*not available/);
   }
 });
 test('a counter can introduce only its own saved procedural worker, never a passerby or another venue worker',()=>{

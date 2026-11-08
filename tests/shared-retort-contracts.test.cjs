@@ -7,6 +7,15 @@ const Repair = require('../retort/generationRepair'), Models = require('../retor
 const Puzzle = require('../assets/physicalPuzzles'), Art = require('../assets/surfaceArt');
 const Contract = require('../retort/puzzleContract'), Dialogue = require('../retort/characterDialogue');
 const { templateContent } = require('retort-js/dist/message');
+
+test('an in-world refusal or unavailable action is repairable, not a provider refusal',async()=>{
+  for(const message of ['The current player input is an explicit invitation. Record it and choose consent, a grounded favor, discussion of a bargain, or a firm refusal.','Choose an available action; none is unavailable.']){
+    assert.equal(Policy.recoverable(Error(message),'validation'),true);
+    let calls=0;const result=await C.request({user(){},assistant:{generation:async()=>({content:JSON.stringify({valid:++calls>1})})}},
+      {component:'social-validation',parameters:{valid:Boolean},validate:v=>{if(!v.valid)throw Error(message);return v;}});
+    assert.equal(result.value.valid,true);assert.equal(calls,2);
+  }
+});
 test('nonblank text agrees under substring and whole-string provider pattern semantics', () => {
   const schema = Schema.toJSON({ line: C.nonblankText() }).properties.line;
   const substring = new RegExp(schema.pattern), whole = new RegExp('^(?:' + schema.pattern + ')$');

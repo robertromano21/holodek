@@ -441,7 +441,7 @@
     const canHear = !!lineOfSight || present && distance <= range && hearingClear(dungeon, player, point, range);
     return { canSpeak: !!canHear, canHear: !!canHear, distance, range, lineOfSight: !!lineOfSight };
   }
-  function place(population, dungeon) {
+  function place(population, dungeon, { random = Math.random } = {}) {
     if (!population) return population;
     const indoor = dungeon.classification?.indoor ?? population.indoor;
     if (indoor) {
@@ -459,6 +459,10 @@
       if (changed) population.revision++;
     }
     if (population.groups.every(g => g.site || g.status === 'exhausted')) return population;
+    if(population.starting && population.starterPlacementSeed===undefined){
+      const roll=random();if(!Number.isFinite(roll)||roll<0||roll>=1)throw Error('Starter placement needs a unit-interval roll.');
+      population.starterPlacementSeed=Math.floor(roll*4294967296);
+    }
     const stamp = dungeon._geometryStamp || `${dungeon.layout?.width}:${dungeon.layout?.height}`;
     if (population.placementStamp === stamp) return population;
     population.placementStamp = stamp;
@@ -467,8 +471,8 @@
     const occupied = new Set(Object.values(population.actors).filter(a => a.position).map(a => `${a.position.x},${a.position.y}`));
     const extent = Math.max(dungeon.layout?.width || 0, dungeon.layout?.height || 0);
     const cityVenue=population.venue?.version===1&&dungeon.cityVenue?.id===population.venue.id;
-    const gap = population.starting ? 0 : cityVenue?3:population.settlement?.hub ? 6 : population.indoor ? 12 : Math.max(20, Math.min(60, extent / 9));
-    const safeDistance = population.starting||cityVenue ? 2 : population.indoor ? 9 : 16;
+    const gap = population.starting ? 4 : cityVenue?3:population.settlement?.hub ? 6 : population.indoor ? 12 : Math.max(20, Math.min(60, extent / 9));
+    const safeDistance = population.starting ? 4 : cityVenue ? 2 : population.indoor ? 9 : 16;
     const smallGroups = population.groups.filter(g => !g.site && g.status !== 'exhausted' && g.members.length <= 3);
     const questGroup = !population.starting && population.questIntroduction?.status === 'pending' ?
       smallGroups.find(g => g.members.includes(population.questIntroduction.speaker) &&
@@ -481,6 +485,16 @@
     const groups = entryGroup ? [entryGroup, ...population.groups.filter(g => g !== entryGroup)] : population.groups.slice();
     const venueOperator=group=>group.members.some(n=>population.actors[n]?.serviceRole||/^venue-operator(?:-|$)/.test(population.actors[n]?.encounterId||''));
     if(cityVenue)groups.sort((a,b)=>Number(venueOperator(b))-Number(venueOperator(a)));
+    function spacesNear(site){
+      const cluster=[site],visited=new Set([`${site.x},${site.y}`]);
+      for(let i=0;i<cluster.length&&i<64&&cluster.length<80;i++)for(const [dx,dy]of [[1,0],[0,1],[-1,0],[0,-1]]){
+        const key=`${cluster[i].x+dx},${cluster[i].y+dy}`,next=available.get(key);
+        if(!next||visited.has(key)||Math.hypot(next.x-site.x,next.y-site.y)>4||!canTraverse(dungeon,cluster[i],next))continue;
+        visited.add(key);cluster.push(next);
+      }
+      return cluster.filter(t=>!occupied.has(`${t.x},${t.y}`)&&!dungeon.cells[`${t.x},${t.y}`].object&&
+        !dungeon.cells[`${t.x},${t.y}`].exitMarker&&(!population.starting||t.distance>=safeDistance));
+    }
     for (const group of groups) {
       if (group.site || group.status === 'exhausted') continue;
       let site = null, best = -Infinity;
@@ -497,11 +511,11 @@
       if(unit)for(const name of group.members)population.actors[name].unitId=unit.id;
       const center = counterSite||unit?.position|| (work?.position?{x:work.position.x+2,y:work.position.y+1}:stall || (population.settlement?.hub ? venue || dungeon.start : null));
       // Sample a bounded number of sites, but across the entire reachable level.
-      const pool = !stall && (population.starting || group === entryGroup) ? candidates.filter(t => Math.hypot(t.x - dungeon.start.x, t.y - dungeon.start.y,
+      const pool = !stall && group === entryGroup ? candidates.filter(t => Math.hypot(t.x - dungeon.start.x, t.y - dungeon.start.y,
         (dungeon.cells[`${t.x},${t.y}`].floorHeight || 0) - (dungeon.cells[`${dungeon.start.x},${dungeon.start.y}`].floorHeight || 0)) <= MONSTER_DIALOGUE_RANGE &&
         lineClear(dungeon, { x: dungeon.start.x + .5, y: dungeon.start.y + .5 }, { x: t.x + .5, y: t.y + .5 })) : candidates;
       const stride = population.starting || group === entryGroup ? 1 : Math.max(1, Math.floor(pool.length / 1400));
-      const salt = hash(population.geoKey + group.id);
+      const salt = hash(population.geoKey + group.id+(population.starting?`:${population.starterPlacementSeed}:${stamp}`:'')),ranked=[];
       for (let i = salt % stride; i < pool.length; i += stride) {
         const t = pool[i];
         if (t.distance < (group===entryGroup ? 2 : safeDistance)) continue;
@@ -513,25 +527,17 @@
         const neighbors = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(([dx,dy]) => available.has(`${t.x+dx},${t.y+dy}`) &&
           Math.abs((dungeon.cells[`${t.x+dx},${t.y+dy}`].floorHeight || 0) - floor) <= 1.5).length;
         if (neighbors < 2) continue;
-        const preferred = center && (cityVenue||group !== entryGroup) ? -Math.hypot(t.x - center.x, t.y - center.y) * 3 : population.starting || group===entryGroup ? -t.distance : -Math.abs(t.distance - safeDistance -
+        const preferred = population.starting && service && center ? -Math.hypot(t.x-center.x,t.y-center.y)*3 : population.starting ? 0 : center && (cityVenue||group !== entryGroup) ? -Math.hypot(t.x - center.x, t.y - center.y) * 3 : group===entryGroup ? -t.distance : -Math.abs(t.distance - safeDistance -
           (group.members.length + sites.length + 1) * Math.max(12, extent / (population.groups.length + 2)));
         const score = preferred + Math.min(spacing, extent) * 0.25 + hash(`${salt}:${t.x},${t.y}`) / 4294967296 * 8;
+        if(population.starting)ranked.push({site:t,score});
         if (score > best) { best = score; site = t; }
       }
       if (!site) continue; // Small or sealed levels never pile leftover groups at spawn.
-      const cluster = [site], visited = new Set([`${site.x},${site.y}`]);
-      for (let i = 0; i < cluster.length && i < 64 && cluster.length < 80; i++) {
-        const t = cluster[i];
-        for (const [dx,dy] of [[1,0],[0,1],[-1,0],[0,-1]]) {
-          const key = `${t.x+dx},${t.y+dy}`, next = available.get(key);
-          if (!next || visited.has(key) || Math.hypot(next.x-site.x, next.y-site.y) > 4) continue;
-          if (!canTraverse(dungeon, t, next)) continue;
-          visited.add(key); cluster.push(next);
-        }
+      let spaces=spacesNear(site);
+      if(population.starting && spaces.length<group.members.length)for(const next of ranked.sort((a,b)=>b.score-a.score)){
+        const alternatives=spacesNear(next.site);if(alternatives.length>=group.members.length){site=next.site;spaces=alternatives;break;}
       }
-      const spaces = cluster.filter(t => !occupied.has(`${t.x},${t.y}`) && !dungeon.cells[`${t.x},${t.y}`].object &&
-        (stall || !population.starting || Math.hypot(t.x-dungeon.start.x,t.y-dungeon.start.y) <= MONSTER_DIALOGUE_RANGE &&
-          lineClear(dungeon,{x:dungeon.start.x+.5,y:dungeon.start.y+.5},{x:t.x+.5,y:t.y+.5})));
       if (spaces.length < group.members.length) continue;
       group.site = { x: site.x, y: site.y }; sites.push(group.site);
       group.members.forEach((name, index) => {
@@ -714,13 +720,51 @@
     }
     return {content:content.trim(),parsed,warnings:[...warnings]};
   }
+  function speechPassages(raw, speaker = '') {
+    const source = typeof raw === 'string' ? raw : '', whole = () => [{ start: 0, end: source.length, line: source.trim(), quoted: false }];
+    const quotes = [], stack = [];
+    let start = 0, escaped = false;
+    for (let i = 0; i < source.length; i++) {
+      const ch = source[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === '\\') { escaped = true; continue; }
+      if (ch !== '"' && ch !== '\u201c' && ch !== '\u201d') continue;
+      const closes = ch === '\u201d' || ch === '"' && stack.at(-1) === '"';
+      if (closes) {
+        if (!stack.length || (ch === '\u201d' && stack.at(-1) !== '\u201c')) return whole();
+        stack.pop();
+        if (!stack.length) quotes.push({ start, end: i + 1, line: source.slice(start + 1, i).trim(), quoted: true });
+      } else {
+        if (!stack.length) start = i;
+        stack.push(ch);
+      }
+    }
+    if (stack.length || !quotes.length || quotes.some(q => !q.line)) return whole();
+    const outside = [];
+    let cursor = 0;
+    for (const quote of quotes) { outside.push(source.slice(cursor, quote.start).trim()); cursor = quote.end; }
+    outside.push(source.slice(cursor).trim());
+    if (quotes.length === 1 && outside.every(part => !part)) return quotes;
+    const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const names = [...new Set([speaker, speaker.split(/\s+/)[0]].filter(Boolean))].map(escape).join('|');
+    const named = names ? `(?:${names})(?=$|[^\\p{L}\\p{N}_])` : '(?!)';
+    const attribution = new RegExp(`^${named}\\s+(?:says|said|asks|asked|replies|replied|whispers|whispered|adds|added|answers|answered)\\b`, 'iu');
+    const gesture = '(?:says?|said|asks?|asked|repl(?:y|ies|ied)|whispers?|whispered|adds?|added|answers?|answered|withdraws?|withdrew|lowers?|lowered|raises?|raised|turns?|turned|points?|pointed|nods?|nodded|shakes?|shook|smiles?|smiled|taps?|tapped|steps?|stepped|pauses?|paused|looks?|looked|glances?|glanced|shrugs?|shrugged|gestures?|gestured|folds?|folded|leans?|leaned|rests?|rested)';
+    const body = '(?:voice|hands?|eyes?|gaze|head|shoulders?|fingers?)';
+    const narration = new RegExp(`^[,;:\\s]*(?:(?:${named}|(?:he|she|they|it)\\b)\\s+(?:(?:quietly|softly|slowly|briefly|then)\\s+)?${gesture}\\b|${named}['\u2019]s\\s+${body}\\b|(?:his|her|their|its)\\s+${body}\\b)`, 'iu');
+    // Quoted names/emphasis inside ordinary speech are not a dialogue envelope.
+    // Only separate balanced passages when every intervening phrase is narration.
+    if ((outside[0] && !attribution.test(outside[0])) || outside.some(part => /[\p{L}\p{N}]/u.test(part) && !narration.test(part))) return whole();
+    return quotes;
+  }
+  const spokenLine = (raw, speaker) => speechPassages(raw, speaker).map(passage => passage.line).join(' ');
   function extractDialogue(raw, names, options = {}) {
     const allowed = new Map(names.map(name => [keyOf(name), name]));
     const audible = Array.isArray(options.audibleNames) ? new Set(options.audibleNames.map(keyOf)) : null;
     const packaging=dialoguePackaging(raw),parsed=packaging.parsed;
     const rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.spoken) ? parsed.spoken : [];
     let dialogue = rows.slice(0, 32).flatMap(row => {
-      const speaker = allowed.get(keyOf(row?.speaker)), line = text(row?.line, MAX_SPEECH_LENGTH);
+      const speaker = allowed.get(keyOf(row?.speaker)), line = text(spokenLine(row?.line, speaker), MAX_SPEECH_LENGTH);
       return speaker && (!audible || audible.has(keyOf(speaker))) && line ? [{ speaker, line, ...(typeof row.remember === 'string' && row.remember.trim() ? { remember: text(row.remember, 180) } : {}) }] : [];
     });
     let prose=packaging.content;
@@ -767,6 +811,15 @@
       try { name = JSON.parse(match[1]); } catch { /* Malformed labels cannot identify a speaker. */ }
       const nested = /\[\[\/?SPEECH\b/i.test(match[2]), body = strip(match[2]);
       const speaker = !nested && typeof name === 'string' ? allowed.get(keyOf(name)) || null : null;
+      const passages = speaker && speechPassages(body, speaker);
+      if (passages?.[0]?.quoted) {
+        const offset = content.length;
+        content += body;
+        for (const passage of passages) spans.push({ start: offset + passage.start, end: offset + passage.end,
+          speaker, line: text(passage.line, MAX_SPEECH_LENGTH) });
+        cursor = match.index + match[0].length;
+        continue;
+      }
       const escapedBody = body.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
       const duplicate = speaker && escapedBody && content.match(new RegExp(`(?:"${escapedBody}"|\u201c${escapedBody}\u201d)\\s*$`));
       if (duplicate && extractAttributedSpeech(content, [...allowed.values()], [], spans).at(-1)?.speaker === speaker) {
@@ -804,6 +857,7 @@
       return { ...row, ...(metadata?.remember ? { remember: metadata.remember } : {}),
         ...(metadata?.attribution ? { attribution: metadata.attribution } : {}),
         ...(metadata?.recipient ? { recipient: metadata.recipient } : {}),
+        ...(typeof metadata?.utteranceId === 'string' ? { utteranceId: metadata.utteranceId } : {}),
         ...(['passing','addressing','question'].includes(metadata?.attention) ? { attention: metadata.attention } : {}) };
     });
     return [...rows, ...explicit.filter(row => !speakers.has(row.speaker))].slice(0, 32);
@@ -971,7 +1025,7 @@
     const allowed = new Map(names.map(name => [keyOf(name), name])), seen = new Set();
     const valid = (Array.isArray(rows) ? rows : []).slice(0, 32).flatMap(row => {
       const speaker = allowed.get(keyOf(row?.speaker));
-      const lines = [...new Set((Array.isArray(row?.lines) ? row.lines : []).filter(line=>typeof line==='string').map(line => text(line, 220)).filter(Boolean))].slice(0, 8);
+      const lines = [...new Set((Array.isArray(row?.lines) ? row.lines : []).filter(line=>typeof line==='string').map(line => text(spokenLine(line, speaker), 220)).filter(Boolean))].slice(0, 8);
       if (!speaker || !lines.length || seen.has(speaker)) return [];
       seen.add(speaker); return [{ speaker, lines }];
     });
@@ -1028,7 +1082,7 @@
     return (Array.isArray(rows) ? rows : []).slice(0, 2).flatMap(exchange => {
       if (!Array.isArray(exchange?.lines) || exchange.lines.length !== 2) return [];
       const lines = exchange.lines.flatMap(row => {
-        const speaker = allowed.get(keyOf(row?.speaker)), line = typeof row?.line === 'string' ? text(row.line, 220) : '';
+        const speaker = allowed.get(keyOf(row?.speaker)), line = typeof row?.line === 'string' ? text(spokenLine(row.line, speaker), 220) : '';
         return speaker && line ? [{ speaker, line }] : [];
       });
       return lines.length === 2 && lines[0].speaker !== lines[1].speaker ? [{ lines }] : [];
@@ -1256,7 +1310,7 @@
   const api = { VERSION, DIALOGUE_REFRESH_MS, MONSTER_DIALOGUE_RANGE, RESIDENT_CONVERSATION_RANGE, COMPANION_DIALOGUE_RANGE, MAX_SPEECH_LENGTH, dialoguePoint, dialogueReach, residentBodyRadius, residentSight, dialogueRecipient, dialogueRefreshDelay, isDown, isAlive, canAct,
     STATES, ROUTINES, EQUIPMENT_SLOTS, equipmentName, parseEquipment, parseEquipmentProperties,
     roomKey, allegiance, state, isPresent, hasEncountered, sectionPattern, parseBlocks, parseSheets, withStates, normalizeDescriptors, createPopulation,
-    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, noticeConversationResidents, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
+    attach, pursuitPolicy, ceilingHeight, walkable, pointWalkable, canTraverse, reachable, lineClear, hearingClear, place, sync, residentSheets, teams, speechPassages, spokenLine, extractDialogue, extractAttributedSpeech, mergeAttributedSpeech, splitSpeech, sanitizeReplies, sanitizeExchanges, speechRepeats, recentSpeech, rememberSpeech, applyReplies, noteSpoken, perceive, noticeConversationResidents, nearbyMonsterNames, hostileEncounterNames, perceivedConsole, consoleView, hash };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.DungeonInhabitants = api;
 })(typeof window === 'undefined' ? globalThis : window);

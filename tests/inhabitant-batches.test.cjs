@@ -53,7 +53,7 @@ test('every batch retains the original Tartarus paragraph byte for byte', async 
   const Pantheon = require('../assets/pantheonCharacters');
   const expected = paragraph.replace('${Pantheon.names.join(\', \')}', Pantheon.names.join(', '));
   const f = fixture(); await f.run();
-  for (const branch of f.branches) assert.ok(branch.prompts[0].includes(expected));
+  for (const branch of f.branches) assert.ok(branch.prompts.join('\n').includes(expected));
   assert.match(expected, /Tartarus, a vast wasteland with a yellowish sky/);
   assert.match(expected, /Arithus never appears outside the final throne-room encounter/);
 });
@@ -121,7 +121,7 @@ test('invalid supplemental race is rejected while exact catalog and creature met
   const good = fixture(request => ({ skip: false, inhabitants: allRows().filter(row => request.ids.includes(row.slot)).map(row => ({ ...row, race: 'Allip' })) }));
   const result = await good.run({ encounter }); assert.equal(Object.keys(result.population.actors).length, 3);
   assert.deepEqual(good.requests[0].schema.properties.inhabitants.items.properties.race.enum, ['Allip']);
-  assert.match(good.branches[0].prompts[0], /Tormented, babbling undead/);
+  assert.match(good.branches[0].prompts.join('\n'), /Tormented, babbling undead/);
   assert.ok(Object.values(result.population.actors).every(actor => actor.race === 'Allip'));
 });
 
@@ -133,8 +133,8 @@ test('single quest contact and unlimited long remarks survive all batches withou
   assert.equal(result.population.questIntroduction.speaker, 'Resident 0'); assert.equal(result.population.questIntroduction.hook, greeting.trim());
   assert.equal(result.population.actors['Resident 0'].allegiance, 'Friendly');
   assert.equal(result.population.actors['Resident 1'].allegiance, 'Neutral'); assert.equal(result.population.actors['Resident 2'].allegiance, 'Neutral');
-  assert.match(f.branches[0].prompts[0], /single NEUTRAL or FRIENDLY quest contact/);
-  for (const branch of f.branches.slice(1)) assert.match(branch.prompts[0], /No quest is being newly introduced here/);
+  assert.match(f.branches[0].prompts.join('\n'), /single NEUTRAL or FRIENDLY quest contact/);
+  for (const branch of f.branches.slice(1)) assert.match(branch.prompts.join('\n'), /No quest is being newly introduced here/);
 });
 
 test('an infeasible settlement batch exhausts three corrections before any mechanics are allocated', async () => {

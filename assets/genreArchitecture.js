@@ -1,9 +1,9 @@
 (function(root, factory) {
   const node = typeof module === 'object' && module.exports;
   const enabled = node ? require('../retort/worldFlags').on('GENRE_EXPANSION') || require('../retort/worldFlags').on('ARCHITECTURE_EXPANSION') : root.HolodekFlags?.GENRE_EXPANSION || root.HolodekFlags?.ARCHITECTURE_EXPANSION;
-  const api = factory(node ? require('./genreExpansion') : root.GenreExpansion, enabled);
+  const api = factory(node ? require('./genreExpansion') : root.GenreExpansion, enabled, node ? require('./genreWardrobe') : root.GenreWardrobe);
   if (typeof module === 'object' && module.exports) module.exports = api; else root.GenreArchitecture = api;
-})(typeof window === 'object' ? window : globalThis, function(Expansion, expanded) {
+})(typeof window === 'object' ? window : globalThis, function(Expansion, expanded, WardrobeApi) {
   'use strict';
   // world1 GENRE_ARCH: per-genre building styles, room shapes, town/street rules and character garb.
   // ADDITIVE ONLY. Nothing here replaces existing art:
@@ -216,13 +216,26 @@
     mythic: [{ hat: 'laurel', coat: 'chiton' }], fantasy: [], 'dark-fantasy': []
   };
   if (expanded && Expansion) for (const [genre, list] of Object.entries(Expansion.GARB)) GARB[genre] = [...(GARB[genre] || []), ...list];
-  function garbFor(mix, seed = 0) { const m = (mix || []).filter(x => GARB[x.genre]); if (!m.length) return null; const r = rng('garb|' + seed), g = draw(m, r), list = GARB[g];
+  // Genre wardrobe expansion: every genre that already dresses its people gains new outfits built only from pieces tagged
+  // for that genre, plus spirit / undead variants for spectral and skeletal bodies. Genres with no garb (the built-in
+  // fantasy look when the expansion is off) stay bare.
+  const Wardrobe = () => WardrobeApi || (typeof globalThis === 'object' ? globalThis.GenreWardrobe : null);
+  const SPIRIT_GARB = {};
+  if (Wardrobe()) for (const genre of Object.keys(GARB)) if (GARB[genre].length) {
+    GARB[genre] = [...GARB[genre], ...Wardrobe().outfitsFor(genre)];
+    const spirit = Wardrobe().spiritOutfitsFor(genre); if (spirit.length) SPIRIT_GARB[genre] = spirit;
+  }
+  function garbFor(mix, seed = 0, bodyPlan = null) { const m = (mix || []).filter(x => GARB[x.genre]); if (!m.length) return null; const r = rng('garb|' + seed), g = draw(m, r);
+    const list = (bodyPlan === 'spectral' || bodyPlan === 'skeletal') && SPIRIT_GARB[g] && GARB[g]?.length ? SPIRIT_GARB[g] : GARB[g];
     if (!list?.length) return null; const horror = m.filter(x => HORROR.includes(x.genre)).reduce((a, x) => a + x.weight, 0), base = { ...list[Math.floor(r() * list.length)], genre: g };
     if (g !== 'cosmic-horror' && horror > 0 && r() < horror * 1.2) base.wrong = r() < .5 ? 'eye' : 'tendrils'; // a few townsfolk look slightly wrong
     return base; }
   // ctx: { grid (cells), rect(x,y,w,h,color) in cells, filled(x,y) }, pal: c64 palette
   function drawGarb(k, garb, pal) {
-    if (!garb || !k) return false; const { grid, rect, filled } = k; let top = -1, bot = -1, L = grid, R = -1;
+    if (!garb || !k) return false;
+    // Never draw a piece outside the current world's genres (stale caches/saves from another world are trimmed here).
+    if (Wardrobe()) { garb = Wardrobe().sanitizeGarb(garb, k.world); if (!garb) return false; }
+    const { grid, rect, filled } = k; let top = -1, bot = -1, L = grid, R = -1;
     for (let y = 0; y < grid; y++) for (let x = 0; x < grid; x++) if (filled(x, y)) { if (top < 0) top = y; bot = y; }
     if (top < 0) return false; const H = bot - top + 1; if (H < 10) return false;
     const span = y => { let a = grid, b = -1; for (let x = 0; x < grid; x++) if (filled(x, y)) { a = Math.min(a, x); b = x; } return [a, b]; };
@@ -269,6 +282,8 @@
       case 'bandolier': for (let i = 0; i < Math.min(tw, 6); i++) rect(tl + i, hipY - 7 + i, 1, 1, i % 2 ? brass : leather); break;
       case 'sash': rect(tl, hipY - 1, tw, 1, '#a83a22'); rect(tl, hipY, 1, 3, '#a83a22'); break;
     }
+    if (Wardrobe()) Wardrobe().drawPieces(garb, { hl, hr, hw, top, ct, headRow, tl, tr, tw, hipY, bl, br, bot, legTop, H, dark, leather, brass, cloth, metal,
+      pale: '#d8d4c0', glow: pal.glow || pal.eye || '#a8d8ff', hairC: pal.hair || dark, mix }, rect);
     const wrong = garb.extra === 'eye' || garb.extra === 'tendrils' ? garb.extra : garb.wrong;
     if (garb.extra === 'lamp') { rect(hr, top - 1, 1, 1, '#ffe8a0'); rect(hr + 1, top - 1, 1, 1, '#f0dca0'); }
     if (garb.extra === 'bandana') rect(hl + 1, headRow + 3, hw - 1, 1, '#a83a22');

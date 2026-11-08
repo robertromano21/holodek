@@ -45,14 +45,14 @@ test('Mode 4 creates at least two authored, friendly, recruitable setting guides
   }finally{Setting.setActive(null);}
 });
 
-test('starting residents are placed in view and conversation range, not behind an arrival wall',()=>{
+test('starting residents use reachable randomized sites rather than the visible side of an arrival wall',()=>{
   const d={geoKey:'0,0,0',layout:{width:22,height:16},start:{x:2,y:3},cells:{},classification:{indoor:true}};
   for(let y=0;y<16;y++)for(let x=0;x<22;x++)d.cells[`${x},${y}`]={tile:x&&y&&x<21&&y<15&&!(x===6&&y<12)?'floor':'wall',floorHeight:0,ceilHeight:3};
   const pop=I.createPopulation('0,0,0',Array.from({length:4},(_,i)=>({name:'Guide '+i,encounterId:'welcome',allegiance:'Friendly'})),{starting:true});
-  I.place(pop,d);
+  I.place(pop,d,{random:()=>.45});const reachable=new Set(I.reachable(d).map(t=>`${t.x},${t.y}`));
   for(const a of Object.values(pop.actors)){
-    assert.ok(a.position,a.name);assert.ok(a.position.x<6,a.name+' visible side of wall');
-    assert.ok(Math.hypot(a.position.x-d.start.x,a.position.y-d.start.y)<=10);
+    assert.ok(a.position,a.name);assert.ok(reachable.has(`${a.position.x},${a.position.y}`));
+    assert.ok(Math.abs(a.position.x-d.start.x)+Math.abs(a.position.y-d.start.y)>=4);
   }
   const positions=JSON.stringify(pop.actors);I.place(pop,d);assert.equal(JSON.stringify(pop.actors),positions);
 });

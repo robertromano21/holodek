@@ -1,7 +1,7 @@
 'use strict';
 const I=require('../assets/dungeonInhabitants');
 function reading(db,requirement){
-  const book=db[requirement.coords]?.readables?.find(b=>b.id===requirement.bookId&&b.name===requirement.value);
+  const room=db[requirement.coords],book=[...(room?.readables||[]),...(room?.inscriptions||[])].find(b=>b.id===requirement.bookId&&b.name===requirement.value);
   const chapter=book?.chapters?.[requirement.chapter-1];
   const receipt=chapter?.text?.trim()&&(db['0,0,0']?.bookReadings||[]).find(r=>r.source==='engine-book-reading-v1'&&
     r.bookId===book.id&&r.sourceKey===requirement.coords&&r.chapter===requirement.chapter&&r.contentHash===I.hash(chapter.text));
@@ -9,11 +9,11 @@ function reading(db,requirement){
 }
 function record(state,plan){
   if(!plan?.allowed||plan.inspect||!plan.record?.chapters?.[plan.chapter-1]?.text?.trim())return false;
-  const db=JSON.parse(state.getRoomNameDatabase()||'{}'),book=db[plan.sourceKey]?.readables?.find(b=>b.id===plan.record.id);
+  const db=JSON.parse(state.getRoomNameDatabase()||'{}'),room=db[plan.sourceKey],book=[...(room?.readables||[]),...(room?.inscriptions||[])].find(b=>b.id===plan.record.id);
   if(!book||book.chapters[plan.chapter-1]?.text!==plan.record.chapters[plan.chapter-1].text)return false;
   const root=db['0,0,0']||={},contentHash=I.hash(book.chapters[plan.chapter-1].text);root.bookReadings||=[];
   if(root.bookReadings.some(r=>r.bookId===book.id&&r.sourceKey===plan.sourceKey&&r.chapter===plan.chapter&&r.contentHash===contentHash))return false;
-  root.bookReadings.push({id:require('node:crypto').randomUUID(),source:'engine-book-reading-v1',bookId:book.id,
+  root.bookReadings.push({id:require('node:crypto').randomUUID(),source:'engine-book-reading-v1',runId:state.getDungeonRunId?.(),bookId:book.id,
     sourceKey:plan.sourceKey,chapter:plan.chapter,contentHash,at:Date.now()});
   state.setRoomNameDatabase(JSON.stringify(db));return true;
 }

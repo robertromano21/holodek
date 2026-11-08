@@ -16,7 +16,7 @@ function fixture() {
   let wire = JSON.stringify([{ name: 'Benedict', type: 'pc', hp: 12, mazeX: 4, mazeY: 4, mazeRoomKey: geoKey },
     { name: 'Ally', type: 'npc', hp: 12, mazeX: 4, mazeY: 5, mazeRoomKey: geoKey },
     { name: 'Vyth Aerir', type: 'monster', hp: 12, state: 'Neutral', mazeX: 5, mazeY: 4, mazeRoomKey: geoKey }]);
-  let db = JSON.stringify({ '0,0,0': {}, [geoKey]: { name: 'Pale Wind Approach', objects: [], inhabitants: p, monsters: { inRoom: row('Vyth Aerir') } } });
+  let db = JSON.stringify({ '0,0,0': {}, [geoKey]: { name: 'Pale Wind Approach', objects: [{name:'wind measuring ribbon',type:'other',magic:0}], inhabitants: p, monsters: { inRoom: row('Vyth Aerir') } } });
   let paused = false;
   const state = { getDungeonRunId: () => 'test-run', getLastCoords: () => ({ x: 1, y: 0, z: 0 }),
     getUpdatedGameConsole: () => text, setUpdatedGameConsole: v => text = v,
@@ -38,34 +38,71 @@ function fixture() {
 }
 
 const F=require('../retort/residentFavors');
-const author=async()=>({title:'Study the Hollow Wind',objectiveId:'survey',focus:'the wind at the bright stones',offer:'Help me watch the wind from these stones, then report your observations. Once my work is finished, I will join you if you invite me.'});
+const author=async(_brief,choices=[])=>({title:'Study the Hollow Wind',objectiveId:choices.find(c=>c.kind==='retrieve')?.id,offer:'Bring my measuring ribbon back so I can finish my work. Then I can come with you.'});
 async function offer(f,write=author){f.p.actors['Vyth Aerir'].encounteredAt=1;f.p.actors['Vyth Aerir'].job='wind observer';f.p.actors['Vyth Aerir'].activity='studies skipping pebbles and wind by the bright stones';return F.prepare(f.state,null,'ask monsters about the wind and ask how we can help',{audibleNames:['Vyth Aerir'],population:f.p,author:write});}
 const mission=f=>Object.values(f.db()['1,0,0'].minorMissions||{})[0];
+function handoff(f){f.inventory({name:'wind measuring ribbon',type:'other',magic:0});return Give.give(f.state,f.service,'give wind measuring ribbon to Vyth Aerir');}
 const tick=(f,n)=>f.change(db=>{db['0,0,0'].spellSystem={...db['0,0,0'].spellSystem,runId:'test-run',clock:n};});
+
+function wander(f,x=45){
+  const roster=JSON.parse(f.state.getCombatCharactersString()),actor=roster.find(a=>a.name==='Vyth Aerir');
+  actor.mazeX=x;actor.mazeY=4;f.state.setCombatCharactersString(JSON.stringify(roster));
+  Object.assign(f.p.actors['Vyth Aerir'].position,{x,y:4});f.change(db=>db['1,0,0'].inhabitants=f.p);
+}
+
+test('a known favor can be accepted, reported and recruited after its resident wanders across the same room',async()=>{
+  const f=fixture();await offer(f);wander(f);
+  assert.equal(E.view(f.state,'Vyth Aerir').error,undefined);
+  assert.match(F.command(f.state,f.service,'accept favor from Vyth Aerir').content,/accepted/);
+  handoff(f);
+  wander(f,55);assert.match(F.command(f.state,f.service,'report to Vyth Aerir').content,/completed/);
+  assert.match(F.command(f.state,f.service,'add Vyth Aerir to party').content,/joins the party/);
+});
+
+test('room-wide favor actions still reject departed, hostile, unconscious, stale-run, other-room and other-floor residents',async()=>{
+  for(const mutate of [
+    f=>{const r=JSON.parse(f.state.getCombatCharactersString());r.find(a=>a.name==='Vyth Aerir').mazeRoomKey='2,0,0';f.state.setCombatCharactersString(JSON.stringify(r));},
+    f=>{f.p.actors['Vyth Aerir'].status='departed';f.change(db=>db['1,0,0'].inhabitants=f.p);},
+    f=>{f.p.actors['Vyth Aerir'].allegiance=f.p.actors['Vyth Aerir'].state='Hostile';f.change(db=>db['1,0,0'].inhabitants=f.p);},
+    f=>{const r=JSON.parse(f.state.getCombatCharactersString());Object.assign(r.find(a=>a.name==='Vyth Aerir'),{hp:0,state:'Unconscious'});f.state.setCombatCharactersString(JSON.stringify(r));},
+    f=>f.state.getDungeonRunId=()=> 'other-run',
+    f=>f.change(db=>db['1,0,0'].cityFloorContext={hostKey:'1,0,0',buildingId:'other-building',floor:1})]){
+    const f=fixture();await offer(f);wander(f);mutate(f);
+    const outcome=F.command(f.state,f.service,'accept favor from Vyth Aerir');
+    assert.notEqual(mission(f).status,'accepted');assert.ok(!outcome || !/Local contract accepted/.test(outcome.content));
+  }
+});
+
+test('ordinary economic actions do not reject an introduced merchant for wandering within the room',()=>{
+  const f=fixture();f.business('shop');f.p.actors['Vyth Aerir'].encounteredAt=1;
+  f.change(db=>{db['1,0,0'].inhabitants=f.p;db['0,0,0'].economy.silver=12;});wander(f,14);
+  const view=E.view(f.state,'Vyth Aerir');assert.equal(view.error,undefined);
+  const outcome=f.action({kind:'buy',actor:'Vyth Aerir',item:R.healingPotion(6).name});
+  assert.equal(outcome.error,undefined);assert.match(outcome.content,/buy/i);
+});
 
 test('the logged wind/help conversation creates an offered favor tied to the resident, not main-quest progress',async()=>{
   const f=fixture(),before=f.state.getCurrentTasks();
-  const offers=await offer(f,async(brief,choices)=>{assert.match(brief,/wind observer/);assert.equal(choices[0].kind,'survey');return author();});
+  const offers=await offer(f,async(brief,choices)=>{assert.match(brief,/wind observer/);assert.equal(choices[0].kind,'retrieve');return author(brief,choices);});
   assert.equal(offers.length,1);assert.equal(mission(f).status,'offered');assert.equal(mission(f).reward.actor,'Vyth Aerir');
   assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').length,1);
   assert.deepEqual(f.state.getCurrentTasks(),before);
-  assert.match(mission(f).description,/observe for Vyth Aerir/);
+  assert.match(mission(f).description,/Give wind measuring ribbon to Vyth Aerir/);
+  assert.doesNotMatch(mission(f).description,/\b(?:observe|report)\b/i);
   assert.equal(E.view(f.state,'Vyth Aerir').missions[0].id,mission(f).id);
   await offer(f);assert.equal(Object.values(f.db()['1,0,0'].minorMissions).length,1,'Repeated help reopens the existing contract');
 });
 
-test('accept -> spaced observations -> report -> explicit recruitment preserves the real character and awards once',async()=>{
+test('accept -> real item handoff -> verified completion -> explicit recruitment preserves the real character and awards once',async()=>{
   const f=fixture();await offer(f);const silver=f.book().silver,sheet=I.parseSheets(f.state.getUpdatedGameConsole())[0];
   assert.match(F.command(f.state,f.service,'add Vyth Aerir to party').content,/conditional/);
   assert.match(F.command(f.state,f.service,'accept favor from Vyth Aerir').content,/accepted/);
   assert.equal(mission(f).status,'accepted');
   assert.match(F.command(f.state,f.service,'report to Vyth Aerir').content,/not verified/);
-  tick(f,1);assert.match(F.command(f.state,f.service,'observe for Vyth Aerir').content,/1\/2/);
-  assert.match(F.command(f.state,f.service,'observe for Vyth Aerir').content,/2 more game action/);
-  assert.equal(mission(f).observations.length,1);
-  tick(f,3);assert.match(F.command(f.state,f.service,'observe for Vyth Aerir').content,/2\/2/);
+  assert.equal(F.command(f.state,f.service,'observe for Vyth Aerir'),null);
+  assert.match(handoff(f).content,/You give/);E.refresh(f.state);
   assert.equal(mission(f).readyToReport,true);assert.equal(mission(f).status,'accepted');
-  assert.match(F.command(f.state,f.service,'report findings to Vyth Aerir').content,/agrees to join/);
+  assert.match(F.command(f.state,f.service,'report findings to Vyth Aerir').content,/work has been verified/);
   const receipt=mission(f).rewardReceiptId;assert.equal(mission(f).status,'completed');
   assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').length,1,'Completion never silently recruits');
   const journal=require('../retort/adventureJournal').project(f.state);assert.ok(journal.contracts.some(m=>m.recipient==='Vyth Aerir'&&m.status==='completed'));
@@ -97,10 +134,10 @@ test('unseen, distant, hostile and divine residents cannot create recruitment fa
 });
 
 test('authoring failures and stale generation cannot mint an unverified objective or promise',async()=>{
-  const f=fixture();const failed=await offer(f,async()=>({...await author(),objectiveId:'invent a new artifact'}));
+  const f=fixture();const failed=await offer(f,async(brief,choices)=>({...await author(brief,choices),objectiveId:'invent a new artifact'}));
   assert.equal(failed.length,0);assert.ok(failed.errors.length);assert.equal(mission(f),undefined);
   const original=f.state.getDungeonRunId;let run='test-run';f.state.getDungeonRunId=()=>run;
-  assert.equal((await offer(f,async()=>{run='new-run';return author();})).length,0);
+  assert.equal((await offer(f,async(brief,choices)=>{run='new-run';return author(brief,choices);})).length,0);
   f.state.getDungeonRunId=original;assert.equal(mission(f),undefined);
 });
 
@@ -117,14 +154,14 @@ test('retrieval uses a real unprotected item and an actual handoff after accepta
   assert.equal(mission(f).completionEvidence[0].source,'engine-give-item-v1');
 });
 
-test('saved favor progress is preserved against stale client snapshots, and runtime epoch changes do not erase it',async()=>{
+test('saved item-transfer evidence is preserved against stale snapshots and runtime epoch changes',async()=>{
   const f=fixture();await offer(f);F.command(f.state,f.service,'accept favor from Vyth Aerir');
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');const saved=f.state.getRoomNameDatabase();
+  handoff(f);const saved=f.state.getRoomNameDatabase();
   const stale=JSON.parse(saved);delete stale['1,0,0'].minorMissions;
   f.state.setRoomNameDatabase(E.preserve(saved,JSON.stringify(stale)));
-  assert.equal(mission(f).observations.length,1);
-  f.state.getCityFloorEpoch=()=>randomUUID();tick(f,3);
-  F.command(f.state,f.service,'observe for Vyth Aerir');assert.equal(mission(f).observations.length,2);
+  assert.equal(F.assess(mission(f),f.db()).passed,true);
+  f.state.getCityFloorEpoch=()=> 'new-runtime-epoch';tick(f,3);
+  assert.equal(F.assess(mission(f),f.db()).passed,true);
   f.state.getGamePaused=()=>true;assert.match(F.command(f.state,f.service,'report to Vyth Aerir').content,/Resume/);
   assert.equal(mission(f).status,'accepted');
 });
@@ -138,7 +175,7 @@ test('a main quest-bound resident keeps its original staged recruitment guard',a
 test('an earned recruit cannot be removed or duplicated by a stale console, population or roster sync',async()=>{
   const f=fixture();await offer(f);F.command(f.state,f.service,'accept favor from Vyth Aerir');
   const staleText=f.state.getUpdatedGameConsole(),staleRoster=f.state.getCombatCharactersString(),staleDB=f.state.getRoomNameDatabase();
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
+  handoff(f);
   F.command(f.state,f.service,'report to Vyth Aerir');F.command(f.state,f.service,'add Vyth Aerir to party');
   const protectedText=E.preserveInventory(f.state.getUpdatedGameConsole(),staleText,f.state.getRoomNameDatabase());
   assert.equal(I.parseSheets(protectedText).some(a=>a.name==='Vyth Aerir'),false);

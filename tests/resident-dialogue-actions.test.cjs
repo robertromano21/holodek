@@ -16,7 +16,7 @@ function fixture() {
   let wire = JSON.stringify([{ name: 'Benedict', type: 'pc', hp: 12, mazeX: 4, mazeY: 4, mazeRoomKey: geoKey },
     { name: 'Ally', type: 'npc', hp: 12, mazeX: 4, mazeY: 5, mazeRoomKey: geoKey },
     { name: 'Vyth Aerir', type: 'monster', hp: 12, state: 'Neutral', mazeX: 5, mazeY: 4, mazeRoomKey: geoKey }]);
-  let db = JSON.stringify({ '0,0,0': {}, [geoKey]: { name: 'Pale Wind Approach', objects: [], inhabitants: p, monsters: { inRoom: row('Vyth Aerir') } } });
+  let db = JSON.stringify({ '0,0,0': {}, [geoKey]: { name: 'Pale Wind Approach', objects: [{name:'wind measuring ribbon',type:'other',magic:0}], inhabitants: p, monsters: { inRoom: row('Vyth Aerir') } } });
   let paused = false;
   const state = { getDungeonRunId: () => 'test-run', getLastCoords: () => ({ x: 1, y: 0, z: 0 }),
     getUpdatedGameConsole: () => text, setUpdatedGameConsole: v => text = v,
@@ -38,9 +38,10 @@ function fixture() {
 }
 
 const F=require('../retort/residentFavors');
-const author=async()=>({title:'Study the Hollow Wind',objectiveId:'survey',focus:'the wind at the bright stones',offer:'Help me watch the wind from these stones, then report your observations. Once my work is finished, I will join you if you invite me.'});
+const author=async(_brief,choices=[])=>({title:'Study the Hollow Wind',objectiveId:choices.find(c=>c.kind==='retrieve')?.id,offer:'Bring my measuring ribbon back so I can finish my work. Then I can come with you.'});
 async function offer(f,write=author){f.p.actors['Vyth Aerir'].encounteredAt=1;f.p.actors['Vyth Aerir'].job='wind observer';f.p.actors['Vyth Aerir'].activity='studies skipping pebbles and wind by the bright stones';return F.prepare(f.state,null,'ask monsters about the wind and ask how we can help',{audibleNames:['Vyth Aerir'],population:f.p,author:write});}
 const mission=f=>Object.values(f.db()['1,0,0'].minorMissions||{})[0];
+function handoff(f){f.inventory({name:'wind measuring ribbon',type:'other',magic:0});return Give.give(f.state,f.service,'give wind measuring ribbon to Vyth Aerir');}
 const tick=(f,n)=>f.change(db=>{db['0,0,0'].spellSystem={...db['0,0,0'].spellSystem,runId:'test-run',clock:n};});
 
 function addGroupMate(f,sameGroup=true){
@@ -66,7 +67,7 @@ test('two residents in one group expose one offer enum and cannot persist a seco
 test('help requests create one job per group while separate groups retain independent offers',async()=>{
   for(const sameGroup of [true,false]){
     const f=fixture();ready(f);const mate=addGroupMate(f,sameGroup);let authored=0;
-    const offers=await F.prepare(f.state,null,'how can we help?',{audibleNames:['Vyth Aerir',mate],population:f.p,author:async()=>{authored++;return author();}});
+    const offers=await F.prepare(f.state,null,'how can we help?',{audibleNames:['Vyth Aerir',mate],population:f.p,author:async(brief,choices)=>{authored++;return author(brief,choices);}});
     assert.equal(offers.length,sameGroup?1:2);assert.equal(authored,sameGroup?1:2);
   }
 });
@@ -76,8 +77,8 @@ test('a two-monster live reply supplies offer-favor to only one speaker and pers
     let raw;if(component==='story-scene')raw={prose:'The two observers listen.',interaction:'work',speakers:['Vyth Aerir',mate]};
     else if(component==='npc-live-speech'){
       const first=!schemas.length;schemas.push(schema);assert.match(brief,/ONE JOB PER MONSTER GROUP/);
-      raw={action:'nods.',line:first?'Help me observe the wind twice, then report back.':'Vyth has explained the work. I will keep listening.',remember:'',recipient:'PC',attention:'addressing',
-        socialAction:first?'offer-favor':'none',playerInvited:false,conditions:first?[{objectiveId:'survey',observationCount:'2',observationInterval:'2'}]:[],favorTitle:first?'The Wind Study':'',favorFocus:first?'the wind':''};
+      raw={action:'nods.',line:first?'Please bring me the measuring ribbon.':'Vyth has explained the work. I will keep listening.',remember:'',recipient:'PC',attention:'addressing',
+        socialAction:first?'offer-favor':'none',playerInvited:false,taskPlan:first?{retrieve:[{target:schema.taskPlan.type.retrieve.type[0].type.target.enum[0],instruction:'Bring me the measuring ribbon.'}]}:{},favorTitle:first?'The Wind Study':''};
     }else raw={lines:['The hollow still carries the wind.','The pebble has not moved.']};
     return validate?validate(raw):raw;
   };
@@ -142,19 +143,20 @@ test('one neutral refusal does not consume the groups one available favor offer'
   assert.deepEqual(options[0].actions,['none','decline-invitation']);assert.ok(options[1].actions.includes('offer-favor'));
   assert.equal(options.filter(o=>o.actions.includes('offer-favor')).length,1);
 });
-test('two favorable neutral rolls still expose one group job without asking the second model for an unavailable action',()=>{
+test('two favorable neutral rolls can each contribute a condition to the same group invitation',()=>{
   const f=neutralFixture(),mate=addGroupMate(f),options=F.dialogueOptions(f.state,['Vyth Aerir',mate],{invitation:true,random:()=>.85});
   assert.equal(options[0].neutralOutcome,'favor');assert.ok(options[0].actions.includes('offer-favor'));
-  assert.equal(options[1].neutralOutcome,'refuse');assert.deepEqual(options[1].actions,['none','decline-invitation']);
+  assert.equal(options[1].neutralOutcome,'favor');assert.deepEqual(options[1].actions,['none','offer-favor']);
+  assert.equal(options[0].recruitmentGroupId,options[1].recruitmentGroupId);
 });
 test('the neutral 30-percent branch lets the LLM author a real favor and joins only after accepted, verified work',async()=>{
   const f=neutralFixture();F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,random:()=>.85});
-  const {briefs}=await converse(f,invited,'offer-favor',{favorTitle:'Vyths Chosen Wind Study',conditions:[{objectiveId:'survey',observationCount:'3',observationInterval:'1'}]});
+  const {briefs}=await converse(f,invited,'offer-favor',{favorTitle:'Vyths Chosen Wind Study'});
   assert.match(briefs.find(b=>b.component==='npc-live-speech').brief,/NEUTRAL INVITATION OUTCOME.*favor/);
-  assert.equal(mission(f).title,'Vyths Chosen Wind Study');assert.equal(mission(f).conditions[0].observations,3);assert.equal(mission(f).status,'offered');
+  assert.equal(mission(f).title,'Vyths Chosen Wind Study');assert.equal(mission(f).conditions[0].kind,'retrieve');assert.equal(mission(f).status,'offered');
   assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a=>a.name==='Vyth Aerir').type,'monster');
   await converse(f,'I accept the study.','accept-favor');
-  for(let n=1;n<=3;n++){tick(f,n);F.command(f.state,f.service,'observe for Vyth Aerir');}
+  handoff(f);
   const report=F.command(f.state,f.service,'report to Vyth Aerir');assert.match(report.content,/joins the party/);assert.ok(mission(f).rewardReceiptId);
 });
 test('a refusal persists across dialogue and clicks, removes consent enums, and rejects stale or forged acceptance',async()=>{
@@ -183,17 +185,18 @@ test('stale browser state cannot erase a refusal or promote the rejecting monste
   assert.ok(I.parseSheets(protectedText).some(a=>a.name==='Vyth Aerir'));
 });
 test('only verified completion of an agreed favor reopens recruitment after refusal',async()=>{
-  const f=fixture();await converse(f,invited,'decline-invitation');await converse(f,invited,'offer-favor');
+  const f=fixture();await converse(f,invited,'decline-invitation');await converse(f,'How can I help with your work?','offer-favor');
   assert.ok(F.recruitmentRefusal(f.state,'Vyth Aerir'));F.command(f.state,f.service,'accept favor from Vyth Aerir');
   F.command(f.state,f.service,'report to Vyth Aerir');assert.ok(F.recruitmentRefusal(f.state,'Vyth Aerir'));
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
+  handoff(f);
   const result=F.command(f.state,f.service,'report to Vyth Aerir');assert.equal(F.recruitmentRefusal(f.state,'Vyth Aerir'),null);
-  assert.match(result.content,/joins the party/);assert.ok(mission(f).rewardReceiptId);
+  assert.doesNotMatch(result.content,/joins the party/);assert.ok(mission(f).rewardReceiptId);
+  const joined=await converse(f,invited,'accept-invitation');assert.match(joined.result.content,/joins the party/);
 });
 test('a newer refusal revokes old conditional consent so a later report cannot silently recruit',async()=>{
   const f=fixture();await converse(f,invited,'offer-favor');F.command(f.state,f.service,'accept favor from Vyth Aerir');
   await converse(f,invited,'decline-invitation');assert.equal(mission(f).invitationPending,false);assert.equal(mission(f).conditionalConsent,undefined);
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
+  handoff(f);
   const result=F.command(f.state,f.service,'report to Vyth Aerir');assert.ok(!result.content.includes('joins the party'));
   assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a=>a.name==='Vyth Aerir').type,'monster');
   assert.equal(F.recruitmentRefusal(f.state,'Vyth Aerir'),null);assert.ok(F.dialogueOptions(f.state,['Vyth Aerir'])[0].actions.includes('accept-invitation'));
@@ -221,9 +224,10 @@ test('the logged Calthokael invitation cannot downgrade to conversation, deny re
         socialAction:'none',playerInvited:false,conditions:[],favorTitle:'',favorFocus:''};
       assert.throws(()=>validate(base),/available social action/);
       assert.throws(()=>validate({...base,socialAction:'decline-invitation',playerInvited:true,line:'No monsters here to hear your tale.'}),/present resident/);
-      assert.throws(()=>validate({...base,socialAction:'decline-invitation'}),/explicit invitation/);
-      return validate({...base,socialAction:'offer-favor',playerInvited:true,line:'Help me observe the hollow wind twice, then report back; once the study is done, I will come with you.',
-        conditions:[{objectiveId:'survey',observationCount:'2',observationInterval:'2'}],favorTitle:'The Unfinished Verse',favorFocus:'the hollow wind'});
+      assert.deepEqual(schema.playerInvited.enum,[true]);
+      assert.equal(validate({...base,socialAction:'decline-invitation'}).playerInvited,true,'The invitation is an engine fact, not willingness.');
+      return validate({...base,socialAction:'offer-favor',playerInvited:true,line:'Bring me the measuring ribbon; once my work is done, I will come with you.',
+        taskPlan:{retrieve:[{target:schema.taskPlan.type.retrieve.type[0].type.target.enum[0],instruction:'Bring me the measuring ribbon.'}]},favorTitle:'The Unfinished Verse'});
     }
     return validate({lines:['The wind may give the verse its ending.','The pebble still rests in the hollow.']});
   };
@@ -251,39 +255,50 @@ test('the live final-story branch routes resident invitations through enums for 
   assert.equal(used,true);assert.ok(mission(f).recruitedAt);
 });
 
-for(const stale of [false,true])test('first-approach encounter '+(stale?'discards stale favor proposals':'installs monster-initiated favor without accepting it'),async()=>{
+for(const stale of [false,true])test('first-approach encounter '+(stale?'discards a stale greeting':'delivers ordinary dialogue without unsolicited recruitment'),async()=>{
   const f=fixture();ready(f);const original=Narration.generate;let generated=false;
   const dialogueMemory={characters:{},recent:[]};f.state.getDialogueMemory=()=>dialogueMemory;
   const runtime={retort:fn=>fn,run:async fn=>fn({})};
   Narration.generate=async(_$,options)=>{
-    generated=true;assert.equal(options.encounter,true);assert.ok(options.socialInteractions[0].actions.includes('offer-favor'));
+    generated=true;assert.equal(options.encounter,true);assert.ok(!options.socialInteractions[0].actions.includes('offer-favor'));
     assert.ok(!options.socialInteractions[0].actions.includes('accept-favor'));
-    options.onSocialAction({speaker:'Vyth Aerir',recipient:'PC',line:'Help me watch the wind three times, then report back.',socialAction:'offer-favor',playerInvited:false,
-      favorTitle:'The Hollow Wind',favorFocus:'the wind',conditions:[{objectiveId:'survey',observationCount:'3',observationInterval:'2'}]},options.socialInteractions[0]);
     assert.equal(mission(f),undefined,'Authoring cannot commit before stale checks.');
-    return{content:'Vyth Aerir says, "[[SPEECH:"Vyth Aerir"]]Help me watch the wind three times, then report back.[[/SPEECH]]"'};
+    return{content:'Vyth Aerir says, "[[SPEECH:"Vyth Aerir"]]Hello. I am listening to the hollow wind.[[/SPEECH]]"'};
   };
   try{
     const result=await require('../retort/encounterNarration').narrateEncounter({state:f.state,service:f.service,runtime,isCurrent:()=>!stale,
       visit:{population:f.p,dialogue:[],encounters:[{names:['Vyth Aerir']}]}});
     assert.ok(generated);
     if(stale){assert.equal(result.stale,true);assert.equal(mission(f),undefined);}
-    else{assert.equal(mission(f).status,'offered');assert.equal(mission(f).invitationPending,false);assert.match(result.story.content,/3 times/);
-      const journal=require('../retort/adventureJournal').project(f.state);assert.equal(journal.contracts[0].status,'offered');}
+    else{assert.equal(mission(f),undefined);assert.match(result.story.content,/Hello/);assert.deepEqual(result.recruitmentRequests,[]);}
   }finally{Narration.generate=original;}
 });
 function ready(f){f.p.actors['Vyth Aerir'].encounteredAt=1;f.p.actors['Vyth Aerir'].job='wind observer';}
+test('encounter delivery includes the complete existing request before a later main-turn state synchronization',async()=>{
+  const f=fixture();ready(f);await converse(f,invited,'offer-favor');
+  const original=Narration.generate,dialogueMemory={characters:{},recent:[]};f.state.getDialogueMemory=()=>dialogueMemory;
+  Narration.generate=async()=>({content:'Vyth Aerir says, "[[SPEECH:"Vyth Aerir"]]Our request still stands.[[/SPEECH]]"'});
+  try{
+    const result=await require('../retort/encounterNarration').narrateEncounter({state:f.state,service:f.service,
+      runtime:{retort:fn=>fn,run:async fn=>fn({})},visit:{population:f.p,dialogue:[],encounters:[{names:['Vyth Aerir']}]}});
+    const saved=mission(f),packet=result.story.recruitmentRequests[0];
+    assert.equal(packet.id,saved.id);assert.equal(packet.source,saved.source);assert.equal(packet.runId,'test-run');
+    assert.equal(packet.roomKey,'1,0,0');assert.equal(packet.floor,'street');assert.equal(packet.recipient,'Vyth Aerir');
+    assert.equal(packet.status,'offered');assert.equal(packet.invitationPending,true);assert.equal(packet.description,saved.description);
+    assert.deepEqual(result.recruitmentRequests,result.story.recruitmentRequests);
+  }finally{Narration.generate=original;}
+});
 async function converse(f,input,socialAction,extra={}) {
-  ready(f);const original=Work.request,briefs=[],options=F.dialogueOptions(f.state,['Vyth Aerir']);
+  ready(f);const original=Work.request,briefs=[],options=F.dialogueOptions(f.state,['Vyth Aerir'],{userInput:input});
   Work.request=async(_$,component,_schema,brief,validate)=>{
     briefs.push({component,brief});
-    const raw=component==='story-scene'?{prose:'The observer turns to listen.',interaction:'recruitment',speakers:['Vyth Aerir']}:
+    const raw=component==='story-scene'?{prose:'The observer turns to listen.',interaction:F.invitationIntent(input)?'recruitment':'work',speakers:['Vyth Aerir']}:
       component==='npc-live-speech'?{action:'lowers the pebble.',line:socialAction==='accept-invitation'?'Yes. I accept your invitation. I will travel with you.':
-        socialAction==='offer-favor'?'I can come when this study is done. Help me observe the hollow wind twice, then report back.':
+        socialAction==='offer-favor'?'I can come when my ribbon is returned. Please bring it to me.':
         socialAction==='decline-invitation'?'No. My family is still here, and I must stay with them.':
-        socialAction==='report-favor'?'The observations are enough. Our bargain is fulfilled, and I will come with you.':'Agreed. Help me with the observations.',
+        socialAction==='complete-favor'?'The observations are enough. Our bargain is fulfilled, and I will come with you.':'Agreed. Help me with the observations.',
         remember:'We discussed traveling together.',recipient:'PC',attention:'addressing',socialAction,playerInvited:true,
-        favorObjectiveId:socialAction==='offer-favor'?'survey':'',favorTitle:socialAction==='offer-favor'?'The Hollow Wind':'',favorFocus:socialAction==='offer-favor'?'the hollow wind':'',...extra}:
+        taskPlan:socialAction==='offer-favor'?{retrieve:[{target:extra.favorObjectiveId || _schema.taskPlan.type.retrieve.type[0].type.target.enum[0],instruction:'Bring me the measuring ribbon.'}]}:{},favorTitle:socialAction==='offer-favor'?'The Hollow Wind':'',...extra}:
       {lines:['The hollow has more to teach us.','Two observations are better than a guess.']};
     return validate?validate(raw):raw;
   };
@@ -325,42 +340,84 @@ for(const replay of ['vyth-cliff-corner','vyth-visible-ogre'])test(`Vyth can acc
 
 test('reluctance in actual dialogue makes a concrete offered favor, never an autoaccepted job',async()=>{
   const f=fixture();const {result}=await converse(f,invited,'offer-favor');
-  assert.equal(mission(f).status,'offered');assert.equal(mission(f).objective.kind,'survey');assert.equal(mission(f).invitationPending,true);
+  assert.equal(mission(f).status,'offered');assert.equal(mission(f).objective.kind,'retrieve');assert.equal(mission(f).invitationPending,true);
   assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').length,1);
-  assert.match(result.content,/Local favor \(offered\)/);assert.match(result.content,/Observe the hollow wind/);
+  assert.match(result.content,/Recruitment Invitation \(offered\)/);assert.match(result.content,/Bring me the measuring ribbon/);
+});
+
+test('the logged tale-and-recruitment invitation cannot accept a residents request on behalf of the player',async()=>{
+  const f=fixture();await converse(f,invited,'offer-favor');
+  const option=F.dialogueOptions(f.state,['Vyth Aerir'],{invitation:true,userInput:'tell monsters my tale and ask if they would join my quest'})[0];
+  assert.equal(option.playerFavorDecision,'none');assert.ok(!option.actions.includes('accept-favor'));assert.ok(!option.actions.includes('decline-favor'));
+  assert.throws(()=>F.applyDialogue(f.state,f.service,{speaker:'Vyth Aerir',recipient:'PC',line:'I will join you.',
+    socialAction:'accept-favor',playerInvited:true,playerFavorDecision:'accept'},option),/not available/);
+  const {briefs}=await converse(f,invited,'discuss-favor');
+  assert.equal(mission(f).status,'offered');assert.equal(mission(f).invitationPending,true);assert.equal(mission(f).acceptedAt,undefined);
+  assert.match(briefs.find(b=>b.component==='npc-live-speech').brief,/PLAYER CHOICE.*none/);
+  assert.match(mission(f).description,/will join after the agreed requirements/);
+});
+
+test('only an explicit unambiguous player decision exposes accept or decline request actions',()=>{
+  const a={id:'a',recipient:'Vyth Aerir',title:'Wind Study',status:'offered'},b={id:'b',recipient:'Sella Venn',title:'Stone Study',status:'offered'};
+  for(const text of ['tell monsters my tale and ask if they would join my quest','How are you?','Sure, tell me about yourself.','Not now',
+    'Will you accept my invitation?','Yes, but I do not accept the request.'])assert.equal(F.favorDecision(text,a,[a]),'none',text);
+  for(const text of ['I accept the study.',"Yes, we'll help with that", "We'll do the study",'Accept the request.'])assert.equal(F.favorDecision(text,a,[a]),'accept',text);
+  assert.equal(F.favorDecision('I decline the request.',a,[a]),'decline');
+  assert.equal(F.favorDecision('I accept the study.',a,[a,b]),'none');
+  assert.equal(F.favorDecision('I accept the request from Sella Venn.',a,[a,b]),'none');
+  assert.equal(F.favorDecision('I accept the request from Sella Venn.',b,[a,b]),'accept');
+});
+
+test('natural-language acceptance remains distinct from the NPC accepting a recruitment invitation',async()=>{
+  const f=fixture();await converse(f,invited,'offer-favor');
+  const {result}=await converse(f,'I accept the request.','accept-favor');
+  assert.equal(mission(f).status,'accepted');assert.equal(mission(f).recruitedAt,undefined);
+  assert.match(result.content,/Request accepted:/);assert.doesNotMatch(result.content,/Local contract accepted|Local favor accepted/);
+  assert.equal(result.socialResults[0].action,'accept-favor');
+});
+
+test('request commands use the new presentation language while old favor commands remain compatible',async()=>{
+  const f=fixture();await converse(f,invited,'offer-favor');
+  assert.match(F.command(f.state,f.service,'accept request from Vyth Aerir').content,/Request accepted:/);assert.equal(mission(f).status,'accepted');
+  const other=fixture();await converse(other,invited,'offer-favor');
+  assert.match(F.command(other.state,other.service,'decline request from Vyth Aerir').content,/You decline/);assert.equal(mission(other).status,'declined');
+  const legacy=fixture();await converse(legacy,invited,'offer-favor');F.command(legacy.state,legacy.service,'accept favor from Vyth Aerir');
+  assert.equal(mission(legacy).status,'accepted');
 });
 
 test('dialogue can accept work and report verified work; the standing conditional invitation recruits on completion',async()=>{
   const f=fixture();await converse(f,invited,'offer-favor');
   await converse(f,"Yes, we'll help with that",'accept-favor');assert.equal(mission(f).status,'accepted');
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
-  const {result}=await converse(f,'Here are our findings','report-favor');
+  handoff(f);
+  const {result}=await converse(f,'Here are our findings','complete-favor');
   assert.equal(mission(f).status,'completed');assert.ok(mission(f).recruitedAt);assert.match(result.content,/joins the party/);
   assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').filter(a=>a.name==='Vyth Aerir').length,1);
 });
 
 test('a menu report also fulfills prior conditional consent without requiring another Add to Party click',async()=>{
   const f=fixture();await converse(f,invited,'offer-favor');F.command(f.state,f.service,'accept favor from Vyth Aerir');
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
-  const request={kind:'report-favor',actor:'Vyth Aerir',missionId:mission(f).id};
+  handoff(f);
+  const request={kind:'complete-recruitment',actor:'Vyth Aerir',missionId:mission(f).id};
   const response=f.action(request);assert.match(response.content,/joins the party/);assert.ok(mission(f).recruitedAt);
   assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').filter(a=>a.name==='Vyth Aerir').length,1);
 });
 
 test('a refusal is a clear personal choice, and dialogue cannot grant a pending favor without evidence',async()=>{
   const f=fixture();const {result}=await converse(f,invited,'decline-invitation');assert.match(result.content,/declines the invitation/);assert.equal(mission(f),undefined);
-  await converse(f,invited,'offer-favor');await converse(f,"We'll do the study",'accept-favor');
+  await converse(f,'How can I help with your work?','offer-favor');await converse(f,"We'll do the study",'accept-favor');
   ready(f);const option=F.dialogueOptions(f.state,['Vyth Aerir'])[0];
-  assert.ok(!option.actions.includes('accept-invitation'));assert.ok(!option.actions.includes('report-favor'));
+  assert.ok(!option.actions.includes('accept-invitation'));assert.ok(!option.actions.includes('complete-favor'));
   assert.throws(()=>F.applyDialogue(f.state,f.service,{speaker:'Vyth Aerir',recipient:'PC',line:'I join.',socialAction:'accept-invitation',playerInvited:true},option),/not available/);
   assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').length,1);
 });
 
 test('no invitation, an invented objective, or an empty hedge cannot silently become a recruitment result',async()=>{
-  for(const [action,extra]of [['accept-invitation',{playerInvited:false}],['offer-favor',{favorObjectiveId:'imaginary-artifact'}],['none',{}]]){
+  for(const [action,extra]of [['offer-favor',{favorObjectiveId:'imaginary-artifact'}],['none',{}]]){
     const f=fixture();await assert.rejects(converse(f,invited,action,extra));assert.equal(mission(f),undefined);
     assert.equal(I.parseSheets(f.state.getUpdatedGameConsole(),'NPCs in Party').length,1);
   }
+  const f=fixture();await assert.rejects(converse(f,'How are you today?','accept-invitation',{playerInvited:true}),/available social action|actual player invitation/);
+  assert.equal(mission(f),undefined);
 });
 
 test('a response from another room, floor, run or speaker cannot commit the original conversation',()=>{
@@ -381,9 +438,9 @@ test('the real response reconciliation keeps the joined actor in the party inste
 
 test('a full party keeps fulfilled conditional consent available instead of losing the completed favor',async()=>{
   const f=fixture();await converse(f,invited,'offer-favor');F.command(f.state,f.service,'accept favor from Vyth Aerir');
-  tick(f,1);F.command(f.state,f.service,'observe for Vyth Aerir');tick(f,3);F.command(f.state,f.service,'observe for Vyth Aerir');
+  handoff(f);
   let text=f.state.getUpdatedGameConsole();text=text.replace(I.sectionPattern('NPCs in Party'),(_,head,body)=>head+body+'\n'+Array.from({length:11},(_,i)=>f.row('Reserve '+i)).join('\n')+'\n');f.state.setUpdatedGameConsole(text);
-  const response=f.action({kind:'report-favor',actor:'Vyth Aerir',missionId:mission(f).id});
+  const response=f.action({kind:'complete-recruitment',actor:'Vyth Aerir',missionId:mission(f).id});
   assert.equal(response.error,undefined);assert.match(response.content,/party is full/);assert.equal(mission(f).status,'completed');assert.equal(mission(f).recruitedAt,undefined);
 });
 
@@ -398,19 +455,19 @@ test('starting-room work restrictions do not block a resident consenting to ordi
   assert.match(result.content,/joins the party/);
 });
 
-test('dialogue constructs compound side missions through enums and every condition needs real evidence',async()=>{
+test('compound typed book tasks require both real reading and item-transfer evidence',async()=>{
   const f=fixture();ready(f);f.change(db=>db['1,0,0'].objects=[{name:'wind ribbon',type:'other',magic:0}]);
   const retrieval=F.dialogueOptions(f.state,['Vyth Aerir'])[0].candidates.find(c=>c.item==='wind ribbon').id;
-  await converse(f,invited,'offer-favor',{favorTitle:'The Wind Ribbon Study',conditions:[
-    {objectiveId:'survey',observationCount:'3',observationInterval:'1'},
-    {objectiveId:retrieval,observationCount:'',observationInterval:''}]});
-  assert.equal(mission(f).conditions.length,2);assert.equal(mission(f).objective.observations,3);assert.equal(mission(f).objective.interval,1);
+  f.change(db=>{db['1,0,0'].objects=[{name:'wind journal',type:'other'}];db['1,0,0'].readables=[{id:'wind',kind:'book',name:'wind journal',chapters:[{title:'Wind',text:'The ribbon measures the western gust.'}]}];});
+  const options=F.dialogueOptions(f.state,['Vyth Aerir'])[0].candidates,target=options.find(c=>c.kind==='retrieve'),chapter=options.find(c=>c.kind==='read');
+  await converse(f,invited,'offer-favor',{favorTitle:'The Wind Journal',taskPlan:{retrieve:[{target:target.id,instruction:'Bring me my journal.'}],read:[{target:chapter.id,instruction:'Read the wind entry before giving me the journal.'}]}});
+  assert.equal(mission(f).conditions.length,2);
   F.command(f.state,f.service,'accept favor from Vyth Aerir');
-  for(let i=1;i<=3;i++){tick(f,i);F.command(f.state,f.service,'observe for Vyth Aerir');}
+  require('../retort/bookResearch').record(f.state,{allowed:true,record:f.db()['1,0,0'].readables[0],sourceKey:'1,0,0',chapter:1});E.refresh(f.state);
   assert.equal(mission(f).readyToReport,false);assert.match(mission(f).progress,/1\/2 conditions/);
-  assert.ok(!F.dialogueOptions(f.state,['Vyth Aerir'])[0].actions.includes('report-favor'));
-  f.inventory({name:'wind ribbon',type:'other',magic:0});Give.give(f.state,f.service,'give wind ribbon to Vyth Aerir');E.refresh(f.state);
-  assert.equal(mission(f).readyToReport,true);await converse(f,'Here are our findings and the ribbon','report-favor');
+  assert.ok(!F.dialogueOptions(f.state,['Vyth Aerir'])[0].actions.includes('complete-favor'));
+  f.inventory({name:'wind journal',type:'other',magic:0});Give.give(f.state,f.service,'give wind journal to Vyth Aerir');E.refresh(f.state);
+  assert.equal(mission(f).readyToReport,true);await converse(f,'Here are our findings and the ribbon','complete-favor');
   assert.ok(mission(f).recruitedAt);assert.ok(mission(f).completionEvidence.some(r=>r.source==='engine-give-item-v1'));
 });
 
@@ -438,7 +495,7 @@ test('real Retort JSON-schema transport carries dialogue enums and accepts unuse
     const fields=body.response_format.json_schema.schema.properties;
     const raw=fields.prose?{prose:'The observer listens to your invitation.',interaction:'recruitment',speakers:['Vyth Aerir']}:
       fields.line?{action:'nods.',line:'Yes. I accept your invitation and will travel with you.',remember:'I agreed to travel with the party.',recipient:'PC',attention:'addressing',
-        socialAction:'accept-invitation',playerInvited:true,conditions:[],favorTitle:'',favorFocus:''}:
+        socialAction:'accept-invitation',playerInvited:true,taskPlan:Object.fromEntries(Object.keys(fields.taskPlan.properties).map(kind=>[kind,[]])),favorTitle:'',joinTiming:'after-task',departureLine:''}:
       {lines:Array(fields.lines.minItems).fill('I will keep watching the hollow wind as we travel.')};
     return{ok:true,text:async()=>JSON.stringify({model:'holodek-1',choices:[{finish_reason:'stop',message:{role:'assistant',content:JSON.stringify(raw)}}]})};
   }});
@@ -449,7 +506,8 @@ test('real Retort JSON-schema transport carries dialogue enums and accepts unuse
       onSocialAction:(event,option)=>F.applyDialogue(f.state,f.service,event,option),location:null})),null,{shouldSaveToLog:false});
     assert.match(result.content,/joins the party/);assert.equal(requests.length,3);
     const schema=requests.find(r=>r.response_format.json_schema.schema.properties.line).response_format.json_schema.schema;
-    assert.ok(schema.properties.socialAction.enum.includes('accept-invitation'));assert.equal(schema.properties.conditions.maxItems,3);
+    assert.ok(schema.properties.socialAction.enum.includes('accept-invitation'));assert.equal(schema.properties.taskPlan.properties.retrieve.maxItems,1);
+    assert.equal(schema.properties.conditions,undefined);assert.equal(schema.properties.favorFocus,undefined);
     assert.equal(JSON.parse(f.state.getCombatCharactersString()).find(a=>a.name==='Vyth Aerir').type,'npc');
   }finally{Models.restore(previous);}
 });

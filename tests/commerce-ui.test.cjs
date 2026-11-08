@@ -42,19 +42,165 @@ function fixture() {
     button: label => nodes.find(n => n.tag === 'button' && n.textContent === label && n.isConnected) };
 }
 
+test('favor delivery runs from the existing idle dialogue heartbeat rather than movement or render frames',()=>{
+  const source=fs.readFileSync('assets/dungeonLifeUi.js','utf8'),start=source.indexOf('function tick()'),tick=source.slice(start,source.indexOf('function ',start+10));
+  assert.match(tick,/root\.CommerceUi\?\.onFrame\?\.\(\)/);
+  assert.ok(tick.indexOf('CommerceUi?.onFrame')<tick.indexOf('CityCrowdUi?.onFrame'));
+  assert.match(source,/setInterval\(tick, 500\)/);
+});
+
 function installGate(f) {
   vm.runInNewContext(fs.readFileSync('assets/commandGate.js','utf8'), {
     window:f.window,document:{addEventListener(){},getElementById:()=>f.input},setTimeout });
   return f.window.GameCommandGate;
 }
 
+function favorFixture(){
+  const f=fixture(),d=f.window.currentDungeon;d.geoKey='0,0,0';
+  const actor={name:'Keeper',type:'monster',hp:12,state:'Friendly',mazeRoomKey:d.geoKey,mazeX:45,mazeY:4};
+  const mission={id:'new-favor',source:'engine-resident-favor-v1',type:'resident-favor',runId:'run',roomKey:d.geoKey,floor:'street',
+    recipient:'Keeper',title:'The Authored Local Favor',description:'Return the existing ring. Keeper will join after completion.',
+    status:'offered',starterRecruitment:true,invitationPending:true};
+  f.window.getDungeonLifeContext=()=>({dungeon:d,player:{x:4.5,y:4.5},actors:[actor]});
+  f.window.getEconomyResidentInfo=()=>({kind:'mission',jobs:true,introduced:true,starterRecruitment:true,recruitmentCondition:mission});
+  const result=()=>({runId:'run',geoKey:d.geoKey,roomNameDatabaseString:JSON.stringify({[d.geoKey]:{minorMissions:{favor:mission}}})});
+  return{...f,actor,mission,result};
+}
+
+test('clicking a recruitment contact immediately shows the full request with no job-list detour or network call',()=>{
+  const f=favorFixture();assert.equal(f.window.CommerceUi.invite('Keeper'),true);
+  assert.ok(f.nodes.some(n=>n.tag==='h3' && n.textContent==='Recruitment Invitation' && n.isConnected));
+  const visible=f.nodes.filter(n=>n.tag==='p' && n.isConnected).map(n=>n.textContent).join('\n');
+  assert.equal(visible.split(f.mission.description).length-1,1);assert.match(visible,/Keeper/);
+  assert.ok(f.button('Accept Request'));assert.ok(f.button('Decline Request'));assert.ok(f.button('Not Now'));
+  assert.equal(f.button('View Job Offers'),undefined);assert.equal(f.button('Accept Local Contract'),undefined);
+  assert.equal(f.requests.length,0);assert.equal(f.mission.status,'offered');
+});
+
+test('long recruitment details scroll separately from the decision buttons without truncating the authored request',()=>{
+  const f=favorFixture();f.mission.description='Find the existing ring and return it to its owner. '.repeat(120);
+  assert.equal(f.window.CommerceUi.invite('Keeper'),true);
+  const popup=f.nodes.find(n=>n.className?.includes('recruitment-dialog'));
+  const content=popup.children.find(n=>n.className==='commerce-dialog-content');
+  const actions=popup.children.find(n=>n.className==='commerce-dialog-actions');
+  assert.equal(content.tabIndex,0);assert.equal(content.role,'region');assert.equal(content['aria-label'],'Request details');
+  assert.ok(content.children.some(n=>n.tag==='p'&&n.textContent.includes(f.mission.description)));
+  assert.equal(actions.children.length,3);assert.ok(actions.children.includes(f.button('Accept Request')));
+  assert.ok(!content.children.includes(f.button('Accept Request')));assert.equal(f.requests.length,0);
+});
+
+test('deferred recruitment can be reopened directly from the character sheet without changing its state',async()=>{
+  const f=favorFixture();f.window.CommerceUi.invite('Keeper');await f.button('Not Now').click();
+  const actions=f.document.createElement('div');f.body.appendChild(actions);f.window.CommerceUi.addAction(actions,'Keeper');
+  assert.ok(f.button('Recruitment Progress'));await f.button('Recruitment Progress').click();
+  assert.ok(f.button('Accept Request'));assert.equal(f.button('View Job Offers'),undefined);
+  assert.equal(f.mission.status,'offered');assert.equal(f.requests.length,0);
+});
+
+test('accepting a recruitment request closes the offer; reopening shows progress once, not another offer',async()=>{
+  const f=favorFixture();f.window.applyRealtimeCombatResult=async event=>{f.applied.push(event);f.window.CommerceUi.receiveResult(event);};
+  f.hook(async request=>({ok:true,json:async()=>{
+    if(request.path==='/economy/view')return{revision:7};
+    f.mission.status='accepted';f.mission.progress='0/2 observations recorded.';return{...f.result(),type:'economy_result',content:'Request accepted.'};
+  }}));
+  f.window.CommerceUi.invite('Keeper');await f.button('Accept Request').click();
+  assert.equal(f.window.CommerceUi.hasInteraction(),false);assert.equal(f.window.CommerceUi.onFrame(),false);
+  assert.equal(f.window.CommerceUi.invite('Keeper'),false);await f.window.CommerceUi.open('Keeper');
+  assert.ok(f.button('Complete Party Invitation'));assert.ok(f.button('Close'));assert.equal(f.button('Complete Party Invitation').disabled,true);
+  assert.equal(f.button('Accept Request'),undefined);assert.equal(f.button('View Job Offers'),undefined);
+  const visible=f.nodes.filter(n=>n.tag==='p'&&n.isConnected).map(n=>n.textContent).join('\n');
+  assert.equal(visible.split(f.mission.description).length-1,1);assert.match(visible,/0\/2 observations/);
+  assert.equal(f.requests.filter(r=>r.path==='/economy/action').length,1);
+});
+
+test('declined recruitment results close an existing request popup without reopening a service menu',()=>{
+  const f=favorFixture();f.window.CommerceUi.invite('Keeper');f.mission.status='declined';
+  f.window.CommerceUi.receiveResult(f.result());assert.equal(f.window.CommerceUi.hasInteraction(),false);
+  assert.equal(f.button('Accept Request'),undefined);assert.equal(f.window.CommerceUi.onFrame(),false);assert.equal(f.requests.length,0);
+});
+
+test('a recruitment contact with a real business still provides a separate services action',async()=>{
+  const f=favorFixture();f.window.currentDungeon.geoKey='1,0,0';f.mission.roomKey='1,0,0';f.actor.mazeRoomKey='1,0,0';
+  f.window.getEconomyResidentInfo=()=>({kind:'temple',introduced:true,recruitmentCondition:f.mission});
+  assert.equal(f.window.CommerceUi.invite('Keeper'),true);assert.ok(f.button('Accept Request'));assert.ok(f.button('Access Services'));
+  await f.button('Access Services').click();assert.equal(f.requests.filter(r=>r.path==='/economy/view').length,1);
+  assert.ok(f.nodes.some(n=>n.tag==='h3'&&n.textContent==='Healing Shrine'&&n.isConnected));
+});
+
+test('a newly synchronized recruitment request also skips the generic contracts page',async()=>{
+  const f=favorFixture();f.window.getEconomyResidentInfo=()=>({kind:'mission',jobs:true,introduced:true,starterRecruitment:true});
+  f.hook(async()=>({ok:true,json:async()=>({silver:2,revision:7,missions:[f.mission]})}));
+  assert.equal(await f.window.CommerceUi.open('Keeper'),true);assert.ok(f.button('Accept Request'));
+  assert.ok(f.nodes.some(n=>n.tag==='h3'&&n.textContent==='Recruitment Invitation'&&n.isConnected));
+  assert.equal(f.button('View Job Offers'),undefined);assert.equal(f.button('Accept Local Contract'),undefined);
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].path,'/economy/view');
+});
+
+test('the journal separates recruitment invitations and their progress from paid local contracts',async()=>{
+  const f=fixture(),popup=f.document.createElement('section'),content=f.document.createElement('div');popup.hidden=true;
+  content.replaceChildren=function(){this.children=[];};
+  f.document.getElementById=id=>id==='journal-popup'?popup:id==='journal-content'?content:null;
+  const data={runId:'run',quest:'Current adventure',step:1,route:[],facts:[],rumors:[],factions:{factions:[],decisions:[]},history:[],contracts:[
+    {status:'offered',description:'Help the resident before they join.',reward:{type:'recruitment'}},
+    {status:'accepted',description:'A separate paid delivery.'},
+    {status:'completed',description:'A completed recruitment request.',reward:{type:'recruitment'},recruited:true,progress:'Work verified.'}]};
+  vm.runInNewContext(fs.readFileSync('assets/adventureJournalUi.js','utf8'),{window:f.window,document:f.document,fetch:async()=>({ok:true,json:async()=>data})});
+  assert.equal(await f.window.AdventureJournalUi.toggle(true),true);
+  const section=title=>content.children.find(s=>s.children[0]?.textContent===title)?.children.slice(1).map(n=>n.textContent).join('\n');
+  assert.match(section('Recruitment Invitations'),/Help the resident/);assert.match(section('Recruitment Invitations'),/Work verified\./);
+  assert.match(section('Recruitment Invitations'),/Joined the party\./);assert.doesNotMatch(section('Recruitment Invitations'),/paid delivery/);
+  assert.match(section('Local Contracts'),/paid delivery/);assert.doesNotMatch(section('Local Contracts'),/recruitment|Help the resident/);
+});
+
+test('a saved starter favor automatically opens a direct accept/decline popup without a click, distance test or model call',async()=>{
+  const f=favorFixture();f.window.DungeonLife={hasPendingSpeech:()=>true};
+  assert.equal(f.window.CommerceUi.onFrame(),true);assert.equal(f.requests.length,0);
+  assert.ok(f.button('Accept Request'));assert.ok(f.button('Decline Request'));assert.ok(f.button('Not Now'));
+  f.hook(async request=>({ok:true,json:async()=>request.path==='/economy/view'?{revision:7}: {type:'economy_result',eventId:'favor-accepted',runId:'run',geoKey:'0,0,0',content:'Accepted.'}}));
+  await f.button('Accept Request').click();
+  assert.equal(f.requests.find(r=>r.path==='/economy/action').body.missionId,'new-favor');
+  assert.equal(f.requests.find(r=>r.path==='/economy/action').body.kind,'accept-mission');
+  assert.equal(f.window.CommerceUi.hasInteraction(),false);
+});
+
+test('idle favor scanning never captures expensive object-discovery snapshots for residents without offers',()=>{
+  const f=fixture();let snapshots=0;
+  f.window.ObjectDiscovery={snapshot:()=>{snapshots++;return{};}};
+  f.window.getDungeonLifeContext=()=>({dungeon:f.window.currentDungeon,player:{x:4.5,y:4.5},actors:Array.from({length:24},(_,i)=>({name:'Resident '+i,type:'monster',hp:12,state:'Friendly'}))});
+  f.window.getEconomyResidentInfo=()=>null;
+  assert.equal(f.window.CommerceUi.onFrame(),false);assert.equal(snapshots,0);assert.equal(f.requests.length,0);
+});
+
+test('a favor response queues while busy, survives a first-frame arrival, and presents only once without blocking speech',async()=>{
+  const f=favorFixture(),gate=installGate(f);f.window.getEconomyResidentInfo=()=>null;gate.begin();
+  f.window.CommerceUi.receiveResult(f.result());assert.equal(f.window.CommerceUi.onFrame(),false);assert.equal(f.button('Accept Request'),undefined);
+  gate.end();assert.equal(f.window.CommerceUi.onFrame(),true);assert.ok(f.button('Accept Request'));assert.equal(f.requests.length,0);
+  await f.button('Not Now').click();f.window.CommerceUi.receiveResult(f.result());
+  assert.equal(f.window.CommerceUi.onFrame(),false);assert.equal(f.button('Accept Request'),undefined);
+});
+
+test('a queued favor cannot appear in another room, run or host-local floor, or after dialogue accepts it',()=>{
+  for(const change of [f=>f.window.currentDungeon={geoKey:'2,0,0'},f=>f.window.dungeonRunId='next-run',
+    f=>{f.window.currentDungeon.cityFloorContext={hostKey:'0,0,0',buildingId:'upper',floor:1};},
+    f=>{f.mission.status='accepted';f.window.CommerceUi.receiveResult(f.result());}]){
+    const f=favorFixture();f.window.CommerceUi.receiveResult(f.result());change(f);
+    assert.equal(f.window.CommerceUi.onFrame(),false);assert.equal(f.button('Accept Request'),undefined);
+  }
+});
+
+test('declining a favor uses its verified mission ID, and Not Now preserves the offer',async()=>{
+  const f=favorFixture();f.window.CommerceUi.onFrame();await f.button('Decline Request').click();
+  const action=f.requests.find(r=>r.path==='/economy/action');assert.equal(action.body.kind,'decline-favor');assert.equal(action.body.missionId,'new-favor');
+  const later=favorFixture();later.window.CommerceUi.onFrame();await later.button('Not Now').click();assert.equal(later.requests.length,0);assert.equal(later.mission.status,'offered');
+});
+
 test('accepting a local job closes its popup and releases the interaction without reopening the menu',async()=>{
   const f=fixture();f.hook(async request=>({ok:true,json:async()=>request.path==='/economy/view'?{silver:2,revision:7,
-    missions:[{id:'wind-job',type:'resident-favor',recipient:'Keeper',status:'offered',description:'Watch the wind, then report.',offer:'Please watch the wind.'}]}:
+    missions:[{id:'wind-job',type:'resident-favor',recipient:'Keeper',status:'offered',description:'Return the existing ring.',offer:'Please watch the wind.'}]}:
     {type:'economy_result',eventId:'accepted',runId:'run',geoKey:'1,0,0',content:'Favor accepted.'}}));
-  await f.window.CommerceUi.open('Keeper');assert.ok(f.button('Accept Local Contract'));const before=f.requests.filter(r=>r.path==='/economy/view').length;
-  await f.button('Accept Local Contract').click();
-  assert.equal(f.button('Accept Local Contract'),undefined);assert.equal(f.button('Report Findings'),undefined);
+  await f.window.CommerceUi.open('Keeper');assert.ok(f.button('Accept Request'));const before=f.requests.filter(r=>r.path==='/economy/view').length;
+  await f.button('Accept Request').click();
+  assert.equal(f.button('Accept Request'),undefined);assert.equal(f.button('Report Findings'),undefined);
   assert.equal(f.window.CommerceUi.hasInteraction(),false);assert.equal(f.requests.filter(r=>r.path==='/economy/view').length,before+1,'Only the transaction revision refresh runs; the menu does not reopen.');
   assert.equal(f.requests.filter(r=>r.path==='/economy/action').length,1);
 });

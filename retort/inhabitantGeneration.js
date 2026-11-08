@@ -6,6 +6,7 @@ const Contracts = require('./generationContracts');
 const Lore = require('./underworldLore');
 const Policy = require('./generationPolicy');
 const Balance = require('./encounterBalance');
+const CotgAuthoring = require('./cotgPopulationAuthoring');
 const { RetortMessage } = require('retort-js/dist/message');
 const BATCH_SIZE = 4;
 function needsStartingResidents(room, geoKey, homebrew) {
@@ -39,6 +40,8 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
   const venue=starting?null:rooms[geoKey]?.cityRoom?.venue||campaignSetting?.city?.venue;
   const market = !starting && !encounter && require('./serviceRoles').market(rooms[geoKey], campaignSetting);
   const local = require('./graveMasterStoryPrompts').isHolodek1(), batchSize = local ? 1 : BATCH_SIZE;
+  const cotg = !require('./settingLayer').current() && rooms['0,0,0']?.setting?.kind !== 'homebrew';
+  const catalogBound = !!encounter && !(cotg && encounter.cotgAuthorship && !encounter.identity);
   const floorProgram=rooms[geoKey]?.cityRoom?.floorProgram;
   const floorResidents=Number.isInteger(floorProgram?.residents)?Math.max(8,Math.min(24,floorProgram.namedResidents??floorProgram.residents)):8;
   const hostileTemple = !starting && require('./campaignSetting').hostileTemple(campaignSetting, roomName);
@@ -46,7 +49,7 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
   const routineResidents = indoor && !settled && party.length ? Math.max(floorResidents, Math.min(16, Balance.partySummary(party).size + 4)) : floorResidents;
   const budget=!starting&&!encounter&&!hostileTemple?roomEncounterPlan:null;
   const baseCount = starting ? rules.random(require('./settingLayer').current() ? market ? 3 : 2 : 1, 5) : encounter ? Math.max(1, Math.min(6, encounter.count || 1)) : indoor ? routineResidents : 16;
-  const count=baseCount;
+  const count=starting&&cotg?Math.min(4,Math.max(2,baseCount)):baseCount;
   if(count>24)throw Error('The planned population exceeds the room population limit.');
   const village = !!campaignSetting?.village;
   const civicMajority = !encounter && !hostileTemple && require('./worldFlags').on('CITY_COMPLETE') && campaignSetting?.city?.population?.civilianMajority;
@@ -56,6 +59,7 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
       campaignSetting.faction?.allegiance === 'Hostile' || i === count - 1 ? 'Hostile' : 'Neutral' : i < 6 || i < 10 && i > 6 ? 'Hostile' : 'Neutral',
     encounterId: i === 0 && questSeed ? 'quest-contact' : i < 3 ? 'residents' : i < 6 ? 'guards' : i === 6 ? 'pilgrim' : i < 10 ? 'raiders' : i < 13 ? 'wayfarers' : 'keepers' }));
   const accepted = [], totalCount = count, originalUsedNames = usedNames, introduceQuest = questSeed;
+  const starterPlan=starting&&cotg?require('./cotgStarterRecruitment').plan(slots):null;
   if (market && !hostileTemple) Object.assign(slots[1], { serviceRole: 'shop', encounterId: 'market-vendor' });
   if(!encounter&&venue&&!hostileTemple){
     if(venue.service)Object.assign(slots[1],{serviceRole:venue.service,encounterId:'venue-operator'});
@@ -71,7 +75,13 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
     roll: Inhabitants.hash(`${geoKey}:cohort-size`) / 4294967296 });
   const civilianTotal=slots.filter(slot=>!slot.engineEncounter).length;
   const ecology=require('./settingEcology'),table=ecology.get(rooms),nameProfiles=new Map();
-  if(table&&!encounter)for(const slot of slots){
+  if(cotg && !encounter)CotgAuthoring.apply(slots,{
+    seed:`${budget?.seed||table?.seed||roomName}:${geoKey}`,table,mix:campaignSetting?.city?.populationMix,
+    starting,questSeed,room:rooms[geoKey]
+  });
+  if(cotg && encounter?.cotgAuthorship && !encounter.identity)
+    for(const slot of slots)slot.cotgAuthorship=encounter.cotgAuthorship;
+  if(!cotg&&table&&!encounter)for(const slot of slots){
     if(slot.slot===0&&questSeed)continue; // Existing quest contacts retain their authored identity bindings.
     const h=Inhabitants.hash(`${table.seed}:${geoKey}:population:${slot.slot}`);let draw=0;
     const selected=ecology.choose(table,campaignSetting?.city?.populationMix,()=>((h+Math.imul(++draw,2654435761))>>>0)/4294967296);
@@ -89,6 +99,7 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
     for(const slot of slots){
       if(encounter?.identity)continue;
       if(slot.slot===0&&introduceQuest)continue;
+      if(cotg)continue; // CotG names are authored with their creatures, not suggested from a fixed syllable palette.
       const profile=nameProfiles.get(slot.slot)||(encounter?.races?.length===1?encounter.catalog?.[0]?.nameParts:null);
       slot.nameSuggestion=GeneratedNames.generate({seed:`${table?.seed||roomName}:${geoKey}:${encounter?'encounter':'resident'}:${slot.slot}`,
         profile,used:reservedNames,isReserved:name=>!!Pantheon.name(name)});
@@ -102,6 +113,10 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
       accepted.filter(requirement.qualifies).length - (civilianTotal - accepted.filter(row=>!row.engineEncounter).length - slots.filter(slot=>!slot.engineEncounter).length)) }));
     $.model = 'gpt-4.1-mini';
     $.temperature = 0.85;
+    if(cotg&&!encounter?.identity){
+      await $.user`${CotgAuthoring.foundation(roomName)}`;
+      if(slots.some(slot=>slot.cotgAuthorship))await $.user`${CotgAuthoring.guidance(slots)}`;
+    }
     const encounterGuidance = Balance.guidance(slots, accepted);
     if (encounterGuidance) await $.user(encounterGuidance);
     if(budget)await $.user('SAVED ENCOUNTER DISPOSITIONS: '+JSON.stringify({profile:budget.profile,groups:budget.groups})+
@@ -125,7 +140,7 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
 ${Lore.GUIDANCE}
 ${require('./cityCompletion').populationGuidance(campaignSetting)}
 ${require('./planarPortals').describe(campaignSetting?.planarRealm)}
-${encounter ? `SUPPLEMENTAL RANDOM ENCOUNTER, not the regular cast: ${encounter.theme || 'Choose a coherent local encounter theme that contrasts with the existing residents.'}. You may decline by returning skip:true and inhabitants:[]. Otherwise skip:false and exactly ${count} individuals. Choose race ONLY from the exact catalog enum. Creature metadata (data): ${JSON.stringify(encounter.catalog || [])}. Use each selected creature's description to derive suitable anatomy, intelligence, behavior, history, personality, voice, motivations and activities. A beast can express itself through calls or simple impressions, not an incongruous learned biography; an intelligent native can have culture and personal stakes. Do not assign every creature its stereotype or invent SRD special mechanics: petrification, domination, teleporting and other catalog traits are descriptive unless supported by existing engine spells. This is an extra small local encounter, never a replacement quest cast or a raid on the whole level.` : ''}
+${encounter ? `SUPPLEMENTAL RANDOM ENCOUNTER, not the regular cast: ${encounter.theme || 'Choose a coherent local encounter theme that contrasts with the existing residents.'}. ${encounter.required||encounter.identity?'Author exactly the requested individuals; this selected encounter cannot be skipped.':`You may decline by returning skip:true and inhabitants:[]. Otherwise skip:false and exactly ${count} individuals.`} ${catalogBound?`Choose race ONLY from the exact catalog enum. Creature metadata (data): ${JSON.stringify(encounter.catalog || [])}. Use each selected creature's description to derive suitable anatomy, intelligence, behavior, history, personality, voice, motivations and activities.`:'Author races and custom classes through the original CotG foundation and this group\'s secondary-influence plan; no fixed race enum applies.'} A beast can express itself through calls or simple impressions, not an incongruous learned biography; an intelligent native can have culture and personal stakes. Do not assign every creature its stereotype or invent SRD special mechanics: petrification, domination, teleporting and other catalog traits are descriptive unless supported by existing engine spells. This is an extra small local encounter, never a replacement quest cast or a raid on the whole level.` : ''}
 Room: ${roomName}. Description: ${roomDescription}. Current quest: ${quest || 'None'}.
 These are fantasy races for an intelligent or unintelligent animal, monster, spirit or other NPC including ordinary residents from the underworld plane, Tartarus, a vast wasteland with a yellowish sky and vast mountains, consumed by hellish sandstorms and other winds, dark magics, ferocious monsters, dragons (celestial and otherwise) high magical beings and other entities of pure energy and form, angels, powerful demons, never gods or goddesses. The engine alone stages persistent divine visitors; do not use names or aliases from this reserved pantheon: ${Pantheon.names.join(', ')}. Arithus never appears outside the final throne-room encounter.
 Regional community facts (read-only): ${JSON.stringify(campaignSetting || {})}. These are BACKGROUND, not a script for every individual's occupation or worry. Respect actual ecology, institutions and allegiances while inventing distinct local lives and interests. Regional trades are possibilities, not a closed profession list; a regional pressure is not every room's scenario. Residents of a settled place are not automatically enemies; the engine's allegiance slots below are authoritative. Never invent a payable contract, money, shop inventory or quest outcome; the engine supplies these separately.
@@ -149,8 +164,9 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     const Variety = require('./inhabitantVariety');
     await $.user`${Variety.prompt(Variety.brief(rooms, geoKey, { includeCurrent: !!encounter }), { starting, encounter: !!encounter })}`;
     }
+    if(starterPlan&&!local)await $.user`${require('./cotgStarterRecruitment').guidance(slots)}`;
     if(encounter?.required)await $.user('ENGINE-SELECTED ENCOUNTER: author every requested slot with the supplied cohort allegiance. This encounter was already rolled by the engine; skip:true is not permitted. Do not reroll its disposition or replace it with peaceful workers.');
-    if(local)await $.user`Use each supplied slot.lineage as its exact race, when present. slot.nameSuggestion is optional for NEW random individuals. Vary first names, surnames and sound patterns. Author their own lives and voices. Preserve all fixed quest contacts, cultivated characters and saved names; never rename them.`;
+    if(local)await $.user`${cotg?`Author new races and custom class titles from the CotG foundation and secondary-influence plans, without a fixed lineage or name palette. Preserve existing citizen identities and any explicit encounter enum. Author their own names, lives and voices; never rename a saved character.`:`Use each supplied slot.lineage as its exact race, when present. slot.nameSuggestion is optional for NEW random individuals. Vary first names, surnames and sound patterns. Author their own lives and voices. Preserve all fixed quest contacts, cultivated characters and saved names; never rename them.`}`;
     else{
       if(require('./settingLayer').current())await $.user`${GeneratedNames.instructions}`;
       if(slots.some(s=>s.nameSuggestion))await $.user`OPTIONAL PROCEDURAL NAME SUGGESTIONS: ${JSON.stringify(slots.filter(s=>s.nameSuggestion).map(s=>({slot:s.slot,name:s.nameSuggestion})))}. You may use or improve these unused names for NEW random individuals. They do not replace fixed quest contacts, saved identities, species names or the cultivated campaign cast. Author each individual's own history, personality and voice; no prefab biography is implied.`;
@@ -163,7 +179,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
       retryHint: 'For each resident, dialogue must be an array of exactly 3 separate, nonblank authored remarks: a greeting or threat, a local remark, and a personal remark. Do not return one combined entry, duplicate a remark, pad missing entries, or split one sentence to fake three remarks. There is no dialogue word-count limit. If a name is duplicated or reserved, invent a genuinely different identity, not a one-letter spelling variant of the rejected name.',
       maxTokens: encounter ? 4000 : 8000,
       parameters: { ...(encounter && !encounter.required ? { skip: Boolean } : {}), inhabitants: { type: Contracts.list({ slot: { type: Number, minimum: slots[0].slot, maximum: slots.at(-1).slot, enum: slots.map(s => s.slot), multipleOf: 1 }, name: encounter?.identity?Contracts.choice([encounter.identity.name]):Contracts.nonblankText(70),
-        race: encounter ? Contracts.choice(encounter.races) : Contracts.nonblankText(55), class: Contracts.nonblankText(80), combatRole: Contracts.choice(['Warrior', 'Spellcaster']),
+        race: catalogBound ? Contracts.choice(encounter.races) : Contracts.nonblankText(55), class: Contracts.nonblankText(80), combatRole: Contracts.choice(['Warrior', 'Spellcaster']),
         combatArchetype: Contracts.choice(SpellRules.archetypes), spellPreferences: [String],
         job: Contracts.nonblankText(70), activity: Contracts.nonblankText(140), personality: Contracts.nonblankText(220), voice: Contracts.nonblankText(140),
         history: Contracts.nonblankText(), motivation: Contracts.nonblankText(), routine: Contracts.choice(['guard', 'patrol', 'work', 'forage', 'wander', 'rest']),
@@ -193,7 +209,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
             throw Error(`Slot ${row.slot} has an invalid combat role or archetype.`);
           if (row.allegiance !== undefined && !['Friendly', 'Neutral', 'Hostile'].includes(row.allegiance)) throw Error(`Slot ${row.slot} has an invalid allegiance.`);
           if (row.homeSite !== undefined && !homeSites.includes(row.homeSite)) throw Error(`Slot ${row.slot} has an unknown home site.`);
-          if (encounter && !encounter.races.includes(row.race)) throw Error(`Slot ${row.slot} race is outside the encounter catalog.`);
+          if (catalogBound && !encounter.races.includes(row.race)) throw Error(`Slot ${row.slot} race is outside the encounter catalog.`);
           const lineage=slots.find(s=>s.slot===row.slot)?.lineage;
           if(lineage&&row.race!==lineage)throw Error(`Slot ${row.slot} race must match its saved world population sample: ${lineage}.`);
           const name = GeneratedNames.clean(row.name).trim();
@@ -289,12 +305,19 @@ Each individual needs a UNIQUE short history and personality that suit their rac
   if(venue&&!encounter)for(const [i,actor]of Object.values(population.actors).entries())actor.occupation={
     ...require('./cityActivities').assignment(venue.type,i,`${geoKey}:${actor.name}`,venue),activity:actor.activity,duty:actor.job,routine:actor.routine};
   population.authoredAt = Date.now();
+  if(cotg&&slots.some(slot=>slot.cotgAuthorship))CotgAuthoring.record(population,descriptors);
   if (village) population.settlement = { id: campaignSetting.village.id, hub: campaignSetting.village.venue === 'commons' };
   Inhabitants.sync(population, Inhabitants.parseBlocks(sheets));
+  if(starterPlan){
+    for(const [index,descriptor] of descriptors.entries())if(descriptor.starterRecruitmentRole && population.actors[normalized[index]?.name])Object.assign(population.actors[normalized[index].name],{
+      starterRecruitmentRole:descriptor.starterRecruitmentRole,...(descriptor.recruitable===false?{recruitable:false}:{})});
+    require('./cotgStarterRecruitment').record(population,starterPlan);
+  }
   if (questSeed && ['Neutral', 'Friendly'].includes(normalized[0]?.allegiance)) population.questIntroduction = {
     questId: String(Inhabitants.hash(String(quest).trim())), speaker: normalized[0].name, status: 'pending',
     hook: String(normalized[0].dialogue[0] || '') };
   console.info('[InhabitantGeneration]', JSON.stringify({ geoKey, status: 'generated', names: normalized.map(actor => actor.name), starting,
+    ...(population.cotgAuthorship?{cotgAuthorship:population.cotgAuthorship}:{}),
     ...(budget?{encounterGroups:population.encounterBudget.groups.map(group=>({id:group.id,allegiance:group.allegiance,members:group.size}))}:{}),
     ...(population.encounterBalance ? {partySize:population.encounterBalance.partySize,settled,
       partyLevel:population.encounterBalance.partyLevel,hostileLevels:characters.filter(actor=>actor.State==='Hostile').map(actor=>actor.Level),

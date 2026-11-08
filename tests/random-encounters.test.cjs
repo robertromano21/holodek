@@ -88,11 +88,11 @@ test('regular inhabitants retain Tartarus race notes and free-form races', async
   assert.match(prompt, /Arithus never appears outside the final throne-room encounter/);
 });
 
-for (const indoor of [true, false]) test(`on-the-fly ${indoor ? 'indoor' : 'outdoor'} additions preserve the regular cast, use enums and send creature metadata`, async () => {
-  const ctx = setup(indoor), count = E.opportunity(ctx.state,ctx.visit,ctx.player,200000).rules.groupSize, names = Catalog.map(r => r.name);
+for (const indoor of [true, false]) test(`unrestricted CotG ${indoor ? 'indoor' : 'outdoor'} additions preserve the regular cast without a race enum`, async () => {
+  const ctx = setup(indoor), count = E.opportunity(ctx.state,ctx.visit,ctx.player,200000).rules.groupSize;
   const rows = fixtures(count, Array.from({ length: count }, (_, slot) => ({ slot, name: `Unfamiliar Soul ${slot}`, race: 'Allip',
     allegiance: 'Hostile', encounterId: 'lost-caravan', history: 'Haunts a forgotten caravan route. Its tormented murmurs preserve one broken memory.' })));
-  const rt = runtime({ skip: false, inhabitants: rows }, options => assert.deepEqual(options.parameters.inhabitants.type[0].type.race.enum, names));
+  const rt = runtime({ skip: false, inhabitants: rows }, options => assert.equal(options.parameters.inhabitants.type[0].type.race.enum, undefined));
   const old = JSON.stringify(ctx.p.actors['Existing Watch']);
   const result = await E.maybeGenerate({ ...ctx, runtime: rt, now: 200000, random:()=>0 });
   assert.equal(ctx.p.randomEncounters.count, 1); assert.equal(Object.keys(ctx.p.actors).length, count + 1);
@@ -103,9 +103,24 @@ for (const indoor of [true, false]) test(`on-the-fly ${indoor ? 'indoor' : 'outd
     assert.ok(Math.hypot(actor.position.x + .5 - ctx.player.x, actor.position.y + .5 - ctx.player.y) >= 12);
     const level=I.parseBlocks(actor.sheet)[0].level;assert.ok(level>=3&&level<=5);
   }
-  assert.ok(rt.prompts.some(p => p.includes('Tormented, babbling undead') && /derive suitable anatomy, intelligence, behavior, history, personality/.test(p)));
+  assert.ok(rt.prompts.some(p => p.includes('ORIGINAL CREATURE AUTHORING FOUNDATION')));
+  assert.ok(rt.prompts.some(p => p.includes('"mode":"unrestricted"')));
+  assert.ok(!rt.prompts.some(p => p.includes('Tormented, babbling undead')),'The unrestricted branch does not send an SRD creature palette.');
   assert.ok(rt.prompts.some(p => p.includes('These are fantasy races for an intelligent or unintelligent animal, monster, spirit') &&
     p.includes('Supplemental encounters have NO reserved workers') && p.includes('never gods or goddesses')));
+});
+
+test('the CotG 35-percent branch supplies a secondary reference without forcing its race or importing its mechanics',async()=>{
+  const ctx=setup(),count=E.opportunity(ctx.state,ctx.visit,ctx.player,200000).rules.groupSize;
+  const race='Unwritten Spirit of the Ashen Fold';
+  const rows=fixtures(count,Array.from({length:count},(_,slot)=>({slot,name:'Ashfold Soul '+slot,race,allegiance:'Hostile',encounterId:'ashfold'})));
+  const rt=runtime({inhabitants:rows},request=>assert.equal(request.parameters.inhabitants.type[0].type.race.enum,undefined));
+  await E.maybeGenerate({...ctx,runtime:rt,now:200000,random:purpose=>purpose==='authorship'?.65:0});
+  assert.equal(ctx.p.randomEncounters.count,1);
+  const group=ctx.p.groups.find(group=>group.supplemental);
+  assert.equal(group.cotgAuthorship[0].mode,'informed');assert.ok(group.cotgAuthorship[0].reference.name);
+  assert.ok(group.members.every(name=>ctx.p.actors[name].race===race));
+  assert.ok(rt.prompts.some(p=>p.includes('inspiration, never a replacement setting')));
 });
 
 test('unsupported races are rejected, while a model-declined encounter adds no manufactured fallback', async () => {

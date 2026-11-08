@@ -34,7 +34,7 @@ function recoverable(error, phase = 'validation') {
   const code = String(error?.code || ''), message = String(error?.message || '');
   if (/CANCEL|ABORT|REFUS|QUOTA|AUTH|STALE|CONTEXT_BUDGET|UNAVAILABLE|QUEUE_FULL/.test(code) ||
       error?.fatal === true || error?.name === 'AbortError' || [401, 403, 429].includes(error?.status) ||
-      /declined|refus(?:ed|al)|exhausted quota|invalid api key|unavailable|ECONNREFUSED|ENOTFOUND|Connection error|no (?:OpenAI|xAI).*(?:client|key)|cancelled|canceled|stale (?:run|task)|unsupported.*schema|invalid.*schema/i.test(message)) return false;
+      /(?:provider|model|client)[^.!?]*(?:declined|refused|refusal|unavailable)|exhausted quota|invalid api key|ECONNREFUSED|ENOTFOUND|Connection error|no (?:OpenAI|xAI).*(?:client|key)|cancelled|canceled|stale (?:run|task)|unsupported.*schema|invalid.*schema/i.test(message)) return false;
   if (phase !== 'transport') return true;
   return ['PC_MODEL_EMPTY', 'MODEL_EMPTY_FINAL', 'MODEL_OUTPUT_LIMIT', 'PC_MODEL_OUTPUT_LIMIT', 'MODEL_SCHEMA'].includes(code) ||
     /structured|schema|function call|returned text/i.test(message);

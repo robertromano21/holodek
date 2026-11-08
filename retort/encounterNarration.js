@@ -32,7 +32,7 @@ async function narrateEncounter({ state, service, visit, isCurrent = () => true,
   const records = Campaign.exportRecords(state).filter(row => row.kind !== 'biography').slice(Prompts.isHolodek1() ? -6 : -24);
   const sequence = state.getCampaignMemory?.()?.sequence;
   const Favors = require('./residentFavors');
-  const socialInteractions = Favors.dialogueOptions(state, targets).map(option => ({ ...option,
+  const socialInteractions = Favors.dialogueOptions(state, targets,{userInput:'Approach '+targets.join(', ')}).map(option => ({ ...option,
     actions: option.actions.filter(action => ['none','offer-favor','discuss-favor'].includes(action)) })), socialActions = [];
   console.info('[EncounterNarration]', JSON.stringify({ status: 'requested', runId, geoKey, targets, historyChars: history.length, records: records.length }));
   const parsed = await runtime.run(runtime.retort(async $ => {
@@ -93,8 +93,9 @@ Automatic encounter: the player has just approached these existing residents: ${
   Campaign.rememberDialogue(state, population, parsed.dialogue, 'encounter-dialogue');
   Campaign.rememberRoomHistory(state, '', parsed.content, before);
   service.save(population);
+  const recruitmentRequests=Favors.presentation(state);
   console.info('[EncounterNarration]', JSON.stringify({ status: 'delivered', runId, geoKey, speakers: parsed.dialogue.map(row => row.speaker), storyChars: parsed.content.length }));
-  return { ...visit, dialogue: parsed.dialogue, story: { content: parsed.content, dialogue: parsed.dialogue,
+  return { ...visit, recruitmentRequests, dialogue: parsed.dialogue, story: { content: parsed.content, dialogue: parsed.dialogue,recruitmentRequests,
     geoKey, runId, eventId: require('node:crypto').randomUUID(), population, consoleText: state.getUpdatedGameConsole() } };
 }
 module.exports = { narrateEncounter, replayHistory };

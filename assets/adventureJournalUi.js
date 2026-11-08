@@ -19,7 +19,10 @@
     content.append(section('Rumors', data.rumors.map(r => `${r.source}: ${r.text}\n${r.status}`)));
     content.append(section('Faction Standing', data.factions.factions.map(f => `${f.name}: ${f.standing} (${f.score > 0 ? '+' : ''}${f.score})`)));
     content.append(section('Remembered Decisions', data.factions.decisions.map(d => d.summary)));
-    content.append(section('Local Contracts', data.contracts.map(c => `${c.status}: ${c.description}${c.progress?'\n'+c.progress:''}${c.recruited?'\nJoined the party.':''}`)));
+    const recruitment=c=>c.reward?.type==='recruitment';
+    const entry=c=>`${c.status}: ${c.description}${c.progress?'\n'+c.progress:''}${c.recruited?'\nJoined the party.':''}`;
+    content.append(section('Recruitment Invitations', data.contracts.filter(recruitment).map(entry)));
+    content.append(section('Local Contracts', data.contracts.filter(c=>!recruitment(c)).map(entry)));
     content.append(section('Completed Obligations', data.history.map(h => `${h.title}: ${h.description}${h.outcome?'\n'+h.outcome:''}`)));
   }
   function position(popup) {

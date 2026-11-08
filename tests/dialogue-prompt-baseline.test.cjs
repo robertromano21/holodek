@@ -8,7 +8,7 @@ const Profiles = require('../assets/characterProfiles');
 const inhabitants = require('./fixtures/inhabitants.cjs');
 const { batchRows, slotIds } = require('./fixtures/inhabitant-batch.cjs');
 
-for (const [geoKey, indoor, count] of [['0,0,0', true, 1], ['1,0,0', true, 8], ['2,0,0', false, 16]]) {
+for (const [geoKey, indoor, count] of [['0,0,0', true, 2], ['1,0,0', true, 8], ['2,0,0', false, 16]]) {
   test(`${geoKey}: authored residents retain regional context without the added public-lore instruction`, async () => {
     const prompts = [], requests = [], rows = inhabitants(count), before = JSON.stringify(rows);
     const agent = { user: (parts, ...values) => prompts.push(templateContent(parts, ...values)),

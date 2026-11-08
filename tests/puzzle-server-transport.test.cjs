@@ -8,13 +8,14 @@ const quiet = { log() {}, info() {}, warn() {}, error() {} };
 function fixture({ held = false, actionOnly = false, newlySolved = false } = {}) {
   let handler, resolve, calls = 0, traits = 0;
   const tasks = new Map(), definition = PhysicalPuzzles.fallback('test', 'Archive');
-  const state = { getGamePaused: () => false, isCharacterGenerationInProgress: () => false,
+  const state = { getGamePaused: () => false, isCharacterGenerationInProgress: () => false, getDungeonRunId: () => 'puzzle-run',
     getLastCoords: () => ({ x: 0, y: 0, z: 0 }), getRoomDungeon: () => ({ physicalPuzzle: { definition } }),
     getCombatMode: () => 'Combat Map-Based', getUpdatedGameConsole: () => 'Coordinates: X: 0, Y: 0, Z: 0',
     getCombatCharactersString: () => '[]', getRoomNameDatabase: () => '{}', getCurrentQuest: () => 'None' };
   const result = { content: 'A result.', actionOnly };
   const pending = held ? new Promise(done => resolve = () => done(result)) : Promise.resolve(result);
   const context = { sharedState: state, PhysicalPuzzles, tasks, inputTaskInFlight: false, console: quiet,
+    require:require('node:module').createRequire(require.resolve('../server.js')),populationService:{},
     Economy: { refresh() {} },
     GameLogContent: require('../assets/gameLogContent'), SidVoice: { prefetch: rows => rows },
     app: { post: (_path, callback) => handler = callback }, broadcast() {}, actionDice: { end() {} },

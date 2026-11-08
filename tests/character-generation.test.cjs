@@ -57,7 +57,7 @@ test('actual Ruined Temple creation delegates to the regional generator, while p
   await assert.rejects(sandbox.generateMonstersForRoomUsingGPT($, 'Lair', 'A lair.'), /legacy boss branch/);
 });
 
-for (const count of [1, 4]) test(`Ruined Temple's ${count} friendly residents receive authored histories, voices and persistent profiles in one call`, async () => {
+for (const count of [2, 4]) test(`Ruined Temple's ${count} friendly residents receive authored histories, voices and persistent profiles in one call`, async () => {
   const rows = inhabitants(count), a = agent({ inhabitants: rows });
   const result = await generateInhabitants(a, { ...context, quest: 'Existing quest', questSeed: true }, { ...rules,
     random: (min, max) => max === 5 ? count : min });
@@ -78,7 +78,7 @@ for (const count of [1, 4]) test(`Ruined Temple's ${count} friendly residents re
 });
 
 for (const [label, mutate, expected] of [
-  ['empty array', () => [], /exactly 1 inhabitants/],
+  ['empty array', () => [], /exactly 2 inhabitants/],
   ['missing biography', rows => { delete rows[0].history; return rows; }, /Slot 0.history/],
   ['missing voice', rows => { delete rows[0].voice; return rows; }, /Slot 0.voice/],
   ['blank personality', rows => { rows[0].personality = ''; return rows; }, /Slot 0.personality/],
@@ -87,7 +87,7 @@ for (const [label, mutate, expected] of [
   ['party collision', rows => { rows[0].name = 'Mortacia'; return rows; }, /reserved name/],
   ['missing greeting', rows => { rows[0].dialogue = []; return rows; }, /dialogue requires/]
 ]) test(`invalid inhabitant generation: ${label} raises a diagnostic error, never a replacement resident`, async () => {
-  const a = agent({ inhabitants: mutate(inhabitants(1)) }); let rolls = 0;
+  const a = agent({ inhabitants: mutate(inhabitants(2)) }); let rolls = 0;
   await assert.rejects(generateInhabitants(a, context, { ...rules, level: () => { rolls++; return 1; } }), expected);
   assert.equal(a.requests.length, 4, 'Initial attempt plus three corrections, never an unbounded retry.'); assert.equal(rolls, 0, 'Validate complete cast before allocating stats or equipment.');
 });
@@ -139,11 +139,12 @@ test('completing a previously authored partial biography preserves its establish
   assert.match(a.prompts[0], /basalt bridge with her sister/);
 });
 
-test('4.1 Mini and Luna send identical character-writing prompts and inputs for the same starting or regional cast', async () => {
+test('4.1 Mini and Luna send identical character-writing prompts and inputs for the same starting or regional cast', async t => {
+  t.mock.method(Math,'random',()=>.5);
   for (const geoKey of ['0,0,0', '1,0,0']) {
     const captures = [];
     for (const id of ['gpt-4.1-mini', 'gpt-6-luna']) {
-      const requests = [], rows = inhabitants(geoKey === '0,0,0' ? 1 : 8).map(row => ({
+      const requests = [], rows = inhabitants(geoKey === '0,0,0' ? 2 : 8).map(row => ({
         ...row, allegiance: geoKey === '0,0,0' ? 'Friendly' : row.slot < 3 ? 'Neutral' : 'Hostile',
         encounterId: 'local-' + Math.floor(row.slot / 3), homeSite: 'commons'
       }));

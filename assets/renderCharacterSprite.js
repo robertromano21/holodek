@@ -46,6 +46,15 @@ function isMortaciaPortrait(character,spriteSpec=null) {
   const name=String(character?.name||character?.Name||spriteSpec?.name||'').replace(/^Name:\s*/i,'').trim();
   return /^mortacia\b/i.test(name);
 }
+// The approved knight token replaces his old saved 2D art once, without touching his spec or anyone else.
+function refreshSuzerainSpriteArt(character) {
+  if(isMortaciaPortrait(character)||!isSuzerainPortrait(character))return false;
+  const revision='suzerain-reference-walk-1',sprite=character.sprite;
+  if(!sprite?.dataUrl||sprite.artRevision===revision)return false;
+  const canvas=createSuzerainReferenceCanvas();
+  character.sprite={...sprite,dataUrl:canvas.toDataURL('image/png'),artRevision:revision};
+  return true;
+}
 function refreshMortaciaSpriteArt(character) {
   if(!isMortaciaPortrait(character))return false;
   const revision='mortacia-reference-walk-6',sprite=character.sprite;
@@ -663,7 +672,7 @@ function getSuzerainStarterFamily(variant = 0) {
 // Draw order: wing (back), legs, torso (costume), head, arm+hand, sword (front), details/outlines.
 // All positions in base pixels; *u at draw time. Center chosen so the figure sits plumb and centered like the ref.
 // Approved 2D reference pose. Kept independent of the detailed 3D preset.
-function createMortaciaReferenceCanvas(frame=0) {
+function createMortaciaReferenceCanvas(frame=0, action=null) {
   const canvas=createCanvas(BASE_SIZE*UPSCALE,BASE_SIZE*UPSCALE),ctx=canvas.getContext('2d');
   const unit=3;
   canvas._combatBodyHeight=24*unit;
@@ -671,7 +680,7 @@ function createMortaciaReferenceCanvas(frame=0) {
     hair:['#f4cd8b','#efc780'],hairShadow:['#d3ad69'],metal:['#f4ce8e']};
   const phase=Number.isFinite(frame)?Math.abs(Math.floor(frame))%4:0;
   // Frame 1's horizontal alignment keeps the blade visibly two pixels wide on the map.
-  const gripX=-1,gripY=[1,2,1,0][phase];
+  const gripX=action==='attack'?[-1,3,3,-1][phase]:-1,gripY=action==='attack'?[1,0,3,1][phase]:[1,2,1,0][phase];
   const rect=(x,y,w,h,color)=>{
     const left=Math.round(x*unit),top=Math.round(y*unit);
     ctx.fillStyle=color;ctx.fillRect(left,top,Math.round((x+w)*unit)-left,Math.round((y+h)*unit)-top);
@@ -735,10 +744,118 @@ function createMortaciaReferenceCanvas(frame=0) {
   const reach=Math.max(Math.abs(gripX-1),gripY);
   for(let step=0;step<=reach;step++)rect(13+Math.round((gripX-1)*step/reach),14+Math.round(gripY*step/reach),1,1,'#717372');
   // Translate the whole grip/weapon assembly together; lowering avoids clipping the tip.
-  const heldRect=(x,y,w,h,color)=>rect(x+gripX,y+gripY,w,h,color);
+  const heldRect=(x,y,w,h,color)=>{
+    if(action!=='attack')return rect(x+gripX,y+gripY,w,h,color);
+    // Rotate the original hand, hilt and blade together on the native pixel grid.
+    const angle=[.35,-1.1,-1.55,-.1][phase],c=Math.cos(angle),si=Math.sin(angle);
+    for(let yy=y;yy<y+h;yy+=.5)for(let xx=x;xx<x+w;xx+=.5){
+      const dx=xx-11,dy=yy-14;rect(11+gripX+Math.round(dx*c-dy*si),14+gripY+Math.round(dx*si+dy*c),1,1,color);
+    }
+  };
   heldRect(10,14,1.75,1.75,'#d5b79c');heldRect(11.5,14,.5,.75,'#d5b79c');
   heldRect(10,0,1,11,'#f4ce8e');heldRect(10,11,1,2,'#757672');
   heldRect(9,13,3,1,'#6b6d69');heldRect(9,16,2,1,'#6b6d69');
+  return canvas;
+}
+
+function isSuzerainPortrait(character,spriteSpec=null){
+  const name=String(character?.name||character?.Name||spriteSpec?.name||'').replace(/^Name:\s*/i,'').trim();
+  return /^suzerain\b/i.test(name)&&!getProceduralSpec(character,spriteSpec);
+}
+// Approved 2D knight: left-facing profile on the same 3px native grid as the goddess token.
+// Great helm with visor slit and a red crest, layered pauldron, segmented breastplate and fauld,
+// plated limbs, a red cape trailing behind, and a long sword held two-handed, tip up.
+// Walk frames stride the legs; attack frames swing the whole hand/hilt/blade assembly while the
+// helm and crest stay one rigid piece that only translates with the body (nothing stretches).
+function createSuzerainReferenceCanvas(frame=0, action=null){
+  const canvas=createCanvas(BASE_SIZE*UPSCALE,BASE_SIZE*UPSCALE),ctx=canvas.getContext('2d');
+  const unit=3;
+  canvas._combatBodyHeight=24*unit;
+  canvas._retroColorRoles={metal:['#868e98','#b4bcc6','#dfe5ec','#5d646d'],cape:['#8e1c1c','#b82a2a','#5e1010']};
+  ctx.imageSmoothingEnabled=false;
+  const phase=Number.isFinite(frame)?Math.abs(Math.floor(frame))%4:0,atk=action==='attack';
+  const rect=(x,y,w,h,color)=>{
+    const left=Math.round(x*unit),top=Math.round(y*unit);
+    ctx.fillStyle=color;ctx.fillRect(left,top,Math.round((x+w)*unit)-left,Math.round((y+h)*unit)-top);
+  };
+  const S0='#30353c',S1='#5d646d',S2='#868e98',S3='#b4bcc6',S4='#dfe5ec',SLIT='#121418';
+  const R0='#5e1010',R1='#8e1c1c',R2='#b82a2a',R3='#d84a3e',G='#c49a3c',G2='#8a6a24';
+  const B='#e4e9f0',B2='#a2aab6',GRIP='#4a3020';
+  // body offsets: walk bobs on contact frames; attack leans back on wind-up, forward on the strike
+  const bx=atk?[1,-1,-1,0][phase]:0,by=atk?[0,0,1,0][phase]:[0,1,0,1][phase];
+  // secondary motion: the cape and crest settle a beat after the body
+  const capeSway=atk?[-1,2,2,1][phase]:[0,1,0,-1][phase],crestLag=atk?[0,1,1,1][phase]:[0,1,0,1][phase];
+  // --- cape (behind everything) ---
+  for(let y=11;y<=29;y++){
+    const k=(y-11)/18,x0=16+bx+Math.floor((y-11)*0.17)+Math.round(capeSway*k*k),w=3+Math.floor((y-11)/5);
+    const yy=y+(y<14?by:0);
+    rect(x0,yy,w,1,R1);
+    rect(x0+w-1,yy,1,1,R0);
+    if(y>13){rect(x0+1+((y>>1)&1),yy,1,1,y%3?R0:R1);if(w>4)rect(x0+3,yy,1,1,R2);}
+    if(y<20)rect(x0,yy,1,1,R2);
+  }
+  for(let x=0;x<7;x+=2)rect(19+Math.round(capeSway)+x,30,1,1,R0); // ragged hem
+  // --- legs: plated greaves with knee cops and sabatons ---
+  const legs=atk?[
+      [{hip:15,knee:16,ankle:17,lift:0},{hip:13,knee:12,ankle:11,lift:0}],
+      [{hip:15,knee:16,ankle:17,lift:0},{hip:13,knee:11,ankle:10,lift:0}],
+      [{hip:15,knee:17,ankle:18,lift:0},{hip:13,knee:11,ankle:10,lift:0}],
+      [{hip:15,knee:16,ankle:17,lift:0},{hip:13,knee:12,ankle:11,lift:0}]][phase]
+    :[[{hip:15,knee:15,ankle:15,lift:0},{hip:13,knee:13,ankle:13,lift:0}],
+      [{hip:15,knee:16,ankle:17,lift:0},{hip:13,knee:12,ankle:11,lift:0}],
+      [{hip:15,knee:15,ankle:14,lift:2},{hip:13,knee:13,ankle:14,lift:0}],
+      [{hip:15,knee:13,ankle:12,lift:0},{hip:13,knee:15,ankle:16,lift:1}]][phase];
+  legs.forEach((leg,i)=>{
+    const near=i===1,base=near?S2:S1,lit=near?S3:S2,thigh=6-leg.lift,hy=20+by;
+    for(let y=0;y<thigh;y++){const x=Math.round(leg.hip+(leg.knee-leg.hip)*y/Math.max(1,thigh-1));rect(x,hy+y,2,1,base);rect(x,hy+y,1,1,lit);}
+    const ky=hy+thigh;rect(leg.knee,ky-1,2,1,near?S4:S3); // knee cop
+    const shin=31-leg.lift-ky;
+    for(let y=0;y<shin;y++){const x=Math.round(leg.knee+(leg.ankle-leg.knee)*y/Math.max(1,shin-1));rect(x,ky+y,2,1,base);rect(x+1,ky+y,1,1,near?S1:S0);}
+    rect(leg.ankle-1,30-leg.lift,3,1,S0);rect(leg.ankle-1,30-leg.lift,1,1,S1);
+  });
+  // --- fauld / tassets ---
+  rect(12+bx,19+by,5,2,S1);rect(12+bx,19+by,5,1,S2);rect(12+bx,20+by,1,1,S3);rect(14+bx,20+by,1,1,S0);
+  // --- breastplate ---
+  rect(12+bx,12+by,5,7,S2);rect(11+bx,14+by,1,3,S2);rect(16+bx,12+by,1,7,S1);
+  rect(12+bx,13+by,1,4,S3);rect(12+bx,13+by,1,1,S4);rect(11+bx,15+by,1,1,S3);
+  rect(12+bx,17+by,4,1,S1);rect(13+bx,16+by,3,1,S3); // segmented lames
+  rect(13+bx,14+by,1,1,G);rect(14+bx,13+by,1,3,G);   // holy sigil
+  rect(12+bx,18+by,5,1,G);rect(15+bx,18+by,1,1,G2);   // sword belt
+  rect(13+bx,11+by,3,1,S1);                           // gorget
+  // --- helm + crest: ONE rigid piece, only translated ---
+  const hx=bx,hy=by;
+  rect(13+hx,6+hy,4,1,S2);rect(12+hx,7+hy,5,4,S2);rect(12+hx,11+hy,4,1,S1);
+  rect(16+hx,7+hy,1,4,S1);rect(13+hx,6+hy,2,1,S4);rect(13+hx,7+hy,1,2,S3);
+  rect(11+hx,8+hy,1,3,S1);                     // visor snout
+  rect(11+hx,8+hy,3,1,SLIT);                   // eye slit
+  rect(12+hx,10+hy,1,1,S0);rect(14+hx,10+hy,1,1,S0); // breaths
+  rect(15+hx,9+hy,1,1,S3);                     // rivet
+  rect(14+hx,5+hy,2,1,G);                      // crest socket
+  rect(15+hx,2+hy,2,1,R3);rect(14+hx,3+hy,3,1,R2);rect(14+hx,4+hy,2,1,R2);rect(14+hx,3+hy,1,1,R3);
+  rect(16+hx+crestLag,4+hy,3,1,R1);rect(17+hx+crestLag,5+hy,3,1,R1);rect(17+hx+crestLag,4+hy,1,1,R2);
+  rect(19+hx+crestLag*2,6+hy,2,1,R0);
+  // --- pauldron (near shoulder) ---
+  rect(14+bx,11+by,4,2,S2);rect(14+bx,11+by,3,1,S3);rect(15+bx,11+by,1,1,S4);
+  rect(14+bx,13+by,4,1,S1);rect(15+bx,14+by,3,1,S2);rect(15+bx,15+by,3,1,S0);
+  // --- two-handed grip ---
+  // the grip sits two native px in front of the visor so a clear gap shows between blade and body
+  const gx=atk?[-3,-2,-3,-2][phase]:-2,gy=atk?[-3,0,2,1][phase]:[1,2,1,0][phase];
+  const hxp=10+bx+gx,hyp=15+by+gy;
+  const arm=(sx,sy,ex,ey,c1,c2)=>{const n=Math.max(Math.abs(ex-sx),Math.abs(ey-sy),1);for(let i=0;i<=n;i++){const x=Math.round(sx+(ex-sx)*i/n),y=Math.round(sy+(ey-sy)*i/n);rect(x,y,1,1,c1);rect(x,y+1,1,1,c2);}};
+  // far arm reaches across the chest, near arm bends at the elbow
+  arm(13+bx,13+by,hxp+1,hyp,S1,S0);
+  const ex=Math.round((15+bx+hxp)/2)+1,ey=Math.max(15+by,hyp)+1;
+  arm(15+bx,14+by,ex,ey,S2,S1);arm(ex,ey,hxp+1,hyp+1,S2,S1);rect(ex,ey,1,1,S3); // couter
+  // --- sword assembly (rotates about the grip on attacks) ---
+  const angle=atk?[.15,-1.1,-1.55,-.1][phase]:0,c=Math.cos(angle),si=Math.sin(angle);
+  const held=(x,y,w,h,color)=>{
+    for(let yy=y;yy<y+h;yy+=.5)for(let xx=x;xx<x+w;xx+=.5)rect(hxp+Math.round(xx*c-yy*si),hyp+Math.round(xx*si+yy*c),1,1,color);
+  };
+  held(0,-15,1,14,B);held(0,-16,1,1,S4);held(0,-13,.5,10,B2);   // blade + fuller
+  held(-1,-1,3,1,G);held(-1,-1,1,1,G2);                         // crossguard
+  held(0,0,1,2,GRIP);held(0,2,1,1,G);                           // grip + pommel
+  // gauntlets over the grip
+  rect(hxp-1+Math.round(-0*c),hyp,1,1,S3);rect(hxp+1,hyp,1,2,S2);rect(hxp+1,hyp+1,1,1,S1);
   return canvas;
 }
 
@@ -940,6 +1057,7 @@ function drawSuzerainExact(ctx, baseX, baseY, u, seed, palette, variant = 0) {
 // generateCharacterSprite (below) wraps it for dataUrl compat (review menu, server, <img> tags).
 function createCharacterSpriteCanvas(character, spriteSpec = null) {
   if(isMortaciaPortrait(character,spriteSpec))return createMortaciaReferenceCanvas();
+  if(isSuzerainPortrait(character,spriteSpec))return createSuzerainReferenceCanvas();
   const traitSpec = getProceduralSpec(character, spriteSpec);
   if (traitSpec) return createTraitSpriteCanvas(traitSpec, 0);
   const canvas = createCanvas(BASE_SIZE * UPSCALE, BASE_SIZE * UPSCALE);
@@ -1674,13 +1792,14 @@ function createCharacterSpriteSpec(character) {
  * Also useful for review previews (draw frames in a <canvas> and cycle with requestAnimationFrame).
  */
 function createCharacterSpriteSheetCanvas(character, spriteSpec = null, frameCount = 4) {
-  if(isMortaciaPortrait(character,spriteSpec)){
-    const frame=createMortaciaReferenceCanvas(),count=Math.max(1,Math.min(8,Math.floor(frameCount||4)));
+  if(isMortaciaPortrait(character,spriteSpec)||isSuzerainPortrait(character,spriteSpec)){
+    const ref=isMortaciaPortrait(character,spriteSpec)?createMortaciaReferenceCanvas:createSuzerainReferenceCanvas;
+    const frame=ref(),count=Math.max(1,Math.min(8,Math.floor(frameCount||4)));
     const sheet=createCanvas(frame.width*count,frame.height),ctx=sheet.getContext('2d');
     sheet._combatBodyHeight=frame._combatBodyHeight;
     sheet._retroColorRoles=frame._retroColorRoles;
     ctx.imageSmoothingEnabled=false;
-    for(let i=0;i<count;i++)ctx.drawImage(i?createMortaciaReferenceCanvas(i):frame,i*frame.width,0);
+    for(let i=0;i<count;i++)ctx.drawImage(i?ref(i):frame,i*frame.width,0);
     return sheet;
   }
   const traitSpec = getProceduralSpec(character, spriteSpec);
@@ -3093,8 +3212,9 @@ function c64Humanoid(ctx, spec, t, pal, frame, rng) {
   const p = c64Proportions(t, rng);
   const robe = ['robe', 'dress', 'cloak', 'rags'].includes(style);
   const armour = style === 'plate' || style === 'mail';
-  const step = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
-  const bob = frame === 2 ? -1 : 0;
+  const attack=ctx._combatAttack;
+  const step = attack ? [-1,2,1,0][frame] : frame === 1 ? 1 : (frame === 3 ? -1 : 0);
+  const bob = attack ? [0,1,1,0][frame] : frame === 2 ? -1 : 0;
   const lift = (t.floating || spectral) ? (-1 - (frame & 1)) : 0;
   const cx = 11;
   const tw = p.torsoW, hw = Math.max(4, Math.min(5, p.headW)), hh = Math.max(4, Math.min(5, p.headH));
@@ -3102,7 +3222,10 @@ function c64Humanoid(ctx, spec, t, pal, frame, rng) {
   const ground = 22;
   const torsoBottom = naga ? 16 : ground - legH + 1;
   const torsoY = torsoBottom - p.torsoH + bob + lift;
-  const headY = torsoY - hh;
+  // A headpiece already touching the atlas ceiling cannot bob above it.
+  const standingHeadTop=torsoBottom-p.torsoH-((t.floating||spectral)?1:0)-hh;
+  const headY = attack&&(t.genreGarb?.hat||t.genreGarb?.hair||helm!=='none'||hooded)?Math.max(torsoY-hh,standingHeadTop):torsoY-hh;
+  ctx.canvas._c64HeadY=headY;
   if(frame===0)ctx.canvas._combatBodyHeight=(ground-headY+1)*C64_U;
   const tx = cx - Math.floor(tw / 2);
   const hx = cx - Math.floor(hw / 2) + 1;
@@ -3212,11 +3335,25 @@ function c64Humanoid(ctx, spec, t, pal, frame, rng) {
   if (t.markings === 'runes' || t.markings === 'veins' || t.markings === 'cracks') c64R(ctx, cx - 1, torsoY + 2, 1, 2, c64Light(pal.glow, 0.1));
 
   // --- head (a dark rim first, so the head reads cleanly over wings / horns / cape behind it)
+  // Attack heads use the standing pixel grid, then move rigidly with the neck.
+  // Rounding each rectangle after a fractional native-scale bob changes helmet rows.
+  const standingHeadY=standingHeadTop;
+  const currentHeadY=headY;
+  const bodyCtx=ctx;
+  if(attack&&((t.wings&&t.wings!=='none')||t.outfit?.cape))c64R(ctx,tx-1,torsoY,1,p.torsoH,pal.outline);
+  {
+  const headDelta=attack?Math.round((currentHeadY-standingHeadY)*(ctx._c64Geometry?.scale||1)*C64_U):0;
+  const headY=attack?standingHeadY:ctx.canvas._c64HeadY;
+  if(attack){
+    ctx=createCanvas(bodyCtx.canvas.width,bodyCtx.canvas.height).getContext('2d');
+    ctx._c64Geometry=bodyCtx._c64Geometry;
+  }
+  ctx.save();
   const headC = skeletal || t.head === 'skull' ? pal.skin : skin;
   if ((t.wings && t.wings !== 'none') || (t.outfit && t.outfit.cape)) {
     c64R(ctx, hx, headY - 1, hw - 1, 1, pal.outline);
     c64R(ctx, hx - 1, headY, 1, hh, pal.outline);
-    c64R(ctx, tx - 1, torsoY, 1, p.torsoH, pal.outline);
+    if(!attack)c64R(ctx, tx - 1, torsoY, 1, p.torsoH, pal.outline);
   }
   c64R(ctx, hx + 1, headY, hw - 2, 1, headC);
   c64R(ctx, hx, headY + 1, hw, hh - 2, headC);
@@ -3301,24 +3438,51 @@ function c64Humanoid(ctx, spec, t, pal, frame, rng) {
     }
   }
   if (t.halo) c64R(ctx, hx, headY - 3, hw - 1, 1, '#ffe680');
+  ctx.restore();
+  if(attack){bodyCtx.drawImage(ctx.canvas,0,headDelta);ctx=bodyCtx;}
+  }
 
   // --- shield on the body, front arm + held items
   if (shield) c64Shield(ctx, shield, tx + tw, torsoY + 2, pal);
   const swing = frame === 1 ? 1 : (frame === 3 ? -1 : 0);
   const ax = tx + tw - 1;
   const armC = robe || armour || style === 'gi' ? body : (style === 'leather' || style === 'furs' ? c64Dark(pal.outfit, 0.1) : skin);
-  const handY = torsoY + p.armH;
-  const handX = ax + 1 + Math.max(0, swing);
-  if (!shield) {
+  let handY = torsoY + p.armH;
+  let handX = ax + 1 + Math.max(0, swing);
+  if(attack){
+    const ranged=weapon&&['bow','crossbow','pistol','rifle','laser_pistol','laser_rifle'].includes(weapon.type);
+    const magic=t.handGlow||(!weapon&&/mage|wizard|sorcer|priest|cleric|warlock|necromancer/i.test(spec.class||''))||weapon&&['staff','wand','orb','tome'].includes(weapon.type);
+    const arm=attack.armR;
+    handX=ax+(arm==='windup'?0:arm==='strike'?5:arm==='follow'?4:2);
+    handY=torsoY+(arm==='windup'?-1:arm==='strike'?2:arm==='follow'?(magic||ranged?2:5):p.armH-1);
+    const elbowX=ax+(arm==='windup'?-1:arm==='strike'?2:1),elbowY=torsoY+(arm==='windup'?1:3);
+    c64Line(ctx,ax,torsoY+1,elbowX,elbowY,c64Dark(armC,.2),2);
+    c64Line(ctx,elbowX,elbowY,handX,handY,armC,2);
+    c64R(ctx,handX,handY,2,1,skin);
+    const prop=weapon||handItem;
+    if(prop){
+      // Draw the same catalog prop into a cell buffer and turn it about its grip.
+      const cv=createCanvas(40*C64_U,40*C64_U),pc=cv.getContext('2d');
+      c64HeldItem(pc,prop,18,22,pal,0,1);
+      const pixels=pc.getImageData(0,0,cv.width,cv.height).data;
+      const angle=magic||ranged?[0,.3,.35,.1][frame]:[-.55,1.05,1.65,.15][frame],c=Math.cos(angle),sn=Math.sin(angle);
+      for(let y=0;y<40;y++)for(let x=0;x<40;x++){
+        const i=(x*C64_U+y*C64_U*cv.width)*4;if(!pixels[i+3])continue;
+        const dx=x-18,dy=y-22;
+        c64R(ctx,handX+Math.round(dx*c-dy*sn),handY+Math.round(dx*sn+dy*c),1,1,c64Hex([pixels[i],pixels[i+1],pixels[i+2]]));
+      }
+    }
+    if(magic&&(frame===1||frame===2))c64Dither(ctx,handX+1,handY-2,3,3,c64Light(pal.glow,.3),frame);
+  } else if (!shield) {
     c64R(ctx, ax, torsoY + 1, 2, 2, armC);
     c64R(ctx, ax + Math.max(0, swing), torsoY + 3, 2, p.armH - 3, armC);
     c64R(ctx, ax + Math.max(0, swing), torsoY + 3, 1, p.armH - 3, c64Dark(armC, 0.2));
   } else {
     c64R(ctx, ax, torsoY + 1, 1, 2, armC); // shoulder; the arm is behind the shield
   }
-  c64R(ctx, handX, handY, 2, 1, skeletal ? pal.skin : skin);
+  if(!attack)c64R(ctx, handX, handY, 2, 1, skeletal ? pal.skin : skin);
   const front = weapon || handItem;
-  if (front) c64HeldItem(ctx, front, weapon ? (C64_ONE_HANDED.includes(weapon.type) ? handX + 1 : handX + 1) : handX - 1, weapon && C64_ONE_HANDED.includes(weapon.type) ? handY : handY, pal, frame, 1);
+  if (front && !attack) c64HeldItem(ctx, front, weapon ? (C64_ONE_HANDED.includes(weapon.type) ? handX + 1 : handX + 1) : handX - 1, weapon && C64_ONE_HANDED.includes(weapon.type) ? handY : handY, pal, frame, 1);
   if (weapon && handItem) {
     if (handItem.type === 'amulet') c64R(ctx, cx, torsoY + 1, 1, 1, c64Readable(handItem.color || pal.glow, 90));
     else c64HeldItem(ctx, handItem, tx - 4, torsoY + p.armH - 1, pal, frame, 1);
@@ -3620,11 +3784,26 @@ function c64VaryPalette(pal, rng, signature) {
 
 // world1 GENRE_ARCH: genre garb (wide-brim hats, dusters, gunbelts, visors, goggles...) layered on the drawn body in
 // native cells, before the outline + colour-limit passes so it reads as part of the same sprite.
-function c64GenreGarb(ctx, garb, pal) {
+function c64GenreGarb(ctx, garb, pal, reference) {
   const GA = typeof window !== 'undefined' ? window.GenreArchitecture : (typeof require === 'function' ? require('./genreArchitecture') : null);
   if (!GA || !ctx.getImageData) return false;
   const size = ctx.canvas.width, grid = Math.floor(size / C64_U), data = ctx.getImageData(0, 0, size, size).data;
   const filled = (x, y) => x >= 0 && y >= 0 && x < grid && y < grid && data[(x * C64_U + y * C64_U * size) * 4 + 3] > 0;
+  if(reference&&(garb.hat||garb.hair)){
+    // The whole attack silhouette includes raised props. It is not a head anchor.
+    // Paint headwear once against the standing art and translate the exact pixels;
+    // even top-edge clipping must remain identical as the head bobs downward.
+    const bodyGarb={...garb};delete bodyGarb.hat;delete bodyGarb.hair;
+    const rect=(x,y,w,h,c)=>{if(w>0&&h>0&&x+w>0&&y+h>0&&x<grid&&y<grid)c64NativeRect(ctx,Math.max(0,x),Math.max(0,y),w,h,c);};
+    GA.drawGarb({grid,filled,rect},bodyGarb,pal);
+    const pixels=reference.getContext('2d').getImageData(0,0,size,size).data;
+    const headFilled=(x,y)=>x>=0&&y>=0&&x<grid&&y<grid&&pixels[(x*C64_U+y*C64_U*size)*4+3]>0;
+    const layer=createCanvas(size,size),head=layer.getContext('2d');
+    GA.drawGarb({grid,filled:headFilled,rect:(x,y,w,h,c)=>{if(w>0&&h>0&&x+w>0&&y+h>0&&x<grid&&y<grid)c64NativeRect(head,Math.max(0,x),Math.max(0,y),w,h,c);}},
+      {genre:garb.genre,spirit:garb.spirit,hat:garb.hat,hair:garb.hair},pal);
+    const dy=Math.round((ctx.canvas._c64HeadY-reference._c64HeadY)*(ctx._c64Geometry?.scale||1)*C64_U);
+    ctx.drawImage(layer,0,dy);return true;
+  }
   return GA.drawGarb({ grid, filled, rect: (x, y, w, h, c) => { if (w > 0 && h > 0 && x + w > 0 && y + h > 0 && x < grid && y < grid) c64NativeRect(ctx, Math.max(0, x), Math.max(0, y), w, h, c); } }, garb, pal);
 }
 function c64NativeDetails(ctx,t,pal){
@@ -3660,6 +3839,7 @@ function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
   const pal = c64VariantPalette(c64VaryPalette(c64PaletteFromTraits(t, rng), rng, !!t.signature), spec.variant, !!t.signature, t.bodyPlan || 'humanoid');
   const plan = t.bodyPlan || 'humanoid';
   const fr = frame | 0;
+  if(options.action==='attack')ctx._combatAttack=getProceduralApi()?.puppetPose?.('attack',fr)||{armR:['windup','strike','follow','recover'][fr]};
   if (plan === 'beast') c64Beast(ctx, spec, t, pal, fr, rng, false);
   else if (plan === 'draconic') c64Beast(ctx, spec, t, pal, fr, rng, true);
   else if (plan === 'serpent' && !t.nagaTorso) c64Serpent(ctx, spec, t, pal, fr, rng);
@@ -3667,8 +3847,13 @@ function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
   else if (plan === 'ooze') c64Ooze(ctx, spec, t, pal, fr, rng);
   else if (plan === 'elemental') c64Elemental(ctx, spec, t, pal, fr, rng);
   else c64Humanoid(ctx, spec, t, pal, fr, rng);
-  if (t.genreGarb && !['beast','draconic','serpent','spider','ooze','elemental'].includes(plan)) c64GenreGarb(ctx, t.genreGarb, pal);
+  if (!options.skipGarb&&t.genreGarb && !['beast','draconic','serpent','spider','ooze','elemental'].includes(plan)) {
+    const reference=options.action==='attack'?createTraitSpriteCanvas(spec,0,{...options,action:null,outline:false,measureBody:true,skipGarb:true}):null;
+    c64GenreGarb(ctx,t.genreGarb,pal,reference);
+  }
   c64NativeDetails(ctx,t,pal);
+  if(options.action==='attack'&&!['humanoid','skeletal','spectral','giant','insectoid','serpent'].includes(plan))c64CreatureAttack(ctx,spec,t,pal,fr);
+  else if(options.action==='attack'&&plan==='serpent'&&!t.nagaTorso)c64CreatureAttack(ctx,spec,t,pal,fr);
   if (options.outline !== false) c64OutlinePass(ctx, pal.outline, true);
   c64LimitColours(ctx, pal);
   if(fr===0&&!options.measureBody&&(Number.isFinite(canvas._combatBodyHeight)||native)){
@@ -3685,6 +3870,101 @@ function createTraitSpriteCanvas(spec, frame = 0, options = {}) {
     if(bottom>=top)canvas._combatBodyHeight=bottom-top+1;
   }
   return canvas;
+}
+
+
+// Attack-only articulation of the native painted creature, never the walk atlas.
+function c64CreatureAttack(ctx,spec,t,pal,frame){
+  const S=ctx.canvas.width,U=C64_U,g=ctx._c64Geometry||{scale:1,pad:0};
+  const src=ctx.getImageData(0,0,S,S),out=ctx.createImageData(S,S),plan=t.bodyPlan;
+  const strength=[-1,2,1,.15][frame];
+  const eye=plan==='ooze'&&(t.floating||t.eyes?.style==='cyclops'||t.head==='eyeless');
+  const chest=/mimic/i.test(spec.race||spec.name||'');
+  // Native-cell inverse sampling keeps clean edges and connected bodies without scaling the token.
+  for(let y=0;y<S;y++)for(let x=0;x<S;x++){
+    const xx=(x/U-g.pad)/g.scale,yy=(y/U-g.pad)/g.scale;
+    let sx=xx,sy=yy;
+    if(plan==='beast'||plan==='draconic'){
+      const upper=Math.max(0,Math.min(1,(22-yy)/10));sx-=strength*upper;
+      sy+=strength*Math.max(0,(xx-13)/9)*.5;
+    }else if(plan==='spider'){
+      sx-=strength*Math.max(0,Math.min(1,(22-yy)/6));sy+=strength*Math.max(0,(xx-10)/12)*.8;
+    }else if(plan==='serpent'){
+      sx-=strength*Math.max(0,Math.min(1,(20-yy)/10))*1.5;
+      sy-=strength*Math.max(0,(16-yy)/12)*.5;
+    }else if(eye){sx-=strength*.7;sy+=strength*.35;}
+    else if(plan==='ooze'){
+      const stretch=1+strength*.08;sx=11+(xx-11)/stretch-strength*.4;sy=22+(yy-22)*stretch;
+    }else if(plan==='elemental'){
+      sx-=strength*Math.max(0,(22-yy)/16);sy=22+(yy-22)/(1+strength*.035);
+    }
+    const ix=Math.round((sx*g.scale+g.pad)*U),iy=Math.round((sy*g.scale+g.pad)*U);
+    if(ix<0||iy<0||ix>=S||iy>=S)continue;
+    const a=(ix+iy*S)*4,b=(x+y*S)*4;out.data.set(src.data.subarray(a,a+4),b);
+  }
+  ctx.putImageData(out,0,0);
+  if((frame===1||frame===2)&&plan==='spider'){
+    c64Line(ctx,14,15,19,17,pal.skin,2);c64R(ctx,19,17,1,2,pal.horn);
+    c64Line(ctx,14,14,20,13,pal.skin);c64R(ctx,20,13,1,2,pal.horn);
+  }
+  if((frame===1||frame===2)&&(plan==='beast'||plan==='draconic')){
+    const x=plan==='draconic'?22:19,y=plan==='draconic'?9:14;
+    c64R(ctx,x,y,3,1,pal.outline);c64R(ctx,x,y+1,2,1,pal.horn);
+    c64Line(ctx,14,17,18,19,pal.skin,2);c64R(ctx,18,19,2,1,pal.horn);
+  }
+  if(eye&&(frame===1||frame===2))c64Line(ctx,18,10,22,10,c64Light(pal.eye,.4));
+  if(chest){
+    // Chest disguise opens into its bite; timber, bands and teeth share the existing palette.
+    c64R(ctx,5,17,14,5,pal.outfit);c64R(ctx,6,18,12,1,c64Light(pal.outfit,.2));
+    c64R(ctx,7,17,1,5,pal.metal);c64R(ctx,16,17,1,5,pal.metal);
+    const gap=[1,6,4,2][frame];c64Poly(ctx,[[5,17-gap],[18,15-gap],[19,17],[5,18]],pal.outfit2);
+    c64R(ctx,6,17-gap,12,1,pal.metal);
+    for(let x=7;x<18;x+=3)c64R(ctx,x,18-gap,1,Math.min(2,gap),pal.horn);
+  }
+}
+
+// Keep a legacy preset's painted armor, cape, palette and proportions during its attack too.
+function createReferenceCombatAttackCanvas(walk,frame){
+  const size=walk.height,unit=size/24,canvas=createCanvas(size,size),ctx=canvas.getContext('2d');
+  const src=walk.getContext('2d').getImageData(0,0,size,size),body=ctx.createImageData(size,size),prop=[];
+  const angle=[.4,-1.15,-1.4,-.15][frame],c=Math.cos(angle),sn=Math.sin(angle),shift=[1,4,5,0][frame];
+  for(let y=0;y<size;y++)for(let x=0;x<size;x++){
+    const i=(x+y*size)*4;if(!src.data[i+3])continue;
+    if((x<7*unit||x<8*unit&&y>=9*unit)&&y<16*unit)prop.push([x,y,src.data.slice(i,i+4)]);
+    else body.data.set(src.data.subarray(i,i+4),i);
+  }
+  ctx.putImageData(body,0,0);
+  // A connected bent arm carries the original blade about its original grip.
+  const handX=(7+shift)*unit,handY=(10+[0,0,3,0][frame])*unit;
+  const skin=src.data.slice((Math.round(6*unit)+Math.round(10*unit)*size)*4,(Math.round(6*unit)+Math.round(10*unit)*size)*4+3);
+  ctx.fillStyle=c64Hex(Array.from(skin));
+  const shoulder=[8*unit,10*unit],elbow=[(7+shift*.4)*unit,12*unit];
+  for(const [a,b]of[[shoulder,elbow],[elbow,[handX,handY]]]){
+    const steps=Math.ceil(Math.max(Math.abs(b[0]-a[0]),Math.abs(b[1]-a[1]))/unit);
+    for(let i=0;i<=steps;i++)ctx.fillRect(Math.round((a[0]+(b[0]-a[0])*i/Math.max(1,steps))/unit)*unit,Math.round((a[1]+(b[1]-a[1])*i/Math.max(1,steps))/unit)*unit,unit,unit);
+  }
+  for(const [x,y,color]of prop){
+    const dx=x-7*unit,dy=y-10*unit;
+    ctx.fillStyle='rgba('+color[0]+','+color[1]+','+color[2]+','+(color[3]/255)+')';
+    ctx.fillRect(Math.round((handX+dx*c-dy*sn)/unit)*unit,Math.round((handY+dx*sn+dy*c)/unit)*unit,unit,unit);
+  }
+  return canvas;
+}
+
+// Append four attacks to an existing native walk sheet without changing a single walk pixel.
+function createCombatPoseSheetCanvas(character,spriteSpec,walk){
+  const spec=getProceduralSpec(character,spriteSpec)||getProceduralApi()?.getPresetProceduralSpec?.(character?.name);
+  if(!walk||!spec?.traits)return walk;
+  const size=walk.height,atlas=createCanvas(size*8,size),ctx=atlas.getContext('2d');
+  ctx.imageSmoothingEnabled=false;ctx.drawImage(walk,0,0);
+  atlas._combatBodyHeight=walk._combatBodyHeight;atlas._retroColorRoles=walk._retroColorRoles;
+  for(let f=0;f<4;f++){
+    const pose=isMortaciaPortrait(character,spriteSpec)?createMortaciaReferenceCanvas(f,'attack'):
+      isSuzerainPortrait(character,spriteSpec)?createSuzerainReferenceCanvas(f,'attack'):
+      createTraitSpriteCanvas(spec,f,{nativeScale:walk._combatNativeScale,action:'attack'});
+    ctx.drawImage(pose,(f+4)*size,0,size,size);
+  }
+  atlas._combatAttackFrames=true;return atlas;
 }
 
 function createCombatSpriteSheetCanvas(character,spriteSpec=null,frameCount=4){
@@ -3738,12 +4018,12 @@ function traitSpriteFingerprint(spec) {
 // Safe export
 if (typeof module !== 'undefined' && module && module.exports) {
   module.exports = {
-    createMortaciaReferenceCanvas,
-    refreshMortaciaSpriteArt,
+    createMortaciaReferenceCanvas, createSuzerainReferenceCanvas,
+    refreshMortaciaSpriteArt, refreshSuzerainSpriteArt,
     generateCharacterSprite,
     createCharacterSpriteCanvas,
     createCharacterSpriteSheetCanvas,
-    createCombatSpriteSheetCanvas,
+    createCombatSpriteSheetCanvas, createCombatPoseSheetCanvas,
     extractCharacterFrameCanvases,
     createCharacterVoxelFrames,
     createSemanticCharacterVoxelFrame,
@@ -3762,10 +4042,12 @@ if (typeof module !== 'undefined' && module && module.exports) {
 
 if (typeof window !== 'undefined') {
   window.refreshMortaciaSpriteArt = refreshMortaciaSpriteArt;
+  window.refreshSuzerainSpriteArt = refreshSuzerainSpriteArt;
   window.generateCharacterSprite = generateCharacterSprite;
   window.createCharacterSpriteCanvas = createCharacterSpriteCanvas;
   window.createCharacterSpriteSheetCanvas = createCharacterSpriteSheetCanvas;
   window.createCombatSpriteSheetCanvas = createCombatSpriteSheetCanvas;
+  window.createCombatPoseSheetCanvas = createCombatPoseSheetCanvas;
   window.extractCharacterFrameCanvases = extractCharacterFrameCanvases;
   window.createCharacterVoxelFrames = createCharacterVoxelFrames;
   window.createSemanticCharacterVoxelFrame = createSemanticCharacterVoxelFrame;

@@ -5,6 +5,7 @@
   const recentSpeakers = new Map();
   const encounterStories = new Set();
   const attention = new Map();
+  const dialogueHolds=new Set();let speechEpoch=0;
   let room = null, active = null, panel, portrait, caption, words, pauseButton, status, recoveryButton, recoveryStatus;
   let recoveryPending = false;
   let lastVisit = 0, lastAutonomy = 0, visitPending = false, autonomyPending = false, pausePending = false;
@@ -193,7 +194,9 @@
       const reach = speechCheck(actor, ctx);
       if (!logged && (row.requiresNearby || (row.kind || 'turn') !== 'turn') && !reach.canSpeak &&
           (row.requiresNearby || !conversational(message, actor, ctx))) { subtitleReport('skipped', message, reach); continue; }
-      const key = `${event.geoKey}|${row.speaker}|${row.line}`;
+      // A new player request may deliberately repeat saved speech; transport retries keep the same ID.
+      const delivery = (row.kind || 'turn') === 'turn' && typeof row.utteranceId === 'string' ? '|' + row.utteranceId : '';
+      const key = `${event.geoKey}|${row.speaker}|${row.line}${delivery}`;
       if (seen.has(key) || queue.some(queued => queued.key === key)) {
         subtitleReport('duplicate', message, { reason: 'already-queued-or-displayed' }); continue;
       }
@@ -238,6 +241,7 @@
     encounterStories.add(event.eventId);
     if (encounterStories.size > 64) encounterStories.delete(encounterStories.values().next().value);
     receivePopulation(event);
+    root.CommerceUi?.receiveResult?.(event);
     Promise.resolve(root.appendDungeonEncounterLog?.(event)).catch(error => console.warn('[EncounterHistory]', error.message));
     receiveTurnDialogue(event.content, { ...event, source: 'encounter-story' });
   }
@@ -248,11 +252,21 @@
     const names = [...new Set([...I.parseSheets(event.consoleText), ...I.parseSheets(event.consoleText, 'NPCs in Party'),
       ...(context()?.actors || []).filter(a => a.type !== 'pc')].map(a => a.name))];
     const explicit = Array.isArray(event.dialogue) ? event.dialogue : [];
-    const attributed = I.extractAttributedSpeech(content, names, explicit).filter(row => !explicit.some(known =>
-      known.attribution === 'labelled' && known.speaker !== row.speaker &&
-      (known.line.includes(row.line) || row.line.includes(known.line))));
+    const attributed = I.extractAttributedSpeech(content, names, explicit).flatMap(row => {
+      const labelled=explicit.filter(known=>known.attribution==='labelled' && known.speaker===row.speaker);
+      // Keep witnessed speech in narrative order, but never extend it with quoted commands or stage directions.
+      if(labelled.length)return labelled.filter(known=>known.line.includes(row.line) || row.line.includes(known.line));
+      return explicit.some(known=>known.attribution==='labelled' &&
+        (known.line.includes(row.line) || row.line.includes(known.line)))?[]:[row];
+    });
     const rows = I.mergeAttributedSpeech(explicit, attributed);
     receiveDialogue({ ...event, source: 'retort-response', dialogue: rows.map(row => ({ ...row, kind: 'turn' })) });
+    root.CommerceUi?.dialogueQueued?.({...event,speakers:rows.map(row=>row.speaker)});
+  }
+  function hasPendingTurnSpeech(name) {
+    const matches=row=>(!name || row.speaker===name) && (row.kind || 'turn')==='turn';
+    return !!(active && matches(active) || queue.some(matches) ||
+      pendingDialogue.some(row=>row.event.geoKey===context()?.dungeon?.geoKey && row.event.dialogue?.some(matches)));
   }
   function flushPendingDialogue(ctx) {
     for (let i = 0; i < pendingDialogue.length;) {
@@ -278,7 +292,7 @@
     panel.style.bottom = Math.max(12, (root.innerHeight - bounds.top) / zoom + 28) + 'px';
   }
   function showNext(ctx, now) {
-    if (active || !queue.length) return;
+    if (dialogueHolds.size || active || !queue.length) return;
     const row = queue.shift(), actor = ctx.actors.find(a => a.name === row.speaker);
     const reach = speechCheck(actor, ctx);
     if (row.geoKey !== ctx.dungeon.geoKey || (!conversational(row, actor, ctx) && (row.requiresNearby || row.kind !== 'turn') && !reach.canSpeak &&
@@ -304,7 +318,7 @@
   function showSpeechPart(ctx, now) {
     const actor = ctx.actors.find(a => a.name === active.speaker);
     const line = active.chunks[active.part].replace(/["\u201c\u201d]/g, '').trim();
-    const row = active, part = active.part, same = () => active === row && active.part === part;
+    const row = active, part = active.part, epoch=speechEpoch, same = () => active === row && active.part === part && epoch===speechEpoch && !dialogueHolds.size;
     caption.textContent = active.speaker;
     let revealed = false;
     // Subtitle text and SID voice appear together: the text is held (speaker shown, "...") until the voice starts.
@@ -332,7 +346,7 @@
     setTimeout(() => { if (!revealed && same()) { console.warn('[DialogueSpeech] voice not ready after', SPEECH_WAIT_MS, 'ms; showing text'); reveal(0, 'speech-timeout'); } }, SPEECH_WAIT_MS);
   }
   function dismissSubtitle() {
-    if (!active) return;
+    if (dialogueHolds.size || !active) return;
     try { root.HolodekSfx?.stopSpeech?.(); } catch {}
     subtitleReport('dismissed', active, { reason: 'player-dismissed', part: active.part + 1, parts: active.chunks.length });
     panel.hidden = true;
@@ -343,6 +357,15 @@
       finishAttention(active);
       active = null;
     }
+  }
+  function holdDialogue() {
+    const token={};dialogueHolds.add(token);
+    if(dialogueHolds.size===1){speechEpoch++;try{root.HolodekSfx?.stopSpeech?.();}catch{}if(panel)panel.hidden=true;}
+    let released=false;
+    return ()=>{if(released)return;released=true;if(!dialogueHolds.delete(token))return;
+      if(!dialogueHolds.size && active && !root.gamePaused){const ctx=context();
+        if(ctx?.dungeon?.geoKey===active.geoKey){panel.hidden=false;showSpeechPart(ctx,time());}}
+    };
   }
   async function post(url, body) {
     const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -401,7 +424,9 @@
     root.refreshDungeonConsoleStates?.();
     if (root.gamePaused) return;
     updateAttention(ctx);
+    root.CommerceUi?.onFrame?.();
     root.CityCrowdUi?.onFrame?.(ctx.dungeon,ctx.player);
+    if(dialogueHolds.size)return;
     if(root.CommerceUi?.invitationPending?.())return;
     if (root.DungeonExplorationMap?.ready?.(ctx.dungeon.geoKey)) for (const actor of ctx.actors) {
       if (actor.type !== 'monster' || !I.isPresent(actor, population()) || !actorVisible(actor, ctx, 8)) continue;
@@ -463,6 +488,7 @@
   }
   function reset({ paused = false } = {}) {
     releaseAttention();
+    dialogueHolds.clear();speechEpoch++;
     timeline++;
     lastVisit = lastAutonomy = lastTick = 0; visitPending = autonomyPending = pausePending = false;
     if (subtitleReportTimer !== null && typeof clearTimeout === 'function') clearTimeout(subtitleReportTimer);
@@ -537,8 +563,8 @@
     setInterval(tick, 500);
   }
   root.DungeonLife = { population, receivePopulation, restorePopulation, receiveDialogue, receiveEncounter, receiveTurnDialogue, togglePause, setPaused, reset, tick, time, lootBlocked, isWaitingToSpeak, dismissSubtitle,
-    playerResponded, releaseAttention, attentionMode,
-    hasPendingSpeech:()=>!!active||queue.length>0||attention.size>0,
+    playerResponded, releaseAttention, attentionMode,holdDialogue,
+    hasPendingSpeech:()=>!!active||queue.length>0||attention.size>0,hasPendingTurnSpeech,
     subtitleDiagnostics: () => subtitleHistory.map(report => ({ ...report })),
     actorAllegiance: actor => I.allegiance(population()?.actors?.[actor.name || actor.Name] || actor, root.latestUpdatedData?.monstersState) };
   document.addEventListener('DOMContentLoaded', init);

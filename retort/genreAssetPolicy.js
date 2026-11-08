@@ -35,6 +35,8 @@ function catalog(room = {}, setting = current()) {
   const clothing = Object.fromEntries(['head','torso','legs'].map(part => [part, unique(genres.flatMap(g => Kits.GENRES[g].clothing[part]))]));
   return { version: VERSION, strict: resolved.homebrew, classical, genre: resolved.genre, genres, shapes,
     material, materials, palette: resolved.palette, clothing,
+    spriteRaces: unique(genres.flatMap(g => Kits.GENRES[g].spriteCreatures || [])),
+    spriteCallings: unique(genres.flatMap(g => Kits.GENRES[g].spriteRoles || [])),
     held: unique(genres.flatMap(g => Kits.GENRES[g].held)), gear: unique(genres.flatMap(g => Kits.GENRES[g].gear)),
     lights: unique(genres.flatMap(g => [...Kits.GENRES[g].lights, ...require('../assets/genreLights').forGenre(g)])),
     textures: Object.fromEntries(['wall','floor','ceiling','door'].map(part => [part, unique(styles.map(style => style[part]))])),
@@ -53,7 +55,7 @@ function directive(room = {}, setting = current()) {
   // Selection contracts expose the complete enum separately.
   const shapes = c.strict ? c.shapes : c.shapes.filter(Kits.has).slice(0, 16);
   return 'APPROVED PROCEDURAL ASSETS (authoritative): ' + JSON.stringify({ version: VERSION,
-    genres: c.genres, shapes: shapes.slice(0, 24), textures: c.textures }) +
+    genres: c.genres, shapes: shapes.slice(0, 24), textures: c.textures, optionalSpriteRaces: c.spriteRaces, optionalSpriteCallings: c.spriteCallings }) +
     '. Select IDs only from the complete enum in the requested answer schema; these examples are not a checklist. Labels, histories and layout remain creative; asset IDs do not. ' +
     'No foreign genre assets or freeform drawing programs. Puzzle devices, actors, loot and exits are installed by their own engine systems.';
 }

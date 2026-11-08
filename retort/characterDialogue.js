@@ -16,6 +16,7 @@ function describeCharacters(roster, population) {
       race:record?.race || actor.race || '',className:record?.className || actor.className || '',
       activity:record?.activity || actor.activity || 'accompanying the player',personality:record?.personality || actor.personality || '',motivation:record?.motivation || actor.motivation || '',
       encountered:Inhabitants.hasEncountered(actor, population),
+      ...(record?.starterRecruitmentRole?{starterRecruitmentRole:record.starterRecruitmentRole,recruitable:record.recruitable!==false}:{}),
       possessions: require('./itemTransfer').possessions(record, require('./graveMasterStoryPrompts').isHolodek1() ? 8 : 24),
       background: require('./dialogueContextPolicy').background(record?.profile || actor.originProfile),
       ...(population?.questIntroduction?.status === 'pending' && population.questIntroduction.speaker === actor.name ?
@@ -41,6 +42,7 @@ async function generateCharacterDialogue($, { characters, roomDescription, quest
   }
   $.model = 'gpt-4.1-mini'; $.temperature = 0.75;
   await $.user(Puzzles.HINT_POLICY);
+  await $.user`SPEECH BOUNDARY: every spoken, cached or exchange line contains only words spoken aloud. No stage directions, narrator attribution or enclosing quotation marks. Gestures belong in narrative prose, never in a speech line.`;
   if (!require('./settingLayer').isCotGPlay()) await $.system`${require('./homebrewStoryPrompts').characterVoices()}`;
   else
   await $.system`You direct individual character voices in Children of the Grave. Tartarus is an inhabited afterlife; Mortacia's existing quests guide the journey toward Hades. Each soul has work, biases, memories and limited knowledge. Never speak for the player, invent characters, resolve combat, give rewards, complete quests or change world state. Output only valid JSON: {"spoken":[{"speaker":"exact existing name","line":"short spoken words"}],"replies":[{"speaker":"exact existing name","lines":["short contextual remark","a different short remark"]}]}.`;

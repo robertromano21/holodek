@@ -1,10 +1,11 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm');
 const { createRequire } = require('node:module'), { EventEmitter } = require('node:events');
-function fixture() {
+function fixture(failure=null) {
   const file = require.resolve('../retort/sidVoice'), localRequire = createRequire(file), jobs = [], routes = new Map();
   class Worker extends EventEmitter {
     postMessage(job) { jobs.push(job); queueMicrotask(() => {
+      if(failure&&job.type==='track')return this.emit('message',{id:job.id,ok:false,error:failure});
       const result = job.type === 'track' ? { frames: [[150, [], []]], noiseFrames: [{ env: [], rms: 0.1, high: 1 }], phones: [], ms: { analyse: 1 } } :
         job.type === 'render' ? { pcm: new Int16Array([Math.round(job.P.f0), job.noiseFrames ? 200 : 100]), sr: 44100,
           articulation: { mode: job.noiseFrames ? 'detail' : 'legacy' }, ms: { render: 1 } } : job.type==='score'?{score:new Uint8Array([1,2,3]),dur:1,ms:{compile:1}}:{};
@@ -24,6 +25,21 @@ function fixture() {
   }
   return { api, jobs, call };
 }
+
+test('real SID failures retain a bounded actionable reason and return it to the browser',async()=>{
+  const f=fixture('Analysis model failed to load');
+  const r=await f.call('POST','/voice/line.sidvoice',{speaker:'Resident',text:'Welcome.'});
+  assert.equal(r.code,503);assert.equal(r.data.error,'Analysis model failed to load');
+  const status=(await f.call('GET','/voice/status',{})).data;
+  assert.equal(status.failures,1);assert.equal(status.prefetchDropped,0);assert.equal(status.recentFailures[0].error,r.data.error);
+});
+
+test('discarded speculative SID prefetch is not counted as a speech synthesis failure',async()=>{
+  const f=fixture();f.api.prefetch(Array.from({length:60},(_,i)=>({speaker:'Resident',line:'Cached alternative '+i+'.'})));
+  for(let i=0;i<20;i++)await new Promise(setImmediate);
+  const status=(await f.call('GET','/voice/status',{})).data;
+  assert.ok(status.prefetchDropped>0);assert.equal(status.failures,0);assert.equal(status.recentFailures.length,0);
+});
 test('POST speech binds the submitted identity to the first render and emits a valid WAV header', async () => {
   const f = fixture();
   const r = await f.call('POST', '/voice/line.wav', { speaker: 'Vessa Reedwake', text: 'Welcome.', chip: '10582', clock: '2x', profile: { name: 'Wrong Name', f0: 211, fs: 1.16 } });

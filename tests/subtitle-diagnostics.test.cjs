@@ -101,6 +101,25 @@ test('subtitle logging distinguishes queued lines from exact text actually displ
   assert.ok(f.posts[0].body.reports.some(row => row.stage === 'displayed'));
 });
 
+test('a repeated player invitation voices the saved refusal again, but duplicate transport and ambient echoes stay suppressed',()=>{
+  const f=fixture(),speaker=f.actor.name,line='I gave my word to keep this entrance watched. I will remain here.';
+  const response=id=>({...f.event,dialogue:[{speaker,line,utteranceId:id,attribution:'labelled',kind:'turn',recipient:'PC',attention:'addressing'}]});
+  const content=speaker+': "'+line+'"';
+  f.root.DungeonLife.receiveTurnDialogue(content,response('first-request'));
+  f.root.DungeonLife.receiveDialogue(response('first-request'));
+  assert.equal(f.reports.filter(r=>r.stage==='displayed').length,1);
+  f.root.DungeonLife.dismissSubtitle();f.root.DungeonLife.tick();
+  f.root.DungeonLife.receiveTurnDialogue(content,response('second-request'));
+  f.root.DungeonLife.receiveTurnDialogue(content,response('second-request'));
+  assert.equal(f.reports.filter(r=>r.stage==='displayed').length,2);
+  assert.equal(f.nodes.get('dungeon-dialogue-words').textContent,line);
+  f.root.DungeonLife.dismissSubtitle();f.root.DungeonLife.tick();
+  f.root.DungeonLife.receiveDialogue({...f.event,dialogue:[{speaker,line,kind:'canned'}]});
+  f.root.DungeonLife.receiveTurnDialogue(content,response('first-request'));
+  assert.equal(f.reports.filter(r=>r.stage==='displayed').length,2);
+  assert.ok(f.reports.some(r=>r.stage==='skipped'&&r.reason==='recently-spoken'));
+});
+
 test('dismissing a subtitle hides the card immediately, logs its reason and retains the next queued line', () => {
   const f = fixture();
   f.root.DungeonLife.receiveDialogue({ ...f.event, dialogue: [f.event.dialogue[0], { speaker: f.actor.name, line: 'Mind the cracked arch.' }] });

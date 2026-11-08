@@ -2963,7 +2963,7 @@ function fitCombatNpcSpriteSheet(sheet,character,frameCount=4) {
   const pixels=sheet.getContext('2d').getImageData(0,0,sheet.width,sheet.height).data;
   let x0=size,y0=size,x1=-1,y1=-1;
   // One shared crop for the whole animation keeps its pose from resizing every frame.
-  for(let y=0;y<size;y++)for(let x=0;x<sheet.width;x++)if(pixels[(x+y*sheet.width)*4+3]){
+  for(let y=0;y<size;y++)for(let x=0;x<count*size;x++)if(pixels[(x+y*sheet.width)*4+3]){
     const xx=x%size;x0=Math.min(x0,xx);x1=Math.max(x1,xx);y0=Math.min(y0,y);y1=Math.max(y1,y);
   }
   if(x1<0)return sheet;
@@ -2972,7 +2972,13 @@ function fitCombatNpcSpriteSheet(sheet,character,frameCount=4) {
   const canvas=document.createElement('canvas');canvas.width=sheet.width;canvas.height=size;
   character._combatBodyFraction=Number.isFinite(sheet._combatBodyHeight)?sheet._combatBodyHeight*scale/size:Math.min(1,h*scale/size);
   const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;
-  for(let i=0;i<count;i++)ctx.drawImage(sheet,i*size+x0,y0,w,h,i*size+(size-w*scale)/2,(size-h*scale)/2,w*scale,h*scale);
+  for(let i=0;i<Math.floor(sheet.width/size);i++){
+    if(i<count){ctx.drawImage(sheet,i*size+x0,y0,w,h,i*size+(size-w*scale)/2,(size-h*scale)/2,w*scale,h*scale);continue;}
+    // Copy the full action frame with the walk-derived transform, not an action-specific crop.
+    ctx.save();ctx.beginPath();ctx.rect(i*size,0,size,size);ctx.clip();
+    ctx.drawImage(sheet,i*size,0,size,size,i*size+(size-w*scale)/2-x0*scale,(size-h*scale)/2-y0*scale,size*scale,size*scale);
+    ctx.restore();
+  }
   return canvas;
 }
 
@@ -3008,13 +3014,14 @@ function ensureCombatTextureForCharacter(scene, character) {
     else if (character.type === 'monster') ensureMonsterSpriteData(character);
   }
   if (!character.sprite || !character.sprite.dataUrl) return null;
-  if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character);
+  if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character); if (typeof window.refreshSuzerainSpriteArt === 'function') window.refreshSuzerainSpriteArt(character);
 
   const texKey = getCombatTextureKey(character);
   if (!scene.textures.exists(texKey) && typeof window.createCharacterSpriteSheetCanvas === 'function') {
     try {
       const drawSheet=window.NATIVE_COMBAT_SPRITES!==false&&window.createCombatSpriteSheetCanvas||window.createCharacterSpriteSheetCanvas;
-      const originalSheet = drawSheet(character, character.sprite && character.sprite.spec, 4);
+      const walkSheet = drawSheet(character, character.sprite && character.sprite.spec, 4);
+      const originalSheet = window.createCombatPoseSheetCanvas?.(character,character.sprite?.spec,walkSheet)||walkSheet;
       const coloredSheet = window.RetroGraphics?.characterSheet?.(originalSheet, character, character.sprite?.spec) || originalSheet;
       const sheetCanvas = fitCombatNpcSpriteSheet(coloredSheet,character,4);
       scene.textures.addCanvas(texKey, sheetCanvas);
@@ -3023,6 +3030,7 @@ function ensureCombatTextureForCharacter(scene, character) {
       const fw = sheetCanvas.height;
       for (let i = 0; i < 4; i++) {
         tex.add('frame' + i, 0, i * fw, 0, fw, fw);
+        if(originalSheet._combatAttackFrames)tex.add('attack'+i,0,(i+4)*fw,0,fw,fw);
       }
       if (tex.update) tex.update();
       if (tex.refresh) tex.refresh();
@@ -3061,11 +3069,14 @@ function ensureCombatTextureForCharacter(scene, character) {
 }
 
 function getCombatFrameName(character) {
+  const attack=typeof window!=='undefined'&&window.CombatMapPoses?.frameFor(character);if(attack)return attack;
   const frameIndex = Math.abs(Math.floor(Number.isFinite(character && character.walkFrame) ? character.walkFrame : 0)) % 4;
   return 'frame' + frameIndex;
 }
 
 function getCombatFacingFlip(character) {
+  const attackFlip=typeof window!=='undefined'?window.CombatMapPoses?.facingFlip(character,typeof getCombatMapRotationAngle==='function'?getCombatMapRotationAngle():0):null;
+  if(typeof attackFlip==='boolean')return attackFlip;
   let facing=deriveFacingFromDelta(0,0,character?.facing);
   if(character?.type!=='pc'&&Number.isFinite(character?.mapMoveX)&&Number.isFinite(character?.mapMoveY)){
     const angle=typeof getCombatMapRotationAngle==='function'?getCombatMapRotationAngle():0;
@@ -3089,11 +3100,18 @@ function applyCombatVisualFrame(sprite, character) {
   }
 }
 
+window.applyCombatVisualFrame=applyCombatVisualFrame;
+
 function drawCombatTextureOnRT(scene, texKey, frameName, x, y, size, character) {
   if (!scene || !scene.renderRT || !texKey || !scene.textures || !scene.textures.exists(texKey)) return false;
   const target = scene.actorRT || scene.renderRT;
   const pixelScale = scene.actorRT ? scene.PIXEL_SCALE : 1;
   x *= pixelScale; y *= pixelScale; size *= pixelScale;
+  const texture=scene.textures.get(texKey);
+  if(frameName&&texture?.has&&!texture.has(frameName)){
+    const walk='frame'+Math.abs(Math.floor(character?.walkFrame||0))%4;
+    frameName=texture.has(walk)?walk:null;
+  }
   const frame = frameName || undefined;
   const flipped = getCombatFacingFlip(character);
   const down = window.DungeonInhabitants?.isDown(character) || character?.type === 'pc' && window.DungeonInhabitants?.isDown((window.combatCharacters || []).find(a => a.type === 'pc'));
@@ -3376,6 +3394,7 @@ class CombatScene extends Phaser.Scene {
     update(time, delta) {
         if (window.gamePaused) return;
         if (!this.characters) return;
+        window.CombatMapPoses?.tick(this);
         const dt = Math.max(0.001, Math.min(0.05, (delta || 16) / 1000));
         Object.values(this.characters).forEach(charData => {
             if (!charData || (charData.type !== 'npc' && charData.type !== 'monster') || !charData.sprite || !charData.label) return;
@@ -3738,7 +3757,7 @@ class CombatScene extends Phaser.Scene {
                       || (window.combatCharacters || []).find(c => c && c.type === 'pc')
                       || fullChar;
                     const phase = Math.abs(Math.floor(Number.isFinite(pcAnimState && pcAnimState.walkFrame) ? pcAnimState.walkFrame : 0)) % 4;
-                    frameName = 'frame' + phase;
+                    frameName = getCombatFrameName(pcAnimState);
                 }
                 const pcAnimState = (window.combatCharacters || []).find(c => c && c.name === pcNameForDraw)
                   || (window.combatCharacters || []).find(c => c && c.type === 'pc')
@@ -7913,7 +7932,7 @@ function ensureCharacterVoiceSpec(character) {
 
 function ensureCharacterSpriteData(character, options = {}) {
   if (!character) return null;
-  if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character);
+  if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(character); if (typeof window.refreshSuzerainSpriteArt === 'function') window.refreshSuzerainSpriteArt(character);
   const regenerate = !!options.regenerate;
   ensureCharacterVoiceSpec(character);
   if (!character._rerollSeed || regenerate) {
@@ -7973,11 +7992,11 @@ function ensureKnownSpritesInCombatList(list) {
       delete entry.sprite;
     }
     if (applyProceduralSpriteToEntry(entry)) return;
-    if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(entry);
+    if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(entry); if (typeof window.refreshSuzerainSpriteArt === 'function') window.refreshSuzerainSpriteArt(entry);
     if (entry.sprite && entry.sprite.dataUrl) return;
     const known = resolveKnownCharacterSprite(entry.name, entry.type);
     if (known) entry.sprite = known;
-    if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(entry);
+    if (typeof window.refreshMortaciaSpriteArt === 'function') window.refreshMortaciaSpriteArt(entry); if (typeof window.refreshSuzerainSpriteArt === 'function') window.refreshSuzerainSpriteArt(entry);
   });
   return list;
 }
@@ -8575,7 +8594,7 @@ function getCombatTextureKey(character) {
   let artKey=revision?base+'-'+String(revision).replace(/[^a-z0-9_-]/gi,'_'):base;
   // Re-register cached generated sheets when combat body metrics change, without rerolling their art.
   if(spec?.kind==='procedural'&&spec.traits&&!/^mortacia\b/i.test(character?.name||''))artKey+='-combat-fit-2';
-  if(spec?.kind==='procedural'&&spec.traits&&window.NATIVE_COMBAT_SPRITES!==false)artKey+='-native-1';
+  if(spec?.kind==='procedural'&&spec.traits&&window.NATIVE_COMBAT_SPRITES!==false)artKey+='-native-2-attack';
   if(window.RetroGraphics?.fullbright?.())artKey+='-c64-materials-5';
   return spec && (spec.kind === 'procedural' || spec.kind === 'placeholder') && spec.key ? artKey + '-' + spec.key : artKey;
 }
@@ -9277,10 +9296,21 @@ window.applySpellEquipment = text => {
 };
 window.getEconomyResidentInfo = name => {
   const room = roomNameDatabase.get(currentDungeon?.geoKey);
-  if (window.EconomyRules.isStarterRoom(currentDungeon?.geoKey,room || currentDungeon)) return null;
   const introduced=!!room?.inhabitants?.actors?.[name]?.servicesAcceptedAt;
-  const recruitmentCondition=Object.values(room?.minorMissions||{}).find(m=>m.source==='engine-resident-favor-v1' && m.type==='resident-favor' &&
-    m.recipient===name && m.runId===window.dungeonRunId && ['offered','accepted'].includes(m.status));
+  let recruitmentCondition=Object.values(room?.minorMissions||{}).find(m=>m.source==='engine-resident-favor-v1' && m.type==='resident-favor' &&
+    m.recipient===name && m.runId===window.dungeonRunId && (['offered','accepted'].includes(m.status) || m.status==='completed'&&m.invitationPending&&!m.recruitedAt));
+  if(!recruitmentCondition){
+    const shared=Object.values(room?.recruitmentInvitations || {}).find(g=>g.source==='engine-recruitment-group-v1' && g.runId===window.dungeonRunId &&
+      !g.completedAt && ['review','accepted'].includes(g.status) && g.members.some(m=>m.name===name && m.outcome==='ready'));
+    recruitmentCondition=shared?.members.map(m=>room.minorMissions?.[m.missionId]).find(m=>m?.invitationPending&&!m.recruitedAt);
+  }
+  const group=room?.recruitmentInvitations?.[recruitmentCondition?.recruitmentGroupId];
+  if(group?.source==='engine-recruitment-group-v1' && group.runId===window.dungeonRunId)recruitmentCondition={...recruitmentCondition,
+    recruitmentGroup:{id:group.id,status:group.status,members:group.members.map(member=>{const task=room.minorMissions?.[member.missionId];
+      return {...member,...(task?{status:task.status,readyToReport:!!task.readyToReport,participation:task.helperOffer?'help-here':'after-task',description:task.requestDescription || task.description}:{})};})}};
+  if (window.EconomyRules.isStarterRoom(currentDungeon?.geoKey,room || currentDungeon)) return recruitmentCondition?.starterRecruitment &&
+    (room?.inhabitants?.starterRecruitment?.favorActor===name || group?.members.some(m=>m.name===name && (m.missionId===recruitmentCondition.id || m.outcome==='ready')) &&
+      room.inhabitants.actors?.[name]?.recruitable!==false) ? {kind:'mission',jobs:true,introduced:true,recruitmentCondition,starterRecruitment:true} : null;
   if (room?.inhabitants?.actors?.[name]?.deityId) return { kind: 'divine', introduced };
   const operators=b=>window.CityEstablishments?.operators(b)||[b?.operator];
   const service = Object.values(room?.services || {}).find(s => operators(s).includes(name));
@@ -9291,6 +9321,7 @@ window.getEconomyResidentInfo = name => {
     const inquiries=!service&&desk?.capabilities?.includes('commission')&&!desk.capabilities.includes('lodging');
     return { kind: service?.kind || 'venue', venue:!!desk, introduced, jobs:inquiries&&hasJobs(room), inquiries, recruitmentCondition };
   }
+  if(recruitmentCondition)return {kind:'mission',jobs:true,introduced:true,recruitmentCondition};
   return [...roomNameDatabase.values()].some(hasJobs)?{kind:'mission',jobs:true,introduced,recruitmentCondition}:null;
 };
 window.commitLocalPartyChange = async text => {
@@ -9510,6 +9541,14 @@ window.applyPreparedRoomEntry = event => {
   // Keep the command gate closed: the same serialized turn is still authoring its quest/story.
   return true;
 };
+window.applyFailedRoomEntry = event => {
+  if (!window.applyPreparedRoomEntry(event)) return false;
+  window._world1Arrival = null;
+  window._world1FootExit = null;
+  window.RoomEntry?.cancel?.();
+  renderDungeonView();
+  return true;
+};
 const realtimeCombatResultsSeen = new Set();
 window.applyRealtimeCombatResult = async event => {
   if (event?.type === 'player_respawn') {
@@ -9561,6 +9600,7 @@ window.applyRealtimeCombatResult = async event => {
   window.refreshPartyPanels?.(window.latestUpdatedData);
   window.SpellUi?.hydrate(text);
   window.game?.scene?.getScene('MainScene')?.scene.restart(window.latestUpdatedData);
+  if(event.recruitmentHandoff&&event.dialogue?.length)window.DungeonLife?.receiveTurnDialogue(event.content,{...event,consoleText:text});
   const entry = document.createElement('p'); entry.style.whiteSpace = 'pre-wrap'; entry.textContent = event.content;
   document.getElementById('chatlog')?.appendChild(entry);
   const conversationId = localStorage.getItem('conversationId');
@@ -12662,6 +12702,7 @@ const taskRequest = {
             clearInterval(pollInterval); // Stop polling on complete/error
         
             if (pollResponse.status === 'error') {
+              if (pollResponse.recovery) window.applyFailedRoomEntry?.(pollResponse.recovery);
               window.RoomEntry?.cancel?.();
               window._combatCommandPending = false;
               window._combatRoundActiveUntil = 0;

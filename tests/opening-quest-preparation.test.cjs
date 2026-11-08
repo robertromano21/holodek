@@ -69,6 +69,44 @@ test('early departure joins the existing author, never dispatches a second quest
   assert.equal(await travel, true); assert.equal(s.jobs.length, 1);
 });
 
+for(const status of ['recruited','dead','departed'])test('opening handoff preserves a '+status+' incidental contact without invalidating the prepared quest',async t=>{
+  const s=fixture(t),name='Entrance Keeper',room=s.db()['0,0,0'];
+  const sheet=`${name}\nFemale\nHuman\nArchivist\nLevel: 2\nAC: 10\nXP: 0\nHP: 20\nMaxHP: 20\nEquipped: Weapon: None, Armor: None, Shield: None, Other: None\nAttack: 0\nDamage: 0\nArmor: 0\nMagic: 0\nState: Friendly`;
+  room.monsters={inRoom:sheet,consoleBlock:sheet,state:'Friendly'};room.inhabitants={actors:{[name]:{status:'present',hp:20}}};
+  const entry=s.service.begin();await tick();const artifact=s.artifact();
+  assert.equal(artifact.task.story.stages.find(stage=>stage.id==='objective').actor,name);
+  assert.equal(artifact.task.story.stages.find(stage=>stage.id==='resolution').actor,name);
+  s.workers[0].emit('message',{type:'checkpoint',artifact});await entry.promise;
+  room.inhabitants.actors[name].status=status;room.monsters.inRoom='None';room.monsters.consoleBlock='None';
+  if(status==='dead')room.inhabitants.actors[name].hp=0;
+  assert.equal(await s.service.activate('0,1,0'),true);
+  const task=s.state.getCurrentTasks()[0],resolution=task.story.stages.find(stage=>stage.id==='resolution');
+  assert.equal(resolution.text,artifact.task.story.stages.find(stage=>stage.id==='resolution').text);
+  assert.equal(resolution.actor,undefined);assert.equal(resolution.roomKey,'0,1,0');assert.equal(resolution.readableId,task.story.fallback.readableId);
+  assert.ok(resolution.options.length);assert.ok(resolution.options.every(option=>!['recruit','receive'].includes(option.action)));
+  assert.equal(task.story.stages.find(stage=>stage.id==='objective').actor,undefined);
+  assert.deepEqual(task.requiredElements,artifact.task.requiredElements);assert.deepEqual(task.actionRequirements,artifact.task.actionRequirements);
+  assert.equal(s.db()['0,0,0'].inhabitants.actors[name].status,status);assert.equal(s.db()['0,0,0'].monsters.inRoom,'None');
+  assert.ok(require('../retort/questScenes').valid(task.story,s.db()));assert.equal(s.jobs.length,1);
+});
+
+test('handoff never silently replaces an unavailable recipient that is part of the actual delivery objective',async t=>{
+  const s=fixture(t),name='Bound Recipient',room=s.db()['0,0,0'];
+  const sheet=`${name}\nFemale\nHuman\nArchivist\nLevel: 2\nAC: 10\nXP: 0\nHP: 20\nMaxHP: 20\nEquipped: Weapon: None, Armor: None, Shield: None, Other: None\nAttack: 0\nDamage: 0\nArmor: 0\nMagic: 0\nState: Friendly`;
+  room.monsters={inRoom:sheet,consoleBlock:sheet,state:'Friendly'};room.inhabitants={actors:{[name]:{status:'present',hp:20}}};
+  const entry=s.service.begin();await tick();const artifact=s.artifact();
+  const Q=require('../retort/questProgress'),Scenes=require('../retort/questScenes');
+  artifact.task=Scenes.compile(Q.compileGeneratedTask({id:'task:delivery',type:'Deliver',actionKind:'deliver_item',
+    desc:'Deliver ivory token to '+name+'.',requiredElements:[{type:'object',name:'ivory token',placement:'0,0,0'},
+      {type:'monster',name,placement:'0,0,0'}]},artifact.rooms,'0,0,0'),artifact.rooms,'0,0,0',{hookKind:'writing'});
+  assert.ok(artifact.task.story);assert.equal(Q.deliveryBindings(artifact.task)[0].recipient,name);
+  s.workers[0].emit('message',{type:'checkpoint',artifact});await entry.promise;
+  room.inhabitants.actors[name].status='departed';room.monsters.inRoom='None';room.monsters.consoleBlock='None';
+  const before=s.state.getRoomNameDatabase();
+  await assert.rejects(s.service.activate('0,1,0'),/does not fit/);
+  assert.equal(s.state.getRoomNameDatabase(),before);assert.equal(s.seeded(),false);assert.equal(s.state.getCurrentQuest(),'None');
+});
+
 test('a failed opening helper is retried privately and its successful result is handed off once',async t=>{
   const s=fixture(t),first=s.service.begin();await tick();
   s.workers[0].emit('message',{type:'failed',reason:'Temporary authoring failure'});await first.promise;

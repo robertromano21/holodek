@@ -80,6 +80,9 @@
     for (const [name, genre] of Object.entries(Expansion.COTG)) GENRES[genre].building.push(`x_${name}`);
   }
   const ALIASES = { 'gothic horror': 'dark-fantasy', horror: 'dark-fantasy', gothic: 'dark-fantasy', 'space station': 'sci-fi', space: 'sci-fi', dystopian: 'cyberpunk', urban: 'modern', eldritch: 'cosmic-horror', pirate: 'nautical', ancient: 'mythic', ...(expanded ? Expansion?.ALIASES : {}) };
+  // Separate additive pools preserve every pre-existing semantic seed and outfit.
+  const SpriteExpansion = typeof module === 'object' && module.exports ? require('./spriteExpansion') : globalThis.SpriteExpansion;
+  for (const [genre,extra] of Object.entries(SpriteExpansion?.CATALOG || {})) if(GENRES[genre]) {GENRES[genre].spriteCreatures=extra.creatures.map(e=>e.key);GENRES[genre].spriteRoles=extra.roles.map(e=>e.key);}
   const genreOf = g => { const k = String(g || '').toLowerCase().trim(); return GENRES[k] ? k : ALIASES[k] || null; };
   const COTG_ALLOWED = ['fantasy', 'dark-fantasy', 'mythic'];
   const hash = s => { let h = 2166136261; for (const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
@@ -98,7 +101,7 @@
     // Blend: each list takes items from every genre in proportion to its weight (primary first), no duplicates.
     const blend = (field, n) => { const out = []; for (const x of mix) { const take = Math.max(1, Math.round(n * x.weight)); for (const v of GENRES[x.genre][field].slice(0, take)) if (!out.includes(v)) out.push(v); } return out; };
     return { genre, mix, homebrew, locked: !homebrew, base, palette: k.palette, voxel: k.voxel, textures: k.textures,
-      lights: [...new Set([...(base?.lights || []), ...blend('lights', 4)])], props: blend('props', 6), building: blend('building', 3), creatures: blend('creatures', 4), held: blend('held', 6) };
+      lights: [...new Set([...(base?.lights || []), ...blend('lights', 4)])], props: blend('props', 6), building: blend('building', 3), creatures: blend('creatures', 4), spriteCreatures: mix.flatMap(x=>GENRES[x.genre].spriteCreatures||[]), spriteRoles: mix.flatMap(x=>GENRES[x.genre].spriteRoles||[]), held: blend('held', 6) };
   }
   // Character spec for the existing semantic voxel generator / sprite review (parts keywords + design params it already reads).
   function characterSpec(genre, role = 'npc', seed = 0) {

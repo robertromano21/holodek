@@ -110,10 +110,11 @@ for(const seed of ['stable','another','third'])for(const genre of [false,true])t
   }
   if(genre)assert.ok(!f.prompts.some(p=>/Tartarus|Arithus|Dantuea/.test(p)));
 });
-test('starter monsters remain small, Friendly and recruitable with no genre shopkeeper exception',async()=>{
+test('starter monsters remain small and Friendly with no genre shopkeeper exception; CotG reserves a local recruitment contact',async()=>{
   for(const genre of [false,true]){
     const f=await generate({starting:true,genre,market:true});
-    assert.equal(Object.keys(f.population.actors).length,genre?2:1);
+    assert.equal(Object.keys(f.population.actors).length,2);
+    assert.equal(!!f.population.starterRecruitment,!genre);
     assert.ok(Object.values(f.population.actors).every(a=>a.allegiance==='Friendly'&&!a.serviceRole));
     assert.equal(f.population.encounterBudget,undefined);assert.equal(f.population.venue,undefined);
     assert.ok(f.prompts.some(p=>/no services|No services/.test(p)));

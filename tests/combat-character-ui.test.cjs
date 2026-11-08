@@ -36,7 +36,7 @@ test('console, map and world selections share healing actions outside combat and
   assert.deepEqual(turns,['PC','Ally','Resident']);assert.equal(heals.length,4,'Combat never bypasses initiative with exploration casting');
 });
 test('PC controls and autonomous movement use screen-relative facing at every cardinal camera heading',()=>{
-  const c={angle:0};vm.runInNewContext(game.slice(game.indexOf('function deriveFacingFromDelta('),game.indexOf('function advanceWalkFrame(')),c);
+  const c={angle:0,window:{}};vm.runInNewContext(game.slice(game.indexOf('function deriveFacingFromDelta('),game.indexOf('function advanceWalkFrame(')),c);
   vm.runInNewContext(game.slice(game.indexOf('function getCombatFacingFlip('),game.indexOf('function applyCombatVisualFrame(')),c);
   c.getCombatMapRotationAngle=()=>c.angle;
   for(const angle of[0,Math.PI/2,Math.PI,Math.PI*1.5]){

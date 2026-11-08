@@ -19,6 +19,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
 
+  const SpriteExpansion = typeof module === 'object' && module.exports ? require('./spriteExpansion') : root.SpriteExpansion;
   const GRID = 64; // enlarged so hanging dragon wings / tip-up swords are not cropped
   const DEFAULT_SCALE = 4;
   const SPEC_VERSION = 3;
@@ -351,6 +352,40 @@
   defCre('mire bog swamp marsh fen lurk lurker', { plan: ['humanoid', 2], c: '#5a6a4a', c2: '#34402a', covering: 'scales', mark: 'spots' });
   defCre('hollow husk', { plan: ['humanoid', 1], eyeStyle: 'hollow', eyeGlow: true });
   defCre('wraithkin', { plan: ['spectral', 5], translucency: 0.35, tattered: true, floating: true });
+  // Expanded archetypes. Added only where a word is not already defined, so every existing character keeps its look.
+  function defCreNew(keys, def) { keys.split(' ').forEach((k) => { if (!CRE[k]) CRE[k] = def; }); }
+  // spirits, undead and ethereal beings
+  defCreNew('eidolon spook umbral umbra shadowfolk', { plan: ['spectral', 5], translucency: 0.45, tattered: true, floating: true, c: '#3a3650', c2: '#1c1a2a', eye: '#b9a8ff', eyeGlow: true, el: 'shadow' });
+  defCreNew('deathknight dreadknight bonelord', { plan: ['skeletal', 6], covering: 'bone', head: 'skull', c: '#cfc6aa', c2: '#8a826a', eye: '#7affd2', eyeGlow: true, outfitHint: 'plate', helmHint: 'closed', aura: 0.3, el: 'shadow' });
+  defCreNew('barghest gravehound', { plan: ['beast', 4], hy: true, head: 'beast', ears: 'animal', covering: 'shadow', tail: 'wisp', c: '#2e2c38', c2: '#16151c', eye: '#ff5a3a', eyeGlow: true, translucency: 0.2 });
+  defCreNew('crone', { plan: ['humanoid', 2], hairC: '#b8b4aa', outfitHint: 'rags', mark: 'cracks' });
+  defCreNew('headless', { plan: ['humanoid', 3], head: 'none', outfitHint: 'plate' });
+  defCreNew('scarecrow strawman', { plan: ['humanoid', 3], covering: 'bark', head: 'eyeless', outfitHint: 'rags', c: '#c8a860', c2: '#8a6a3a', eye: '#ffb34d', eyeGlow: true });
+  defCreNew('marionette puppet', { plan: ['humanoid', 2], covering: 'bark', c: '#c8a070', c2: '#8a6440', mark: 'cracks' });
+  defCreNew('vampyre', { plan: ['humanoid', 2], c: '#ddd3dc', c2: '#a79aa6', eye: '#ff2a3a', eyeGlow: true, fangs: true, cape: true, hairC: '#1b1420' });
+  // beasts, giants and folk of the wilds
+  defCreNew('valkyrie', { plan: ['humanoid', 2], wings: 'feather', outfitHint: 'plate', helmHint: 'open', el: 'storm', aura: 0.2 });
+  defCreNew('sphinx', { plan: ['beast', 4], head: 'human', wings: 'feather', covering: 'fur', size: 'large', c: '#d0a860', c2: '#8a6a32' });
+  defCreNew('centaur', { plan: ['beast', 4], head: 'human', covering: 'fur', tail: 'thick', size: 'large', c: '#8a5a32', c2: '#4e3218' });
+  defCreNew('hydra', { plan: ['serpent', 5], head: 'reptile', covering: 'scales', size: 'huge', c: '#3f7a4a', c2: '#214528' });
+  defCreNew('cockatrice', { plan: ['beast', 4], head: 'bird', wings: 'feather', tail: 'scaled', covering: 'feathers', size: 'small', c: '#c8a040', c2: '#7a5a1c' });
+  defCreNew('ettin gargantua', { plan: ['giant', 3], size: 'huge', build: 'heavy', tusks: true, skin: 'human' });
+  defCreNew('gnoll', { plan: ['humanoid', 3], head: 'beast', ears: 'animal', covering: 'fur', tail: 'thin', c: '#a8865a', c2: '#6a5030', fangs: true });
+  defCreNew('bugbear', { plan: ['humanoid', 3], head: 'beast', ears: 'animal', covering: 'fur', build: 'heavy', size: 'large', c: '#8a5a32', c2: '#4e3218' });
+  defCreNew('gremlin homunculus', { plan: ['humanoid', 2], size: 'tiny', ears: 'long', wings: 'bat', c: '#6a8a42', c2: '#3a5020', eye: '#ffde3a', eyeGlow: true, fangs: true });
+  defCreNew('shambler', { plan: ['humanoid', 3], covering: 'bark', head: 'eyeless', build: 'heavy', size: 'large', c: '#4a5a32', c2: '#283218', mark: 'veins' });
+  defCreNew('sporeling sporekin mushroomfolk', { plan: ['humanoid', 2], covering: 'bark', mark: 'spots', size: 'small', c: '#b07a5a', c2: '#6a4430', aura: 0.15 });
+  defCreNew('treefolk', { plan: ['humanoid', 3], covering: 'bark', mark: 'cracks', size: 'large', c: '#6a5236', c2: '#3c2d1c', hairC: '#4f8a3a' });
+  defCreNew('undine selkie merrow', { plan: ['humanoid', 2], ears: 'fin', covering: 'water', translucency: 0.2, c: '#5aa8c8', c2: '#2a6a8a', el: 'water' });
+  defCreNew('kelpie', { plan: ['beast', 4], hy: true, head: 'beast', mane: true, covering: 'water', translucency: 0.15, c: '#3f8fa8', c2: '#1f4f66', el: 'water' });
+  defCreNew('magmin cinderling', { plan: ['elemental', 5], size: 'small', covering: 'flame', c: '#ff7a2a', c2: '#a83a12', el: 'fire', aura: 0.35 });
+  defCreNew('mimic', { plan: ['ooze', 5], covering: 'bark', fangs: true, eyes: 1, c: '#8a6440', c2: '#4e3218' });
+  // technological and otherworldly peoples (only ever chosen when a character sheet uses these words)
+  defCreNew('android robot cyborg droid automaton', { plan: ['humanoid', 3], covering: 'metal', c: '#9aa3ad', c2: '#545a61', eye: '#90d0ff', eyeGlow: true });
+  defCreNew('xenoform alienkind', { plan: ['humanoid', 3], head: 'eyeless', c: '#8ab89a', c2: '#4a7a5a', eye: '#1a1a1a', eyes: 2 });
+  defCreNew('xenomorph', { plan: ['insectoid', 5], covering: 'chitin', tail: 'thin', c: '#2a2c30', c2: '#121416' });
+  defCreNew('mutant', { plan: ['humanoid', 2], mark: 'spots', c: '#a0a86a', c2: '#646a3a' });
+  for (const e of SpriteExpansion?.creatures || []) if (!CRE[e.key]) CRE[e.key] = { ...e.def, exactOnly: true, genre: e.genre };
   const HYBRID_SUFFIX = /(kin|born|spawn|blood|folk|touched|kith|kind|ling|man|men|blooded|scion|get|child|sworn)$/;
   const SMALL_SUFFIX = /(ling|let)$/;
 
@@ -382,6 +417,27 @@
   defCls('pirate corsair buccaneer', { style: 'leather', prio: 2 });
   defCls('dancer courtesan', { style: 'dress', prio: 2 });
 
+  // Expanded callings (new words only; existing class words keep their current outfits).
+  function defClsNew(keys, def) { keys.split(' ').forEach((k) => { if (!CLS[k]) CLS[k] = def; }); }
+  defClsNew('gravekeeper sexton undertaker mortician', { style: 'robe', hood: true, symbol: 'skull', dark: true, prio: 3 });
+  defClsNew('exorcist', { style: 'robe', symbol: 'holy', handGlow: true, prio: 3 });
+  defClsNew('witchhunter', { style: 'leather', hood: true, cape: true, prio: 3 });
+  defClsNew('pilgrim hermit wanderer', { style: 'robe', hood: true, prio: 2 });
+  defClsNew('beggar vagabond', { style: 'rags', prio: 2 });
+  defClsNew('merchant trader peddler innkeeper', { style: 'tabard', prio: 2 });
+  defClsNew('blacksmith armorer runesmith', { style: 'leather', symbol: 'rune', prio: 2 });
+  defClsNew('sailor deckhand gunslinger cowboy courier detective falconer', { style: 'leather', prio: 2 });
+  defClsNew('netrunner hacker decker', { style: 'leather', hood: true, prio: 3 });
+  defClsNew('trooper hoplite', { style: 'plate', helm: 'closed', prio: 3 });
+  defClsNew('medic healer herbalist', { style: 'tabard', prio: 2 });
+  defClsNew('astrologer stargazer chronomancer', { style: 'robe', symbol: 'star', handGlow: true, prio: 3 });
+  defClsNew('pyromancer', { style: 'robe', symbol: 'flame', handGlow: true, glow: '#ff7a2a', prio: 3 });
+  defClsNew('cryomancer', { style: 'robe', symbol: 'star', handGlow: true, glow: '#9ec2ff', prio: 3 });
+  defClsNew('bloodmage', { style: 'robe', symbol: 'rune', handGlow: true, glow: '#ff2a3a', prio: 3 });
+  defClsNew('spellblade', { style: 'mail', handGlow: true, prio: 3 });
+  defClsNew('beastmaster', { style: 'furs', prio: 3 });
+  defClsNew('plaguedoctor', { style: 'leather', hood: true, helm: 'cowl', dark: true, prio: 4 });
+  for (const e of SpriteExpansion?.roles || []) if (!CLS[e.key]) CLS[e.key] = { style: e.style, prio: 4, exactOnly: true, genre: e.genre };
   const ITEM_WORDS = [
     ['rifle', /\b(rifle|shotgun|carbine|musket|smg|tommy gun|lever[- ]action)\b/],
     ['pistol', /\b(pistol|revolver|flintlock|sidearm|blaster|handgun|smartgun)\b/],
@@ -436,10 +492,12 @@
   }
   const STOP_FRAGMENTS = { ant: 1, cat: 1, bat: 1, ape: 1, ox: 1, rat: 1, orc: 1, elf: 1, imp: 1, eye: 1, ent: 1, man: 1, god: 1, ice: 1, red: 1, sun: 1, ash: 1, ork: 1, fae: 1, dog: 1, fox: 1, owl: 1, sea: 1, fog: 1, gel: 1, goo: 1, ink: 1, war: 1, fly: 1, bug: 1, ent2: 1 };
   function matchTable(word, table) {
+    if (table[word]?.exactOnly) return SpriteExpansion.allowed(table[word].genre) ? [word] : [];
     const keys = Object.keys(table).sort((a, b) => b.length - a.length);
     const hits = [];
     let remaining = word;
     for (const k of keys) {
+      if (table[k].exactOnly) { if (word === k && SpriteExpansion.allowed(table[k].genre)) hits.push(k); continue; }
       if (k.length <= 3 || STOP_FRAGMENTS[k]) {
         if (word === k || word === k + 's') hits.push(k);
         continue;
@@ -476,12 +534,13 @@
       shield: cleanItemName(eq.shield || eq.Shield), other: cleanItemName(eq.other || eq.Other)
     };
     const name = String(s.name || s.Name || 'Unknown').trim();
+    const expansionRace = SpriteExpansion?.creatureFor(name), expansionRole = SpriteExpansion?.roleFor(name);
     const isMonster = !!(s.isMonster || s.type === 'monster' || s.role === 'monster');
     return {
       name,
       sex: String(s.sex || s.Sex || '').trim(),
-      race: String(s.race || s.Race || '').trim(),
-      class: String(s.class || s.Class || '').trim(),
+      race: String(s.race || s.Race || expansionRace?.key || '').trim(),
+      class: String(s.class || s.Class || expansionRole?.key || '').trim(),
       level: Math.max(1, Math.min(99, parseInt(s.level || s.Level, 10) || 1)),
       hp: parseInt(s.hp || s.HP, 10) || 0,
       maxHp: parseInt(s.maxHp || s.MaxHP, 10) || 0,
@@ -750,6 +809,13 @@
     if (sheet.isMonster && !t.items.some((i) => i.slot === 'weapon') && ['humanoid', 'giant', 'insectoid'].includes(t.bodyPlan) && (t.head !== 'human' || t.covering !== 'skin')) t.claws = true;
     if (t.handGlow && t.palette.glow === '#ffe8a0' && raceMats.length) t.palette.glow = raceMats[0].glow || t.palette.glow;
     t.aura.color = t.palette.glow;
+    const expansionRole = SpriteExpansion?.roleFor(sheet.class);
+    if (expansionRole && !['beast','draconic','serpent','spider','ooze','elemental'].includes(t.bodyPlan)) {
+      t.genreGarb = SpriteExpansion.outfitFor(expansionRole.genre,expansionRole.key);
+      const roleColour=SpriteExpansion.paletteFor(expansionRole);t.palette.outfit=roleColour;t.palette.outfit2=rgbToHex(rampDark(hexToRgb(roleColour),.35));
+      if (['modern','sci-fi','cyberpunk','dieselpunk'].includes(expansionRole.genre)) t.hair='short';
+      if (!t.items.some(i=>i.slot==='weapon')) {const type=expansionRole.weapon;t.items.push({slot:'weapon',type,name:type,color:type==='staff'?'#7a5434':'#b8c0c8',accent:t.palette.trim,glow:false,shape:''});}
+    }
     t.planConfidence = creatureHits ? Math.max(0, planPrio) : 0;
     return t;
   }
@@ -1463,10 +1529,15 @@
         }
         px.line(sx, ay - 2, sx + side * span * 0.45, ay - height * 0.85 + flap, rampLight(mem, 0.25), PART.DETAIL, F_NOSHADE);
       } else if (kind === 'insect') {
-        const c = mix(lighten(P.glow, 0.4), [220, 240, 255], 0.5);
-        px.ellipse(sx + side * span * 0.5, ay - height * 0.35 + flap, span * 0.52, height * 0.42, c, part, F_TRANS | F_NOSHADE, 0.55);
-        px.ellipse(sx + side * span * 0.38, ay + height * 0.15, span * 0.36, height * 0.26, c, part, F_TRANS | F_NOSHADE, 0.5);
-        px.line(sx, ay - 1, sx + side * span * 0.85, ay - height * 0.5 + flap, lighten(c, 0.3), PART.DETAIL, F_NOSHADE | F_TRANS, 0.8);
+        // gossamer wings: a big upper lobe and a smaller lower one, translucent, with dark veins fanning from the root
+        const c = mix(lighten(P.glow, 0.4), [220, 240, 255], 0.5), vein = rampDark(mix(c, P.glow, 0.4), 0.35), rim = lighten(c, 0.35);
+        const SP = Math.min(GRID / 2 - 3, span * 1.45), HT = height * 1.4;
+        const up = [sx + side * SP * 0.52, ay - HT * 0.42 + flap], lo = [sx + side * SP * 0.38, ay + HT * 0.2];
+        px.ellipse(up[0], up[1], SP * 0.54, HT * 0.46, c, part, F_TRANS | F_NOSHADE, 0.55);
+        px.ellipse(lo[0], lo[1], SP * 0.38, HT * 0.28, c, part, F_TRANS | F_NOSHADE, 0.5);
+        [[0.95, -0.75], [1.02, -0.4], [0.7, -0.85], [0.72, 0.32], [0.45, 0.42]].forEach(([u, v]) => px.line(sx, ay - 1, Math.round(sx + side * SP * u), Math.round(ay + HT * v + (v < 0 ? flap : 0)), vein, PART.DETAIL, F_NOSHADE | F_TRANS, 0.85));
+        px.line(sx, ay - 2, Math.round(sx + side * SP * 0.9), Math.round(ay - HT * 0.82 + flap), rim, PART.DETAIL, F_NOSHADE | F_TRANS, 0.9);
+        px.put(Math.round(sx + side * SP * 0.7), Math.round(ay - HT * 0.5 + flap), lighten(P.glow, 0.3), PART.DETAIL, F_GLOW | F_NOOUTLINE);
       }
     });
   }
@@ -1526,6 +1597,20 @@
     px.poly(pts, P.capeC, PART.CAPE, 0);
     if (t.tattered) for (let x = Math.round(CX - wBot / 2); x < CX + wBot / 2; x += 2) px.clear(x, bottom);
     for (let x = Math.round(CX - wBot / 2) + 2; x < CX + wBot / 2 - 1; x += 3) px.put(x, bottom - 1, rampDark(P.capeC, 0.25), PART.CAPE, 0);
+    if (t.capeFolds && D.view === 'back' && !D.assembly) {
+      const dk = rampDark(P.capeC, 0.24), hi = rampLight(P.capeC, 0.16), h = bottom - top;
+      for (let y = top + 2; y <= bottom; y++) {
+        const k = (y - top) / Math.max(1, h), half = (wTop + (wBot - wTop) * k) / 2, cx = CX + D.fr.step * 0.5 * k;
+        // folds fan out toward the hem and lag the stride a little more than the cape edge
+        [-0.5, 0, 0.5].forEach((f, i) => {
+          const x = Math.round(cx + f * half * (0.6 + 0.4 * k) + D.fr.step * 0.35 * k * k);
+          if (px.partAt(x, y) === PART.CAPE) px.put(x, y, i === 1 && y % 3 === 0 ? hi : dk, PART.CAPE, 0);
+        });
+        const lx = Math.round(cx - half) + 1;
+        if (px.partAt(lx, y) === PART.CAPE) px.put(lx, y, hi, PART.CAPE, 0);
+      }
+      for (let x = Math.round(CX - wBot / 2); x < CX + wBot / 2; x += 3) if (px.partAt(x + 1, bottom) === PART.CAPE) px.clear(x + 1, bottom);
+    }
   }
   function drawHairBack(D, L) {
     const px = D.px, P = D.P, t = D.t;
@@ -1552,7 +1637,7 @@
     if (t.covering !== 'skin' && ['none', 'rags', 'furs'].includes(style)) legCol = P.skin;
     [-1, 1].forEach((side) => {
       const part = side < 0 ? PART.LEG_L : PART.LEG_R;
-      const lift = (fr.step === side) ? 1 : 0;
+      const lift = (fr.step === side) ? 2 : 0;
       // no outward hip flare for statuesque — keep hips centered / legs together
       const out = (D.fightStance && !closeStance) ? (side > 0 ? 1 : 0) : 0;
       const x0 = (side < 0 ? CX - gap / 2 - L.legW : CX + gap / 2) + side * out;
@@ -2083,6 +2168,7 @@
       const x0 = side < 0 ? CX - L.shoulderW / 2 - L.armW + 1 : CX + L.shoulderW / 2 - 1;
       const raised = hold[side] ? true : false;
       const swing = fr.step * side;
+      if (!raised && t.bodyPlan !== 'skeletal' && !t.extraArms) { hands[side] = restArm(D, L, side, x0, cols, part, trans); return; }
       const len = raised ? Math.round(L.torsoH * 0.6) : L.armLen + (swing > 0 ? -1 : 0);
       const y0 = L.yTorsoTop + 1;
       px.rect(x0, y0, L.armW, len, cols.arm, part, trans);
@@ -2108,6 +2194,31 @@
       });
     }
     return hands;
+  }
+  // Free arm at rest: shoulder -> bent elbow -> wrist, asymmetric by character (a caster raises the off hand with the
+  // palm up, everyone else rests a loose fist by the hip with the elbow eased out), swinging a pixel on the walk.
+  const CASTER_RE = /mage|wizard|witch|sorcer|warlock|priest|cleric|medium|druid|shaman|necro|oracle|psychic|seer|mystic|enchant/i;
+  function restArm(D, L, side, x0, cols, part, trans) {
+    const px = D.px, t = D.t, fr = D.fr;
+    const w = L.armW, sy = L.yTorsoTop + 1;
+    const scx = x0 + (w - 1) / 2;
+    const caster = side > 0 && (t.handGlow || CASTER_RE.test(String(D.spec.class || '')));
+    const sw = -fr.step * side; // the hands swing against the legs
+    let ex, ey, hx, hy;
+    if (caster) { ex = scx + side * 2; ey = sy + Math.round(L.armLen * 0.5); hx = scx + side * 0.5; hy = sy + Math.round(L.armLen * 0.3) + (fr.i === 2 ? 1 : 0); }
+    else { ex = scx + side * 1; ey = sy + Math.round(L.armLen * 0.48); hx = scx - side * 0.5; hy = sy + L.armLen - 1 + sw; }
+    const off = (k) => k - Math.floor((w - 1) / 2);
+    for (let k = 0; k < w; k++) {
+      const c = k === 0 ? rampLight(cols.arm, 0.06) : k === w - 1 ? rampDark(cols.arm, 0.08) : cols.arm;
+      px.line(scx + off(k), sy, ex + off(k), ey, c, part, trans);
+      px.line(ex + off(k), ey, hx + off(k), hy, c, part, trans);
+    }
+    if (cols.cuff) px.rect(Math.round(hx) - Math.floor((w - 1) / 2), hy - 1, w, 1, cols.cuff, part, trans);
+    const handW = w >= 3 ? 2 : w, hX = Math.round(hx) - (side < 0 ? 1 : 0) + (handW < 2 ? 0 : 0);
+    px.rect(hX, hy, handW, L.heavy ? 3 : 2, cols.hand, side < 0 ? PART.HAND_L : PART.HAND_R, trans);
+    if (!caster) px.put(hX + (side < 0 ? 0 : handW - 1), hy, rampDark(cols.hand, 0.18), side < 0 ? PART.HAND_L : PART.HAND_R, trans); // knuckle
+    if (caster && t.handGlow) px.put(hX, hy - 1, D.P.glow, PART.DETAIL, F_GLOW | F_NOOUTLINE);
+    return { x: hX, y: hy, x0: hX, w: handW };
   }
   // Ready / fighting grip: articulated arms with bent elbows (Paint proportion blueprint).
   // Weapon hand (-1) holds tip-UP sword; free hand hangs with a soft elbow bend.
@@ -2142,9 +2253,9 @@
       const part = PART.ARM_R;
       const sx = CX + L.shoulderW / 2 - 1;
       const elbowX = sx + Math.max(3, Math.round(L.shoulderW * 0.4) + thick);
-      const elbowY = sy + Math.round(L.torsoH * 0.35) + (fr.step > 0 ? 1 : 0);
-      const wx = elbowX - 1;
-      const wy = L.yLegTop - 1 + (fr.step > 0 ? 1 : 0);
+      const elbowY = sy + Math.round(L.torsoH * 0.38) + (fr.step > 0 ? 1 : 0);
+      const wx = Math.max(CX + Math.round(L.waistW / 2) + 1, elbowX - 2); // hand set on the waist
+      const wy = sy + Math.round(L.torsoH * 0.7) - (fr.step < 0 ? 1 : 0);
       stroke(sx, sy, elbowX, elbowY, cols.arm, part);
       stroke(elbowX, elbowY, wx, wy, cols.arm, part);
       px.rect(elbowX - 1, elbowY - 1, thick + 1, thick, rampLight(cols.arm, 0.1), part, 0);
@@ -2415,7 +2526,19 @@
       if (t.eyes.glow) { px.put(CX - 2, eyeY, P.eye, PART.DETAIL, F_GLOW); px.put(CX + 1, eyeY, P.eye, PART.DETAIL, F_GLOW); }
       px.rect(CX - 1, top - 1, 1, eyeY - top + 1, rampLight(P.metal, 0.3), PART.DETAIL, F_NOSHADE);
       for (let y = eyeY + 2; y < L.yHeadBottom; y += 2) { px.put(CX - 2, y, rampDark(P.metal, 0.4), PART.DETAIL, F_NOSHADE); px.put(CX + 1, y, rampDark(P.metal, 0.4), PART.DETAIL, F_NOSHADE); }
-      if (t.plume || v.plume) {
+      if (t.plume && t.plumeCrest) {
+        // tall horsehair crest: a socket on the crown, an upright tuft, then a tail that sweeps back and droops
+        const pc = hexToRgb(t.plume), dir = v.tailDir || 1, hi = rampLight(pc, 0.22), lo = rampDark(pc, 0.22);
+        px.span(CX, top - 2, 2, t.helmTrim ? hexToRgb(t.helmTrim) : rampLight(P.metal, 0.3), PART.HAIR, 0);
+        px.rect(CX - 1, top - 6, 2, 4, pc, PART.HAIR, 0);
+        px.put(CX - 1 + (dir < 0 ? 1 : 0), top - 6, hi, PART.HAIR, 0); px.put(CX - 1 + (dir < 0 ? 1 : 0), top - 5, hi, PART.HAIR, 0);
+        px.put(CX - 1 + (dir > 0 ? 0 : 1), top - 7, hi, PART.HAIR, 0);
+        for (let k = 1; k <= 6; k++) {
+          const x = CX - 1 + (dir > 0 ? 1 : 0) + dir * k, y = top - 7 + Math.round(k * 0.7);
+          px.rect(x, y, 1, k < 5 ? 2 : 1 + (k === 5 ? 1 : 0), k > 4 ? lo : (k === 1 ? hi : pc), PART.HAIR, 0);
+        }
+        px.put(CX - 1 + (dir > 0 ? 1 : 0) + dir * 6, top - 1, lo, PART.HAIR, 0);
+      } else if (t.plume || v.plume) {
         const pc = t.plume ? hexToRgb(t.plume) : P.capeC;
         const dir = v.tailDir;
         px.rect(CX - 1, top - 4, 2, 3, pc, PART.HAIR, 0);
@@ -2543,6 +2666,7 @@
       else drawWeapon(D, hold[-1], h.x, h.y, -1, L);
     }
     const eyeY = drawHead(D, L);
+    D.eyeY = eyeY;
     drawHairFront(D, L, eyeY);
     const hooded = t.outfit.hood || t.outfit.helm === 'hood' || t.outfit.helm === 'cowl';
     drawHeadgear(D, L, eyeY);
@@ -2603,6 +2727,14 @@
     const headCol = (helm === 'closed' || helm === 'open' || helm === 'horned') ? P.metal
       : hooded ? P.outfit : (t.hair !== 'none' && t.bodyPlan !== 'skeletal' ? P.hair : rampDark(P.skin, 0.08));
     const headParts = [PART.HEAD, PART.EYE, PART.DETAIL, PART.SNOUT, PART.BEARD, PART.HAIR, PART.HELM, PART.HOOD];
+    // Held props (weapon, shield, orb, gripping hands) are seen from behind too: snapshot them so the back-of-head,
+    // long hair and cape drawn below never bury them. Wings are nearer the camera than the arms from behind, so
+    // wherever a wing covers them it stays on top (only a tip or hilt past the wing edge shows).
+    const keepParts = [PART.ITEM, PART.ITEM2, PART.SHIELD, PART.ORB, PART.HAND_L, PART.HAND_R, PART.ARM_L, PART.ARM_R];
+    const kept = [];
+    for (let i = 0; i < px.w * px.h; i++) {
+      if (px.c[i * 4 + 3] > 0 && keepParts.includes(px.part[i])) kept.push([i, px.c[i * 4], px.c[i * 4 + 1], px.c[i * 4 + 2], px.c[i * 4 + 3], px.part[i], px.fl[i]]);
+    }
     for (let y = L.yHeadTop - 1; y <= L.yHeadBottom; y++) for (let x = 0; x < px.w; x++) {
       if (Math.abs(x + 0.5 - CX) > L.headW / 2 + 1) continue;
       if (headParts.includes(px.partAt(x, y))) px.put(x, y, (y + x) % 5 === 0 ? rampDark(headCol, 0.12) : headCol, PART.HEAD, 0);
@@ -2642,6 +2774,30 @@
       drawWings(D, CX, ay, span, height, t.wings);
       if (t.raggedWings && !t.statuesque) raggedWingEdges(D);
     }
+    // No face from behind: any skin / eye / detail pixel left inside the head band becomes back-of-head.
+    for (let y = L.yHeadTop - 1; y <= L.yHeadBottom; y++) for (let x = 0; x < px.w; x++) {
+      if (Math.abs(x + 0.5 - CX) > L.headW / 2 + 1) continue;
+      const p = px.partAt(x, y);
+      if (p === PART.EYE || p === PART.SNOUT || p === PART.BEARD || (p === PART.DETAIL && !(px.fl[y * px.w + x] & F_GLOW))) px.put(x, y, headCol, PART.HEAD, 0);
+    }
+    // Garment back: a laced spine seam and shoulder-blade shading so the torso reads as a back, not a blank front.
+    if (t.bodyPlan === 'humanoid' || t.bodyPlan === 'spectral') {
+      for (let y = L.yTorsoTop + 1; y < L.yLegTop; y++) {
+        const p = px.partAt(CX - 1, y);
+        if (p !== PART.TORSO && p !== PART.SKIRT) continue;
+        const c = px.colorAt(CX - 1, y);
+        px.put(CX - 1, y, rampDark(c, 0.35), p, 0);
+        if (y % 2 === 0) px.put(CX, y, rampDark(c, 0.2), p, 0);
+      }
+      const by = L.yTorsoTop + 2;
+      [-1, 1].forEach((side) => {
+        for (let k = 0; k < 3; k++) {
+          const x = Math.round(CX + side * (L.shoulderW / 4)) + (side < 0 ? -1 : 0), y = by + k;
+          if (px.partAt(x, y) === PART.TORSO) px.put(x, y, rampDark(px.colorAt(x, y), 0.18), PART.TORSO, 0);
+        }
+      });
+    }
+    kept.forEach((k) => { if (px.part[k[0]] === PART.WING_L || px.part[k[0]] === PART.WING_R) return; if (t.capeCoversBack && px.part[k[0]] === PART.CAPE) return; const o = k[0] * 4; px.c[o] = k[1]; px.c[o + 1] = k[2]; px.c[o + 2] = k[3]; px.c[o + 3] = k[4]; px.part[k[0]] = k[5]; px.fl[k[0]] = k[6]; });
   }
 
   // Fitted garments with optional full waist coverage, high-cut bottoms and trailing panels.
@@ -2819,7 +2975,17 @@
       px.rect(x - (side < 0 ? 1 : 0), ground - lift, legWd + 1, 1, rampDark(P.skin, 0.1), side < 0 ? PART.BOOT_L : PART.BOOT_R, 0);
       [0, legWd - 1].forEach((dx) => px.put(x + dx, ground - lift, [236, 230, 214], PART.DETAIL, F_NOSHADE));
     });
-    if (t.head === 'human') t.head = 'beast';
+    const raceB = String(D.spec.race || ''), riderB = /centaur/i.test(raceB), sphinxB = /sphinx/i.test(raceB);
+    if (riderB) { // centaur: a humanoid upper body (same garb and palette) rising from the horse body
+      const L0 = layoutHumanoid(D), hipY = Math.round(bodyCY - bodyH / 2 + 3), sh = hipY - L0.yLegTop;
+      const Lr = Object.assign({}, L0, { yLegTop: L0.yLegTop + sh, yTorsoTop: L0.yTorsoTop + sh, yHeadTop: L0.yHeadTop + sh, yHeadBottom: L0.yHeadBottom + sh, ground });
+      const cov = t.covering, hd = t.head; t.covering = 'skin'; t.head = 'human';
+      drawHumanoid(D, { layout: Lr, noLegs: true, noTail: true });
+      t.covering = cov; t.head = hd;
+      return { ground };
+    }
+    if (t.head === 'human' && !sphinxB) t.head = 'beast';
+    if (sphinxB) px.ellipse(CX, headTop + headH / 2 + 1, headW / 2 + 3, headH / 2 + 3, rampDark(P.hair || P.skin, 0.05), PART.HAIRBACK, 0);
     const L = { yHeadTop: headTop, headH, headW, yHeadBottom: headTop + headH - 1, s, torsoH: 8, yTorsoTop: headTop + headH, shoulderW: bodyW, armW: 3, legH: 6, ground };
     if (t.mane) px.ellipse(CX, headTop + headH / 2, headW / 2 + 3, headH / 2 + 2.5, rampDark(P.hair, 0.05), PART.HAIRBACK, 0);
     drawHead(D, L);
@@ -2932,6 +3098,7 @@
 
   function drawOoze(D) {
     const t = D.t, P = D.P, px = D.px, v = D.v, fr = D.fr;
+    if (/mimic/i.test(String(D.spec.race || ''))) return drawMimicChest(D);
     const s = clamp(D.s, 0.6, 1.3);
     const trans = t.translucency > 0 ? F_TRANS : 0;
     if (t.floating || t.eyes.style === 'cyclops') {
@@ -2999,18 +3166,28 @@
     }[el];
     const stoneLike = el === 'earth' || el === 'sand' || el === 'bone' || el === 'blood';
     if (stoneLike || !pal) {
-      const sc = P.skin;
-      [-1, 1].forEach((side) => px.rect(side < 0 ? CX - 5 : CX + 1, L.yLegTop + 2, 4, L.legH - 1, rampDark(sc, 0.1), side < 0 ? PART.LEG_L : PART.LEG_R, 0));
-      px.ball(CX, L.yTorsoTop + L.torsoH * 0.5, L.shoulderW / 2 + 2, L.torsoH / 2 + 1, sc, PART.TORSO, 0, 1, 0.2);
+      // stone elemental: a massive rocky torso hunched over heavy arms and stone fists, short pillar legs, glowing seams
+      const sc = P.skin, dk = rampDark(sc, 0.22), lt = rampLight(sc, 0.12), glow = P.glow || [255, 150, 60];
+      const sw = L.shoulderW / 2 + 4, ty = L.yTorsoTop + L.torsoH * 0.45 + 1;
       [-1, 1].forEach((side) => {
-        px.ball(CX + side * (L.shoulderW / 2 + 3), L.yTorsoTop + 2, 3.2, 3, rampLight(sc, 0.05), side < 0 ? PART.PAUL_L : PART.PAUL_R, 0, 1);
-        px.ball(CX + side * (L.shoulderW / 2 + 4), L.yTorsoTop + L.torsoH * 0.8 + fr.step * side, 3, 3, sc, side < 0 ? PART.HAND_L : PART.HAND_R, 0, 1);
+        const lx = side < 0 ? CX - 7 : CX + 2, up = fr.step === side ? 1 : 0;
+        px.rect(lx, L.yLegTop + 1 - up, 5, L.ground - L.yLegTop - 1, dk, side < 0 ? PART.LEG_L : PART.LEG_R, 0);
+        px.rect(lx - 1, L.ground - 1 - up, 7, 2, rampDark(sc, 0.35), side < 0 ? PART.BOOT_L : PART.BOOT_R, 0);
       });
-      px.ball(CX, L.yHeadTop + L.headH / 2 + 1, L.headW / 2, L.headH / 2 - 0.5, rampLight(sc, 0.05), PART.HEAD, 0, 1);
-      const ey = Math.round(L.yHeadTop + L.headH / 2 + 1);
-      px.put(CX - 2, ey, P.glow, PART.EYE, F_GLOW); px.put(CX + 1, ey, P.glow, PART.EYE, F_GLOW);
+      px.ball(CX, L.yLegTop, sw * 0.6, 3, dk, PART.BELT, 0, 1);
+      px.ball(CX, ty, sw, L.torsoH / 2 + 3, sc, PART.TORSO, 0, 1, 0.22);
+      [-1, 1].forEach((side) => {
+        const sx = CX + side * (sw + 1), swing = fr.step * side;
+        px.ball(sx, L.yTorsoTop + 1, 4, 3.5, lt, side < 0 ? PART.PAUL_L : PART.PAUL_R, 0, 1);
+        px.ball(sx + side, ty + 3 + swing * 0.5, 3, 4, sc, side < 0 ? PART.ARM_L : PART.ARM_R, 0, 1);
+        px.ball(sx + side, L.yLegTop + 3 + swing, 4, 3.5, dk, side < 0 ? PART.HAND_L : PART.HAND_R, 0, 1);
+      });
+      const hy = L.yTorsoTop - 1;
+      px.ball(CX, hy, L.headW / 2, L.headH / 2 - 1, lt, PART.HEAD, 0, 1);
+      px.put(CX - 2, Math.round(hy), glow, PART.EYE, F_GLOW); px.put(CX + 1, Math.round(hy), glow, PART.EYE, F_GLOW);
       const r = makeRng(v.markSeed);
-      for (let k = 0; k < 3; k++) { let x = CX + r.int(-4, 3), y = L.yTorsoTop + r.int(1, 4); for (let s = 0; s < 5; s++) { px.put(x, y, P.glow, PART.DETAIL, F_GLOW); x += r.int(-1, 1); y++; } }
+      for (let k = 0; k < 4; k++) { let x = CX + r.int(-sw + 3, sw - 3), y = L.yTorsoTop + r.int(1, 3); for (let q = 0; q < 6; q++) { px.put(x, y, glow, PART.DETAIL, F_GLOW); x += r.int(-1, 1); y++; } }
+      [-1, 1].forEach((side) => { px.put(CX + side * (sw + 2), ty + 3, glow, PART.DETAIL, F_GLOW); px.put(CX + side * (sw + 2), ty + 4, glow, PART.DETAIL, F_GLOW); });
       return { ground: GRID - 2 };
     }
     const [edge, mid, inner, core] = pal;
@@ -3138,32 +3315,1142 @@
   // alpha, binary alpha and a posterized palette. Torch lighting is applied by the voxel shader.
   // world === 'billboard': 3D camera-facing billboards (rendererWebGL.js). Like 'world' (binary alpha, no soft
   // halos) but full colour depth (the sprite shader does torch + distance shading) and optional back view.
+  // Wing tips rise / settle one pixel with the stride (the root at the shoulder blades stays put).
+  function flexWingTips(px, dy) {
+    const isW = (i) => px.c[i * 4 + 3] > 0 && (px.part[i] === PART.WING_L || px.part[i] === PART.WING_R);
+    let top = GRID, bot = -1;
+    for (let i = 0; i < GRID * GRID; i++) if (isW(i)) { const y = (i / GRID) | 0; top = Math.min(top, y); bot = Math.max(bot, y); }
+    if (bot < 0) return;
+    const split = top + Math.round((bot - top) * 0.45);
+    const c = new Float32Array(px.c), part = new Uint8Array(px.part), fl = new Uint8Array(px.fl);
+    for (let x = 0; x < GRID; x++) {
+      for (let y = top - 1; y < split; y++) {
+        if (y < 0) continue;
+        const sy = y - dy, i = y * GRID + x, j = sy * GRID + x;
+        const srcW = sy >= 0 && sy < GRID && c[j * 4 + 3] > 0 && (part[j] === PART.WING_L || part[j] === PART.WING_R);
+        const dstW = c[i * 4 + 3] > 0 && (part[i] === PART.WING_L || part[i] === PART.WING_R);
+        if (srcW) { for (let k = 0; k < 4; k++) px.c[i * 4 + k] = c[j * 4 + k]; px.part[i] = part[j]; px.fl[i] = fl[j]; }
+        else if (dstW) { px.c[i * 4 + 3] = 0; px.part[i] = 0; }
+      }
+    }
+  }
+  // ---------------------------------------------------------------- turned-view puppet
+  // Turned views (front-3/4, side, back-3/4) and action poses are drawn as their own pose, not a squeezed front:
+  // a jointed figure (head, torso, legs or robe, arms, held props, cape, hair) is posed in 3D, turned to the view
+  // and painted back-to-front. Its surfaces are wrapped with the character's own painted front and back art (row by
+  // row, so trims, buckles, sashes and colours carry round), its silhouette widths are measured from the front
+  // art, and props, halos and horns are the actual front pixels, so every view reads as the same character.
+  const PROP_PARTS = [PART.ITEM, PART.ITEM2, PART.SHIELD, PART.ORB];
+  const NOT_BODY = [PART.ARM_L, PART.ARM_R, PART.HAND_L, PART.HAND_R, PART.ITEM, PART.ITEM2, PART.SHIELD, PART.ORB, PART.WING_L, PART.WING_R, PART.ARM2_L, PART.ARM2_R];
+  function sampleFrontParts(fp, bp, capeOverBack) {
+    // a full cape: its red from the FRONT art never wraps onto the chest/legs; the back art (cape over the back) still does
+    const NOT_BODY_S = capeOverBack ? NOT_BODY.concat([PART.CAPE]) : NOT_BODY;
+    const tally = new Map(), count = new Map(), rows = new Map();
+    const ink = (d, i) => d[i] + d[i + 1] + d[i + 2] <= 75;
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!fp.data[i * 4 + 3]) continue;
+      const p = fp.parts[i], k = (fp.data[i * 4] << 16) | (fp.data[i * 4 + 1] << 8) | fp.data[i * 4 + 2];
+      if (!tally.has(p)) tally.set(p, new Map());
+      const m = tally.get(p); m.set(k, (m.get(k) || 0) + 1);
+      count.set(p, (count.get(p) || 0) + 1);
+      const y = (i / GRID) | 0, x = i % GRID, r = rows.get(p) || [GRID, -1, GRID, -1];
+      rows.set(p, [Math.min(r[0], y), Math.max(r[1], y), Math.min(r[2], x), Math.max(r[3], x)]);
+    }
+    const pick = (p, mode) => {
+      const m = tally.get(p); if (!m) return null;
+      let best = null, bv = -1;
+      m.forEach((n, k) => {
+        const c = [k >> 16, (k >> 8) & 255, k & 255], l = c[0] + c[1] + c[2];
+        if (l < 60 && mode !== 'dark') return;
+        const v = mode === 'light' ? l * (n > 1 ? 1 : 0.2) : mode === 'dark' ? (765 - l) * (n > 1 ? 1 : 0.2) : n;
+        if (v > bv) { bv = v; best = c; }
+      });
+      return best;
+    };
+    // colour of the art at (x, y), stepping off ink / holes toward the body axis (and off props / wings)
+    const wrapAt = (src, x, y, okParts) => {
+      if (!src) return null;
+      y = Math.max(0, Math.min(GRID - 1, Math.round(y))); x = Math.floor(x);
+      const dir = x < CX ? 1 : -1;
+      for (let d = 0; d <= 4; d++) for (const s of d ? [dir, -dir] : [1]) {
+        const xx = x + s * d; if (xx < 0 || xx >= GRID) continue;
+        const i = (y * GRID + xx) * 4, p = src.parts[y * GRID + xx];
+        if (!src.data[i + 3] || ink(src.data, i) || (okParts ? !okParts.includes(p) : (src === fp ? NOT_BODY_S : NOT_BODY).includes(p))) continue;
+        return [src.data[i], src.data[i + 1], src.data[i + 2]];
+      }
+      return null;
+    };
+    const at = (x, y) => wrapAt(fp, x, y);
+    // body half-width per row: the run through the axis, ignoring arms / props / wings
+    const half = new Float32Array(GRID);
+    for (let y = 0; y < GRID; y++) {
+      const ok = (x) => { if (x < 0 || x >= GRID) return false; const i = y * GRID + x; return fp.data[i * 4 + 3] && !NOT_BODY_S.includes(fp.parts[i]); };
+      let c0 = -1; for (let d = 0; d <= 3 && c0 < 0; d++) { if (ok(CX - 1 - d)) c0 = CX - 1 - d; else if (ok(CX + d)) c0 = CX + d; }
+      if (c0 < 0) continue;
+      let lo = c0, hi = c0;
+      const gap = (x, dir) => { for (;;) { if (ok(x + dir)) x += dir; else if (ok(x + 2 * dir)) x += 2 * dir; else return x; } };
+      lo = gap(lo, -1); hi = gap(hi, 1);
+      half[y] = Math.max(CX - lo, hi + 1 - CX);
+    }
+    // the arm colour per row, read from that side's painted arm
+    const armAt = (side, y) => {
+      const want = side < 0 ? [PART.ARM_L] : [PART.ARM_R];
+      for (let dy = 0; dy <= 6; dy++) for (const s of [1, -1]) {
+        const yy = Math.round(y) + s * dy; if (yy < 0 || yy >= GRID) continue;
+        for (let x = 0; x < GRID; x++) { const i = yy * GRID + x; if (want.includes(fp.parts[i]) && fp.data[i * 4 + 3] && !ink(fp.data, i * 4)) return [fp.data[i * 4], fp.data[i * 4 + 1], fp.data[i * 4 + 2]]; }
+      }
+      return null;
+    };
+    // held props as bitmaps relative to the hand that holds them
+    const handC = (p) => { const b = rows.get(p); return b ? [(b[2] + b[3] + 1) / 2, (b[0] + b[1] + 1) / 2] : null; };
+    const hands = { '-1': handC(PART.HAND_L), '1': handC(PART.HAND_R) };
+    const props = { '-1': [], '1': [] };
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!fp.data[i * 4 + 3] || !PROP_PARTS.includes(fp.parts[i])) continue;
+      const x = i % GRID, y = (i / GRID) | 0;
+      const side = !hands['1'] ? -1 : !hands['-1'] ? 1 : (Math.hypot(x + 0.5 - hands['-1'][0], y + 0.5 - hands['-1'][1]) <= Math.hypot(x + 0.5 - hands['1'][0], y + 0.5 - hands['1'][1]) ? -1 : 1);
+      const h = hands[side] || [x, y];
+      props[side].push([x + 0.5 - h[0], y + 0.5 - h[1], [fp.data[i * 4], fp.data[i * 4 + 1], fp.data[i * 4 + 2]], fp.parts[i], fp.fl ? fp.fl[i] : 0]);
+    }
+    // ink outline pixels hugging a prop belong to it too (keeps its painted edge)
+    return { at, wrapAt, back: bp, front: fp, half, armAt, props, hands, color: (p, mode) => pick(p, mode), count: (p) => count.get(p) || 0, box: (p) => rows.get(p) || null };
+  }
+  // Pose for a frame of an action. Walk matches the front art's cycle: 0 standing, 1 contact, 2 passing, 3 contact (other foot).
+  function puppetPose(action, f) {
+    const P = { swing: 0, bob: 0, lean: 0, armR: null, flinch: 0, fall: 0, breathe: 0, trail: 0, kneel: 0 };
+    if (action === 'walk') { P.swing = [0, 1, 0, -1][f]; P.bob = [0, 0, -1, 0][f]; P.lean = f ? 0.6 : 0; P.trail = [0, 0.6, 1, 0.6][f]; }
+    else if (action === 'idle') { P.breathe = [0, 1, 1, 0][f]; P.trail = [0, 0.25, 0.4, 0.15][f]; }
+    else if (action === 'attack') { // wind-up, strike, follow-through, recover
+      P.armR = ['windup', 'strike', 'follow', 'recover'][f]; P.lean = [-1.4, 2.2, 1.4, 0.4][f]; P.swing = [-0.2, 0.7, 0.55, 0.15][f]; P.trail = [-0.6, 0.8, 1.2, 0.6][f];
+    } else if (action === 'pain') { P.flinch = [1.3, 1.5, 0.6, 0.15][f]; P.lean = -[1.2, 1.5, 0.6, 0.15][f]; P.trail = [0.4, 1, 0.8, 0.3][f]; }
+    else if (action === 'death') { P.fall = [0, 0.22, 0.7, 1][f]; P.kneel = [0.4, 0.85, 0.55, 0][f]; P.trail = [0.4, 1, 1, 0.3][f]; P.flinch = [1, 0.4, 0, 0][f]; }
+    return P;
+  }
+  // A death fall tips the body over sideways on screen (so it reads as a body on the ground in every view)
+  // around a pivot that keeps the lying figure centred.
+  function fallTransform(fall, H, ground) {
+    const ang = fall * Math.PI / 2 * 0.96, s = 1, cA = Math.cos(ang), sA = Math.sin(ang), px0 = CX - s * fall * H * 0.45;
+    return (x, y) => { const h = ground - y, dx = x - CX; return [px0 + dx * cA + s * h * sA, ground - (h * cA - dx * sA * s) ]; };
+  }
+  function drawTurnedHumanoid(D, phi, sample, action) {
+    const px = D.px, t = D.t, P = D.P;
+    const L = layoutHumanoid(D); D.L = L;
+    const pose = puppetPose(action, D.fr.i);
+    const col = (p, fb, mode) => sample.color(p, mode) || fb;
+    const cP = Math.cos(phi), sP = Math.sin(phi);
+    const lean = pose.lean * 0.12;
+    const drop = Math.round(pose.kneel * L.legH * 0.45) + (pose.bob < 0 ? 1 : 0);
+    const fallT = pose.fall > 0 ? fallTransform(pose.fall, L.H, L.ground) : null;
+    D.fallT = fallT;
+    // body frame: a toward the character's left, f forward (toward a front-on viewer); y is the painted row
+    const proj = (a, f, y) => {
+      const hip = L.yLegTop + drop, h = hip - y;
+      const ff = f + (y < hip ? h * lean : 0) - (y < hip ? h * 0.18 * pose.flinch : 0);
+      let X = CX + a * cP + ff * sP, Y = y;
+      if (fallT) [X, Y] = fallT(X, Y);
+      return [X, ff * cP - a * sP, Y];
+    };
+    const items = [], add = (z, fn) => items.push({ z, fn });
+    const skin = P.skin;
+    const hairC = col(PART.HAIR, P.hair), torsoC = col(PART.TORSO, P.outfit), legC = col(PART.LEG_L, col(PART.LEG_R, skin));
+    const handC = col(PART.HAND_R, skin);
+    const eyeC = col(PART.EYE, [36, 26, 32], 'dark');
+    const hooded = t.outfit.hood || t.outfit.helm === 'hood' || t.outfit.helm === 'cowl';
+    const helmC = ['closed', 'open', 'horned'].includes(t.outfit.helm) ? col(PART.HELM, P.metal) : null;
+    const headHairC = hooded ? col(PART.HOOD, P.outfit) : helmC || (t.hair !== 'none' && t.bodyPlan !== 'skeletal' ? hairC : rampDark(skin, 0.1));
+    const robe = sample.count(PART.LEG_L) + sample.count(PART.LEG_R) + sample.count(PART.BOOT_L) < 6 || t.bodyPlan === 'spectral';
+    const fp = sample.front, bp = sample.back;
+    const put = (x, y, c, part) => px.put(Math.round(x), Math.round(y), c, part, 0);
+    // lathe: one elliptical body section per painted row, wrapped with the front art (near half) / back art (far half)
+    const lathe = (y0, y, wa, wf, offF, part, fallbackC) => {
+      const best = new Map();
+      for (let i = 0; i < 40; i++) {
+        const b = (i / 40) * Math.PI * 2, a = wa * Math.sin(b), f = wf * Math.cos(b) + offF;
+        const p = proj(a, f, y), x = Math.round(p[0] - 0.01);
+        if (!best.has(x) || best.get(x)[0] < p[1]) best.set(x, [p[1], a, f - offF, p[2]]);
+      }
+      best.forEach(([, a, f, yy], x) => {
+        const src = f >= -0.2 * wf || !bp ? fp : bp;
+        const c = sample.wrapAt(src, CX + a, y0) || sample.wrapAt(fp, CX + a, y0) || fallbackC;
+        px.put(x, Math.round(yy), c, part, 0);
+      });
+    };
+    const curveP = (pts, r0, r1, c, part, fn) => px.curve(pts.map((p) => [p[0], p[2]]), r0, r1, c, part, 0, undefined, fn);
+    // legs (or a robe) with a full stride in profile and a foreshortened stride at 3/4
+    const stride = Math.max(2, L.legH * 0.34);
+    if (!robe) {
+      [-1, 1].forEach((side) => {
+        const a = side * Math.max(1, L.hipW / 4);
+        const sw = pose.swing * side * stride;
+        const passingLift = action === 'walk' && D.fr.i === 2 && side > 0;
+        const kneeF = sw * 0.45 + (passingLift ? stride * 0.45 : 0) + pose.kneel * L.legH * 0.35;
+        const footF = passingLift ? -stride * 0.15 : sw - pose.kneel * L.legH * 0.15;
+        const hipY = L.yLegTop + drop, footY = L.ground - (passingLift ? 2 : 0), kneeY = Math.round((hipY + footY) / 2) - (passingLift ? 1 : 0);
+        const H = proj(a, 0, hipY), K = proj(a, kneeF, kneeY), F = proj(a, footF, footY), T = proj(a, footF + 2.2, footY);
+        add((H[1] + F[1]) / 2, () => {
+          const part = side < 0 ? PART.LEG_R : PART.LEG_L, r = L.legW / 2 + 0.2;
+          const lx = CX + side * Math.max(1, L.hipW / 4) - 0.5;
+          curveP([H, K, F], r + 0.2, r, legC, part, (tt) => sample.at(lx, L.yLegTop + tt * (L.ground - L.yLegTop)) || legC);
+          px.line(F[0], F[2], T[0], T[2], sample.at(lx, L.ground) || legC, side < 0 ? PART.BOOT_R : PART.BOOT_L, 0);
+        });
+      });
+    } else {
+      // robe / shroud: the painted lower body, widths measured from the front art, swaying behind the motion
+      const top = L.yLegTop - 1, bot = L.ground;
+      add(0, () => {
+        for (let y0 = top; y0 <= bot; y0++) {
+          const k = (y0 - top) / Math.max(1, bot - top);
+          const wa = sample.half[y0] || (L.hipW / 2 + k * 2);
+          if (!sample.half[y0] && k > 0.9) continue;
+          lathe(y0, y0 + drop, wa, Math.max(1.5, wa * 0.72), -pose.trail * k * 2 + pose.swing * k * 0.8, PART.SKIRT, col(PART.SKIRT, torsoC));
+        }
+      });
+    }
+    // cape: a sheet hanging from the shoulders behind the back, trailing the motion
+    if (t.outfit.cape) {
+      const capeC = col(PART.CAPE, P.capeC);
+      add(-L.shoulderW * 0.6, () => {
+        const top = L.yTorsoTop + 1 + drop, bot = L.ground - 2;
+        for (let y = top; y <= bot; y++) {
+          const k = (y - top) / Math.max(1, bot - top), wa = L.shoulderW / 2 + k * 2, back = -(L.shoulderW * 0.35 + 1) - k * (1.5 + Math.max(0, pose.trail) * 2.5);
+          const A = proj(-wa, back, y), B = proj(wa, back, y);
+          const c = sample.wrapAt(bp, CX, y - drop, [PART.CAPE]) || capeC;
+          for (let x = Math.round(Math.min(A[0], B[0])); x <= Math.round(Math.max(A[0], B[0])); x++) put(x, A[2], (x + y) % 4 ? c : rampDark(c, 0.18), PART.CAPE);
+        }
+      });
+    }
+    // torso: lathe sections, chest a touch forward of the spine
+    add(0, () => {
+      for (let y0 = L.yTorsoTop; y0 < L.yLegTop; y0++) {
+        const row = y0 - L.yTorsoTop;
+        const wa = (sample.half[y0] || torsoWidthAt(L, row) / 2) + (pose.breathe && row < L.torsoH * 0.4 ? 0.3 : 0);
+        const chest = row > L.torsoH * 0.12 && row < L.torsoH * 0.42;
+        const wf = Math.max(1.6, wa * 0.62) + (chest ? (D.female ? 0.9 : 0.4) : 0);
+        lathe(y0, y0 + drop, wa, wf, chest ? 0.3 : 0, PART.TORSO, torsoC);
+      }
+      const N = proj(0, 0, L.yTorsoTop - 1 + drop);
+      put(N[0], N[2], skin, PART.NECK); put(N[0] - 1, N[2], skin, PART.NECK);
+    });
+    // head: skull egg + a hair shell that is fuller at the crown and back, face only on the front of the egg
+    const headY0 = L.yHeadTop + drop, headY1 = L.yHeadBottom + drop, ra = L.headW / 2, rf = ra * 1.1;
+    const eyeY = headY0 + Math.round(L.headH * 0.5), hairline = headY0 + Math.max(1, Math.round(L.headH * 0.3));
+    const hairBox = sample.box(PART.HAIR), hairBottom = hairBox ? Math.max(headY1, hairBox[1] + drop) : headY1;
+    const longHair = ['long', 'flowing', 'braid'].includes(t.hair) && !hooded && t.outfit.helm !== 'closed';
+    if (longHair) {
+      const len = t.hair === 'flowing' ? Math.round(L.torsoH * 0.95) : Math.round(L.torsoH * 0.5);
+      add(-rf, () => {
+        for (let y = headY0 + 2; y <= headY1 + len; y++) {
+          const k = (y - headY0) / Math.max(1, headY1 + len - headY0);
+          const w = (ra + 0.6) * (1 - Math.max(0, k - 0.75) * 1.6);
+          const back = -rf * 0.75 - k * (1 + Math.max(0, pose.trail) * 2), A = proj(-w, back, y), B = proj(w, back, y), C = proj(0, back - 1, y);
+          const x0 = Math.round(Math.min(A[0], B[0], C[0])), x1 = Math.round(Math.max(A[0], B[0], C[0]));
+          for (let x = x0; x <= x1; x++) put(x, A[2], (y + (x & 1)) % 3 ? hairC : rampDark(hairC, 0.14), PART.HAIRBACK);
+        }
+      });
+    }
+    add(0.5, () => {
+      const hairy = !hooded && !helmC && t.hair !== 'none' && t.bodyPlan !== 'skeletal';
+      for (let y = headY0 - (hairy ? 1 : 0); y <= Math.max(headY1, hairy ? hairBottom : headY1); y++) {
+        const k = (y - (headY0 + headY1) / 2) / Math.max(1, (headY1 - headY0) / 2 + 0.5);
+        const inSkull = y >= headY0 && y <= headY1;
+        const sh = inSkull ? Math.sqrt(Math.max(0, 1 - k * k * 0.8)) : 0;
+        const best = new Map();
+        const consider = (a, f, kind) => { const p = proj(a, f, y), x = Math.round(p[0] - 0.01); if (!best.has(x) || best.get(x)[0] < p[1]) best.set(x, [p[1], kind, p[2]]); };
+        for (let i = 0; i < 56; i++) {
+          const b = (i / 56) * Math.PI * 2, cb = Math.cos(b);
+          if (inSkull) {
+            // jaw narrows toward the chin at the front; the face is the front of the egg below the hairline
+            const jaw = y > eyeY + 1 && cb > 0 ? 1 - (y - eyeY - 1) * 0.12 : 1;
+            const face = !hooded && !helmC && Math.abs(Math.atan2(Math.sin(b), cb)) < 1.0 && y >= hairline && t.head !== 'skull';
+            consider(ra * sh * Math.sin(b) * jaw, rf * sh * cb, face ? 'skin' : 'hair');
+          }
+          // hair shell: crown and back of the head, side locks down to the painted hair length
+          if (hairy && (y < hairline + 1 ? true : cb < 0.25) && (y <= headY1 + 1 || cb < 0.55)) {
+            const hs = inSkull ? sh + 0.12 : 0.85, hr = ra + 0.7;
+            consider(hr * hs * Math.sin(b), (rf + 0.6) * hs * cb - (y > headY1 ? 0.5 : 0), 'hair');
+          }
+        }
+        best.forEach(([, kind, yy], x) => {
+          if (kind === 'skin') px.put(x, yy, skin, PART.HEAD, 0);
+          else px.put(x, yy, (x + y) % 5 === 0 ? rampDark(headHairC, 0.12) : headHairC, hooded ? PART.HOOD : helmC ? PART.HELM : PART.HAIR, 0);
+        });
+      }
+      if (!hooded && !helmC && t.head !== 'skull') {
+        // eyes at +-26 deg (the far one hides by 3/4), nose and chin edge on the centre line
+        [-1, 1].forEach((side) => {
+          const b = side * 0.46, p = proj(ra * Math.sin(b), rf * Math.cos(b) - 0.2, eyeY);
+          const nrm = Math.cos(b) * cP - Math.sin(b) * sP;
+          if (nrm > 0.42) px.put(Math.round(p[0]), p[2], pose.flinch > 1 ? rampDark(skin, 0.35) : eyeC, PART.EYE, 0);
+        });
+        if (cP > -0.05) {
+          const n = proj(0, rf + 0.8, eyeY + 1), m = proj(0, rf * 0.92, eyeY + 2), ch = proj(0, rf * 0.75, headY1);
+          px.put(Math.round(n[0]), n[2], rampDark(skin, 0.05), PART.HEAD, 0);
+          if (Math.abs(sP) > 0.5) { px.put(Math.round(n[0]) - Math.sign(sP), n[2], skin, PART.HEAD, 0); px.put(Math.round(ch[0]), ch[2], rampDark(skin, 0.12), PART.HEAD, 0); }
+          if (cP > 0.25) px.put(Math.round(m[0]), m[2], rampDark(skin, 0.3), PART.DETAIL, 0);
+          else if (Math.abs(sP) > 0.5) px.put(Math.round(m[0]) - Math.sign(sP), m[2], rampDark(skin, 0.3), PART.DETAIL, 0);
+        }
+      }
+      // halo, horns, crests: the actual painted pixels above the head, turned with it
+      const k = Math.max(0.35, Math.abs(cP)), flip = cP < 0 ? -1 : 1;
+      for (let i = 0; i < GRID * GRID; i++) {
+        const y = (i / GRID) | 0; if (y >= L.yHeadTop || !fp.data[i * 4 + 3]) continue;
+        const p = fp.parts[i]; if (![PART.DETAIL, PART.HORN, PART.HELM, PART.HOOD, PART.HAIR].includes(p)) continue;
+        const x = i % GRID; if (Math.abs(x + 0.5 - CX) > L.headW + 4) continue;
+        const q = proj((x + 0.5 - CX) * k * flip, 0, y + drop);
+        px.put(Math.round(q[0]), Math.round(q[2]), [fp.data[i * 4], fp.data[i * 4 + 1], fp.data[i * 4 + 2]], p, p === PART.DETAIL && (fp.fl ? fp.fl[i] & F_GLOW : 0) ? F_GLOW : 0);
+      }
+    });
+    // arms swing against the legs; the right arm (canvas-left on the front art) carries its prop and does the attack
+    [-1, 1].forEach((side) => {
+      const sa = side * (L.shoulderW / 2 + 0.4), shY = L.yTorsoTop + 1 + drop;
+      const hasProp = sample.props[side].length > 2;
+      let sw = -pose.swing * side * L.armLen * 0.32 * (hasProp ? 0.5 : 1);
+      let handY = shY + L.armLen - (hasProp ? 2 : 1), elbowF = sw * 0.5 + 0.6, handF = sw + (hasProp ? 1.2 : 0.4), handA = sa, elbowY = shY + Math.round(L.armLen * 0.48);
+      if (hasProp && sample.hands[side]) handY = Math.min(handY, Math.round(sample.hands[side][1]) + drop);
+      let propRot = Math.abs(sP) > 0.5 && !pose.armR ? 0.28 : 0;
+      const fwdScreen = Math.abs(sP) > 0.3 ? Math.sign(sP) : -side * Math.sign(cP || 1);
+      if (side < 0 && pose.armR) {
+        const a = pose.armR;
+        if (a === 'windup') { handF = -L.armLen * 0.3; handY = shY - Math.round(L.armLen * 0.35); elbowF = -L.armLen * 0.25; elbowY = shY - 1; propRot = -0.7; }
+        else if (a === 'strike') { handF = L.armLen * 0.95; handY = shY + 1; elbowF = L.armLen * 0.5; elbowY = shY; propRot = 1.45; }
+        else if (a === 'follow') { handF = L.armLen * 0.6; handY = shY + Math.round(L.armLen * 0.8); elbowF = L.armLen * 0.4; propRot = 2.3; }
+        else { handF = L.armLen * 0.2; propRot = 0.35; }
+      }
+      if (pose.flinch) { handF += L.armLen * 0.3 * pose.flinch; handY -= Math.round(L.armLen * 0.25 * pose.flinch); handA = sa * 0.5; }
+      if (pose.fall > 0.5) { handF = L.armLen * 0.4; handY = shY + L.armLen; propRot = 1.5; }
+      const S0 = proj(sa, 0, shY), E = proj(sa * 1.08, elbowF, elbowY), Hh = proj(handA, handF, handY);
+      add(S0[1] + 0.2, () => {
+        const armFallback = col(side < 0 ? PART.ARM_L : PART.ARM_R, skin);
+        curveP([S0, E, Hh], L.armW / 2, L.armW / 2 - 0.2, armFallback, side < 0 ? PART.ARM_R : PART.ARM_L, (tt) => sample.armAt(side, L.yTorsoTop + 1 + tt * L.armLen) || armFallback);
+        px.ball(Hh[0], Hh[2], 0.9, 0.9, handC, side < 0 ? PART.HAND_R : PART.HAND_L, 0);
+        if (!hasProp) return;
+        // the painted prop, rotated about the grip for attack poses (nearest-neighbour, 2x2 subsamples, no holes)
+        const rot = propRot * fwdScreen + (fallT ? Math.PI / 2 * pose.fall : 0), cR = Math.cos(rot), sR = Math.sin(rot), flipX = cP < -0.2 ? -1 : 1;
+        sample.props[side].forEach(([dx, dy, c, p, fl]) => {
+          for (const ox of [-0.25, 0.25]) for (const oy of [-0.25, 0.25]) {
+            const u = (dx + ox) * flipX * (Math.abs(sP) > 0.85 && Math.abs(dx) > 1.5 ? 0.6 : 1), v = dy + oy;
+            px.put(Math.floor(Hh[0] + u * cR - v * sR + 0.5), Math.floor(Hh[2] + u * sR + v * cR + 0.5), c, p, fl & F_GLOW ? F_GLOW : 0);
+          }
+        });
+        if (pose.armR === 'strike') {
+          const len = Math.max(...sample.props[side].map((q) => Math.hypot(q[0], q[1])));
+          for (let k2 = 3; k2 < len; k2 += 2) px.put(Math.round(Hh[0] + Math.sin(rot) * k2 - Math.cos(rot) * 2), Math.round(Hh[2] - Math.cos(rot) * k2 - Math.sin(rot) * 2), [255, 255, 255], PART.DETAIL, F_GLOW | F_NOOUTLINE, 0.6);
+        }
+      });
+    });
+    items.sort((p, q) => p.z - q.z).forEach((it) => it.fn());
+    return L;
+  }
+  // Four-legged creatures (beasts, dragons) turned and posed: a long body section along the facing direction, four
+  // legs on a diagonal gait, a head and muzzle out front and a tail behind, coloured from the creature's own art.
+  function drawTurnedBeast(D, phi, sample, action) {
+    const raceS = String(D.spec.race || ''), rider = /centaur/i.test(raceS), humanHead = /sphinx/i.test(raceS);
+    const BEAST_BODY = [PART.BODY, PART.BODY2, PART.LEG_L, PART.LEG_R, PART.LEG_BL, PART.LEG_BR, PART.BOOT_L, PART.BOOT_R, PART.TAIL];
+    const px = D.px, t = D.t, P = D.P;
+    const fp = sample.front;
+    let minX = GRID, maxX = -1, minY = GRID, maxY = -1;
+    const tally = new Map();
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!fp.data[i * 4 + 3] || fp.parts[i] === PART.WING_L || fp.parts[i] === PART.WING_R || (rider && !BEAST_BODY.includes(fp.parts[i]))) continue;
+      const x = i % GRID, y = (i / GRID) | 0;
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      const l = fp.data[i * 4] + fp.data[i * 4 + 1] + fp.data[i * 4 + 2]; if (l < 80) continue;
+      const k = (fp.data[i * 4] << 16) | (fp.data[i * 4 + 1] << 8) | fp.data[i * 4 + 2]; tally.set(k, (tally.get(k) || 0) + 1);
+    }
+    if (maxX < 0) return null;
+    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => [k >> 16, (k >> 8) & 255, k & 255]);
+    const bodyC = ranked[0] || P.skin, lum = (c) => c[0] + c[1] + c[2];
+    const bellyC = ranked.slice(0, 6).sort((a, b) => lum(b) - lum(a))[0] || rampLight(bodyC, 0.2);
+    const darkC = rampDark(bodyC, 0.22), eyeC = sample.color(PART.EYE, P.glow || [30, 20, 20], 'light') || [30, 20, 20];
+    const W = maxX - minX + 1, Hb = maxY - minY + 1, ground = maxY;
+    const drac = t.bodyPlan === 'draconic', clawC = sample.color(PART.HORN, 'light') || [225, 215, 190], hornC = clawC;
+    const pose = puppetPose(action, D.fr.i);
+    const legLen = Math.max(3, Math.round(Hb * (drac ? 0.26 : 0.3))), bl = Math.max(5, W * (drac ? 0.42 : 0.55)), bw = Math.max(2.5, W * (drac ? 0.27 : 0.32)), rv = Math.max(2.5, Hb * (drac ? 0.15 : 0.2));
+    const bodyY = ground - legLen - rv + 1 + (pose.bob < 0 ? 1 : 0) + Math.round(Math.max(pose.kneel * 0.6, pose.fall) * legLen);
+    const lunge = pose.armR === 'strike' ? bl * 0.35 : pose.armR === 'windup' ? -bl * 0.15 : pose.armR === 'follow' ? bl * 0.2 : 0;
+    const recoil = -pose.flinch * bl * 0.15;
+    const cP = Math.cos(phi), sP = Math.sin(phi);
+    const fallT = null; // a felled creature slumps onto its side: body down, legs splayed
+    const proj = (a, f, y) => { let X = CX + a * cP + (f + lunge + recoil) * sP, Y = y; if (fallT) [X, Y] = fallT(X, Y); return [X, (f + lunge) * cP - a * sP, Y]; };
+    const items = [], add = (z, fn) => items.push({ z, fn });
+    // legs on a diagonal gait
+    const stride = legLen * 0.55;
+    [[-1, 1], [1, 1], [-1, -1], [1, -1]].forEach(([side, end]) => {
+      const a = side * bw * 0.6 * (1 + pose.fall * 1.6), f0 = end * bl * 0.6;
+      const phase = side * end; // diagonal pairs move together
+      const sw = pose.swing * phase * stride + (end > 0 && pose.armR === 'strike' ? stride * 0.6 : 0);
+      const lift = action === 'walk' && D.fr.i === 2 && phase > 0 ? 2 : 0;
+      const top = proj(a, f0, bodyY + rv * 0.4), knee = proj(a, f0 + sw * 0.5 + (drac ? (end > 0 ? -bl * 0.12 : bl * 0.16) : end * 0.6), ground - legLen * 0.5 * (1 - pose.fall * 0.8) - lift), foot = proj(a * (1 + pose.fall * 0.5), f0 + sw, ground - lift);
+      add((top[1] + foot[1]) / 2 - 0.5, () => {
+        if (drac) px.ball(top[0], top[2] - rv * 0.2, Math.max(1.2, bw * (end < 0 ? 0.42 : 0.3)), Math.max(1.2, rv * (end < 0 ? 0.75 : 0.5)), bodyC, PART.BODY, 0); // haunch / shoulder
+        px.curve([[top[0], top[2]], [knee[0], knee[2]], [foot[0], foot[2]]], Math.max(1, bw * (drac ? 0.22 : 0.32)), Math.max(0.8, bw * (drac ? 0.14 : 0.24)), drac ? rampDark(bodyC, 0.1) : darkC, side < 0 ? PART.LEG_L : PART.LEG_R, 0);
+        px.put(Math.round(foot[0] + Math.sign(sP || 0.01) * 0.5), Math.round(foot[2]), rampDark(darkC, 0.3), PART.BOOT_L, 0);
+        if (drac) { const cl = proj(a * (1 + pose.fall * 0.5), f0 + sw + 1.4, ground - lift); px.put(Math.round(cl[0]), Math.round(cl[2]), clawC, PART.BOOT_R, 0); }
+      });
+    });
+    // tail
+    const tail = [proj(0, -bl, bodyY - rv * 0.3), proj(0, -bl - 3 - pose.trail, bodyY - rv * 0.2 + 2), proj(0, -bl - 5 - pose.trail * 1.5, bodyY + 1 - (t.tail === 'none' ? 0 : 2))];
+    if (!drac) add(tail[1][1], () => px.curve(tail.map((p) => [p[0], p[2]]), 1.2, 0.6, darkC, PART.TAIL, 0));
+    else { // long tapering tail, swaying, with a horn-coloured spade
+      const sway = Math.sin(D.fr.i * Math.PI / 2) * bw * 0.6 * (action === 'walk' ? 1 : 0.3);
+      const tp = [0, 1, 2, 3, 4].map((k) => proj(Math.sin(k * 0.9) * sway * k / 4, -bl * 0.85 - k * bl * 0.32 - pose.trail * k * 0.4, bodyY - rv * 0.1 + k * rv * 0.35));
+      add(tp[2][1], () => { px.curve(tp.map((p) => [p[0], p[2]]), Math.max(1.2, bw * 0.5), 0.5, bodyC, PART.TAIL, 0); const e = tp[4]; px.put(Math.round(e[0]), Math.round(e[2]), hornC, PART.TAIL, 0); px.put(Math.round(e[0]) + 1, Math.round(e[2]), hornC, PART.TAIL, 0); });
+    }
+    // body: ellipsoid sections along its length
+    add(0, () => {
+      for (let y = Math.floor(bodyY - rv); y <= Math.ceil(bodyY + rv); y++) {
+        const k = (y - bodyY) / rv; if (Math.abs(k) > 1) continue;
+        const sh = Math.sqrt(1 - k * k), best = new Map();
+        for (let i = 0; i < 256; i++) {
+          const b = (i / 256) * Math.PI * 2, a = bw * sh * Math.sin(b), f = bl * sh * Math.cos(b);
+          const p = proj(a, f, y), x = Math.round(p[0] - 0.01);
+          if (!best.has(x) || best.get(x)[0] < p[1]) best.set(x, [p[1], p[2]]);
+        }
+        best.forEach(([, yy], x) => px.put(x, Math.round(yy), k > (drac ? 0.3 : 0.45) ? (drac && (y & 1) ? rampDark(bellyC, 0.1) : bellyC) : (k < -0.6 ? rampLight(bodyC, 0.08) : bodyC), PART.BODY, 0));
+      }
+    });
+    // folded wings drawn as part of the figure (membrane between finger bones), for dragons and winged beasts alike
+    const drawFigureWings = () => {
+      const hr = Math.max(2, Math.min(W * 0.2, Hb * 0.16));
+      // folded bat wings on each side: membrane fanned between finger bones from the wrist, flexing on the walk,
+      // cocked on the wind-up, tucked when felled
+      const wingC = sample.color(PART.WING_L) || sample.color(PART.WING_R) || rampDark(bodyC, 0.15), boneC = rampDark(wingC, 0.35);
+      const flap = action === 'walk' ? [0, 0.12, 0.2, 0.12][D.fr.i] : action === 'attack' ? [0.35, 0.15, 0.1, 0.05][D.fr.i] : action === 'pain' ? 0.25 : action === 'idle' ? [0, 0.05, 0.05, 0][D.fr.i] : 0;
+      const wingH = Hb * 0.4 * (1 - pose.fall * 0.7) * (1 + flap);
+      const fillPoly = (pts, c, part) => {
+        const ys = pts.map((p) => p[1]), y0 = Math.floor(Math.min(...ys)), y1 = Math.ceil(Math.max(...ys));
+        for (let y = y0; y <= y1; y++) {
+          const xs = [];
+          for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; if ((p[1] <= y + 0.5) !== (q[1] <= y + 0.5)) xs.push(p[0] + (y + 0.5 - p[1]) / (q[1] - p[1]) * (q[0] - p[0])); }
+          xs.sort((a, b) => a - b);
+          for (let k = 0; k + 1 < xs.length; k += 2) for (let x = Math.round(xs[k]); x < Math.round(xs[k + 1]); x++) px.put(x, y, c, part, 0);
+        }
+      };
+      [-1, 1].forEach((side) => {
+        const Q = (a, f, y) => { const p = proj(a, f, y); return [p[0], p[2], p[1]]; };
+        const sh = Q(side * bw * 0.45, bl * 0.4, bodyY - rv * 0.8), wr = Q(side * bw * (0.7 + flap * 1.2), bl * 0.12, bodyY - rv - wingH);
+        const tips = [Q(side * bw * (0.8 + flap), -bl * 0.35, bodyY - rv - wingH * 0.72), Q(side * bw * (0.75 + flap * 0.6), -bl * 0.72, bodyY - rv - wingH * 0.32), Q(side * bw * 0.6, -bl * 0.82, bodyY - rv * 0.15)];
+        const root = Q(side * bw * 0.45, -bl * 0.3, bodyY - rv * 0.55);
+        add(wr[2] + (wr[2] > 0 ? 0.6 : -0.6), () => {
+          const near = wr[2] > 0, mem = near ? wingC : rampDark(wingC, 0.18);
+          // scalloped trailing edge: membrane between consecutive finger tips sags toward the body
+          const sag = (p, q) => [(p[0] + q[0]) / 2 + (root[0] - (p[0] + q[0]) / 2) * 0.18, (p[1] + q[1]) / 2 + (root[1] - (p[1] + q[1]) / 2) * 0.18];
+          fillPoly([sh, wr, tips[0], sag(tips[0], tips[1]), tips[1], sag(tips[1], tips[2]), tips[2], root], mem, side < 0 ? PART.WING_L : PART.WING_R);
+          [sh].concat(tips).forEach((tp) => px.line(Math.round(wr[0]), Math.round(wr[1]), Math.round(tp[0]), Math.round(tp[1]), boneC, side < 0 ? PART.WING_L : PART.WING_R, 0));
+          px.put(Math.round(wr[0]), Math.round(wr[1]) - 1, hornC, PART.DETAIL, 0); // wrist claw
+        });
+      });
+    };
+    if (drac) { // dragons: arched neck, horned head with a jaw that opens to strike, dorsal spines
+      const neckL = Math.max(4, Hb * 0.3), hr = Math.max(2, Math.min(W * 0.2, Hb * 0.16)), dropH = pose.fall * (neckL + rv);
+      const hy = bodyY - rv - neckL + (pose.armR === 'strike' ? neckL * 0.35 : pose.armR === 'windup' ? -1 : 0) + dropH + pose.flinch;
+      const hf = bl * 0.95 + hr * 0.6 + (pose.armR === 'strike' ? hr : 0);
+      const P0 = proj(0, bl * 0.7, bodyY - rv * 0.3), P1 = proj(0, bl * 1.0, bodyY - rv - neckL * 0.55 + dropH * 0.6), P2 = proj(0, hf - hr * 0.4, hy + hr * 0.3);
+      add((P0[1] + P2[1]) / 2, () => {
+        px.curve([[P0[0], P0[2]], [P1[0], P1[2]], [P2[0], P2[2]]], Math.max(1.5, bw * 0.55), Math.max(1, hr * 0.6), bodyC, PART.NECK, 0);
+        const fw = Math.abs(sP) > 0.3 ? Math.sign(sP) * 0.7 : 0;
+        px.curve([[P0[0] + fw, P0[2] + 1], [P1[0] + fw, P1[2] + 1], [P2[0] + fw, P2[2] + 1]], Math.max(0.8, bw * 0.2), 0.6, bellyC, PART.NECK, 0);
+      });
+      const strikeJaw = pose.armR === 'strike' || pose.armR === 'follow';
+      const H0 = proj(0, hf, hy), M = proj(0, hf + hr * 1.25, hy + hr * 0.3), Jw = proj(0, hf + hr * 1.0, hy + hr * (strikeJaw ? 1.2 : 0.7));
+      add(H0[1] + 1, () => {
+        [-1, 1].forEach((side) => { const h0 = proj(side * hr * 0.45, hf - hr * 0.3, hy - hr * 0.6), h1 = proj(side * hr * 0.75, hf - hr * 1.5, hy - hr * 1.7); px.curve([[h0[0], h0[2]], [h1[0], h1[2]]], 0.9, 0.45, hornC, PART.HORN, 0); });
+        px.ball(H0[0], H0[2], hr * Math.max(0.8, Math.abs(cP) * 0.2 + 0.8), hr * 0.9, bodyC, PART.HEAD, 0);
+        px.ball(Jw[0], Jw[2], Math.max(1, hr * 0.55), Math.max(0.8, hr * 0.32), darkC, PART.SNOUT, 0);
+        px.ball(M[0], M[2], Math.max(1, hr * 0.62), Math.max(1, hr * 0.42), bodyC, PART.SNOUT, 0);
+        if (strikeJaw) { const tq = proj(0, hf + hr * 1.3, hy + hr * 0.8); px.put(Math.round(tq[0]), Math.round(tq[2]), [240, 235, 220], PART.DETAIL, 0); }
+        [-1, 1].forEach((side) => { const e = proj(side * hr * 0.5, hf + hr * 0.45, hy - hr * 0.25), nrm = 0.5 * cP - side * 0.85 * sP; if (nrm > 0.1) px.put(Math.round(e[0]), Math.round(e[2]), pose.flinch > 1 || pose.fall > 0.7 ? darkC : eyeC, PART.EYE, pose.fall > 0.7 ? 0 : F_GLOW); });
+        if (cP > -0.3) { const n = proj(0, hf + hr * 1.75, hy + hr * 0.15); px.put(Math.round(n[0]), Math.round(n[2]), [24, 18, 18], PART.DETAIL, 0); }
+      });
+      drawFigureWings();
+      for (let k = -2; k <= 2; k++) { const s0 = proj(0, k * bl * 0.3, bodyY - rv - 0.5); add(s0[1] + 0.2, () => px.put(Math.round(s0[0]), Math.round(s0[2] - 1), hornC, PART.DETAIL, 0)); }
+      items.sort((p, q) => p.z - q.z).forEach((it) => it.fn());
+      return { H: Hb, ground, legH: legLen, shoulderW: Math.round(bw * 2) };
+    }
+    // head and muzzle, out in front
+    const hr = Math.max(2, Math.min(W * 0.26, Hb * 0.24)), hf = bl + hr * 0.5, hy = bodyY - rv * 0.7 + (pose.armR === 'strike' ? 2 : 0) + pose.fall * rv * 1.2;
+    if (t.wings && t.wings !== 'none') drawFigureWings();
+    // sphinx head seen turned: painted profile (side) or three-quarter face under a striped headdress with lappets
+    const sphinxHead = (hx, hyy, hs) => {
+      const dir = sP >= 0 ? 1 : -1, faceOn = cP > -0.2, R = 3.3 * hs, skinC = rampLight(sample.color(PART.HEAD, 'light') || P.skin, 0.12);
+      const gold = [214, 176, 72], band = rampDark(P.hair || bodyC, 0.3), ink = [26, 18, 12], cy = Math.round(hyy - R * 0.1);
+      const quarter = Math.abs(cP) > 0.3;
+      hx = Math.min(GRID - 4 - R * 1.1, Math.max(3 + R * 1.1, hx - dir * R * (quarter ? 0.25 : 0.55))); // keep the profile (nose, beard) inside the frame
+      // headdress cloth: swept back from the brow, striped
+      px.ball(hx - dir * R * 0.35, cy - R * 0.15, R * 1.1, R * 1.15, gold, PART.HAIRBACK, 0, 1);
+      for (let k = -3; k <= 3; k += 2) px.line(Math.round(hx - dir * R * 1.2), Math.round(cy + k * R * 0.28), Math.round(hx + dir * R * 0.3), Math.round(cy - R * 0.9 + k * R * 0.1), band, PART.HAIRBACK, 0);
+      // lappet: the striped flap hanging behind the cheek down to the chest
+      const lx = Math.round(hx - dir * R * 0.15);
+      for (let y = Math.round(cy); y < Math.round(cy + R * 1.9); y++) { const st = ((y - cy) >> 1) % 2 ? gold : band; px.put(lx, y, st, PART.HAIRBACK, 0); px.put(lx - dir, y, st, PART.HAIRBACK, 0); px.put(lx - 2 * dir, y, rampDark(st, 0.15), PART.HAIRBACK, 0); }
+      if (!faceOn) return;
+      // face: cheek and jaw, a straight nose standing proud of the profile, chin line, heavy brow over a dark eye
+      const fx = hx + dir * R * (quarter ? 0.2 : 0.35);
+      px.ball(fx, cy + R * 0.15, R * (quarter ? 0.8 : 0.7), R * 0.85, skinC, PART.HEAD, 0, 1);
+      const front = Math.round(fx + dir * R * (quarter ? 0.8 : 0.7));
+      // brow ridge and headdress band across the forehead
+      px.line(Math.round(hx - dir * R * 0.3), Math.round(cy - R * 0.55), front, Math.round(cy - R * 0.5), gold, PART.HAT, 0);
+      px.line(Math.round(fx), Math.round(cy - R * 0.25), front - dir, Math.round(cy - R * 0.25), rampDark(skinC, 0.45), PART.DETAIL, F_NOSHADE);
+      // eye(s)
+      const ey = Math.round(cy - R * 0.08);
+      px.put(front - dir * 2, ey, ink, PART.EYE, F_NOSHADE); px.put(front - dir * 3, ey, ink, PART.EYE, F_NOSHADE);
+      if (quarter) { px.put(Math.round(fx - dir * R * 0.35), ey, ink, PART.EYE, F_NOSHADE); px.put(Math.round(fx - dir * R * 0.35) - dir, ey, ink, PART.EYE, F_NOSHADE); }
+      // nose: a wedge out past the face line, lit on top, shadowed under
+      for (let k = 0; k < 3; k++) px.put(front + dir, ey + k, skinC, PART.HEAD, 0);
+      px.put(front + 2 * dir, ey + 2, skinC, PART.HEAD, 0);
+      px.put(front + dir, ey + 3, rampDark(skinC, 0.35), PART.DETAIL, F_NOSHADE);
+      // mouth and chin line
+      px.put(front, ey + 4, rampDark(skinC, 0.5), PART.DETAIL, F_NOSHADE); px.put(front - dir, ey + 4, rampDark(skinC, 0.5), PART.DETAIL, F_NOSHADE);
+      px.put(front, ey + 5, skinC, PART.HEAD, 0); px.put(front, ey + 6, rampDark(skinC, 0.3), PART.HEAD, 0);
+      px.line(front - dir, ey + 7, Math.round(hx - dir * R * 0.1), Math.round(cy + R * 0.9), rampDark(skinC, 0.4), PART.DETAIL, F_NOSHADE);
+      // false beard under the chin
+      px.rect(Math.min(front - dir, front - 2 * dir), ey + 7, 2, 3, gold, PART.BEARD, 0);
+    };
+    if (rider || humanHead) { // centaur: the rider's own turned upper body rises from the withers; sphinx: a human head on a maned neck
+      if (rider) { const W0 = proj(0, bl * 0.72, bodyY - rv * 0.55); add(W0[1] + 2, () => pasteProxyPart(D, phi, action, D.fr.i, 'hip', [W0[0], W0[2]], pose.fall * Math.PI / 2 * 0.8 * (sP < 0 ? -1 : 1), clamp(Hb / 30, 1, 1.45))); }
+      else { const Hn = proj(0, hf - hr * 0.2, hy); add(Hn[1] + 1, () => { const hs = clamp(hr / 3.2, 1.2, 1.8), mr = 4.2 * hs; px.ball(Hn[0], Hn[2] - mr * 0.55, mr, mr * 1.15, rampDark(P.hair || bodyC, 0.12), PART.HAIRBACK, 0); for (let k = -2; k <= 2; k++) { const lx = Math.round(Hn[0] + k * mr * 0.38); px.line(lx, Math.round(Hn[2] - mr * 0.2), lx + k, Math.round(Hn[2] + mr * 0.55), k % 2 ? [205, 170, 70] : rampDark(P.hair || bodyC, 0.25), PART.HAIRBACK, 0); } if (Math.abs(sP) > 0.38) sphinxHead(Hn[0], Hn[2], hs); else pasteProxyPart(D, phi, action, D.fr.i, 'chin', [Hn[0], Hn[2] + hr * 0.7], 0, hs); }); }
+      items.sort((p, q) => p.z - q.z).forEach((it) => it.fn());
+      return { H: Hb, ground, legH: legLen, shoulderW: Math.round(bw * 2) };
+    }
+    const H0 = proj(0, hf, hy), M = proj(0, hf + hr * 0.95, hy + hr * 0.35);
+    add(H0[1] + 1, () => {
+      px.ball(H0[0], H0[2], hr * Math.max(0.75, Math.abs(cP) * 0.25 + 0.75), hr, bodyC, PART.HEAD, 0);
+      if (cP > -0.3) px.ball(M[0], M[2], Math.max(1, hr * 0.55), Math.max(1, hr * 0.5), bellyC, PART.SNOUT, 0);
+      [-1, 1].forEach((side) => {
+        const ear = proj(side * hr * 0.55, hf - hr * 0.2, hy - hr - 1.2);
+        px.put(Math.round(ear[0]), Math.round(ear[2]), darkC, PART.EAR, 0); px.put(Math.round(ear[0]), Math.round(ear[2]) + 1, darkC, PART.EAR, 0);
+        const e = proj(side * hr * 0.5, hf + hr * 0.55, hy - hr * 0.2), nrm = 0.5 * cP - side * 0.85 * sP;
+        if (nrm > 0.1) px.put(Math.round(e[0]), Math.round(e[2]), pose.flinch > 1 || pose.fall > 0.7 ? darkC : eyeC, PART.EYE, pose.fall > 0.7 ? 0 : F_GLOW);
+      });
+      if (cP > -0.3) { const n = proj(0, hf + hr * 1.45, hy + hr * 0.15); px.put(Math.round(n[0]), Math.round(n[2]), [24, 18, 18], PART.DETAIL, 0); }
+      if (pose.armR === 'strike' || pose.armR === 'follow') { const j = proj(0, hf + hr * 1.1, hy + hr * 0.9); px.put(Math.round(j[0]), Math.round(j[2]), [235, 230, 215], PART.DETAIL, 0); }
+    });
+    items.sort((p, q) => p.z - q.z).forEach((it) => it.fn());
+    return { H: Hb, ground, legH: legLen, shoulderW: Math.round(bw * 2) };
+  }
+  // Shared read of a creature's painted front: silhouette box and its main, belly and shadow colours.
+  function artPalette(D, fp) {
+    let minX = GRID, maxX = -1, minY = GRID, maxY = -1;
+    const tally = new Map();
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!fp.data[i * 4 + 3] || fp.parts[i] === PART.WING_L || fp.parts[i] === PART.WING_R) continue;
+      const x = i % GRID, y = (i / GRID) | 0;
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      if (fp.data[i * 4] + fp.data[i * 4 + 1] + fp.data[i * 4 + 2] < 80 || fp.parts[i] === PART.EYE) continue;
+      const k = (fp.data[i * 4] << 16) | (fp.data[i * 4 + 1] << 8) | fp.data[i * 4 + 2]; tally.set(k, (tally.get(k) || 0) + 1);
+    }
+    if (maxX < 0) return null;
+    const lum = (c) => c[0] + c[1] + c[2];
+    const ranked = [...tally.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => [k >> 16, (k >> 8) & 255, k & 255]);
+    const bodyC = ranked[0] || D.P.skin;
+    return { minX, maxX, minY, maxY, W: maxX - minX + 1, H: maxY - minY + 1, ground: maxY, bodyC,
+      bellyC: ranked.slice(0, 6).sort((a, b) => lum(b) - lum(a))[0] || rampLight(bodyC, 0.2), darkC: rampDark(bodyC, 0.22) };
+  }
+  // Ellipsoid section painter shared by the creature figures: fills the visible front of an (a, f) ellipse at row y.
+  function paintSection(px, proj, cy, wa, wf, colorFn, part, y) {
+    const best = new Map();
+    for (let i = 0; i < 160; i++) {
+      const b = (i / 160) * Math.PI * 2, a = wa * Math.sin(b), f = wf * Math.cos(b);
+      const p = proj(a, f, y), x = Math.round(p[0] - 0.01);
+      if (!best.has(x) || best.get(x)[0] < p[1]) best.set(x, [p[1], p[2], a, f]);
+    }
+    best.forEach(([, yy, a, f], x) => px.put(x, Math.round(yy), colorFn(a, f), part, 0));
+  }
+  // Serpents (snakes, nagas, hydras): a body lying in a travelling S-wave along the facing direction, the fore part
+  // rearing up to the painted head height; strikes lunge the head forward, death uncoils flat.
+  function drawTurnedSerpent(D, phi, sample, action) {
+    const px = D.px, t = D.t, fp = sample.front, A = artPalette(D, fp); if (!A) return null;
+    // nagas and lamias: the painted humanoid upper body rides on the serpent's reared fore part; coils keep the coil colours
+    const COILP = [PART.COIL1, PART.COIL2, PART.COIL3, PART.TAIL];
+    let torso = null;
+    if (t.nagaTorso) {
+      let top = GRID, bot = -1, l = GRID, r = -1;
+      for (let i = 0; i < GRID * GRID; i++) if (fp.data[i * 4 + 3] && !COILP.includes(fp.parts[i]) && fp.parts[i] !== OUTLINE_PART) { const x = i % GRID, y = (i / GRID) | 0; top = Math.min(top, y); bot = Math.max(bot, y); l = Math.min(l, x); r = Math.max(r, x); }
+      if (bot >= 0) torso = { top, bot, l, r };
+    }
+    {
+      const okP = COILP.concat(torso ? [] : [PART.BODY, PART.BODY2, PART.NECK, PART.HEAD]), m = new Map();
+      for (let i = 0; i < GRID * GRID; i++) { if (!fp.data[i * 4 + 3] || !okP.includes(fp.parts[i])) continue; const l = fp.data[i * 4] + fp.data[i * 4 + 1] + fp.data[i * 4 + 2]; if (l < 80) continue; const k = (fp.data[i * 4] << 16) | (fp.data[i * 4 + 1] << 8) | fp.data[i * 4 + 2]; m.set(k, (m.get(k) || 0) + 1); }
+      const rk = [...m.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => [k >> 16, (k >> 8) & 255, k & 255]);
+      if (rk.length) { A.bodyC = rk[0]; A.darkC = rampDark(rk[0], 0.22); A.bellyC = rk.slice(0, 5).sort((a, b) => (b[0] + b[1] + b[2]) - (a[0] + a[1] + a[2]))[0]; }
+    }
+    const drawNagaTorso = () => {
+      { const hp0 = proj(pts[N].a, pts[N].f, pts[N].y); if (pasteProxyPart(D, phi, action, D.fr.i, 'hip', [hp0[0], hp0[2] + 1], action === 'death' ? pose.fall * Math.PI / 2 * 0.9 * (sP < 0 ? -1 : 1) : 0)) return; }
+      const hp = proj(pts[N].a, pts[N].f, pts[N].y), useBack = Math.abs(phi) > Math.PI / 2 + 0.01 && sample.back;
+      const src = useBack ? sample.back : fp, kx = Math.max(0.55, Math.abs(cP));
+      const tilt = pose.fall * Math.PI / 2 * 0.9 + ((strike > 0 ? 0.25 : strike < 0 ? -0.15 : 0) - pose.flinch * 0.08) * (sP < 0 ? -1 : 1);
+      const ct = Math.cos(tilt), st = Math.sin(tilt), cxT = (torso.l + torso.r + 1) / 2;
+      for (let y = torso.top; y <= torso.bot; y++) for (let x = torso.l; x <= torso.r; x++) {
+        const i = y * GRID + x; if (!src.data[i * 4 + 3] || COILP.includes(src.parts[i]) || src.parts[i] === OUTLINE_PART) continue;
+        let u = (x + 0.5 - cxT) * kx; if (useBack) u = -u; const v = y + 0.5 - (torso.bot + 1);
+        for (const [du, dv] of kx < 0.99 ? [[0, 0]] : [[0, 0]]) px.put(Math.floor(hp[0] + (u + du) * ct - (v + dv) * st), Math.floor(hp[2] + 1 + (u + du) * st + (v + dv) * ct), [src.data[i * 4], src.data[i * 4 + 1], src.data[i * 4 + 2]], src.parts[i], 0);
+      }
+    };
+    const pose = puppetPose(action, D.fr.i), cP = Math.cos(phi), sP = Math.sin(phi);
+    const len = Math.max(14, A.W * 1.6), thick = Math.max(2, A.W * 0.16), rear = (torso ? Math.max(thick * 2, A.ground - torso.bot - 1) : A.H * 0.78) * (1 - pose.fall);
+    const eyeC = sample.color(PART.EYE, [230, 200, 60], 'light') || [230, 200, 60];
+    const strike = pose.armR === 'strike' ? 1 : pose.armR === 'follow' ? 0.6 : pose.armR === 'windup' ? -0.4 : 0;
+    const proj = (a, f, y) => [CX + a * cP + f * sP, f * cP - a * sP, y];
+    const N = 36, pts = [];
+    for (let i = 0; i <= N; i++) {
+      const s = i / N; // 0 tail .. 1 head
+      const wave = Math.sin(s * Math.PI * 2.4 + D.fr.i * Math.PI / 2) * thick * 1.6 * (1 - s * 0.6) * (1 - pose.fall * 0.7);
+      const surge = action === 'walk' ? Math.sin(D.fr.i * Math.PI / 2) * thick * 0.9 * (1 - pose.fall) : 0;
+      const f = -len * 0.55 + s * len * 0.8 + surge * s + (s > 0.7 ? strike * (s - 0.7) * len * 0.8 - pose.flinch * (s - 0.7) * 4 : 0);
+      const riseK = Math.max(0, (s - 0.62) / 0.38), y = A.ground - thick - riseK * riseK * (rear - thick) * (strike > 0 ? 0.75 : 1);
+      const hump = action === 'walk' && s < 0.62 ? Math.max(0, Math.sin(s * Math.PI * 3.2 - D.fr.i * Math.PI / 2)) * thick * 0.9 : 0;
+      pts.push({ a: wave, f, y: y - hump, r: thick * (0.45 + 0.55 * Math.min(1, s * 2.2)) * (s > 0.95 ? 0.85 : 1) });
+    }
+    const segs = pts.map((p, i) => ({ p, z: proj(p.a, p.f, p.y)[1], i })).sort((u, v) => u.z - v.z);
+    segs.forEach(({ p, i }) => {
+      const q = proj(p.a, p.f, p.y);
+      const c = i % 4 === 0 ? A.darkC : A.bodyC;
+      px.ellipse(q[0] + 0.5, q[2] + 0.5, p.r, p.r, c, PART.BODY, 0);
+      px.put(Math.round(q[0]), Math.round(q[2] + p.r * 0.6), A.bellyC, PART.BODY, 0);
+    });
+    if (torso) drawNagaTorso(); else {
+    const head = pts[N], hq = proj(head.a, head.f + thick * 0.6, head.y - thick * 0.3);
+    px.ball(hq[0], hq[2], thick * 1.15, thick * 0.95, A.bodyC, PART.HEAD, 0);
+    [-1, 1].forEach((side) => { const e = proj(head.a + side * thick * 0.6, head.f + thick * 1.2, head.y - thick * 0.7); if (0.5 * cP - side * 0.85 * sP > 0.05) px.put(Math.round(e[0]), Math.round(e[2]), pose.fall > 0.7 ? A.darkC : eyeC, PART.EYE, pose.fall > 0.7 ? 0 : F_GLOW); });
+    if (strike > 0 || action === 'walk' && D.fr.i === 2) { const tg = proj(head.a, head.f + thick * 2.6, head.y - thick * 0.2); px.line(Math.round(hq[0]), Math.round(hq[2] + 1), Math.round(tg[0]), Math.round(tg[2] + 1), [200, 40, 50], PART.DETAIL, 0); }
+    }
+    return { H: A.H, ground: A.ground, legH: thick, shoulderW: Math.round(thick * 2) };
+  }
+  // Spiders and scorpions: cephalothorax and abdomen with eight jointed legs on an alternating gait (knees high),
+  // fangs or pincers forward, an optional tail curled over the back.
+  function drawTurnedSpider(D, phi, sample, action) {
+    const px = D.px, t = D.t, fp = sample.front, A = artPalette(D, fp); if (!A) return null;
+    const pose = puppetPose(action, D.fr.i), cP = Math.cos(phi), sP = Math.sin(phi);
+    const eyeC = sample.color(PART.EYE, [220, 40, 40], 'light') || [220, 40, 40];
+    const bw = Math.max(3, A.W * 0.2), legLen = Math.max(5, A.W * 0.42), lift = (1 - pose.fall) * Math.max(2, A.H * 0.25);
+    const lunge = pose.armR === 'strike' ? bw * 1.2 : pose.armR === 'windup' ? -bw * 0.5 : 0;
+    const proj = (a, f, y) => [CX + a * cP + (f + lunge - pose.flinch * 1.5) * sP, (f + lunge) * cP - a * sP, y];
+    const bodyY = A.ground - lift - bw * 0.6 + (pose.bob < 0 ? 1 : 0);
+    const items = [], add = (z, fn) => items.push({ z, fn });
+    for (let k = 0; k < 8; k++) {
+      const side = k < 4 ? -1 : 1, j = k % 4, ang = (-0.9 + j * 0.6); // fan from front to back
+      const step = ((j + (side > 0 ? 1 : 0)) % 2 ? 1 : -1) * pose.swing * 0.35;
+      const da = Math.cos(ang + step) * side, df = Math.sin(-ang - step);
+      const hip = [side * bw * 0.5, bw * 0.3 - j * bw * 0.25], knee = [hip[0] + da * legLen * 0.55, hip[1] + df * legLen * 0.55], foot = [hip[0] + da * legLen * (1 + pose.fall * 0.3), hip[1] + df * legLen];
+      const up = (action === 'walk' && ((j + (side > 0 ? 1 : 0)) % 2) && D.fr.i % 2 === 1) ? 2 : 0;
+      const H = proj(hip[0], hip[1], bodyY), K = proj(knee[0], knee[1], bodyY - legLen * 0.35 * (1 - pose.fall)), F = proj(foot[0], foot[1], A.ground - up);
+      add((H[1] + F[1]) / 2, () => { px.line(H[0], H[2], K[0], K[2], A.darkC, PART.LEG_L, 0); px.line(K[0], K[2], F[0], F[2], A.darkC, PART.LEG_L, 0); });
+    }
+    add(0, () => {
+      for (let y = Math.floor(bodyY - bw * 1.3); y <= Math.ceil(bodyY + bw * 0.9); y++) {
+        const k1 = (y - (bodyY - bw * 0.2)) / (bw * 1.1);
+        if (Math.abs(k1) <= 1) paintSection(px, (a, f, yy) => proj(a, f - bw * 1.2, yy), 0, bw * 1.05 * Math.sqrt(1 - k1 * k1), bw * 1.4 * Math.sqrt(1 - k1 * k1), (a, f) => (Math.abs(a) < 0.8 && f > 0 ? A.bellyC : A.bodyC), PART.ABDOMEN, y);
+        const k2 = (y - bodyY) / (bw * 0.7);
+        if (Math.abs(k2) <= 1) paintSection(px, (a, f, yy) => proj(a, f + bw * 0.4, yy), 0, bw * 0.75 * Math.sqrt(1 - k2 * k2), bw * 0.8 * Math.sqrt(1 - k2 * k2), () => A.bodyC, PART.BODY, y);
+      }
+    });
+    add(bw, () => {
+      [-1, 1].forEach((side) => {
+        const e = proj(side * bw * 0.25, bw * 1.15, bodyY - bw * 0.3), fang = proj(side * bw * 0.25, bw * 1.25 + (pose.armR === 'strike' ? 2 : 0), bodyY + bw * 0.4);
+        if (cP > -0.2) { px.put(Math.round(e[0]), Math.round(e[2]), eyeC, PART.EYE, F_GLOW); px.put(Math.round(fang[0]), Math.round(fang[2]), [230, 225, 210], PART.DETAIL, 0); }
+      });
+    });
+    if (t.tail && t.tail !== 'none') {
+      const up = 1 - pose.fall, tp = [proj(0, -bw * 2.4, bodyY - bw * 0.4 * up), proj(0, -bw * (3.2 + pose.fall), bodyY - bw * 2.5 * up), proj(0, -bw * (2.2 + 2 * pose.fall) + lunge * 1.5, bodyY - bw * 3.6 * up), proj(0, -bw * (1.2 + 3 * pose.fall) + lunge * 2, bodyY - bw * 3.2 * up)];
+      add(-bw, () => px.curve(tp.map((p) => [p[0], p[2]]), 1.3, 0.7, A.bodyC, PART.TAIL, 0));
+    }
+    items.sort((p, q) => p.z - q.z).forEach((it) => it.fn());
+    return { H: A.H, ground: A.ground, legH: lift, shoulderW: Math.round(bw * 2) };
+  }
+  // Oozes, elementals, beholders, mimics: the painted body turned as a solid of revolution (front art on the near
+  // half, so eyes and markings come round), squashing and stretching on the move, lurching to attack, melting on death.
+  function drawTurnedBlob(D, phi, sample, action) {
+    const px = D.px, t = D.t, fp = sample.front, A = artPalette(D, fp); if (!A) return null;
+    const pose = puppetPose(action, D.fr.i), cP = Math.cos(phi), sP = Math.sin(phi);
+    const floaty = t.bodyPlan === 'elemental' || t.floating;
+    const sq = action === 'walk' ? [1, 0.9, 1.06, 0.9][D.fr.i] : action === 'attack' ? [0.85, 1.12, 1, 0.95][D.fr.i] : action === 'pain' ? [0.8, 0.86, 0.95, 1][D.fr.i] : action === 'death' ? [0.85, 0.6, 0.38, 0.22][D.fr.i] : [1, 0.97, 0.97, 1][D.fr.i];
+    const sx = 1 / Math.sqrt(sq) * (action === 'death' ? 1.25 : 1), lurch = pose.armR === 'strike' ? A.W * 0.18 : pose.armR === 'windup' ? -A.W * 0.08 : 0;
+    const proj = (a, f, y) => [CX + a * cP + (f + lurch) * sP, (f + lurch) * cP - a * sP, y];
+    const ground = A.ground - (floaty && action !== 'death' ? (D.fr.i % 2) : 0);
+    const motes = t.bodyPlan === 'elemental' ? elementMotes(D, A, proj, action) : [];
+    motes.filter((m) => m.z < 0).forEach((m) => m.fn(px));
+    for (let y0 = A.minY; y0 <= A.maxY; y0++) {
+      const wa = sample.half[y0]; if (!wa) continue;
+      const y = Math.round(ground - (A.ground - y0) * sq);
+      const wobble = action === 'walk' ? Math.sin((y0 / A.H) * Math.PI * 2 + D.fr.i * 1.5) * 0.6 : 0;
+      paintSection(px, (a, f, yy) => proj(a + wobble, f, yy), 0, wa * sx, Math.max(1.2, wa * 0.85 * sx), (a, f) => sample.wrapAt(f >= 0 || !sample.back ? fp : sample.back, CX + (f >= 0 || !sample.back ? a : -a) / sx, y0, null) || A.bodyC, PART.BODY, y);
+      if (sq < 1 && y > 0) { const yb = Math.round(ground - (A.ground - y0 - 1) * sq); for (let yy = y + 1; yy < yb; yy++) paintSection(px, (a, f, q) => proj(a + wobble, f, q), 0, wa * sx, Math.max(1.2, wa * 0.85 * sx), (a, f) => sample.wrapAt(fp, CX + a / sx, y0, null) || A.bodyC, PART.BODY, yy); }
+    }
+    motes.filter((m) => m.z >= 0).forEach((m) => m.fn(px));
+    if (floaty && action !== 'death') for (let k = 0; k < 4; k++) { const m = proj(Math.sin(k * 2.1 + D.fr.i) * A.W * 0.45, Math.cos(k * 1.7) * A.W * 0.3, A.minY + (k * 7 + D.fr.i * 3) % Math.max(4, A.H)); px.put(Math.round(m[0]), Math.round(m[2]), rampLight(A.bodyC, 0.4), PART.DETAIL, F_GLOW | F_NOOUTLINE, 0.8); }
+    return { H: A.H, ground: A.ground, legH: 2, shoulderW: Math.round(A.W * 0.5) };
+  }
+  // ---- creature backs, painted-art action poses, spirit wisps, de-striping, folded wings ----
+  // A creature with no painted back is seen from behind as its silhouette with the face painted out
+  // (eyes, snout, fangs) and a darker spine ridge, so its back never shows a face.
+  function creatureBackPixels(spec, f) {
+    const fp = renderProceduralPixels(spec, f, 'billboard', 'front', true);
+    const data = new Uint8ClampedArray(fp.data), parts = fp.parts, N = GRID * GRID;
+    const face = new Uint8Array(N), eyes = [];
+    for (let i = 0; i < N; i++) if (fp.data[i * 4 + 3] && (parts[i] === PART.EYE || parts[i] === PART.SNOUT)) { face[i] = 1; eyes.push(i); }
+    // the pale belly / chest bib is underside: from behind it is the creature's back colour
+    for (let i = 0; i < N; i++) if (fp.data[i * 4 + 3] && (parts[i] === PART.BODY2 || (spec.traits.bodyPlan === 'spectral' && (parts[i] === PART.HEAD || parts[i] === PART.BEARD)))) face[i] = 2;
+    for (let i = 0; i < N; i++) {
+      if (!fp.data[i * 4 + 3] || face[i] || parts[i] !== PART.DETAIL) continue;
+      const x = i % GRID, y = (i / GRID) | 0;
+      if (eyes.some((e) => Math.abs((e % GRID) - x) <= 4 && Math.abs(((e / GRID) | 0) - y) <= 5)) face[i] = 1;
+    }
+    const ink = (i) => fp.data[i * 4] + fp.data[i * 4 + 1] + fp.data[i * 4 + 2] <= 75;
+    const usable = (j) => fp.data[j * 4 + 3] && !face[j] && !ink(j) && parts[j] !== OUTLINE_PART && parts[j] !== PART.WING_L && parts[j] !== PART.WING_R;
+    let backC = [40, 34, 30]; { const m = new Map(); for (let j = 0; j < N; j++) if (usable(j)) { const k = (fp.data[j * 4] << 16) | (fp.data[j * 4 + 1] << 8) | fp.data[j * 4 + 2]; m.set(k, (m.get(k) || 0) + 1); } let bv = 0; m.forEach((n, k) => { if (n > bv) { bv = n; backC = [k >> 16, (k >> 8) & 255, k & 255]; } }); }
+    for (let i = 0; i < N; i++) {
+      if (!face[i]) continue;
+      const x = i % GRID, y = (i / GRID) | 0; let src = -1;
+      for (let d = 1; d <= 8 && src < 0; d++) for (const [u, v] of [[d, 0], [-d, 0], [0, -d], [0, d], [d, -d], [-d, -d], [d, d], [-d, d]]) {
+        const xx = x + u, yy = y + v; if (xx < 0 || yy < 0 || xx >= GRID || yy >= GRID) continue;
+        if (usable(yy * GRID + xx)) { src = yy * GRID + xx; break; }
+      }
+      const c = src >= 0 ? rampDark([fp.data[src * 4], fp.data[src * 4 + 1], fp.data[src * 4 + 2]], face[i] === 2 ? 0.04 : 0.1) : backC;
+      data[i * 4] = c[0]; data[i * 4 + 1] = c[1]; data[i * 4 + 2] = c[2]; data[i * 4 + 3] = 255;
+    }
+    // spine ridge and carapace chevrons
+    const BACKP = [PART.HEAD, PART.BODY, PART.BODY2, PART.ABDOMEN, PART.NECK, PART.TORSO];
+    for (let i = 0; i < N; i++) {
+      if (!data[i * 4 + 3] || !BACKP.includes(parts[i]) || ink(i)) continue;
+      const x = i % GRID, y = (i / GRID) | 0, dx = Math.abs(x + 0.5 - CX);
+      const ridge = dx < 1, chevron = parts[i] === PART.ABDOMEN && dx < 4 && (y + Math.floor(dx)) % 4 === 0;
+      if (!ridge && !chevron) continue;
+      const c = rampDark([data[i * 4], data[i * 4 + 1], data[i * 4 + 2]], ridge ? 0.2 : 0.14);
+      data[i * 4] = c[0]; data[i * 4 + 1] = c[1]; data[i * 4 + 2] = c[2];
+    }
+    return Object.assign({}, fp, { data });
+  }
+  function backAssembly(spec, f) { return supportsBackView(spec) && spec.traits.bodyPlan !== 'spectral' ? renderProceduralPixels(spec, f, 'billboard', 'back', true) : creatureBackPixels(spec, f); }
+  function paintedActionPlan(spec) { const p = spec && spec.traits && spec.traits.bodyPlan; return BEAST_PUPPET_PLANS.includes(p) || p === 'spectral'; }
+  function affineBlit(src, S, m) {
+    const out = new Uint8ClampedArray(src.length), det = m.a * m.d - m.b * m.c; if (Math.abs(det) < 1e-6) return out;
+    const ia = m.d / det, ib = -m.b / det, ic = -m.c / det, id = m.a / det;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const u = x + 0.5 - m.dx0, v = y + 0.5 - m.dy0;
+      const sx = Math.floor(ia * u + ib * v + m.sx0), sy = Math.floor(ic * u + id * v + m.sy0);
+      if (sx < 0 || sy < 0 || sx >= S || sy >= S) continue;
+      const si = (sy * S + sx) * 4; if (!src[si + 3]) continue;
+      const o = (y * S + x) * 4; out[o] = src[si]; out[o + 1] = src[si + 1]; out[o + 2] = src[si + 2]; out[o + 3] = 255;
+    }
+    return out;
+  }
+  function tintPixels(data, c, k) {
+    if (!(k > 0)) return data;
+    for (let i = 0; i < data.length; i += 4) {
+      if (!data[i + 3] || data[i] + data[i + 1] + data[i + 2] < 70) continue; // keep the ink outline
+      data[i] += (c[0] - data[i]) * k; data[i + 1] += (c[1] - data[i + 1]) * k; data[i + 2] += (c[2] - data[i + 2]) * k;
+    }
+    return data;
+  }
+  function overPixels(under, top) { const out = new Uint8ClampedArray(under); for (let i = 0; i < top.length; i += 4) if (top[i + 3]) { out[i] = top[i]; out[i + 1] = top[i + 1]; out[i + 2] = top[i + 2]; out[i + 3] = 255; } return out; }
+  // Fold a wing layer in toward the body (a felled winged creature tucks its wings rather than spreading them).
+  function foldWing(wing, S, k) {
+    const b = opaqueBounds(wing, S, S); if (!b || k >= 1) return wing;
+    const out = new Uint8ClampedArray(wing.length), cx = CX * S / GRID, ky = 0.55 + 0.45 * k, by = b.maxY + 1;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const sx = Math.floor(cx + (x + 0.5 - cx) / k), sy = Math.floor(by + (y + 0.5 - by) / ky);
+      if (sx < 0 || sy < 0 || sx >= S || sy >= S) continue;
+      const si = (sy * S + sx) * 4; if (!wing[si + 3]) continue;
+      const o = (y * S + x) * 4; out[o] = wing[si]; out[o + 1] = wing[si + 1]; out[o + 2] = wing[si + 2]; out[o + 3] = 255;
+    }
+    return out;
+  }
+  // Front and back action poses for creatures come from their painted art itself: the strike swells toward the
+  // viewer, the wind-up rears, pain recoils, and death tips the painted body over onto the ground (wings folded).
+  function paintedActionBillboard(spec, f, S, view, action) {
+    const back = view === 'back', spectral = spec.traits.bodyPlan === 'spectral';
+    const asm = back ? backAssembly(spec, 0) : renderProceduralPixels(spec, 0, 'billboard', 'front', true);
+    const winged = spec.traits.wings && spec.traits.wings !== 'none';
+    const split = winged && action === 'death' ? splitWingLayer(asm) : null;
+    let base;
+    if (split) {
+      const body = scaleToBillboard(split.body), wing = foldWing(scaleToBillboard(split.wing), S, [0.85, 0.6, 0.42, 0.35][f]);
+      base = back ? overPixels(body, wing) : overPixels(wing, body);
+    } else base = scaleToBillboard(asm);
+    if (back) base = mirrorPixelsX(base, S, S);
+    const b = opaqueBounds(base, S, S); if (!b) return base;
+    const gx = (b.minX + b.maxX + 1) / 2, gy = b.maxY + 1, H = b.maxY - b.minY + 1, W = b.maxX - b.minX + 1, toward = back ? -1 : 1;
+    let sc = 1, sxF = 1, sy = 1, dx = 0, dy = 0, ang = 0, dark = 0; const wide = true; // creatures slump down where they stand (the turned views show the full fall onto the side)
+    if (action === 'attack' && back) { sxF = [0.97, 1.07, 1.04, 1.01][f]; sy = [1.06, 0.95, 0.98, 1][f]; dy = [-0.03, 0.015, 0.008, 0][f] * H; ang = [0.03, -0.05, -0.03, 0][f]; } // from behind: rear up, then lunge forward into the target (no shrink)
+    else if (action === 'attack') { sc = 1 + [-0.05, 0.14, 0.09, 0.03][f]; sy = [1.08, 0.96, 0.99, 1][f]; dy = [-0.04, 0.025, 0.012, 0][f] * H; } // anticipation, overshooting strike, follow-through, settle
+    else if (action === 'pain') { sc = [0.93, 0.95, 0.98, 1][f]; dx = -[0.05, 0.07, 0.035, 0.01][f] * W; ang = -[0.05, 0.08, 0.035, 0.01][f]; }
+    else if (action === 'death' && spectral) { sy = [0.95, 0.8, 0.6, 0.42][f]; sc = [1, 1.04, 1.08, 1.12][f]; dark = [0, 0.1, 0.2, 0.3][f]; }
+    else if (action === 'death' && wide) { sxF = [1.03, 1.12, 1.22, 1.3][f]; sy = [0.93, 0.74, 0.47, 0.38][f]; ang = [0.05, 0.12, 0.13, 0.1][f]; dark = [0, 0.1, 0.2, 0.3][f]; }
+    else if (action === 'death') { ang = [0.12, 0.55, 1.15, 1.5][f]; sy = [1, 0.97, 0.92, 0.86][f]; dark = [0, 0.1, 0.2, 0.3][f]; }
+    else if (action === 'idle') sy = [1, 1.02, 1.02, 1][f];
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+    const m = { a: ca * sc * sxF, b: -sa * sc * sy, c: sa * sc * sxF, d: ca * sc * sy, sx0: gx, sy0: gy, dx0: gx + dx, dy0: gy + dy };
+    if (action === 'death' && !spectral) {
+      const cs = [[b.minX - gx, b.minY - gy], [b.maxX + 1 - gx, b.minY - gy], [b.minX - gx, 0], [b.maxX + 1 - gx, 0]].map(([u, v]) => [m.a * u + m.b * v, m.c * u + m.d * v]);
+      m.dy0 = gy - Math.max(...cs.map((p) => p[1])); m.dx0 = gx - (Math.min(...cs.map((p) => p[0])) + Math.max(...cs.map((p) => p[0]))) / 2;
+    }
+    const out = affineBlit(base, S, m);
+    if (dark) tintPixels(out, [20, 16, 24], dark);
+    return out;
+  }
+  // Spirits: no solid legs or hem. The lower body thins into dithered tatters that sway with the frame, and the
+  // whole figure hovers with a slow bob; in death it sinks and dissolves.
+  function wispify(data, S, f, action, seed) {
+    const b = opaqueBounds(data, S, S); if (!b) return data;
+    const H = b.maxY - b.minY + 1, zone = H * 0.42, z0 = b.maxY - zone;
+    const hsh = (x, y) => { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed | 0, 362437)) >>> 0; h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0; return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+    const out = new Uint8ClampedArray(S * S * 4);
+    const dying = action === 'death', lift = dying ? [8, 5, 2, 0][f] : 8 + [0, 3, 5, 3][f];
+    const fade = dying ? [0, 0.2, 0.45, 0.7][f] : 0;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4; if (!data[i + 3]) continue;
+      let t = 0, xs = 0;
+      if (y > z0) {
+        t = (y - z0) / zone;
+        const xr = Math.abs(x * 2 + 1 - (b.minX + b.maxX + 1)) >> 1, col = xr >> 3, strand = 0.4 + 0.6 * hsh(col, 7), sway = Math.sin(col * 1.3 + f * Math.PI / 2) * 0.1;
+        if (t > strand + sway) continue;
+        if (t > 0.3 && ((xr >> 2) + (y >> 2)) % 2 === 1) continue;
+        if (hsh(xr >> 2, y >> 2) < (t - 0.5) * 1.6) continue;
+        xs = Math.round(Math.sin(y * 0.06 + f * Math.PI / 2) * t * 6);
+      }
+      if (fade && hsh((x >> 2) + 31, (y >> 2) + 17) < fade) continue;
+      const xx = x + xs, yy = y - lift; if (yy < 0 || xx < 0 || xx >= S) continue;
+      const o = (yy * S + xx) * 4; out[o] = data[i]; out[o + 1] = data[i + 1]; out[o + 2] = data[i + 2]; out[o + 3] = 255;
+    }
+    return out;
+  }
+  // Remove one-row colour stripes (dithered art sampled row by row) from turned soft-bodied figures.
+  function destripe(pix) {
+    const d = new Uint8ClampedArray(pix.data), W = GRID;
+    const lum = (p) => d[p] + d[p + 1] + d[p + 2], same = (p, q) => d[p] === d[q] && d[p + 1] === d[q + 1] && d[p + 2] === d[q + 2];
+    for (let pass = 0; pass < 2; pass++) for (let y = 1; y < W - 1; y++) for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4, u = i - W * 4, v = i + W * 4;
+      if (!d[i + 3] || !d[u + 3] || !d[v + 3] || lum(i) < 75 || lum(u) < 75) continue;
+      if (lum(i) > lum(u) + 150) continue; // keep eyes and glints
+      if (!same(i, u) && same(u, v)) { d[i] = d[u]; d[i + 1] = d[u + 1]; d[i + 2] = d[u + 2]; }
+      else if (y < W - 2 && !same(i, u) && same(i, v)) { const w = v + W * 4; if (d[w + 3] && same(u, w) && lum(w) >= 75) { for (const p of [i, v]) { d[p] = d[u]; d[p + 1] = d[u + 1]; d[p + 2] = d[u + 2]; } } }
+    }
+    return Object.assign({}, pix, { data: d });
+  }
+  // ---- pass 5: humanoid proxies for riders / naga torsos / human heads, beholder and mimic figures, element motion ----
+  const proxyCache = new Map();
+  function humanoidProxy(spec) {
+    const k = (spec.key || spec.name) + '|hproxy';
+    if (proxyCache.has(k)) return proxyCache.get(k);
+    const tr = Object.assign({}, spec.traits, { bodyPlan: 'humanoid', nagaTorso: false, wings: 'none', tail: 'none', head: 'human', covering: 'skin', mane: false });
+    const p = Object.assign({}, spec, { traits: tr, key: k });
+    proxyCache.set(k, p); return p;
+  }
+  function viewOfPhi(phi) {
+    const a = Math.abs(phi); let best = 'front', bd = 9;
+    Object.keys(TURN_ANGLE).forEach((v) => { const d = Math.abs(TURN_ANGLE[v] - a); if (d < bd) { bd = d; best = v; } });
+    return [best, phi < 0 ? -1 : 1];
+  }
+  const HEAD_PARTS = [PART.HEAD, PART.HAIR, PART.HAIRBACK, PART.HELM, PART.EYE, PART.EAR, PART.HORN, PART.BEARD, PART.HOOD];
+  const LEG_PARTS = [PART.LEG_L, PART.LEG_R, PART.BOOT_L, PART.BOOT_R];
+  // Paste part of the character's own turned humanoid figure (same garb, palette and pose timing) at an anchor:
+  // ref 'hip' keeps the upper body above the hips, ref 'chin' keeps the head.
+  function pasteProxyPart(D, phi, action, f, ref, anchor, tilt, scale) {
+    const [vn, fc] = viewOfPhi(phi), proxy = humanoidProxy(D.spec), sc = scale || 1, sub = Math.max(1, Math.ceil(sc));
+    const act = action === 'death' ? 'walk' : action, fi = action === 'death' ? 0 : f;
+    const pp = renderProceduralPixels(proxy, fi, 'billboard', 'turn:' + vn + ':' + fc + ':' + act, true);
+    if (!pp || !pp.parts) return 0;
+    let ry = ref === 'chin' ? -1 : GRID, sx = 0, n = 0;
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!pp.data[i * 4 + 3]) continue; const p = pp.parts[i], y = (i / GRID) | 0;
+      if (ref === 'chin' ? p === PART.HEAD && y > ry : LEG_PARTS.includes(p) && y < ry) ry = y;
+    }
+    if (ref === 'chin' ? ry < 0 : ry >= GRID) return 0;
+    for (let i = 0; i < GRID * GRID; i++) { if (!pp.data[i * 4 + 3]) continue; const p = pp.parts[i], y = (i / GRID) | 0; if ((ref === 'chin' ? p === PART.HEAD : LEG_PARTS.includes(p)) && Math.abs(y - ry) <= 1) { sx += i % GRID; n++; } }
+    const rx = n ? sx / n + 0.5 : CX, ct = Math.cos(tilt || 0), st = Math.sin(tilt || 0);
+    let put = 0;
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!pp.data[i * 4 + 3]) continue; const p = pp.parts[i], y = (i / GRID) | 0, x = i % GRID;
+      if (p === OUTLINE_PART || LEG_PARTS.includes(p)) continue;
+      if (ref === 'chin' ? !HEAD_PARTS.includes(p) : (y > ry + 1 && ![PART.SKIRT, PART.TAB, PART.BELT].includes(p))) continue;
+      let c = [pp.data[i * 4], pp.data[i * 4 + 1], pp.data[i * 4 + 2]]; const fl = (pp.fl ? pp.fl[i] & F_GLOW : 0) | F_NOSHADE;
+      if (ref === 'chin' && sc > 1.1) { // big heads (sphinx) get a bold face: dark eyes under a heavy brow
+        const below = y + 1 < GRID && pp.data[(i + GRID) * 4 + 3] && pp.parts[i + GRID] === PART.EYE, below2 = y + 2 < GRID && pp.parts[i + 2 * GRID] === PART.EYE;
+        if (p === PART.EYE) c = [24, 16, 12]; else if (p === PART.HEAD && below) c = rampDark(c, 0.45); else if (p === PART.HEAD && below2) c = rampDark(c, 0.2);
+      }
+      for (let a = 0; a < sub; a++) for (let b = 0; b < sub; b++) {
+        const u = (x + (a + 0.5) / sub - rx) * sc, v = (y + (b + 0.5) / sub - (ry + 1)) * sc;
+        D.px.put(Math.floor(anchor[0] + u * ct - v * st), Math.floor(anchor[1] + u * st + v * ct), c, p, fl);
+      }
+      put++;
+    }
+    return put;
+  }
+  // depth-buffered painter for solid figures built from surfaces
+  function zPainter(px) {
+    const zb = new Map();
+    return {
+      plot(x, y, z, c, part, fl) { const X = Math.floor(x), Y = Math.floor(y); if (X < 0 || Y < 0 || X >= GRID || Y >= GRID) return; const k = Y * GRID + X, e = zb.get(k); if (e && e.z >= z) return; zb.set(k, { z, c, part, fl: fl || 0, X, Y }); },
+      flush() { zb.forEach((e) => px.put(e.X, e.Y, e.c, e.part, e.fl | F_NOSHADE)); }
+    };
+  }
+  // lambert tone from a surface normal (light from upper-left-front), snapped to the 4-tone ramp the painted art uses
+  function toneFor(col, nx, ny, nz) {
+    const l = -0.5 * nx + 0.62 * ny + 0.6 * nz; // nx: screen right, ny: up, nz: toward viewer
+    return l > 0.78 ? rampLight(col, 0.5) : l > 0.4 ? rampLight(col, 0.26) : l > -0.05 ? col : l > -0.45 ? rampDark(col, 0.25) : rampDark(col, 0.45);
+  }
+  // Beholder-type: a floating sphere whose great eye, fanged mouth and eye-stalks are attached in 3D (no row wrapping).
+  function drawTurnedEye(D, phi, sample, action) {
+    const px = D.px, t = D.t, P = D.P, fr = D.fr.i, s = clamp(D.s, 0.6, 1.3), pose = puppetPose(action, fr);
+    const cP = Math.cos(phi), sP = Math.sin(phi), Z = zPainter(px);
+    const dying = action === 'death', fall = pose.fall;
+    const r = 11 * s * (action === 'pain' ? [0.94, 0.9, 0.96, 1][fr] : 1);
+    const cy = (26 + (fr % 2)) + fall * (GRID - 2 - r - 26) + (action === 'attack' ? [-1, 0, 0, 0][fr] : 0);
+    const lunge = action === 'attack' ? [-1, 3, 2, 0.5][fr] : action === 'pain' ? -2 : 0;
+    const proj = (a, f, y) => [CX + a * cP + (f + lunge) * sP, (f + lunge) * cP - a * sP, y];
+    const skin = P.skin, eyeC = P.eye || [255, 200, 60];
+    const open = dying ? Math.max(0, 1 - fall * 1.3) : action === 'pain' && fr < 2 ? 0.3 : 1;
+    // sphere surface
+    const N = Math.ceil(r * 3.2);
+    for (let i = 0; i <= N; i++) for (let j = 0; j < N * 2; j++) {
+      const el = -Math.PI / 2 + Math.PI * i / N, az = Math.PI * j / N;
+      const nx = Math.cos(el) * Math.sin(az), nf = Math.cos(el) * Math.cos(az), ny = Math.sin(el);
+      const p = proj(nx * r, nf * r, cy - ny * r * (dying ? 1 - fall * 0.25 : 1));
+      const sx = nx * cP + nf * sP, sz = nf * cP - nx * sP; // screen-space normal
+      let c = toneFor(skin, sx, ny, sz), part = PART.BODY, fl = 0;
+      const ang = Math.acos(clamp(nf * Math.cos(-0.12) + ny * Math.sin(-0.12) * -1 + 0, -1, 1)); // angle from the eye axis (slightly up)
+      const eAng = Math.acos(clamp(nf * Math.cos(0.1) + ny * Math.sin(0.1), -1, 1));
+      if (eAng < 0.5 * open + 0.02 && open > 0.05) {
+        c = eAng < 0.11 ? [20, 10, 20] : eAng < 0.27 ? eyeC : [244, 240, 228]; part = PART.EYE; fl = eAng < 0.27 && eAng >= 0.11 ? F_GLOW : 0;
+        if (pose.armR === 'strike' && eAng < 0.27) { c = rampLight(eyeC, 0.5); fl = F_GLOW; }
+      } else if (eAng < 0.58) { c = rampDark(skin, 0.35); part = PART.DETAIL; } // heavy lid rim
+      else {
+        // mouth: a wide band under the eye, teeth along both lips
+        const mEl = Math.asin(clamp(ny, -1, 1)), mAz = Math.atan2(nx, nf);
+        const gape = action === 'attack' ? [0.05, 0.2, 0.15, 0.08][fr] : 0.09;
+        if (Math.abs(mAz) < 0.75 && mEl < -0.55 && mEl > -0.55 - gape - 0.12) {
+          const lip = mEl > -0.6 || mEl < -0.55 - gape - 0.07;
+          c = lip && (Math.floor((mAz + 1) * 9) % 2 === 0) ? [240, 236, 220] : [40, 16, 24]; part = PART.DETAIL;
+        }
+      }
+      Z.plot(p[0], p[2], p[1], c, part, fl);
+    }
+    // eye stalks: fanned over the crown, each a jointed stalk with its own little eye; they writhe on the walk
+    const n = Math.max(3, t.tentacles || 5);
+    for (let k = 0; k < n; k++) {
+      const az = -2.2 + 4.4 * k / (n - 1), el0 = 0.75 + 0.25 * Math.cos(k * 1.7);
+      const droop = dying ? fall * 1.3 : 0, wig = Math.sin(fr * Math.PI / 2 + k * 1.3) * 0.18 + (action === 'attack' && fr === 1 ? -0.25 : 0);
+      const dir = (el, a2) => [Math.cos(el) * Math.sin(a2), Math.cos(el) * Math.cos(a2), Math.sin(el)];
+      const b = dir(el0, az), m = dir(el0 + 0.25 - droop + wig, az + wig), e = dir(el0 - 0.05 - droop * 1.4 + wig, az + wig * 1.5);
+      const pts = [[b[0] * r, b[1] * r, b[2] * r], [m[0] * (r + 3.5), m[1] * (r + 3.5), m[2] * (r + 3.5)], [e[0] * (r + 6.5), e[1] * (r + 6.5), e[2] * (r + 6.5)]];
+      const stalkC = rampDark(skin, 0.15);
+      for (let q = 0; q < 2; q++) for (let u = 0; u <= 1; u += 0.08) {
+        const A = pts[q], B = pts[q + 1], x = A[0] + (B[0] - A[0]) * u, f = A[1] + (B[1] - A[1]) * u, yv = A[2] + (B[2] - A[2]) * u;
+        const p = proj(x, f, cy - yv); Z.plot(p[0], p[2], p[1], q ? stalkC : rampDark(stalkC, 0.12), PART.DETAIL, 0);
+      }
+      const tip = proj(pts[2][0], pts[2][1], cy - pts[2][2]), toward = pts[2][1] * cP - pts[2][0] * sP;
+      Z.plot(tip[0], tip[2], tip[1] + 0.5, [240, 236, 220], PART.EYE, 0);
+      Z.plot(tip[0], tip[2] - 1, tip[1] + 0.5, dying && fall > 0.5 ? rampDark(skin, 0.4) : (toward > -2 ? eyeC : [240, 236, 220]), PART.EYE, dying ? 0 : F_GLOW);
+    }
+    // the strike fires a short ray from the great eye
+    if (action === 'attack' && (fr === 1 || fr === 2)) for (let u = 1; u < 9; u++) { const p = proj(0, r + u * 1.4, cy - 1); Z.plot(p[0], p[2], p[1] + 30, rampLight(eyeC, 0.4), PART.DETAIL, F_GLOW | F_NOOUTLINE); }
+    Z.flush();
+    return { H: r * 2 + 8, ground: GRID - 2, legH: 2, shoulderW: Math.round(r) };
+  }
+  // Mimic: a banded treasure chest whose lid is the jaw (teeth, tongue, a lock-plate eye); it hops and snaps.
+  function drawTurnedChest(D, phi, sample, action) {
+    const px = D.px, P = D.P, fr = D.fr.i, s = clamp(D.s, 0.7, 1.3), pose = puppetPose(action, fr);
+    const cP = Math.cos(phi), sP = Math.sin(phi), Z = zPainter(px);
+    const W = 15 * s, Dp = 12 * s, H = 15 * s, lidH = 8 * s, ground = GRID - 2;
+    const hop = action === 'walk' ? [0, 2, 3, 1][fr] : action === 'attack' ? [1, 0, 0, 0][fr] : 0;
+    const lunge = action === 'attack' ? [-1, 4, 2, 0][fr] : action === 'pain' ? -2 : 0;
+    const theta = action === 'walk' ? [0.05, 0.35, 0.15, 0.35][fr] : action === 'attack' ? [0.6, 1.15, 0.8, 0.25][fr] : action === 'pain' ? [0.45, 0.3, 0.15, 0.05][fr] : action === 'death' ? [0.3, 0.9, 1.5, 1.75][fr] : [0.05, 0.12, 0.12, 0.05][fr];
+    const tilt = action === 'death' ? pose.fall * 0.35 : 0;
+    const base = ground - hop;
+    const proj = (a, f, y) => { const a2 = a * Math.cos(tilt) - 0, y2 = y; return [CX + a2 * cP + (f + lunge) * sP, (f + lunge) * cP - a2 * sP, y2 + (a * Math.sin(tilt))]; };
+    const wood = P.skin, metal = [176, 150, 90], dark = [40, 12, 18], toneFor = toneSoft;
+    const box = (o, e1, e2, colorAt, part) => { // a planar face o + u*e1 + v*e2
+      const L1 = Math.hypot(...e1), L2 = Math.hypot(...e2), n1 = Math.ceil(L1 * 2.2), n2 = Math.ceil(L2 * 2.2);
+      const nrm = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]], nl = Math.hypot(...nrm) || 1;
+      const nx = nrm[0] / nl, nf = nrm[1] / nl, ny = -nrm[2] / nl, sx = nx * cP + nf * sP, sz = nf * cP - nx * sP;
+      for (let i = 0; i <= n1; i++) for (let j = 0; j <= n2; j++) {
+        const u = i / n1, v = j / n2, a = o[0] + e1[0] * u + e2[0] * v, f = o[1] + e1[1] * u + e2[1] * v, y = o[2] + e1[2] * u + e2[2] * v;
+        const p = proj(a, f, y); const c = colorAt(u, v, a, f, y); if (!c) continue;
+        Z.plot(p[0], p[2], p[1], c === 'tone' ? toneFor(wood, sx, ny, sz) : Array.isArray(c[0]) ? toneFor(c[0], sx, ny, sz) : c, part, 0);
+      }
+    };
+    const planks = (u, v, a, f, y) => (Math.abs(Math.abs(a) - W * 0.72) < 0.9 ? [metal] : (Math.round(y) % 4 === 0 ? [rampDark(wood, 0.12)] : 'tone'));
+    const yTop = base - H;
+    const sidePl = (u, v, a, f, y) => (Math.abs(Math.abs(f) - Dp * 0.6) < 0.9 ? [metal] : (Math.round(y) % 4 === 0 ? [rampDark(wood, 0.12)] : 'tone'));
+    // body: front, back, sides; open top is the mouth
+    box([-W, Dp, base], [2 * W, 0, 0], [0, 0, -H], planks, PART.BODY);
+    box([-W, -Dp, base], [2 * W, 0, 0], [0, 0, -H], planks, PART.BODY);
+    box([-W, -Dp, base], [0, 2 * Dp, 0], [0, 0, -H], sidePl, PART.BODY);
+    box([W, -Dp, base], [0, 2 * Dp, 0], [0, 0, -H], sidePl, PART.BODY);
+    box([-W + 0.6, -Dp + 0.6, yTop + 1.5], [2 * W - 1.2, 0, 0], [0, 2 * Dp - 1.2, 0], (u, v, a, f) => (Math.abs(a) < 2.5 * s && f > -1 && theta > 0.3 ? [190, 50, 70] : dark), PART.DETAIL);
+    // teeth on the box rim (front edge)
+    for (let a = -W + 1; a < W; a += 2) { const p = proj(a, Dp - 0.5, yTop - 0.5); Z.plot(p[0], p[2], p[1] + 0.3, [240, 236, 220], PART.DETAIL, 0); }
+    // lid hinged along the back top edge, rotating open by theta
+    const hinge = (a, u, h) => [a, -Dp + u * Math.cos(theta) - h * Math.sin(theta) * 0, yTop - u * Math.sin(theta) - h * Math.cos(theta)];
+    const lidFace = (fn, part) => { const n1 = Math.ceil(W * 4.4), n2 = 14; for (let i = 0; i <= n1; i++) for (let j = 0; j <= n2; j++) { const q = fn(i / n1, j / n2); if (!q) continue; const p = proj(q[0], q[1], q[2]); Z.plot(p[0], p[2], p[1], q[3], part, q[4] || 0); } };
+    const lidNorm = (nx0, nu, nh) => { const nf = nu * Math.cos(theta) - nh * Math.sin(theta), ny = nu * Math.sin(theta) + nh * Math.cos(theta); return [nx0 * cP + nf * sP, ny, nf * cP - nx0 * sP]; };
+    const lidTop = lidNorm(0, 0, 1), lidFront = lidNorm(0, 1, 0), lidUnder = lidNorm(0, 0, -1);
+    lidFace((u, v) => { const a = -W + 2 * W * u, uu = v * 2 * Dp; const h = lidH * (0.7 + 0.3 * Math.sqrt(Math.max(0, 1 - Math.pow(uu / Dp - 1, 2)))); const q = hinge(a, uu, h); const band = Math.abs(Math.abs(a) - W * 0.72) < 0.9; return [q[0], q[1], q[2], band ? toneFor(metal, ...lidTop) : toneFor(rampLight(wood, 0.06), ...lidTop)]; }, PART.HEAD);
+    lidFace((u, v) => { const a = -W + 2 * W * u, h = v * lidH * 0.85; const q = hinge(a, 2 * Dp, h); const lock = Math.abs(a) < 2 * s && h > lidH * 0.15 && h < lidH * 0.6; const eye = lock && Math.abs(a) < 1 && h > lidH * 0.25 && h < lidH * 0.5; return [q[0], q[1], q[2], eye ? (action === 'death' && pose.fall > 0.5 ? [40, 30, 20] : P.eye || [255, 200, 40]) : lock ? toneFor(metal, ...lidFront) : toneFor(wood, ...lidFront), eye && action !== 'death' ? F_GLOW : 0]; }, PART.HEAD);
+    lidFace((u, v) => { const a = -W + 2 * W * u, uu = v * 2 * Dp; const q = hinge(a, uu, 0); const tooth = uu > 2 * Dp - 1.2 && Math.round(a) % 2 === 0; return [q[0], q[1], q[2], tooth ? [240, 236, 220] : toneFor(dark, ...lidUnder)]; }, PART.DETAIL);
+    // stubby clawed feet
+    [-1, 1].forEach((sx) => [-1, 1].forEach((sf) => { const p = proj(sx * (W - 2), sf * (Dp - 2), base + 1); Z.plot(p[0], p[2], p[1], rampDark(wood, 0.35), PART.LEG_L, 0); }));
+    Z.flush();
+    return { H: H + lidH, ground, legH: 2, shoulderW: Math.round(W) };
+  }
+  function drawTurnedOoze(D, phi, sample, action) {
+    const race = String(D.spec.race || '');
+    if (/mimic/i.test(race)) return drawTurnedChest(D, phi, sample, action);
+    if (D.t.floating || (D.t.eyes && D.t.eyes.style === 'cyclops')) return drawTurnedEye(D, phi, sample, action);
+    return drawTurnedBlob(D, phi, sample, action);
+  }
+  // per-element motion around a turned elemental body: flame tongues and embers, orbiting stones, sloshing droplets,
+  // a wind vortex. Returns the motes split by depth so the body can be drawn between them.
+  function elementMotes(D, A, proj, action) {
+    const el = D.t.element || 'fire', fr = D.fr.i, out = [], dying = action === 'death';
+    const stone = el === 'earth' || el === 'sand' || el === 'bone' || el === 'blood';
+    const flame = el === 'fire' || el === 'holy' || el === 'void' || el === 'arcane';
+    const glow = A.bellyC, base = A.bodyC;
+    if (dying && fr >= 2) return out;
+    if (stone) for (let k = 0; k < 5; k++) {
+      const ang = k * 1.256 + fr * 0.39, rad = A.W * 0.62 + (k % 2) * 2, y = A.minY + A.H * (0.3 + 0.12 * k) - Math.sin(fr * 1.57 + k) * 1.2;
+      const p = proj(Math.cos(ang) * rad, Math.sin(ang) * rad, y); out.push({ z: p[1], fn: (px) => { px.ball(p[0], p[2], 1.4, 1.1, k % 2 ? base : rampDark(base, 0.15), PART.DETAIL, 0); } });
+    }
+    if (flame) {
+      for (let k = 0; k < 7; k++) {
+        const ang = k * 0.9, rr = A.W * 0.28, p = proj(Math.cos(ang) * rr, Math.sin(ang) * rr, A.minY + 1), len = 2 + ((k * 5 + fr * 3) % 4);
+        out.push({ z: p[1] + 0.1, fn: (px) => { for (let q = 0; q < len; q++) px.put(Math.round(p[0] + Math.sin(fr + k + q) * 0.6), Math.round(p[2] - q), q === len - 1 ? rampLight(glow, 0.5) : glow, PART.HAIR, F_GLOW | F_NOSHADE); } });
+      }
+      for (let k = 0; k < 4; k++) { const p = proj(Math.sin(k * 2.3) * A.W * 0.4, Math.cos(k * 1.9) * A.W * 0.3, A.minY - 2 - ((k * 3 + fr * 2) % 6)); out.push({ z: p[1], fn: (px) => px.put(Math.round(p[0]), Math.round(p[2]), rampLight(glow, 0.6), PART.DETAIL, F_GLOW | F_NOSHADE | F_NOOUTLINE) }); }
+    }
+    if (el === 'water' || el === 'poison' || el === 'frost') for (let k = 0; k < 5; k++) {
+      const p = proj(Math.sin(k * 2.1) * A.W * 0.55, Math.cos(k * 1.3) * A.W * 0.4, A.minY + ((k * 7 + fr * 4) % Math.max(4, A.H)));
+      out.push({ z: p[1], fn: (px) => { px.put(Math.round(p[0]), Math.round(p[2]), rampLight(base, 0.45), PART.DETAIL, F_NOSHADE); px.put(Math.round(p[0]), Math.round(p[2]) + 1, base, PART.DETAIL, F_NOSHADE); } });
+    }
+    if (el === 'storm' || el === 'air' || el === 'shadow') for (let ring = 0; ring < 3; ring++) for (let k = 0; k < 10; k++) {
+      const ang = k * 0.35 + fr * 0.8 + ring * 2, rad = A.W * (0.5 + ring * 0.12), y = A.minY + A.H * (0.35 + ring * 0.22) + k * 0.25;
+      const p = proj(Math.cos(ang) * rad, Math.sin(ang) * rad, y); if (k > 6) continue;
+      out.push({ z: p[1], fn: (px) => px.put(Math.round(p[0]), Math.round(p[2]), rampLight(base, 0.35 + k * 0.03), PART.DETAIL, F_NOSHADE | (el === 'storm' && k === 0 ? F_GLOW : 0)) });
+    }
+    return out;
+  }
+  // dark creatures get a cool rim light along their upper edges in turned views so legs and joints stay readable
+  function rimLight(pix) {
+    const d = pix.data; let sum = 0, n = 0;
+    for (let i = 0; i < GRID * GRID; i++) if (d[i * 4 + 3]) { const l = d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]; if (l > 60) { sum += l; n++; } }
+    if (!n || sum / n > 260) return pix;
+    const out = new Uint8ClampedArray(d), ink = (i) => !d[i * 4 + 3] || d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2] <= 60;
+    for (let y = 1; y < GRID; y++) for (let x = 1; x < GRID - 1; x++) {
+      const i = y * GRID + x; if (ink(i)) continue;
+      if (ink(i - GRID) || ink(i - GRID - 1) && ink(i - 1)) { const c = mix([d[i * 4], d[i * 4 + 1], d[i * 4 + 2]], [205, 215, 235], 0.6); out[i * 4] = c[0]; out[i * 4 + 1] = c[1]; out[i * 4 + 2] = c[2]; }
+      else if (y > 1 && !ink(i - GRID) && ink(i - 2 * GRID)) { const c = mix([d[i * 4], d[i * 4 + 1], d[i * 4 + 2]], [205, 215, 235], 0.22); out[i * 4] = c[0]; out[i * 4 + 1] = c[1]; out[i * 4 + 2] = c[2]; }
+    }
+    return Object.assign({}, pix, { data: out });
+  }
+  // Painted mimic: a banded chest seen from the front, lid-jaw ajar with teeth, the lock plate its eye.
+  function drawMimicChest(D) {
+    const P = D.P, px = D.px, fr = D.fr, s = clamp(D.s, 0.7, 1.3);
+    const ground = GRID - 2, W = Math.round(30 * s), H = Math.round(15 * s), lidH = Math.round(8 * s);
+    const open = fr.i % 2 ? 3 : 1, hop = fr.i === 2 ? 1 : 0;
+    const x0 = Math.round(CX - W / 2), yBox = ground - H + 1 - hop;
+    const wood = P.skin, metal = [176, 150, 90];
+    [-1, 1].forEach((side) => px.rect(side < 0 ? x0 + 2 : x0 + W - 5, ground - hop, 3, 1 + hop, rampDark(wood, 0.35), side < 0 ? PART.LEG_L : PART.LEG_R, 0));
+    px.ball(CX, yBox + (H - 1) / 2, W / 2, (H - 1) / 2 + 0.2, wood, PART.BODY, 0, 1, 0.12);
+    px.rect(x0, yBox, W, H - 1, wood, PART.BODY, 0);
+    for (let y = yBox + 3; y < yBox + H - 1; y += 4) px.span(CX, y, W - 2, rampDark(wood, 0.15), PART.DETAIL, F_NOSHADE);
+    [x0 + 2, x0 + W - 4].forEach((x) => px.rect(x, yBox, 2, H - 1, metal, PART.BELT, 0));
+    const gapY = yBox - open;
+    px.rect(x0 + 1, gapY, W - 2, open, [40, 12, 18], PART.DETAIL, F_NOSHADE);
+    for (let x = x0 + 2; x < x0 + W - 2; x += 2) { px.put(x, gapY, [240, 236, 220], PART.DETAIL, F_NOSHADE); px.put(x + 1, yBox - 1, [240, 236, 220], PART.DETAIL, F_NOSHADE); }
+    if (open > 1) px.rect(CX - 2, yBox - 1, 4, 2, [190, 50, 70], PART.DETAIL, F_NOSHADE);
+    const lidTop = gapY - lidH;
+    for (let r = 0; r < lidH; r++) px.span(CX, lidTop + r, W - (r === 0 ? 4 : r === 1 ? 2 : 0), r < 2 ? rampLight(wood, 0.1) : wood, PART.HEAD, 0);
+    [x0 + 2, x0 + W - 4].forEach((x) => px.rect(x, lidTop + 1, 2, lidH - 1, metal, PART.BELT, 0));
+    px.rect(CX - 2, lidTop + lidH - 4, 4, 3, metal, PART.DETAIL, 0);
+    px.put(CX - 1, lidTop + lidH - 3, P.eye || [255, 200, 40], PART.EYE, F_GLOW); px.put(CX, lidTop + lidH - 3, P.eye || [255, 200, 40], PART.EYE, F_GLOW);
+    return { ground };
+  }
+  const STONE_EL = ['earth', 'sand', 'bone', 'blood'];
+  function toneSoft(col, nx, ny, nz) {
+    const l = -0.5 * nx + 0.62 * ny + 0.6 * nz;
+    return l > 0.78 ? rampLight(col, 0.16) : l > 0.4 ? rampLight(col, 0.07) : l > -0.05 ? col : l > -0.45 ? rampDark(col, 0.16) : rampDark(col, 0.3);
+  }
+  // Flame, water, storm and other fluid elementals look alike from every side: the painted body itself turns
+  // (slightly narrower edge-on, its far side from the faceless back), with element motion around it.
+  function drawTurnedFlame(D, phi, sample, action) {
+    const px = D.px, fp = sample.front, A = artPalette(D, fp); if (!A) return null;
+    const fr = D.fr.i, cP = Math.cos(phi), sP = Math.sin(phi), behind = Math.abs(phi) > Math.PI / 2 + 0.01;
+    const src = behind && sample.back ? sample.back : fp, kx = 0.7 + 0.3 * Math.abs(cP), mir = behind ? -1 : 1;
+    const sq = action === 'pain' ? [0.86, 0.9, 0.96, 1][fr] : action === 'death' ? [0.9, 0.65, 0.42, 0.25][fr] : action === 'attack' ? [0.95, 1.1, 1.05, 1][fr] : action === 'idle' ? [1, 1.03, 1.03, 1][fr] : 1;
+    const lunge = action === 'attack' ? [-2, 6, 3, 1][fr] : action === 'pain' ? -3 : 0;
+    const proj = (a, f, y) => [CX + a * cP + f * sP, f * cP - a * sP, y];
+    const motes = elementMotes(D, A, proj, action);
+    motes.filter((m) => m.z < 0).forEach((m) => m.fn(px));
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!src.data[i * 4 + 3] || src.parts[i] === OUTLINE_PART) continue;
+      const x = i % GRID, y = (i / GRID) | 0, p = src.parts[i];
+      if (p === PART.EYE && Math.abs(phi) > 1.75) continue;
+      const h = (A.ground - y) / Math.max(1, A.H);
+      const X = CX + (x + 0.5 - CX) * kx * mir + (p === PART.EYE ? sP * 2.5 : 0) + lunge * sP * h;
+      const Y = A.ground - (A.ground - y) * sq;
+      let c = [src.data[i * 4], src.data[i * 4 + 1], src.data[i * 4 + 2]];
+      if (action === 'death') c = rampDark(c, [0, 0.15, 0.3, 0.45][fr]);
+      const fl = (src.fl ? src.fl[i] & (F_GLOW | F_TRANS) : 0) | F_NOSHADE;
+      px.put(Math.floor(X), Math.floor(Y), c, p, fl);
+      if (sq > 1) px.put(Math.floor(X), Math.floor(Y) + 1, c, p, fl);
+    }
+    motes.filter((m) => m.z >= 0).forEach((m) => m.fn(px));
+    return { H: A.H, ground: A.ground, legH: 2, shoulderW: Math.round(A.W * 0.5) };
+  }
+  // turned creature views keep the painted front's stature, so turning never makes the figure jump taller or shorter
+  const statureScale = new Map();
+  function scaleAboutGround(data, S, sc, scx) {
+    const kx = scx || sc;
+    const b = opaqueBounds(data, S, S); if (!b) return data;
+    const cx = (b.minX + b.maxX + 1) / 2, gy = b.maxY + 1, out = new Uint8ClampedArray(data.length);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const sx = Math.floor(cx + (x + 0.5 - cx) / kx), sy = Math.floor(gy + (y + 0.5 - gy) / sc);
+      if (sx < 0 || sy < 0 || sx >= S || sy >= S) continue;
+      const si = (sy * S + sx) * 4; if (!data[si + 3]) continue;
+      const o = (y * S + x) * 4; out[o] = data[si]; out[o + 1] = data[si + 1]; out[o + 2] = data[si + 2]; out[o + 3] = 255;
+    }
+    return out;
+  }
+  const BEAST_PUPPET_PLANS = ['beast', 'draconic', 'serpent', 'spider', 'ooze', 'elemental'];
+  const NON_PUPPET_PLANS = ['beast', 'serpent', 'spider', 'ooze', 'elemental', 'draconic'];
+  const TURN_ANGLE = { front: 0, threeQuarter: Math.PI / 4, side: Math.PI / 2, backQuarter: Math.PI * 3 / 4, back: Math.PI };
+  function supportsActionPoses(spec) { return usesPuppet(spec); }
+  function usesPuppet(spec) { return !!(spec && spec.traits && (!NON_PUPPET_PLANS.includes(spec.traits.bodyPlan) || BEAST_PUPPET_PLANS.includes(spec.traits.bodyPlan))); }
   function renderProceduralPixels(spec, frame, world, view, assembly) {
+    const turn = typeof view === 'string' && view.indexOf('turn:') === 0 ? view.split(':') : null; // turn:<view>:<facing>:<action>
     const f = Math.max(0, Math.min(3, frame | 0));
     const bb = world === 'billboard';
     const back = view === 'back' && supportsBackView(spec);
-    const key = (spec.key || '') + '|' + f + (world ? (bb ? '|b' : '|w') : '') + (back ? '|back' : '') + (assembly ? '|assembly' : '');
+    const key = (spec.key || '') + '|' + f + (world ? (bb ? '|b' : '|w') : '') + (back ? '|back' : '') + (turn ? '|' + view : '') + (assembly ? '|assembly' : '');
     if (spec.key && pixelCache.has(key)) return pixelCache.get(key);
     const D = buildContext(spec, f);
     if (back) D.view = 'back';
+    D.assembly = !!assembly; // wrap source for turned views: keep it free of view-only shading
     if (bb) D.t = {...D.t,gesture:true}; // Render-only pose; never mutate the cached preset.
     const t = D.t;
     let L = null;
     switch (t.bodyPlan) {
-      case 'beast': drawBeast(D); break;
-      case 'serpent': drawSerpent(D); L = D.L; break;
-      case 'spider': drawSpider(D); break;
-      case 'ooze': drawOoze(D); break;
-      case 'elemental': drawElemental(D); L = D.L; break;
-      case 'draconic': drawDragon(D); break;
-      default: L = drawHumanoid(D); break;
+      case 'beast': if (turn) { L = null; D.beastL = drawTurnedBeast(D, (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0), sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk'); } else drawBeast(D); break;
+      case 'serpent': if (turn) { L = null; D.beastL = drawTurnedSerpent(D, (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0), sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk'); } else { drawSerpent(D); L = D.L; } break;
+      case 'spider': if (turn) { L = null; D.beastL = drawTurnedSpider(D, (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0), sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk'); } else drawSpider(D); break;
+      case 'ooze': if (turn) { L = null; D.beastL = drawTurnedOoze(D, (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0), sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk'); } else drawOoze(D); break;
+      case 'elemental': if (turn) { L = null; D.beastL = drawTurnedFlame(D, (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0), sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk'); } else { drawElemental(D); L = D.L; } break;
+      case 'draconic': if (turn) { L = null; D.beastL = drawTurnedBeast(D, (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0), sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk'); } else drawDragon(D); break;
+      default:
+        if (turn) {
+          const phi = (Number(turn[2]) < 0 ? -1 : 1) * (TURN_ANGLE[turn[1]] || 0);
+          L = drawTurnedHumanoid(D, phi, sampleFrontParts(renderProceduralPixels(spec, f, 'billboard', 'front', true), backAssembly(spec, f), !!(spec.traits && spec.traits.capeCoversBack)), turn[3] || 'walk');
+        } else L = drawHumanoid(D);
+        break;
     }
     const px = D.px;
-    if(t.genreGarb && L && !['beast','draconic','serpent','spider','ooze','elemental'].includes(t.bodyPlan)){
+    if(t.genreGarb && L && !turn && !['beast','draconic','serpent','spider','ooze','elemental'].includes(t.bodyPlan)){
       const A=typeof module==='object'&&module.exports?require('./genreArchitecture'):root.GenreArchitecture;
       A?.drawGarb({grid:GRID,filled:(x,y)=>px.alpha(Math.floor(x),Math.floor(y))>0,
         rect:(x,y,w,h,color)=>px.rect(Math.round(x),Math.round(y),Math.max(1,Math.round(w)),Math.max(1,Math.round(h)),hexToRgb(color),PART.DETAIL,0)},t.genreGarb,t.palette);
     }
+    if (!turn && t.wings !== 'none' && f % 2 === 1) flexWingTips(px, f === 1 ? -1 : 1);
+    // turned figures carry the painted art's translucency too, so spirits stay dithered from every side
+    if (turn && t.translucency > 0) for (let i = 0; i < px.fl.length; i++) if (px.c[i * 4 + 3] > 0 && !(px.fl[i] & F_GLOW)) px.fl[i] |= F_TRANS;
     if (t.translucency > 0) {
       if (t.bodyPlan === 'spectral' && L) passTranslucency(px, t.translucency * 0.75, L.yLegTop - 1, L.ground + 3);
       else passTranslucency(px, t.translucency);
@@ -3205,6 +4492,12 @@
     // Weapon-hand lock: do not mirror back bitmaps (would move the sword to the other hand).
     const result = { w: GRID, h: GRID, data: out };
     if (bb && L && Number.isFinite(L.yHeadTop)) result.bodyHeight = L.ground - L.yHeadTop + 1;
+    if (L && L.shoulderW) result.shoulderW = L.shoulderW;
+    if (turn && L) result.puppet = { H: L.H, ground: L.ground, legH: L.legH };
+    if (turn && D.beastL) { result.puppet = D.beastL; result.shoulderW = D.beastL.shoulderW; }
+    if (L && Number.isFinite(D.eyeY) && t.bodyPlan === 'humanoid' && t.head !== 'skull' && !t.outfit.hood && !['closed', 'hood', 'cowl'].includes(t.outfit.helm)) {
+      result.face = { eyeY: D.eyeY, top: L.yHeadTop, bottom: L.yHeadBottom, skin: D.P.skin.slice(0, 3) };
+    }
     if(assembly)result.parts=new Uint8Array(px.part);
     if (spec.key) {
       if (pixelCache.size > PIXEL_CACHE_MAX) pixelCache.delete(pixelCache.keys().next().value);
@@ -3273,6 +4566,7 @@
     if (v === 'back') return 'back';
     if (v === 'side' || v === 'profile') return 'side';
     if (v === 'threequarter' || v === 'three-quarter' || v === '3q' || v === '3/4') return 'threeQuarter';
+    if (v === 'backquarter' || v === 'back-quarter' || v === 'backthreequarter' || v === 'back-three-quarter' || v === 'b3q') return 'backQuarter';
     return 'front';
   }
   function fillNearestHoles(out, w, h, minX, maxX, minY, maxY) {
@@ -3458,6 +4752,301 @@
     if (v === 'threeQuarter') return buildThreeQuarter(src, w, h, face, b);
     return buildSideProfile(src, w, h, face, b);
   }
+  // Turned views (front-3/4, side, back-3/4) for the 8-direction billboard set. Instead of squashing the front art
+  // like a card, each row of the sprite is wrapped onto an elliptical body section (front art on the near half,
+  // back art on the far half), turned by the view's yaw and depth-sorted, so the near flank widens, the far flank
+  // foreshortens and the back of the body comes into view as the angle grows. Hard-edged alpha is kept.
+  const VIEW_YAW = { threeQuarter: Math.PI / 4, side: Math.PI / 2, backQuarter: Math.PI * 3 / 4 };
+  const BODY_DEPTH = 0.7; // torso depth as a share of its half-width
+  function rotateBillboard(front, back, w, h, theta, b) {
+    const out = new Uint8ClampedArray(w * h * 4), zbuf = new Float32Array(w * h).fill(-Infinity);
+    const cT = Math.cos(theta), sT = Math.sin(theta), cx = b.cx;
+    // One rigid axis for every row. The torso core is a column of radius R (each row uses its own width up to R,
+    // so a narrow head turns as a head and a winged row cannot shear the body sideways); anything reaching past
+    // R (arms, wings, weapons, capes) lies in the body's lateral plane and swings with it.
+    const halves = [];
+    for (let y = b.minY; y <= b.maxY; y++) {
+      // only the run of pixels through the body axis counts (a raised blade or a wing tip is not the torso)
+      const op = (x) => x >= 0 && x < w && front[(y * w + x) * 4 + 3];
+      let c0 = -1;
+      for (let d = 0; d <= 3 && c0 < 0; d++) { if (op(Math.round(cx) - d)) c0 = Math.round(cx) - d; else if (op(Math.round(cx) + d)) c0 = Math.round(cx) + d; }
+      if (c0 < 0) { halves.push(0); continue; }
+      let lo = c0, hi = c0;
+      // dithered (translucent) art has holes: bridge gaps of up to GAP columns
+      const GAP = Math.max(2, Math.round(w / 40));
+      const ext = (x, dir) => { for (;;) { let g = 1; while (g <= GAP && !op(x + dir * g)) g++; if (g > GAP) return x; x += dir * g; } };
+      lo = ext(lo, -1); hi = ext(hi, 1);
+      halves.push(Math.max(cx - lo, hi - cx) + 0.5);
+    }
+    const bodyH = b.maxY - b.minY + 1, rowsOf = (f0, f1) => halves.slice(Math.floor(bodyH * f0), Math.max(Math.floor(bodyH * f0) + 1, Math.floor(bodyH * f1))).filter(v => v > 0).sort((p, q) => p - q);
+    const head = rowsOf(0.04, 0.16), lower = rowsOf(0.4, 0.97), all = halves.filter(v => v > 0).sort((p, q) => p - q);
+    const pct = (list, t) => list.length ? list[Math.min(list.length - 1, Math.floor(list.length * t))] : 0;
+    const R = Math.max(2, Math.min(pct(all, 0.5) || 2, Math.max(pct(head, 0.5) * 1.35, pct(lower, 0.25))));
+    const DEPTH_MIN = Math.max(R * BODY_DEPTH, (b.bw || (b.maxX - b.minX + 1)) * 0.26);
+    // Each source art carries its own dark silhouette outline. Those edge pixels would land inside the turned body as a
+    // seam, so they are skipped while sampling and one clean outline is redrawn around the turned shape afterwards.
+    const OL = Math.max(1, Math.round(w / 64)), lum = (a, i) => a[i] * 0.299 + a[i + 1] * 0.587 + a[i + 2] * 0.114;
+    let ink = null;
+    for (let i = 0; i < front.length; i += 4) if (front[i + 3] && (!ink || lum(front, i) < lum(ink, 0))) ink = [front[i], front[i + 1], front[i + 2]];
+    const put = (o, src, si, z, shade) => {
+      if (z <= zbuf[o]) return; zbuf[o] = z;
+      out[o * 4] = Math.min(255, Math.round(src[si] * shade)); out[o * 4 + 1] = Math.min(255, Math.round(src[si + 1] * shade));
+      out[o * 4 + 2] = Math.min(255, Math.round(src[si + 2] * shade)); out[o * 4 + 3] = src[si + 3];
+    };
+    const rowSpan = (src, y) => { let lo = w, hi = -1; for (let x = 0; x < w; x++) if (src[(y * w + x) * 4 + 3]) { if (x < lo) lo = x; hi = x; } return [lo, hi]; };
+    // Sample a core pixel, stepping inward off an outline pixel.
+    const sample = (src, y, sx, lo, hi) => {
+      let x = Math.max(lo, Math.min(hi, sx));
+      for (let k = 0; k <= OL; k++) {
+        const i = (y * w + x) * 4;
+        if (!src[i + 3]) return -1;
+        const edge = x - lo < OL || hi - x < OL;
+        if (!(edge && lum(src, i) < 80) || hi - lo <= OL * 4) return i;
+        x += x < cx ? 1 : -1;
+      }
+      return (y * w + x) * 4;
+    };
+    for (let y = b.minY; y <= b.maxY; y++) {
+      const [flo, fhi] = rowSpan(front, y); if (fhi < 0) continue;
+      const [blo, bhi] = back ? rowSpan(back, y) : [w, -1];
+      const hv = halves[y - b.minY] || 0;
+      // Real front-to-back thickness: the torso is at least ~a quarter of the front silhouette deep (so a side view keeps
+      // roughly half the front width), heads and limbs scale with their own radius, capped so a head never becomes a log.
+      const r = Math.max(1, Math.min(R, hv)), D = Math.min(r * 1.45, Math.max(r * BODY_DEPTH, DEPTH_MIN * (r / R)));
+      const W = hv > 0 ? Math.sqrt(r * r * cT * cT + D * D * sT * sT) : -1;
+      // core: inverse-sample every screen column, so the turned body has no gaps or comb seams
+      for (let dx = -Math.ceil(W); W > 0 && dx <= Math.ceil(W); dx++) {
+        const X = dx / W; if (X < -1 || X > 1) continue;
+        const alpha = Math.asin(X);
+        let phi = alpha + theta; phi = Math.atan2(Math.sin(phi), Math.cos(phi));
+        const useFront = Math.abs(phi) <= Math.PI / 2 || !back || bhi < 0;
+        const u = useFront ? r * (2 / Math.PI) * Math.max(-Math.PI / 2, Math.min(Math.PI / 2, phi)) : Math.sign(phi) * r * (2 / Math.PI) * (Math.PI - Math.abs(phi));
+        const src = useFront ? front : back, lo = useFront ? flo : blo, hi = useFront ? fhi : bhi;
+        const si = sample(src, y, Math.round(cx + u), lo, hi); if (si < 0) continue;
+        const nx = Math.round(cx + dx); if (nx < 0 || nx >= w) continue;
+        put(y * w + nx, src, si, D * Math.cos(alpha), 0.82 + 0.18 * Math.cos(alpha));
+      }
+      // limbs / wings / held gear outside the core swing in the lateral plane
+      for (let x = flo; x <= fhi; x++) {
+        const u = x - cx; if (Math.abs(u) <= r) continue;
+        const si = (y * w + x) * 4; if (!front[si + 3]) continue;
+        const nx = Math.round(cx + u * cT); if (nx < 0 || nx >= w) continue;
+        const z = u * sT, o = y * w + nx;
+        if (z < 0 && out[o * 4 + 3]) continue; // far-side limb stays behind the body
+        put(o, front, si, z >= 0 ? z + D : z, 0.82 + 0.18 * Math.max(0, Math.min(1, 0.5 + z / (2 * R))));
+      }
+    }
+    if (ink) {
+      const solid = (x, y) => x >= 0 && y >= 0 && x < w && y < h && out[(y * w + x) * 4 + 3] > 0, edge = new Uint8Array(w * h);
+      for (let y = b.minY; y <= b.maxY; y++) for (let x = 0; x < w; x++) {
+        if (!solid(x, y)) continue;
+        for (let k = 1; k <= OL && !edge[y * w + x]; k++) if (!solid(x - k, y) || !solid(x + k, y) || !solid(x, y - k) || !solid(x, y + k)) edge[y * w + x] = 1;
+      }
+      for (let i = 0; i < edge.length; i++) if (edge[i]) { out[i * 4] = ink[0]; out[i * 4 + 1] = ink[1]; out[i * 4 + 2] = ink[2]; }
+    }
+    return out;
+  }
+  function mirrorAbout(src, w, h, cx) {
+    const out = new Uint8ClampedArray(src.length);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const si = (y * w + x) * 4; if (!src[si + 3]) continue;
+      const nx = Math.round(2 * cx - x); if (nx < 0 || nx >= w) continue;
+      const di = (y * w + nx) * 4; out[di] = src[si]; out[di + 1] = src[si + 1]; out[di + 2] = src[si + 2]; out[di + 3] = src[si + 3];
+    }
+    return out;
+  }
+  // Left/right views are only mirrored when the front art itself is mirror-symmetric (no one-handed weapon,
+  // shield or lopsided gear); otherwise both sides are turned from the real art so the weapon hand stays put.
+  function isMirrorSymmetric(src, w, h, b) {
+    let total = 0, same = 0;
+    for (let y = b.minY; y <= b.maxY; y++) for (let x = b.minX; x <= b.maxX; x++) {
+      const i = (y * w + x) * 4; if (!src[i + 3]) continue; total++;
+      const mx = Math.round(2 * b.cx - x); if (mx < 0 || mx >= w) continue;
+      const j = (y * w + mx) * 4;
+      if (src[j + 3] && Math.abs(src[i] - src[j]) < 12 && Math.abs(src[i + 1] - src[j + 1]) < 12 && Math.abs(src[i + 2] - src[j + 2]) < 12) same++;
+    }
+    return total > 0 && same / total >= 0.97;
+  }
+  // Wings are thin membranes hinged on the back, not part of the torso column: split them off the grid render
+  // (by part id, plus their own ink fringe) so the body turns as a body and the wings swing as planes behind it.
+  const OUTLINE_PART = 99;
+  function splitWingLayer(pix) {
+    const n = GRID * GRID, body = new Uint8ClampedArray(pix.data), wing = new Uint8ClampedArray(n * 4);
+    const parts = pix.parts, isW = (i) => parts[i] === PART.WING_L || parts[i] === PART.WING_R;
+    let any = false;
+    for (let i = 0; i < n; i++) {
+      if (!pix.data[i * 4 + 3]) continue;
+      let take = isW(i);
+      if (!take && parts[i] === OUTLINE_PART) {
+        const x = i % GRID, y = (i / GRID) | 0, nb = [[1, 0], [-1, 0], [0, 1], [0, -1]].map(([u, v]) => { const xx = x + u, yy = y + v; return xx < 0 || yy < 0 || xx >= GRID || yy >= GRID || !pix.data[(yy * GRID + xx) * 4 + 3] ? -1 : yy * GRID + xx; });
+        take = nb.some((j) => j >= 0 && isW(j)) && !nb.some((j) => j >= 0 && !isW(j) && parts[j] !== OUTLINE_PART);
+      }
+      if (!take) continue;
+      any = true;
+      for (let k = 0; k < 4; k++) { wing[i * 4 + k] = pix.data[i * 4 + k]; body[i * 4 + k] = 0; }
+    }
+    return any ? { body: { data: body }, wing: { data: wing } } : null;
+  }
+  // Close the gaps the hidden wing roots leave in the back of the body (copy the nearest body pixel in the row).
+  function fillRowGaps(d, S, mask) {
+    for (let y = 0; y < S; y++) {
+      let lo = -1, hi = -1;
+      for (let x = 0; x < S; x++) if (d[(y * S + x) * 4 + 3]) { if (lo < 0) lo = x; hi = x; }
+      if (hi - lo < 2) continue;
+      let last = -1;
+      for (let x = lo; x <= hi; x++) {
+        const o = (y * S + x) * 4;
+        if (d[o + 3]) { last = o; continue; }
+        if (!mask[o + 3]) continue;
+        let nx = x; while (nx <= hi && !d[(y * S + nx) * 4 + 3]) nx++;
+        const src = (nx - x) < (last < 0 ? 1e9 : x - last / 4 + y * S) ? (y * S + nx) * 4 : last;
+        for (let k = 0; k < 4; k++) d[o + k] = d[src + k];
+      }
+    }
+  }
+  // painted feather pattern: soft primaries banded at the tip, scalloped coverts near the root, a bar across the middle
+  function featherShade(au, v, ug, yg) {
+    let m = 1;
+    if (au > 0.62) { m = (Math.floor(ug / 3) % 2) ? 0.88 : 0.97; if (v > 0.8) m *= 0.9; }
+    else if (v < 0.32) m = ((Math.floor(yg / 2) + Math.floor(ug / 3)) % 2) ? 1.06 : 0.94;
+    if (v > 0.5 && v < 0.57) m *= 0.84;
+    return m;
+  }
+  // the same feathers on the painted front/back wings, so walk, idle and action frames match the turned views
+  function featherPainted(data, S, raw, mirror) {
+    const k = S / GRID, isW = (i) => raw.data[i * 4 + 3] && (raw.parts[i] === PART.WING_L || raw.parts[i] === PART.WING_R);
+    let top = GRID, bot = -1, span = 1;
+    for (let i = 0; i < GRID * GRID; i++) if (isW(i)) { const x = i % GRID, y = (i / GRID) | 0; top = Math.min(top, y); bot = Math.max(bot, y); span = Math.max(span, Math.abs(x + 0.5 - CX)); }
+    if (bot < 0) return data;
+    const H = bot - top + 1;
+    for (let i = 0; i < GRID * GRID; i++) {
+      if (!isW(i)) continue;
+      const x = i % GRID, y = (i / GRID) | 0, ug = Math.abs(x + 0.5 - CX), m = featherShade(ug / span, (y - top) / H, ug, y);
+      if (m === 1) continue;
+      const X0 = (mirror ? GRID - 1 - x : x) * k;
+      for (let dy = 0; dy < k; dy++) for (let dx = 0; dx < k; dx++) {
+        const o = ((y * k + dy) * S + X0 + dx) * 4; if (!data[o + 3]) continue;
+        data[o] = Math.min(255, data[o] * m); data[o + 1] = Math.min(255, data[o + 1] * m); data[o + 2] = Math.min(255, data[o + 2] * m);
+      }
+    }
+    return data;
+  }
+  function swingWings(out, wingFront, wingBack, S, theta, cx, bodyHalf, trail, place, opt) {
+    const wo = opt || {}, k = S / GRID;
+    const cT = Math.cos(theta), sT = Math.sin(theta), src = wingBack || wingFront; // the back render has the full membrane incl. the roots the torso hides from the front
+    const zb = Math.max(2, bodyHalf * BODY_DEPTH * 0.3), SWEEP = 1.0;
+    const res = new Uint8ClampedArray(out);
+    const layer = new Uint8ClampedArray(S * S * 4), front = new Uint8Array(S * S);
+    // wing extent, for painted feather detail and the strike follow-through
+    let wTop = S, wBot = -1, wSpan = 1;
+    if (wo.feather || wo.flare) for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) if (src[(y * S + x) * 4 + 3]) { if (y < wTop) wTop = y; if (y > wBot) wBot = y; wSpan = Math.max(wSpan, Math.abs(x + 0.5 - cx)); }
+    const wH = Math.max(1, wBot - wTop + 1), fl = wo.flare || 0;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4; if (!src[i + 3]) continue;
+      let u = x + 0.5 - cx, yy = y;
+      const au = Math.abs(u) / wSpan;
+      // follow-through: wings flare up and out on the wind-up (fl < 0), trail low and tucked through the strike (fl > 0)
+      if (fl) { u *= 1 - 0.12 * fl; yy = Math.round(y + fl * au * au * 0.14 * wH); if (yy < 0 || yy >= S) continue; }
+      // see-through gossamer keeps its painted dither when turned
+      let c0 = src[i], c1 = src[i + 1], c2 = src[i + 2];
+      if (wo.feather) { // primaries at the tip, scalloped coverts near the root, a dark bar across the middle
+        const m = featherShade(au, (y - wTop) / wH, Math.abs(u) / k, y / k);
+        c0 = Math.min(255, c0 * m); c1 = Math.min(255, c1 * m); c2 = Math.min(255, c2 * m);
+      }
+      const z = -(zb + Math.abs(u) * (SWEEP + 0.12 * (trail || 0)));
+      const sx = u * cT - z * sT, depth = z * cT + u * sT;
+      let x0 = Math.round(cx + sx - 0.5), Y = yy;
+      if (place) { const q = place(cx + sx - 0.5, yy); x0 = Math.round(q[0]); Y = Math.round(q[1]); if (Y < 0 || Y >= S) continue; }
+      for (let k = 0; k < 2; k++) {
+        const X = x0 + k; if (X < 0 || X >= S) continue;
+        if (wo.dither && ((X >> 2) + (Y >> 2)) % 2) continue; // see-through gossamer keeps its painted dither when turned
+        const o = (Y * S + X) * 4;
+        if (layer[o + 3] && k) continue;
+        layer[o] = c0; layer[o + 1] = c1; layer[o + 2] = c2; layer[o + 3] = 255;
+        front[Y * S + X] = depth > 0 ? 1 : 0;
+      }
+    }
+    for (let p = 0; p < S * S; p++) {
+      if (!layer[p * 4 + 3]) continue;
+      if (res[p * 4 + 3] && !front[p]) continue; // membrane behind the body
+      for (let k = 0; k < 4; k++) res[p * 4 + k] = layer[p * 4 + k];
+    }
+    return res;
+  }
+  // Turned heads: the art only has a front face, so a 3/4 or side turn gets a profile cue on the leading edge of the
+  // head (nose bump, the near eye set back from it, far eye hidden) and a back-3/4 turn gets no face at all.
+  function profileFace(out, S, face, view, theta, cx) {
+    if (!face || view === 'backQuarter') return out;
+    const k = S / GRID, ey = Math.round(face.eyeY * k), top = Math.round(face.top * k), bot = Math.round(face.bottom * k);
+    const lead = Math.sin(theta) > 0 ? -1 : 1; // side of the canvas the face turns toward
+    const op = (x, y) => x >= 0 && x < S && out[(y * S + x) * 4 + 3];
+    const span = (y) => { let c0 = Math.round(cx); for (let d = 0; d < 12 && !op(c0, y); d++) c0 += (d % 2 ? d : -d); if (!op(c0, y)) return null; let lo = c0, hi = c0; while (op(lo - 1, y)) lo--; while (op(hi + 1, y)) hi++; return [lo, hi]; };
+    const set = (x, y, c) => { if (x < 0 || y < 0 || x >= S || y >= S) return; const o = (y * S + x) * 4; out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = 255; };
+    const skin = face.skin, shade = skin.map((v) => Math.round(v * 0.78)), ink = [24, 18, 22], eye = [40, 28, 34];
+    const sp = span(ey + k); if (!sp) return out;
+    const edge = lead > 0 ? sp[1] : sp[0], inward = -lead;
+    const near = view === 'side' ? 3 * k : 2 * k;
+    // clear the face band (skin over the far eye and the squeezed front features), then the near eye set back
+    for (let y = ey - k; y <= Math.min(bot - k, ey + 3 * k); y++) {
+      const s2 = span(y); if (!s2) continue;
+      const e2 = lead > 0 ? s2[1] : s2[0];
+      const depth = view === 'side' ? 4 * k : 3 * k;
+      for (let d = k; d <= depth; d++) { const x = e2 + inward * d; if (op(x, y)) set(x, y, y > ey + 2 * k ? shade : skin); }
+    }
+    for (let y = ey; y < ey + k; y++) for (let d = 0; d < k; d++) set(edge + inward * (near + d), y, eye);
+    // nose: one grid pixel past the leading edge just below the eye, inked, plus a mouth notch
+    for (let y = ey + k; y < ey + 2 * k; y++) { for (let d = 1; d <= k; d++) set(edge + lead * d, y, skin); set(edge + lead * (k + 1), y, ink); }
+    for (let d = 1; d <= k + 1; d++) set(edge + lead * d, ey + k - 1, ink);
+    for (let d = 1; d <= k; d++) set(edge + lead * d, ey + 2 * k, ink);
+    for (let d = 0; d < k; d++) set(edge + inward * d, ey + 2 * k + Math.floor(k / 2), shade);
+    return out;
+  }
+  function puppetBillboard(spec, f, S, view, facing, action) {
+    const phi = (facing < 0 ? -1 : 1) * TURN_ANGLE[view];
+    const pix = renderProceduralPixels(spec, f, 'billboard', 'turn:' + view + ':' + facing + ':' + action);
+    let data = scaleToBillboard(['ooze', 'elemental', 'spectral'].includes(spec.traits.bodyPlan) ? destripe(pix) : ['spider', 'beast', 'serpent'].includes(spec.traits.bodyPlan) ? rimLight(pix) : pix);
+    if (spec.traits.wings && spec.traits.wings !== 'none' && !['draconic', 'beast'].includes(spec.traits.bodyPlan)) {
+      const wsrc = renderProceduralPixels(spec, f, 'billboard', supportsBackView(spec) ? 'back' : 'front', true);
+      const split = splitWingLayer(wsrc);
+      if (split) {
+        const wing0 = scaleToBillboard(split.wing), wing = action === 'death' ? foldWing(wing0, S, [0.85, 0.6, 0.42, 0.35][f]) : wing0;
+        const trail = puppetPose(action, f).trail;
+        const pose = puppetPose(action, f), k = S / GRID, pp = pix.puppet;
+        const drop = pp ? (Math.round(pose.kneel * pp.legH * 0.45) + (pose.bob < 0 ? 1 : 0)) * k : 0;
+        const ft = pp && pose.fall > 0 ? fallTransform(pose.fall, pp.H, pp.ground) : null;
+        const place = (x, y) => { y += drop; if (!ft) return [x, y]; const q = ft(x / k, y / k); return [q[0] * k, q[1] * k]; };
+        data = swingWings(data, wing, wing, S, -phi, CX * S / GRID, (pix.shoulderW || 8) * S / GRID / 2, trail, place, { dither: spec.traits.wings === 'insect', feather: spec.traits.wings === 'feather', flare: action === 'attack' ? [-0.8, 0.7, 1, 0.35][f] : 0 });
+      }
+    }
+    return data;
+  }
+  function turnedBillboard(spec, f, frontData, S, view, facing, action) {
+    if (usesPuppet(spec)) return puppetBillboard(spec, f, S, view, facing, action || 'walk');
+    const b = opaqueBounds(frontData, S, S);
+    if (!b) return new Uint8ClampedArray(frontData.length);
+    if (facing < 0 && isMirrorSymmetric(frontData, S, S, b)) return mirrorAbout(turnedBillboard(spec, f, frontData, S, view, 1), S, S, b.cx);
+    const hasBack = supportsBackView(spec);
+    const theta = -(facing < 0 ? -1 : 1) * VIEW_YAW[view];
+    const wf = spec.traits && spec.traits.wings && spec.traits.wings !== 'none' ? splitWingLayer(renderProceduralPixels(spec, f, 'billboard', 'front', true)) : null;
+    const wb = wf && hasBack ? splitWingLayer(renderProceduralPixels(spec, f, 'billboard', 'back', true)) : null;
+    if (wf) {
+      const bodyFront = scaleToBillboard(wf.body);
+      const bb = opaqueBounds(bodyFront, S, S);
+      if (bb) {
+        const bodyBack = wb ? scaleToBillboard(wb.body) : null;
+        if (bodyBack) fillRowGaps(bodyBack, S, bodyFront);
+        const backSurface = mirrorPixelsX(composeBackBillboard(bodyFront, bodyBack, S), S, S);
+        const fpix = renderProceduralPixels(spec, f, 'billboard', 'front');
+        const turned = profileFace(rotateBillboard(bodyFront, backSurface, S, S, theta, Object.assign({}, bb, { cx: b.cx })), S, fpix.face, view, theta, b.cx);
+        const wingFront = scaleToBillboard(wf.wing), wingBack = wb ? scaleToBillboard(wb.wing) : wingFront;
+        return swingWings(turned, wingFront, wingBack, S, theta, b.cx, (bb.maxX - bb.minX) / 4, 0, null, { dither: spec.traits.wings === 'insect', feather: spec.traits.wings === 'feather' });
+      }
+    }
+    const backData = hasBack ? scaleToBillboard(renderProceduralPixels(spec, f, 'billboard', 'back')) : null;
+    // Back surface in front-canvas coordinates (the back view is this surface seen from behind).
+    const backSurface = mirrorPixelsX(composeBackBillboard(frontData, backData, S), S, S);
+    return profileFace(rotateBillboard(frontData, backSurface, S, S, theta, b), S, renderProceduralPixels(spec, f, 'billboard', 'front').face, view, theta, b.cx);
+  }
   // 3D world billboard (Doom-style): crisp binary-alpha at 4x (two Scale2x passes).
   // opts: {frame, view, facing: +1|-1}. Same body weapon hand across all views.
   const billboardCache = new Map();
@@ -3469,51 +5058,79 @@
   // Back: mirror FRONT so the right-hand sword lands on the RIGHT, then overlay mirrored
   // back-of-head / cape / wing-from-behind cues without burying the weapon.
   function composeBackBillboard(frontData, backData, S) {
-    const mirroredFront = mirrorPixelsX(frontData, S, S);
-    if (!supportsBackView || !backData) return mirroredFront;
-    const mirroredBack = mirrorPixelsX(backData, S, S);
-    const out = new Uint8ClampedArray(mirroredFront);
-    const headEnd = Math.floor(S * 0.42);
-    for (let y = 0; y < headEnd; y++) {
-      for (let x = 0; x < S; x++) {
-        const i = (y * S + x) * 4;
-        if (!mirroredBack[i + 3]) continue;
-        // Prefer back hair/helm in the upper band; keep any pale blade pixels from mirrored front
-        const frontPale = out[i] > 150 && out[i + 1] > 150 && out[i + 2] > 130
-          && (out[i] + out[i + 1] + out[i + 2]) > 450;
-        if (frontPale && y > S * 0.12) continue; // don't bury tip-up sword with hair
-        out[i] = mirroredBack[i];
-        out[i + 1] = mirroredBack[i + 1];
-        out[i + 2] = mirroredBack[i + 2];
-        out[i + 3] = mirroredBack[i + 3];
-      }
-    }
-    return out;
+    // Seen from behind: the dedicated back render, mirrored so the right-hand weapon lands on the viewer's right.
+    // backView keeps held props on top, so no front art (face, bodice front) bleeds through.
+    if (!backData) return mirrorPixelsX(frontData, S, S);
+    return mirrorPixelsX(backData, S, S);
   }
   function renderBillboardPixels(spec, opts) {
     const o = opts || {};
     const f = Math.max(0, Math.min(3, o.frame | 0));
     const view = normalizeBillboardView(o.view);
     const facing = o.facing < 0 ? -1 : 1;
-    const key = (spec.key || '') + '|' + f + '|' + view + '|' + (view === 'front' ? 'c' : (facing > 0 ? 'r' : 'l')) + '|v3';
+    const action = ['walk', 'idle', 'attack', 'pain', 'death'].includes(o.action) ? o.action : 'walk';
+    const key = (spec.key || '') + (o._raw ? '|raw' : '') + '|' + f + '|' + view + '|' + (view === 'front' ? 'c' : (facing > 0 ? 'r' : 'l')) + '|' + action + '|v38';
     if (spec.key && billboardCache.has(key)) return billboardCache.get(key);
     // Always build side/¾/back from FRONT so the sword (right hand / canvas-left) is present
     const frontPix = renderProceduralPixels(spec, f, 'billboard', 'front');
     let data = scaleToBillboard(frontPix);
     const S = GRID * 4;
-    if (view === 'back') {
+    if (action === 'idle' && (view === 'front' || view === 'back')) {
+      // idle front/back keep the painted standing frame exactly (same silhouette and stature as before);
+      // the breathing settle lives in the turned views, where it widens the chest without moving the feet or crown
+      const fi = 0;
+      data = scaleToBillboard(renderProceduralPixels(spec, fi, 'billboard', 'front'));
+      if (view === 'back') data = composeBackBillboard(data, supportsBackView(spec) && spec.traits.bodyPlan !== 'spectral' ? scaleToBillboard(renderProceduralPixels(spec, fi, 'billboard', 'back')) : (BEAST_PUPPET_PLANS.includes(spec.traits && spec.traits.bodyPlan) || spec.traits.bodyPlan === 'spectral' ? scaleToBillboard(creatureBackPixels(spec, fi)) : null), S);
+    } else if (action !== 'walk' && (view === 'front' || view === 'back') && paintedActionPlan(spec)) {
+      // creatures act out front/back poses with their own painted art (no switch to the plainer turned figure)
+      data = paintedActionBillboard(spec, f, S, view, action);
+    } else if (action !== 'walk' && usesPuppet(spec)) {
+      // action poses (idle breath, attack, pain, death) are drawn as their own pose in every direction
+      data = puppetBillboard(spec, f, S, view, view === 'front' ? 1 : facing, action);
+    } else if (view === 'back') {
       let backData = null;
-      if (supportsBackView(spec)) {
+      if (supportsBackView(spec) && spec.traits.bodyPlan !== 'spectral') {
         backData = scaleToBillboard(renderProceduralPixels(spec, f, 'billboard', 'back'));
-      }
+      } else if (BEAST_PUPPET_PLANS.includes(spec.traits && spec.traits.bodyPlan) || spec.traits.bodyPlan === 'spectral') backData = scaleToBillboard(creatureBackPixels(spec, f));
       data = composeBackBillboard(data, backData, S);
-    } else if (view === 'side' || view === 'threeQuarter') {
-      data = deriveViewFromFront(data, S, S, view, facing);
+    } else if (view === 'side' || view === 'threeQuarter' || view === 'backQuarter') {
+      data = turnedBillboard(spec, f, data, S, view, facing, action);
     }
+    if (!o._raw && (view === 'side' || view === 'threeQuarter' || view === 'backQuarter') && (BEAST_PUPPET_PLANS.includes(spec.traits && spec.traits.bodyPlan) || (spec.traits && spec.traits.bodyPlan === 'spectral'))) {
+      const k2 = (spec.key || spec.name) + '|' + view + '|' + facing;
+      let sc = statureScale.get(k2);
+      if (sc === undefined) {
+        const ref = renderBillboardPixels(spec, { frame: 0, view: 'front', _raw: true }).bounds, cur = renderBillboardPixels(spec, { frame: 0, view, facing, action: 'walk', _raw: true }).bounds;
+        let h = 1, wx = 1; if (ref && cur) { const r = (ref.maxY - ref.minY + 1) / (cur.maxY - cur.minY + 1); if (r > 1.06 || r < 0.94) h = clamp(r, 0.7, 1.35); wx = h;
+          // naga coils fan out sideways when turned; ease the spread so the 45-degree step never doubles the width
+          if (spec.traits.nagaTorso && view !== 'side') { const wr = (cur.maxX - cur.minX + 1) * h / (ref.maxX - ref.minX + 1); if (wr > 1.35) wx = h * 1.35 / wr; } }
+        sc = { h, wx };
+        if (statureScale.size > 512) statureScale.clear();
+        statureScale.set(k2, sc);
+      }
+      if (sc.h !== 1 || sc.wx !== 1) data = scaleAboutGround(data, S, sc.h, sc.wx);
+    }
+    if (spec.traits && spec.traits.wings === 'feather' && (view === 'front' || view === 'back') && !['draconic', 'beast'].includes(spec.traits.bodyPlan)) {
+      try {
+        const fi = action === 'idle' ? 0 : f, back = view === 'back' && supportsBackView(spec) && spec.traits.bodyPlan !== 'spectral';
+        const painted = action === 'walk' || action === 'idle' || (back ? false : !usesPuppet(spec));
+        if (painted) { const raw = renderProceduralPixels(spec, fi, 'billboard', back ? 'back' : 'front', true); if (raw && raw.parts) data = featherPainted(new Uint8ClampedArray(data), S, raw, view === 'back'); }
+      } catch (e) { /* keep the plain painted wings */ }
+    }
+    // pain reads at a glance: a one-frame flash on the recoil, a red tinge after
+    if (action === 'pain') tintPixels(data, f === 0 ? [255, 250, 240] : [255, 70, 60], f === 0 ? 0.45 : f === 1 ? 0.2 : 0);
+    if (spec.traits && spec.traits.bodyPlan === 'spectral' && view === 'back' && action !== 'death') {
+      // the spirit's back art keeps its full trailing hem: fill anything the back plate lost from the mirrored front silhouette
+      const fm = mirrorPixelsX(scaleToBillboard(renderProceduralPixels(spec, action === 'idle' ? 0 : f, 'billboard', 'front')), S, S);
+      for (let i = 0; i < S * S * 4; i += 4) if (!data[i + 3] && fm[i + 3]) { data[i] = fm[i]; data[i + 1] = fm[i + 1]; data[i + 2] = fm[i + 2]; data[i + 3] = 255; }
+    }
+    if (spec.traits && spec.traits.bodyPlan === 'spectral') data = wispify(data, S, f, action, spec.seed);
     let minX = S, minY = S, maxX = -1, maxY = -1;
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) if (data[(y * S + x) * 4 + 3]) { if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
     const res = { w: S, h: S, data, bounds: maxX < 0 ? null : { minX, minY, maxX, maxY }, view, facing };
     if (Number.isFinite(frontPix.bodyHeight)) res.bodyHeight = frontPix.bodyHeight * 4;
+    // action poses keep the standing stature so attacking, flinching or dying never resizes the figure in the world
+    if (action !== 'walk') { const stand = renderProceduralPixels(spec, 0, 'billboard', 'front'); if (Number.isFinite(stand.bodyHeight)) res.bodyHeight = stand.bodyHeight * 4; }
     if (spec.key) {
       if (billboardCache.size > 256) billboardCache.delete(billboardCache.keys().next().value);
       billboardCache.set(key, res);
@@ -3595,6 +5212,9 @@
     if (traits && traits.v && traits.palette && traits.outfit) tr = JSON.parse(JSON.stringify(traits));
     else if (traits) tr = normalizeTraitSpec(traits, sheet);
     else tr = deriveFallbackTraits(sheet);
+    // Reapply only new calling outfits after legacy cache sanitization.
+    const newCalling = SpriteExpansion?.roleFor(sheet.class);
+    if (newCalling && !tr.genreGarb && !['beast','draconic','serpent','spider','ooze','elemental'].includes(tr.bodyPlan)) tr.genreGarb = SpriteExpansion.outfitFor(newCalling.genre,newCalling.key);
     const first = sheet.name.toLowerCase().split(/\s+/)[0];
     if (SIGNATURE[first] && o.signature !== false) SIGNATURE[first](tr);
     const salt = o.salt !== undefined && o.salt !== null ? (o.salt >>> 0) : hashString('salt|' + sheet.name.toLowerCase());
@@ -3717,7 +5337,7 @@
         ],
         aura: { color: '#ffe8a0', strength: 0 }, handGlow: false, planConfidence: 0, signature: true,
         // slim knight: naturalLimbs but build stays plate-readable without bulky segments
-        heroic: true, naturalLimbs: true, longBlade: true, plateSegments: false, pauldrons: true, plume: '#6a7078', worldScale: 1.08, weaponPose: 'ready'
+        heroic: true, naturalLimbs: true, longBlade: true, plateSegments: true, pauldrons: true, plume: '#b82424', plumeCrest: true, helmTrim: '#b89440', capeFolds: true, capeCoversBack: true, worldScale: 1.08, weaponPose: 'ready'
       }
     }
   };
@@ -3756,7 +5376,7 @@
     createProceduralCharacterSprite,
     spriteFingerprint, fingerprintDistance, traitSignature, traitSignatureDistance, ensureDistinctSpriteSpec,
     PRESET_TRAITS, getPresetProceduralSpec, isPresetName: (n) => !!presetKeyOf(n),
-    renderBillboardPixels, createBillboardCanvas, supportsBackView, humanoidWorldStature, characterWorldStature:humanoidWorldStature,
+    puppetPose, renderBillboardPixels, createBillboardCanvas, supportsBackView, supportsActionPoses, ACTIONS: ['walk', 'idle', 'attack', 'pain', 'death'], humanoidWorldStature, characterWorldStature:humanoidWorldStature,
     characterStature, frameBillboardHeight, characterViewingDistance,
     normalizeBillboardView, deriveViewFromFront
   };

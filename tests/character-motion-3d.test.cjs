@@ -60,7 +60,7 @@ test('facing and body motion are time-based rather than render-frame based', () 
 test('view boundaries and front-axis weapon handedness resist camera jitter', () => {
   const c = M.createController();
   for (let now = 0; now <= 1000; now += 20) c.sample('Guard', input({ x: now / 1000, now }));
-  const boundary = Math.PI * .22;
+  const boundary = Math.PI / 8; // front / front-3/4 sector edge of the 8-direction set
   for (let now = 1020; now <= 1400; now += 20) {
     const x = now / 1000, angle = boundary + (now % 40 ? .035 : -.035);
     const p = c.sample('Guard', input({ x, now, camX: x + 5 * Math.cos(angle), camY: -5 * Math.sin(angle) }));

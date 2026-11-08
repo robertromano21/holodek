@@ -130,10 +130,10 @@ test('inn rest is a receipted party service, not resurrection or a free ability/
   f.move(f.upper); assert.match(f.action('lodge', 'Guild Steward').error, /does not operate lodging/);
 });
 
-test('rest rejects hostile rooms, distant/dead operators, stale/paused games and insufficient funds without charging', () => {
+test('rest rejects hostile rooms, other-room/dead operators, stale/paused games and insufficient funds without charging', () => {
   const cases = [
     f => { const roster = JSON.parse(f.state.getCombatCharactersString()); roster[1].state = 'Hostile'; f.state.setCombatCharactersString(JSON.stringify(roster)); },
-    f => { const roster = JSON.parse(f.state.getCombatCharactersString()); roster[1].mazeX = 11; f.state.setCombatCharactersString(JSON.stringify(roster)); },
+    f => { const roster = JSON.parse(f.state.getCombatCharactersString()); roster[1].mazeRoomKey = '9,9,9'; f.state.setCombatCharactersString(JSON.stringify(roster)); },
     f => { f.db[f.inn].inhabitants.actors.Host.status = 'dead'; },
     f => { f.paused = true; },
     f => { f.db['0,0,0'].economy.silver = 0; }
@@ -147,7 +147,7 @@ test('rest rejects hostile rooms, distant/dead operators, stale/paused games and
   f.state.setUpdatedGameConsole(text); assert.match(f.action('lodge', 'Host').error, /No conscious|closer/);
 });
 
-test('commission requests coalesce and merge only fresh state; no calls for unavailable or distant work', async () => {
+test('commission requests coalesce and merge fresh state across same-room wandering, but reject other-room work', async () => {
   const f = fixture(), r = runner(() => { f.db['0,0,0'].newIndependentField = 'retained'; }); f.move(f.upper);
   const input = f.request(), first = Commissions.request(f.state, f.service, input, { run: r.run });
   const second = Commissions.request(f.state, f.service, input, { run: r.run }); assert.equal(first, second);
@@ -157,7 +157,9 @@ test('commission requests coalesce and merge only fresh state; no calls for unav
   await assert.rejects(Commissions.request(unavailable.state, unavailable.service, unavailable.request(), { run: r.run }), /No known/);
   assert.equal(r.calls, 1);
   const roster = JSON.parse(f.state.getCombatCharactersString()); roster[1].mazeX = 11; f.state.setCombatCharactersString(JSON.stringify(roster));
-  await assert.rejects(Commissions.request(f.state, f.service, f.request(), { run: r.run }), /closer/); assert.equal(r.calls, 1);
+  await Commissions.request(f.state, f.service, f.request(), { run: r.run });assert.equal(r.calls,1,'Wandering does not rebuild the existing offer.');
+  roster[1].mazeRoomKey='9,9,9';f.state.setCombatCharactersString(JSON.stringify(roster));
+  await assert.rejects(Commissions.request(f.state, f.service, f.request(), { run: r.run }), /not available/); assert.equal(r.calls, 1);
 });
 
 test('interrupted generation, changed recipient and malformed prose never install or pay a commission', async () => {

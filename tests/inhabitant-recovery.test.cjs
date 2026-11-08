@@ -22,11 +22,11 @@ test('array cardinality survives the Retort converter, strict nesting and nullab
 });
 
 test('the logged three residents all claiming slot zero gets one correction, not truncation or a new random count',async()=>{
-  const bad=cast(3).map(r=>({...r,slot:0})),good=[bad[0]],a=agent([{inhabitants:bad},{inhabitants:good}]);
-  const counters={levels:0,equipment:0},result=await generateInhabitants(a,context,rules(1,counters));
-  assert.equal(a.requests.length,2);assert.deepEqual(Object.keys(result.population.actors),[good[0].name]);assert.equal(counters.levels,1);assert.equal(counters.equipment,0);
-  assert.match(a.prompts.join('\n'),/exactly 1 inhabitants with slot IDs 0/);assert.match(a.prompts.at(-1),/Expected exactly 1 inhabitants/);
-  for(const request of a.requests){const s=toJSON(request.parameters).properties.inhabitants;assert.equal(s.minItems,1);assert.equal(s.maxItems,1);}
+  const bad=cast(3).map(r=>({...r,slot:0})),good=cast(2),a=agent([{inhabitants:bad},{inhabitants:good}]);
+  const counters={levels:0,equipment:0},result=await generateInhabitants(a,context,rules(2,counters));
+  assert.equal(a.requests.length,2);assert.deepEqual(Object.keys(result.population.actors),good.map(r=>r.name));assert.equal(counters.levels,2);assert.equal(counters.equipment,0);
+  assert.match(a.prompts.join('\n'),/exactly 2 inhabitants with slot IDs 0, 1/);assert.match(a.prompts.at(-1),/Expected exactly 2 inhabitants/);
+  for(const request of a.requests){const s=toJSON(request.parameters).properties.inhabitants;assert.equal(s.minItems,2);assert.equal(s.maxItems,2);}
 });
 
 for(const defect of ['too few','duplicate slots','missing biography'])test(`a ${defect} correction is validated before any mechanical allocation`,async()=>{
@@ -37,7 +37,7 @@ for(const defect of ['too few','duplicate slots','missing biography'])test(`a ${
 
 test('failed correction stops after four total calls without inventing, deduplicating or allocating residents',async()=>{
   const a=agent([{inhabitants:cast(3).map(r=>({...r,slot:0}))}]),counters={levels:0,equipment:0};
-  await assert.rejects(generateInhabitants(a,context,rules(1,counters)),/Expected exactly 1 inhabitants/);
+  await assert.rejects(generateInhabitants(a,context,rules(2,counters)),/Expected exactly 2 inhabitants/);
   assert.equal(a.requests.length,4);assert.deepEqual(counters,{levels:0,equipment:0});
 });
 
@@ -54,11 +54,11 @@ test('declining a supplemental encounter still accepts an empty cast without all
 
 test('real Luna transport rejects an oversized structured cast and the same Retort session recovers',async()=>{
   const requests=[],counters={levels:0,equipment:0},client={chat:{completions:{create:async body=>{
-    requests.push(body);const rows=requests.length===1?cast(3).map(r=>({...r,slot:0})):cast(1);
+    requests.push(body);const rows=requests.length===1?cast(3).map(r=>({...r,slot:0})):cast(2);
     return(async function*(){yield{choices:[{delta:{tool_calls:[{index:0,id:'cast-'+requests.length,type:'function',function:{name:'answer',arguments:JSON.stringify({inhabitants:rows})}}]}}]};yield{choices:[{delta:{},finish_reason:'tool_calls'}]};})();
   }}}};
   const models=Models.createModelService({initial:'gpt-6-luna',clientFor:()=>client}),runtime=Runtime.createRuntime({models,client,log(){}});
-  const result=await runtime.run(runtime.retort($=>generateInhabitants($,context,rules(1,counters))),null,{shouldSaveToLog:false});
-  assert.equal(requests.length,2);assert.equal(Object.keys(result.population.actors).length,1);assert.equal(counters.levels,1);
-  for(const request of requests){assert.equal(request.model,'gpt-6-luna');const s=request.tools[0].function.parameters.properties.inhabitants;assert.equal(s.minItems,1);assert.equal(s.maxItems,1);}
+  const result=await runtime.run(runtime.retort($=>generateInhabitants($,context,rules(2,counters))),null,{shouldSaveToLog:false});
+  assert.equal(requests.length,2);assert.equal(Object.keys(result.population.actors).length,2);assert.equal(counters.levels,2);
+  for(const request of requests){assert.equal(request.model,'gpt-6-luna');const s=request.tools[0].function.parameters.properties.inhabitants;assert.equal(s.minItems,2);assert.equal(s.maxItems,2);}
 });

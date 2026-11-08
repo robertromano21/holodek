@@ -1,6 +1,6 @@
 (function(root) {
   'use strict';
-  let pending = false, currentClose = null, interaction = null;
+  let pending = false, currentClose = null, currentElement = null, interaction = null;
   const actionBlocked = () => !!(root.gamePaused || root.actionDiceState?.active || root._combatCommandPending || root._characterStartupPending ||
     root._combatRoundActiveUntil > Date.now() || root._gameOver || root._playerUnconscious || root._deathSceneActive);
   const blocked = () => !!(pending || root.GameCommandGate?.busy() || actionBlocked());
@@ -29,7 +29,7 @@
     if (!interaction) return false;
     if (!sameRoom(interaction) || root.actionDiceState?.active || root._gameOver || root._playerUnconscious || root._deathSceneActive ||
       interaction.element?.isConnected === false) { interaction = null; return false; }
-    return interaction.actor === name;
+    return interaction.actor === name || interaction.actors?.includes(name);
   }
   function beginInteraction(actor) {
     currentClose?.();
@@ -67,19 +67,24 @@
     return event;
     });
   }
-  function popup(title, text) {
+  function popup(title, text, {pauseDialogue=false,fixedActions=false}={}) {
     const origin = observer();
     currentClose?.();
+    const resumeDialogue=pauseDialogue?root.DungeonLife?.holdDialogue?.():null;
     document.querySelectorAll('.popup-container').forEach(p => p.remove());
     const box = document.createElement('div'); box.className = 'popup-container commerce-actions';
+    if (fixedActions) box.className += ' recruitment-dialog';
     box.setAttribute('role', 'dialog'); box.setAttribute('aria-label', title);
     box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:17000;width:min(560px,calc(100vw - 32px));max-height:calc(100vh - 40px);overflow:auto';
-    const heading = document.createElement('h3'), info = document.createElement('p'), rows = document.createElement('div');
-    heading.textContent = title; info.textContent = text; info.style.whiteSpace = 'pre-wrap'; box.append(heading, info, rows);
+    const heading = document.createElement('h3'), info = document.createElement('p'), rows = document.createElement('div'), content = document.createElement('div');
+    content.className = 'commerce-dialog-content'; rows.className = 'commerce-dialog-actions';
+    if (fixedActions) { content.tabIndex = 0; content.setAttribute('role', 'region'); content.setAttribute('aria-label', 'Request details'); }
+    heading.textContent = title; info.textContent = text; info.style.whiteSpace = 'pre-wrap'; content.append(heading, info); box.append(content, rows);
     function close() {
+      resumeDialogue?.();
       box.remove(); document.removeEventListener('keydown', escape);
       if (interaction?.element === box) interaction = null;
-      if (currentClose === close) currentClose = null;
+      if (currentClose === close) {currentClose = null;currentElement=null;}
     }
     const escape = event => { if (event.key === 'Escape' && !pending && interaction?.phase!=='loading') close(); };
     const add = (label, request, reopen) => {
@@ -89,14 +94,15 @@
         if (!request) { if (!pending) close(); return; }
         if (!sameRoom(origin)) { close(); notice('That menu belonged to another room or game.'); return; }
         if (blocked()) { info.textContent = blockedMessage(); return; }
+        const listeners=interaction?.actors || [request.actor];
         pending = true; box.querySelectorAll('button').forEach(b => b.disabled = true);
-        try { await transact(request); close(); pending = false; if (reopen) await open(request.actor,{counterId:origin.counterId}); }
+        try { await transact(request); if(['accept-mission','decline-favor','report-favor','complete-recruitment'].includes(request.kind))for(const name of listeners)root.DungeonLife?.releaseAttention?.(name);close(); pending = false; if (reopen) await open(request.actor,{counterId:origin.counterId}); }
         catch (error) { info.textContent = error.message; }
         finally { pending = false; box.querySelectorAll('button').forEach(b => b.disabled = false); }
       });
       return button;
     };
-    currentClose = close; document.addEventListener('keydown', escape); document.body.appendChild(box);
+    currentClose = close;currentElement=box; document.addEventListener('keydown', escape); document.body.appendChild(box);
     return { add, info, close, rows, element: box };
   }
   function invitation(actor, accept, jobs = false, inquiries = false) {
@@ -133,9 +139,17 @@
     });box.rows.appendChild(later);
     return true;
   }
-  function invite(actor) {
-    if(starterRoom())return false;
+  function invite(actor,{characterClick=false}={}) {
     const business = root.getEconomyResidentInfo?.(actor);
+    const request=requestFor(actor);
+    if(characterClick && (request || business?.recruitmentCondition || reviewedActors.has(actorReviewKey(actor))))return false;
+    if(request){
+      if(request.status!=='offered' || shownFavors.has(shownKey(request)) || reviewedActors.has(actorReviewKey(actor)))return false;
+      if(blocked()){notice(blockedMessage());return true;}
+      return showRecruitment(request);
+    }
+    if(business?.recruitmentCondition){if(reviewedActors.has(actorReviewKey(actor)))return false;void open(actor);return true;}
+    if(starterRoom()&&!business?.starterRecruitment)return false;
     if (!business || !business.jobs && !business.venue && !['shop', 'temple', 'venue', 'divine'].includes(business.kind)) return false;
     return invitation(actor, () => open(actor), business.jobs && (business.kind === 'mission'||business.inquiries),business.inquiries);
   }
@@ -163,8 +177,12 @@
     });
   }
   async function open(actor,{counterId}={}) {
-    if(starterRoom())return false;
+    const business=root.getEconomyResidentInfo?.(actor);
+    const request=requestFor(actor);
+    if(starterRoom()&&!request&&!business?.starterRecruitment&&!business?.recruitmentCondition){notice('There is no saved request available for this resident.');return false;}
     if (blocked()) { notice(blockedMessage()); return false; }
+    if(!counterId && !business?.venue && !['shop','temple','divine'].includes(business?.kind) && request)
+      return showRecruitment(request);
     pending = true; let held,loading;
     return track(async()=>{
     try {
@@ -174,7 +192,7 @@
       loading.element.setAttribute('aria-busy','true');
       await root.prepareEconomyState?.();
       if (!sameRoom(held)) return false;
-      if(root.getEconomyResidentInfo?.(actor)?.introduced===false){
+      if(!business?.recruitmentCondition && root.getEconomyResidentInfo?.(actor)?.introduced===false){
         const encounter=await post('/city/services/encounter',{...observer(),actor});
         if(!sameRoom(held))return false;
         await root.applyRealtimeCombatResult?.(encounter);
@@ -185,6 +203,8 @@
       if (!sameRoom(ctx)) return false;
       if (data.economyResult) await root.applyRealtimeCombatResult?.(data.economyResult);
       if (!sameRoom(ctx) || root.GameCommandGate?.waitingNative?.()) return false;
+      const recruitment=data.missions.find(m=>m.recipient===actor && validRecruitment(m));
+      if(!data.service && !data.venue && !data.divine && recruitment)return showRecruitment(recruitment);
       const box = popup(data.divine ? 'Divine Audience: ' + data.divine.name : data.venue?.name || data.service?.name || 'Local Contracts',
         `Silver Pieces: ${data.silver}` + (data.divine ? `\n${data.divine.domain}\n${data.divine.interest}\nVisit ${data.divine.visits}. This deity travels independently and cannot join the party.` : ''));
       held.element = box.element;held.phase='menu';held.offeredMissionIds=data.missions.filter(m=>m.status==='offered').map(m=>m.id);interaction=held;
@@ -218,12 +238,12 @@
         }
       }
       for (const mission of data.missions) {
-        const line = document.createElement('p'); line.textContent = `${mission.status}: ${mission.description}${mission.pendingReward ? '\nRequirements verified; free an inventory slot to receive your payment.' : ''}`; box.info.after(line);
-        if (mission.status === 'offered'&&(mission.type!=='delivery'||mission.patron===actor)) box.add('Accept Local Contract', { kind: 'accept-mission', actor, missionId: mission.id });
+        const line = document.createElement('p'); line.textContent = `${mission.type==='resident-favor'?'Recruitment Invitation ('+mission.status+')':mission.status}: ${mission.description}${mission.pendingReward ? '\nRequirements verified; free an inventory slot to receive your payment.' : ''}`; box.info.after(line);
+        if (mission.status === 'offered'&&(mission.type!=='delivery'||mission.patron===actor)) box.add(mission.type==='resident-favor'?'Accept Request':'Accept Local Contract', { kind: 'accept-mission', actor, missionId: mission.id });
         if (mission.type === 'resident-favor') {
-          const progress = document.createElement('p'); progress.textContent = mission.progress || mission.offer; box.info.after(progress);
-          if (mission.status === 'offered') box.add('Decline Favor', { kind: 'decline-favor', actor, missionId: mission.id }, true);
-          if (mission.status === 'accepted') box.add('Report Findings', { kind: 'report-favor', actor, missionId: mission.id }, true);
+          if(mission.status!=='offered' && mission.progress){const progress = document.createElement('p'); progress.textContent = mission.progress; box.info.after(progress);}
+          if (mission.status === 'offered') box.add('Decline Request', { kind: 'decline-favor', actor, missionId: mission.id });
+          if (mission.status === 'accepted') box.add('Complete Request', { kind: 'complete-recruitment', actor, missionId: mission.id }, true);
         }
         if (mission.status === 'accepted' && mission.item&&(mission.type!=='delivery'||mission.recipient===actor)) {
           const give = document.createElement('button'); give.type = 'button'; give.className = 'popup-button'; give.textContent = 'Give Requested Item';
@@ -256,10 +276,20 @@
     button.addEventListener('click', () => { root.InventoryUi?.toggle(false); drink(name); }); box.appendChild(button); return button;
   }
   function addAction(box, name) {
-    const business = root.getEconomyResidentInfo?.(name); if (!box || !business) return;
+    const business = root.getEconomyResidentInfo?.(name),request=requestFor(name); if (!box || !business&&!request) return;
     const button = document.createElement('button'); button.type = 'button'; button.className = 'popup-button';
-    button.textContent = business.venue ? 'Venue Services and Local Work' : business.kind === 'divine' ? 'Divine Audience' : business.kind === 'temple' ? 'Temple Services' : business.kind === 'shop' ? 'Trade' : 'Local Contract';
-    button.addEventListener('click', () => open(name)); box.appendChild(button);
+    button.textContent = request ? (request.invitationPending?(request.status!=='offered'||shownFavors.has(shownKey(request))?'Recruitment Progress':'Recruitment Invitation'):'Local Request') : business.venue ? 'Venue Services and Local Work' : business.kind === 'divine' ? 'Divine Audience' : business.kind === 'temple' ? 'Temple Services' : business.kind === 'shop' ? 'Trade' : business.recruitmentCondition ? 'Recruitment Progress' : 'Local Contract';
+    button.addEventListener('click', () => request?showRecruitment(requestFor(name) || request):open(name)); box.appendChild(button);
+    if(request?.invitationPending && request.status!=='offered'){
+      const finish=document.createElement('button');finish.type='button';finish.className='popup-button';finish.textContent='Complete Party Invitation';
+      finish.disabled=!completionReady(request);finish.title=finish.disabled?'Complete every agreed condition first; see Recruitment Progress.':'';
+      finish.addEventListener('click',async()=>{
+        const current=requestFor(name);if(!current || !completionReady(current) || blocked())return;
+        pending=true;finish.disabled=true;
+        try{await transact({kind:'complete-recruitment',actor:current.recipient,missionId:current.id});root.CombatCharacterUi?.open?.({name},{services:false});}
+        catch(error){notice(error.message);}finally{pending=false;finish.disabled=!completionReady(requestFor(name));}
+      });box.appendChild(finish);
+    }
   }
   function trader(requested) {
     const ctx = root.getDungeonLifeContext?.();
@@ -323,14 +353,152 @@
     return options.receipt?receipt:true;
   }
   const hasInteraction=()=>!!interaction&&isInteracting(interaction.actor);
+  const favorOffers=new Map(),knownRequests=new Map(),shownFavors=new Set(),reviewedActors=new Set(),reports=[],reported=new Set();let favorScope=null,lastFavorScan=0;
+  function report(phase,m,reason='') {
+    const row={version:'group-recruitment-1',phase,reason,runId:root.dungeonRunId,geoKey:root.currentDungeon?.geoKey,
+      actor:m?.recipient || '',requestId:m?.id || '',floor:floorIdentity(),at:Date.now()};
+    const signature=[row.runId,row.geoKey,row.floor,phase,row.requestId,m?.status,!!m?.invitationPending,reason].join('|');if(reported.has(signature))return;reported.add(signature);if(reported.size>256)reported.delete(reported.values().next().value);
+    reports.push(row);if(reports.length>64)reports.shift();root.console?.info?.('[RecruitmentUi]',row);
+    if(row.runId&&row.geoKey)root.fetch?.('/debug/recruitment-ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(row)})?.catch(()=>{});
+  }
+  const floorIdentity=()=>root.CityFloorScope?.identity?.(root.currentDungeon?.cityFloorContext) ||
+    (root.currentDungeon?.cityFloorContext?`${root.currentDungeon.cityFloorContext.hostKey}|${root.currentDungeon.cityFloorContext.buildingId}|${root.currentDungeon.cityFloorContext.floor}`:'street');
+  function syncFavorScope() {
+    const scope=root.dungeonRunId+'|'+root.currentDungeon?.geoKey+'|'+floorIdentity()+'|'+root.CityFloorScope?.token();
+    if(scope!==favorScope){
+      if(interaction?.favorId && interaction.favorScope!==scope)currentClose?.();
+      if(favorScope && !favorScope.startsWith(root.dungeonRunId+'|')){shownFavors.clear();reviewedActors.clear();}
+      favorScope=scope;favorOffers.clear();knownRequests.clear();lastFavorScan=0;
+    }
+  }
+  const offerContext=()=>({runId:root.dungeonRunId,geoKey:root.currentDungeon?.geoKey,floorToken:root.CityFloorScope?.token()});
+  function validRecruitment(m) {
+    return !!(m?.source==='engine-resident-favor-v1' && m.type==='resident-favor' &&
+      !/\b(?:observe|observations?|report(?:s|ing)?)\b/i.test(m.description || '') &&
+      (['offered','accepted'].includes(m.status) || m.status==='completed'&&m.invitationPending&&!m.recruitedAt) &&
+      m.runId===root.dungeonRunId && m.roomKey===root.currentDungeon?.geoKey && m.floor===floorIdentity() && m.id && m.recipient && m.description);
+  }
+  function completionReady(m){
+    if(!m?.invitationPending)return false;
+    if(m.recruitmentGroup)return m.recruitmentGroup.status==='accepted' && m.recruitmentGroup.members.every(member=>
+      member.outcome!=='pending' && (member.outcome!=='conditional' || member.status==='completed' || member.readyToReport));
+    return m.status==='completed' || m.status==='accepted'&&m.readyToReport;
+  }
+  function requestFor(name) {
+    syncFavorScope();const m=knownRequests.get(name) || root.getEconomyResidentInfo?.(name)?.recruitmentCondition;
+    return validRecruitment(m) && (!starterRoom() || m.starterRecruitment===true)?m:null;
+  }
+  const shownKey=m=>root.dungeonRunId+'|'+(m.recruitmentGroup?.id || m.id);
+  const actorReviewKey=name=>[root.dungeonRunId,root.currentDungeon?.geoKey,floorIdentity(),name].join('|');
+  function rememberReview(m){
+    shownFavors.add(shownKey(m));reviewedActors.add(actorReviewKey(m.recipient));
+    while(shownFavors.size>512)shownFavors.delete(shownFavors.values().next().value);
+    while(reviewedActors.size>512)reviewedActors.delete(reviewedActors.values().next().value);
+  }
+  function showRecruitment(m,{automatic=false}={}) {
+    if(!validRecruitment(m) || starterRoom()&&!m.starterRecruitment){report('unavailable',m,'invalid-request-or-scope');if(!automatic)notice('This request is not available in the current room.');return false;}
+    const ctx=root.getDungeonLifeContext?.(),actor=ctx?.actors?.find(a=>a.name===m.recipient && (a.type==='monster'||a.type==='npc'&&a.recruitmentLease) && (a.hp??1)>0 &&
+      a.discoveryState!=='pending' && !['Hostile','Dead','Dying','Unconscious'].includes(a.allegiance || a.state));
+    const actorRoom=actor?.mazeRoomKey && (root.DungeonInhabitants?.roomKey?.(actor.mazeRoomKey) || actor.mazeRoomKey);
+    if(!actor || actorRoom && actorRoom!==root.currentDungeon?.geoKey){report('unavailable',m,'resident-not-present');if(!automatic)notice('This request is saved, but its resident is not available in this room.');return false;}
+    const group=m.recruitmentGroup;
+    if(group?.status==='collecting' || root.DungeonLife?.hasPendingTurnSpeech?.()){
+      queueFavor(m,{...offerContext(),awaitDialogue:true,dialogueQueued:true});report('waiting',m,'group-dialogue');return true;
+    }
+    syncFavorScope();
+    for(const [id,offer]of favorOffers)if(shownKey(offer.mission)===shownKey(m))favorOffers.delete(id);
+    const offered=group?group.status==='review':m.status==='offered';
+    const held=beginInteraction(m.recipient),status=offered?'Review the complete request before deciding.':'Request accepted. Fulfill the listed requirements.';
+    const localHelpers=group?.members.some(member=>member.participation==='help-here');
+    const description=group?group.members.map(member=>`${member.name}: ${member.description ||
+      (member.outcome==='ready'?'Willing to join after the group conditions are approved and completed.':member.outcome==='pending'?'Still considering the invitation.':'Remaining here; not part of the recruitment reward.')}${member.participation==='help-here'?' Helps here after acceptance; stays behind if you leave before the group task is finished.':''}`).join('\n\n')+
+      (localHelpers?'\n\nLocal helpers accompany you here after acceptance. Complete every agreed condition for the willing group to remain together.':'\n\nThe willing members join together after every agreed condition is verified.'):m.invitationPending?m.description:m.requestDescription || m.description;
+    const box=popup(group?(offered?'Group Recruitment Invitation':'Recruitment Progress'):m.invitationPending?(offered?'Recruitment Invitation':'Recruitment Progress'):'Local Request',`${group?'Encountered Group':m.recipient}\n${status}\n\n${description}`+
+      (!offered && m.progress && !m.description.includes(m.progress)?'\n\n'+m.progress:''),{pauseDialogue:true,fixedActions:true});
+    rememberReview(m);report('shown',m);
+    const sheet=document.getElementById('party-popup');if(sheet?.style)sheet.style.display='none';
+    held.element=box.element;held.phase='menu';held.actors=group?.members.map(member=>member.name);held.offeredMissionIds=offered?(group?.members.map(member=>member.missionId).filter(Boolean) || [m.id]):[];held.favorId=m.id;held.favorScope=favorScope;
+    if(group)for(const member of group.members)reviewedActors.add(actorReviewKey(member.name));
+    if(offered){
+      const contact=group?.members.find(member=>member.status==='offered' && member.missionId) || {name:m.recipient,missionId:m.id};
+      box.add(group?'Accept Group Request':'Accept Request',{kind:'accept-mission',actor:contact.name,missionId:contact.missionId});
+      box.add(group?'Decline Group Request':'Decline Request',{kind:'decline-favor',actor:contact.name,missionId:contact.missionId});
+      const later=box.add('Not Now');later.addEventListener('click',()=>{if(!pending){box.close();root.DungeonLife?.releaseAttention?.(m.recipient);root.CombatCharacterUi?.open?.({name:m.recipient},{services:false});}});
+    }else{
+      const finish=box.add(m.invitationPending?'Complete Party Invitation':'Complete Request',{kind:'complete-recruitment',actor:m.recipient,missionId:m.id});
+      if(m.invitationPending)finish.disabled=!completionReady(m);
+      box.add('Close');
+    }
+    const business=root.getEconomyResidentInfo?.(m.recipient);
+    if(business?.venue || ['shop','temple','divine'].includes(business?.kind)){
+      const services=document.createElement('button');services.type='button';services.className='popup-button';services.textContent='Access Services';
+      services.addEventListener('click',async()=>{if(!blocked())await open(m.recipient);});box.rows.appendChild(services);
+    }
+    return true;
+  }
+  function queueFavor(m,ctx) {
+    if(!m || m.source!=='engine-resident-favor-v1' || m.type!=='resident-favor' || m.status!=='offered')return;
+    ctx ||= offerContext();
+    if(m.runId!==ctx.runId || m.roomKey!==ctx.geoKey || m.floor!==floorIdentity() || !m.id || !m.recipient || !m.description)return;
+    syncFavorScope();knownRequests.set(m.recipient,m);const id=ctx.runId+'|'+m.id;
+    if(!shownFavors.has(shownKey(m))){favorOffers.set(id,{queuedAt:Date.now(),...favorOffers.get(id),...ctx,mission:m});report('queued',m);}
+  }
+  function dialogueQueued(event) {
+    if(event.runId && event.runId!==root.dungeonRunId || event.geoKey!==root.currentDungeon?.geoKey)return;
+    for(const offer of favorOffers.values())if(event.speakers?.includes(offer.mission.recipient))offer.dialogueQueued=true;
+  }
+  function onFrame() {
+    const d=root.currentDungeon;if(!d)return false;
+    syncFavorScope();if(currentElement?.isConnected===false)currentClose?.();
+    const openPopup=[...document.querySelectorAll('.popup-container')].some(node=>!node.hidden && node.style?.display!=='none' &&
+      (typeof node.getClientRects!=='function'||node.getClientRects().length>0));
+    const waiting=blocked()?'action-busy':hasInteraction()||currentClose||openPopup?'popup-open':root.RoomEntry?.isPending?.()?'arrival-pending':root.GameCommandGate?.isSubmitting?.()?'command-submitting':null;
+    if(waiting){for(const offer of favorOffers.values())report('waiting',offer.mission,waiting);return false;}
+    const ctx=root.getDungeonLifeContext?.();if(!ctx?.player || ctx.dungeon?.geoKey!==d.geoKey)return false;
+    if(Date.now()-lastFavorScan>500){lastFavorScan=Date.now();
+      for(const actor of ctx.actors || [])if(actor.type==='monster' && (actor.hp??1)>0 && actor.discoveryState!=='pending' &&
+        !['Hostile','Dead','Dying','Unconscious'].includes(actor.allegiance || actor.state))
+        queueFavor(root.getEconomyResidentInfo?.(actor.name)?.recruitmentCondition);
+    }
+    for(const [id,offer]of favorOffers){
+      if(!sameRoom(offer) || offer.mission.floor!==floorIdentity()){favorOffers.delete(id);continue;}
+      const actor=ctx.actors?.find(a=>a.name===offer.mission.recipient && a.type==='monster' && (a.hp??1)>0 && a.discoveryState!=='pending' &&
+        !['Hostile','Dead','Dying','Unconscious'].includes(a.allegiance || a.state));
+      const actorRoom=actor?.mazeRoomKey && (root.DungeonInhabitants?.roomKey?.(actor.mazeRoomKey) || actor.mazeRoomKey);
+      if(!actor || actorRoom && actorRoom!==d.geoKey){report('waiting',offer.mission,'resident-not-present');continue;}
+      if(offer.mission.recruitmentGroup?.status==='collecting'){report('waiting',offer.mission,'group-still-responding');continue;}
+      if(offer.awaitDialogue && (!offer.dialogueQueued || root.DungeonLife?.hasPendingTurnSpeech?.())){
+        if(!offer.dialogueQueued && Date.now()-offer.queuedAt>30000)report('waiting',offer.mission,'speech-handoff-timeout');
+        else{report('waiting',offer.mission,offer.dialogueQueued?'resident-speaking':'speech-not-queued');continue;}
+      }
+      return showRecruitment(offer.mission,{automatic:true});
+    }
+    return false;
+  }
   function receiveResult(event) {
-    if(!interaction || interaction.phase!=='menu' || !sameRoom(interaction) || event?.runId!==root.dungeonRunId || event.geoKey!==interaction.geoKey) return;
-    let database;try{database=JSON.parse(event.roomNameDatabaseString);}catch{return;}
-    const jobs=Object.values(database?.[interaction.geoKey]?.minorMissions || {});
-    if(jobs.some(m=>interaction.offeredMissionIds?.includes(m.id) && ['accepted','completed','withdrawn'].includes(m.status)))currentClose?.();
+    if(event?.runId!==root.dungeonRunId || event.geoKey!==root.currentDungeon?.geoKey) return;
+    let jobs=event.recruitmentRequests;
+    if(!Array.isArray(jobs)){let database;try{database=JSON.parse(event.roomNameDatabaseString);}catch{return;}
+      const room=database?.[event.geoKey];jobs=Object.values(room?.minorMissions || {}).map(m=>{
+        const group=room.recruitmentInvitations?.[m.recruitmentGroupId];
+        return group?{...m,recruitmentGroup:{...group,members:group.members.map(member=>{
+          const task=room.minorMissions?.[member.missionId];return {...member,...(task?{status:task.status,readyToReport:!!task.readyToReport,description:task.requestDescription || task.description}:{})};})}}:m;
+      });}
+    syncFavorScope();const ctx=offerContext();
+    for(const m of jobs){
+      if(m.source==='engine-resident-favor-v1' && m.runId===ctx.runId && m.roomKey===ctx.geoKey && m.floor===floorIdentity() &&
+        ['accepted','declined','completed','withdrawn','failed'].includes(m.status))rememberReview(m);
+      if(validRecruitment(m)){
+        knownRequests.set(m.recipient,m);report('received',m);
+        for(const member of m.recruitmentGroup?.members || [])if(member.outcome==='ready')knownRequests.set(member.name,m);
+      }else for(const [name,request]of knownRequests)if(request.id===m?.id)knownRequests.delete(name);
+      if(m.status==='offered')queueFavor(m,{...ctx,...(event.dialogue?.some(row=>row.speaker===m.recipient)?{awaitDialogue:true}:{})});else favorOffers.delete(ctx.runId+'|'+m.id);
+    }
+    if(!interaction || interaction.phase!=='menu' || !sameRoom(interaction))return;
+    if(jobs.some(m=>interaction.offeredMissionIds?.includes(m.id) && ['accepted','completed','withdrawn','declined','failed'].includes(m.status)))currentClose?.();
   }
   root.CommerceUi = { open, openCounter, invite, inviteAmbient, isInteracting, hasInteraction,
-    receiveResult,
+    receiveResult,onFrame,dialogueQueued,requestFor,diagnostics:()=>reports.map(row=>({...row})),
     invitationPending:()=>hasInteraction()&&interaction.phase==='offer',
     addAction, addDrinkAction, drinkable, drink, handleCommand,isBusy:blocked,
     takeItem:(name,options)=>handleCommand('take '+name,{...options,receipt:true,quietBusy:true}) };
