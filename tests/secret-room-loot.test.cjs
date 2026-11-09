@@ -110,5 +110,5 @@ test('changed games and duplicate names cannot install secret rewards after asyn
 test('main, isolated construction and cached room entry prepare secret loot before publishing the dungeon',()=>{
   const source=fs.readFileSync('retort/retortWithUserInput.js','utf8');
   assert.equal((source.match(/await require\('\.\/secretRoomLoot'\)\.prepare\(/g)||[]).length,3);
-  assert.match(source,/secretRoomLoot'\)\.prepare\([^;]+;\s*roomNameDatabaseString = sharedState.getRoomNameDatabase\(\);\s*const finalDungeon = finalizeRoomDungeon/);
+  assert.match(source,/secretRoomLoot'\)\.prepare\([^;]+;\s*roomNameDatabaseString = sharedState.getRoomNameDatabase\(\);\s*await require\('\.\/roomHazardAuthoring'\)\.prepare\([^;]+;\s*const finalDungeon = finalizeRoomDungeon/);
 });

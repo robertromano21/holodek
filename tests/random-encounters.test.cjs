@@ -26,8 +26,17 @@ function setup(indoor = false) {
   return { state, service, visit, player, p, d, setRun: r => run = r, pause: () => paused = true };
 }
 function runtime(reply, call = () => {}) {
+  let itemNumber=0;
   const prompts = [], agent = { user(p, ...v) { prompts.push(typeof p === 'string' ? p : String.raw({ raw: p }, ...v)); },
-    assistant: { async generation(options) { call(options); return { content: JSON.stringify({ ...reply, inhabitants: batchRows(reply.inhabitants, options) }) }; } } };
+    assistant: { async generation(options) {
+      if(options.parameters.items){
+        const plan=JSON.parse(prompts.findLast(text=>text.startsWith('Engine-selected item types')).match(/\[[^\]]*\]/)[0]);
+        return{content:JSON.stringify({items:plan.map(type=>({name:`traveller ${type} ${String.fromCharCode(97+Math.floor(++itemNumber/26),97+itemNumber%26)}`,type,
+          attack_modifier:type==='weapon'?3:0,damage_modifier:type==='weapon'?4:0,ac:['armor','shield'].includes(type)?1:0,
+          magic:0,consumable_kind:'none',description:'An implement carried along the ashland route.'}))})};
+      }
+      call(options); return { content: JSON.stringify({ ...reply, inhabitants: batchRows(reply.inhabitants, options) }) };
+    } } };
   return { prompts, run: async fn => fn(agent), retort: fn => fn };
 }
 
@@ -102,7 +111,12 @@ for (const indoor of [true, false]) test(`unrestricted CotG ${indoor ? 'indoor' 
     assert.equal(actor.race, 'Allip'); assert.equal(actor.allegiance, 'Hostile'); assert.ok(actor.position);
     assert.ok(Math.hypot(actor.position.x + .5 - ctx.player.x, actor.position.y + .5 - ctx.player.y) >= 12);
     const level=I.parseBlocks(actor.sheet)[0].level;assert.ok(level>=3&&level<=5);
+    const stats=I.parseBlocks(actor.sheet)[0];assert.ok(I.parseEquipment(stats.lines[9]).Weapon!=='None');
+    assert.ok(stats.attack>=3&&stats.damage>=4);
   }
+  const gear=I.parseEquipmentProperties(ctx.p.equipmentProperties);assert.ok(gear.length>=count);
+  assert.ok(gear.every(item=>item.owner&&item.slot&&item.description));
+  assert.equal(I.parseEquipmentProperties(ctx.p.initialEquipmentProperties).length,gear.length);
   assert.ok(rt.prompts.some(p => p.includes('ORIGINAL CREATURE AUTHORING FOUNDATION')));
   assert.ok(rt.prompts.some(p => p.includes('"mode":"unrestricted"')));
   assert.ok(!rt.prompts.some(p => p.includes('Tormented, babbling undead')),'The unrestricted branch does not send an SRD creature palette.');

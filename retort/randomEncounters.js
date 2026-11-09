@@ -114,7 +114,11 @@ async function maybeGenerate({ state, service, visit, player, isCurrent = () => 
         encounter: { count: rules.groupSize, allegiance, required:true,
           ...(cotgAuthorship?{cotgAuthorship,races:[],catalog:[]}: {races:choices.map(row => row.name),catalog:choices}),
           theme: `Author one coherent ${rules.groupSize}-member encounter sharing an encounterId. Ordinary hostile groups have 2-6 members, not unrelated solo threats. Suitable for ${room.name || 'this location'} and its ecology, lore and conflicts. Existing residents (do not replace): ${Object.values(p.actors).slice(0, 24).map(a => `${a.race}: ${a.job}`).join('; ')}. Recently selected supplementary races: ${pacing.recentRaces.join(', ') || 'None'}. Prefer a fresh choice unless continuity calls for a repeat. Not every encounter is hostile. Native plane data, when supplied, governs knowledge of the war.` } },
-      { level: pickLevel, random: randomInt, sex: () => randomInt(0, 2) ? 'Female' : 'Male', xp, equipment: async () => null });
+      { level: pickLevel, random: randomInt, sex: () => randomInt(0, 2) ? 'Female' : 'Male', xp,
+        equipPopulation: actors => require('./monsterEquipment').equip($, actors, {
+          roomName:room.name,roomDescription:room.description,database:db,party,consoleText,
+          excluded:I.parseEquipmentProperties(p.equipmentProperties).map(item=>item.name)
+        }) });
     }));
     if (result.skipped) return visit;
     const coords = state.getLastCoords(), currentRoster = JSON.parse(state.getCombatCharactersString() || '[]');
@@ -135,6 +139,9 @@ async function maybeGenerate({ state, service, visit, player, isCurrent = () => 
     }
     p.groups.push(...groups);
     p.initialSheets = [p.initialSheets, result.sheets].filter(Boolean).join('\n');
+    const gear=require('./monsterEquipment');
+    p.initialEquipmentProperties=gear.merge(p.initialEquipmentProperties,result.equipment);
+    p.equipmentProperties=gear.merge(p.equipmentProperties,result.equipment);
     pacing.count++; pacing.recentRaces = [...new Set([...pacing.recentRaces, ...sheets.map(a => a.race)])].slice(-8);
     I.attach(currentRoster, p); state.setCombatCharactersString(JSON.stringify(currentRoster)); service.save(p);
     console.info('[RandomEncounter]',JSON.stringify({geoKey:p.geoKey,status:'installed',groupId:id,partyLevel:level,allegiance,levels:sheets.map(actor=>actor.level)}));

@@ -4085,7 +4085,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const retro = window.RetroGraphics?.fullbright?.();
       const bbRev = Number.isFinite(window.CHARACTER_BILLBOARD_REV) ? window.CHARACTER_BILLBOARD_REV : 0;
       // Cache by facing (drawn art), never by bitmap-mirror — keeps weapon on the same hand
-      const key = [spec.key, animFrame, view, facing > 0 ? 'r' : 'l', 'v40', bbRev, down ? 'down' : 'standing', action, retro ? 'retro-world' : 'world'].join('|');
+      const key = [spec.key, animFrame, view, facing > 0 ? 'r' : 'l', 'v41', bbRev, down ? 'down' : 'standing', action, retro ? 'retro-world' : 'world'].join('|');
       this._billboardTexCache = this._billboardTexCache || new Map();
       let entry = this._billboardTexCache.get(key);
       if (!entry) {
@@ -4115,7 +4115,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         // Use the idle measurement for every frame so walking cannot change size.
         const worldHeight = stature > 0 && bodyFraction > 0 ? stature / bodyFraction : 1.22 * ws;
         // Anchor all walking poses to the same idle soles, not frame-specific padding.
-        const footKey = [spec.key, view, facing, 'v40', bbRev, retro ? 'retro-world' : 'world'].join('|');
+        const footKey = [spec.key, view, facing, 'v41', bbRev, retro ? 'retro-world' : 'world'].join('|');
         this._billboardFootInsets = this._billboardFootInsets || new Map();
         let footInset = this._billboardFootInsets.get(footKey);
         if (!Number.isFinite(footInset)) {
@@ -4568,7 +4568,11 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
       const planeX = -dirY * planeScale;
       const planeY = dirX * planeScale;
       const focalLength = height / (2 * Math.tan(FOV / 2));
-      const viewShift = Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
+      // A hazard fall drives the eye down the chasm with a sideways tumble and pitch (window.playerZ is left alone).
+      const hazardCam = window.RoomHazardsUi?.camera?.();
+      if (hazardCam && Number.isFinite(hazardCam.eyeZ)) { eyeZ = hazardCam.eyeZ; camX += hazardCam.dx || 0; camY += hazardCam.dy || 0; }
+      const viewShift = hazardCam ? Math.max(-.25, Math.min(.15, hazardCam.shift || 0))
+        : Number.isFinite(window.dungeonViewShift) ? Math.max(-.1, Math.min(0, window.dungeonViewShift)) : 0;
       const horizon = height * (.5 + viewShift);
       const voxelCamera = { x: camX, y: camY, eyeZ, dirX, dirY, planeScale, viewShift, verticalScale: 2 * focalLength / height, aspect: width / height,
         artVerticalCompensation: width / (2 * planeScale * focalLength),
@@ -5573,7 +5577,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
         const {position,size}=batch.bounds;if(!this.isVoxelBoxVisible(position,size,voxelCamera))continue;
         voxelInstances.push({tileName:'city-skyline:'+batch.id,mesh:this.getCitySkylineMesh(batch),modelPos:position,modelScale:size});
       }
-      for (const part of window.SecretDoorsUi?.parts(dungeon) || []) {
+      for (const part of [...(window.SecretDoorsUi?.parts(dungeon) || []), ...(window.RoomHazardsUi?.parts(dungeon) || [])]) {
         const mesh = this.getVoxelMesh(part.tile, dungeon);
         if (mesh) voxelInstances.push({ tileName: part.tile, mesh, modelPos: part.position, modelScale: part.size });
       }
@@ -6621,7 +6625,7 @@ this.spriteProgram = createProgram(gl, spriteVs, spriteFs);
 
       gl.disable(gl.BLEND);
 
-      const puzzleMoving = window.PhysicalPuzzles?.motionActive(dungeon) || window.SecretDoorsUi?.active(dungeon);
+      const puzzleMoving = window.PhysicalPuzzles?.motionActive(dungeon) || window.SecretDoorsUi?.active(dungeon) || window.RoomHazardsUi?.active(dungeon);
       const wantsAnimation = puzzleMoving || torchLights.length > 0 || sprites.some((spr) => spr.type === 'torch');
       if (wantsAnimation && popup.style.display === 'block') {
         if (!window._dungeonAnimPending) {

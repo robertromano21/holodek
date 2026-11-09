@@ -60,6 +60,22 @@ An instruction such as "tell the monsters my tale", "tell them my story" or "exp
   function prompt(policy) {
     return `Dialogue recipient rule: ${JSON.stringify(policy)}. ${COMMAND_SEMANTICS}\nHearing is not an invitation to answer. Only responders may answer the PLAYER's question. Named recipients take precedence over names merely mentioned in quoted speech. If there are no available responders, narrate that nobody addressed can answer; do not substitute a companion or distant resident. Other nearby characters may listen and react silently. For a resident conversation, at most ONE listed reactor may subsequently respond TO A RESIDENT, not answer the player or deliver unrelated cached commentary. Its short reaction must engage with what that resident ACTUALLY said earlier in THIS response. In spoken metadata include {"speaker":"companion name","replyTo":"exact resident name","reactsTo":"an exact phrase of at least three words from that resident's preceding speech"}. Label the reaction's entire quote with the existing SPEECH markers. No reaction before a resident speaks, no invented or remembered trigger, no chorus, and no generic unsolicited monologues.`;
   }
+  function requiredResponders(policy) {
+    return policy?.directed && policy.kind === 'named' ? [...new Set(policy.responders)] : [];
+  }
+  function selectSpeakers(policy, selected, { required = [], limit = 4 } = {}) {
+    const mandatory = [...new Set([...required, ...requiredResponders(policy)])];
+    const speakers = [...new Set([...mandatory, ...selected])].slice(0, Math.max(limit, mandatory.length));
+    if (policy?.directed && policy.responders.length && !speakers.some(name => policy.responders.includes(name)))
+      speakers.unshift(policy.responders[0]);
+    return speakers.slice(0, Math.max(limit, mandatory.length, 1));
+  }
+  function missingResponses(policy, dialogue) {
+    if (!policy?.directed || !policy.responders.length) return [];
+    const answered = new Set(dialogue.filter(row => row.line?.trim() && (!row.recipient || row.recipient === 'PC')).map(row => row.speaker));
+    return policy.kind === 'named' ? requiredResponders(policy).filter(name => !answered.has(name)) :
+      policy.responders.some(name => answered.has(name)) ? [] : [policy.responders[0]];
+  }
   function gate(policy, metadata = []) {
     const primary = new Set(policy.responders.map(key)), secondary = new Set(policy.reactors.map(key)), said = new Map();
     let reactionSpeaker = null;
@@ -77,5 +93,5 @@ An instruction such as "tell the monsters my tale", "tell them my story" or "exp
       reactionSpeaker = speaker; return true;
     };
   }
-  return { resolve, prompt, gate, COMMAND_SEMANTICS, commandPrompt };
+  return { resolve, prompt, gate, requiredResponders, selectSpeakers, missingResponses, COMMAND_SEMANTICS, commandPrompt };
 });

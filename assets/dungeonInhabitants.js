@@ -156,8 +156,7 @@
       const referenced = new Set(parseSheets(value).flatMap(a => Object.values(parseEquipment(a.lines[9]))).map(keyOf));
       const properties = new Map(parseEquipmentProperties(population.equipmentProperties).map(p => [keyOf(p.name), p]));
       for (const p of parseEquipmentProperties(value.match(/^Monsters Equipped Properties:[ \t]*([^\r\n]*)/m)?.[1])) properties.set(keyOf(p.name), p);
-      const canonical = [...properties.values()].filter(p => referenced.has(keyOf(p.name))).map(p =>
-        `{name: ${JSON.stringify(p.name)}, type: ${JSON.stringify(p.type)}, attack_modifier: ${p.attack_modifier}, damage_modifier: ${p.damage_modifier}, ac: ${p.ac}, magic: ${p.magic}}`).join(', ') || 'None';
+      const canonical = [...properties.values()].filter(p => referenced.has(keyOf(p.name))).map(p => JSON.stringify(p)).join(', ') || 'None';
       value = value.replace(/^Monsters Equipped Properties:[^\r\n]*/m, () => `Monsters Equipped Properties: ${canonical}`);
     }
     const fallback = value.match(/^Monsters State:[ \t]*(\w+)/m)?.[1] || 'Neutral';

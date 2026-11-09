@@ -95,31 +95,39 @@ function compile(task, database, currentRoom, options = {}) {
   }
   return next;
 }
-function valid(story,database) {
+function valid(story,database,issues) {
+  const reject = (reason, stage) => {
+    if (Array.isArray(issues)) issues.push({ reason, ...(stage ? { stageId: stage.id, roomKey: stage.roomKey,
+      ...(stage.actor ? { actor: stage.actor } : {}), ...(stage.readableId ? { readableId: stage.readableId } : {}) } : {}) });
+    return false;
+  };
   if (story?.version !== 1 || typeof story.id!=='string' || !story.id || !Array.isArray(story.stages) ||
-      story.stages.length < 3 || story.stages.length > 12 || story.stages.some(s=>!s||typeof s.id!=='string'||!s.id||typeof s.text!=='string')) return false;
+      story.stages.length < 3 || story.stages.length > 12 || story.stages.some(s=>!s||typeof s.id!=='string'||!s.id||typeof s.text!=='string')) return reject('invalid_story');
   const nodes = new Map(story.stages.map(s=>[s.id,s]));
   if (nodes.size !== story.stages.length || !['dialogue','read'].includes(nodes.get('hook')?.kind) ||
-      nodes.get('complete')?.kind!=='complete' || story.stages.filter(s=>s.kind==='objective').length!==1) return false;
+      nodes.get('complete')?.kind!=='complete' || story.stages.filter(s=>s.kind==='objective').length!==1) return reject('invalid_stage_structure');
   const visiting = new Set(), visited = new Set();
   function check(id) {
-    if (visiting.has(id)) return false; if (visited.has(id)) return true;
+    if (visiting.has(id)) return reject('cyclic_stage',nodes.get(id)); if (visited.has(id)) return true;
     const s = nodes.get(id), room = s && database[s.roomKey];
-    if (!s || !room?.name || !['dialogue','read','objective','encounter','complete',...(story.family==='regional-v1'?['escort']:[])].includes(s.kind)) return false;
+    if (!s) return reject('missing_stage',{id});
+    if (!room?.name) return reject('missing_room',s);
+    if (!['dialogue','read','objective','encounter','complete',...(story.family==='regional-v1'?['escort']:[])].includes(s.kind)) return reject('invalid_stage_kind',s);
     const reserved = name => story.family==='regional-v1' && room.regionalSite?.storyId===story.id && room.regionalSite.actors.some(a=>a.name===name);
-    if (s.actor && s.kind!=='escort' && !residents(room).some(a=>a.name===s.actor) && !reserved(s.actor)) return false;
-    if (s.kind==='read' && ![...(room.readables||[]),...(room.inscriptions||[])].some(r=>r.id===s.readableId&&r.name===s.name&&r.chapters?.[(s.chapter||1)-1]?.text?.trim())) return false;
+    if (s.actor && s.kind!=='escort' && !residents(room).some(a=>a.name===s.actor) && !reserved(s.actor)) return reject('unavailable_actor',s);
+    if (s.kind==='read' && ![...(room.readables||[]),...(room.inscriptions||[])].some(r=>r.id===s.readableId&&r.name===s.name&&r.chapters?.[(s.chapter||1)-1]?.text?.trim())) return reject('missing_readable',s);
     if (s.kind==='encounter' && (!s.targets?.length || s.targets.some(name=>!residents(room).some(a=>a.name===name&&I.allegiance(a,room.monsters?.state)==='Hostile') &&
-      !(reserved(name)&&room.regionalSite.actors.some(a=>a.name===name&&a.allegiance==='Hostile'))))) return false;
-    if(s.options!==undefined&&(!Array.isArray(s.options)||s.options.some(o=>!o||typeof o.id!=='string'||typeof o.label!=='string')))return false;
+      !(reserved(name)&&room.regionalSite.actors.some(a=>a.name===name&&a.allegiance==='Hostile'))))) return reject('unavailable_encounter_target',s);
+    if(s.options!==undefined&&(!Array.isArray(s.options)||s.options.some(o=>!o||typeof o.id!=='string'||typeof o.label!=='string')))return reject('invalid_options',s);
     const edges = [...(s.options?.map(o=>o.next) || (s.next ? [s.next] : [])),...(s.kind==='escort'&&s.recovery?[s.recovery]:[])];
     if (s.kind!=='complete' && !edges.length || s.kind==='complete' && edges.length ||
         s.options && new Set(s.options.map(o=>o.id)).size!==s.options.length || s.options?.some(o=>!o.id||
         !['continue','finish','recruit','receive'].includes(o.action) || ['receive','recruit'].includes(o.action)&&!s.actor ||
-        o.action==='receive'&&!room.inhabitants?.actors?.[s.actor]?.inventory?.some(item=>item.name===o.item))) return false;
+        o.action==='receive'&&!room.inhabitants?.actors?.[s.actor]?.inventory?.some(item=>item.name===o.item))) return reject('invalid_transition',s);
     visiting.add(id); const okay = edges.every(check); visiting.delete(id); visited.add(id); return okay;
   }
-  return check('hook') && visited.size===nodes.size;
+  if (!check('hook')) return false;
+  return visited.size===nodes.size || reject('unreachable_stage');
 }
 function runtime(task,database,create=false) {
   database=require('./hostLocalFloors').forTask(database,task);

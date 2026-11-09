@@ -78,13 +78,13 @@ test('higher encounter levels propagate through real HP, XP, attack and damage a
 });
 test('the actual supplemental path hydrates stripped map actors and generates a high-level group',async()=>{
   const file=require.resolve('./random-encounters.test.cjs'),source=fs.readFileSync(file,'utf8');
-  const f=vm.runInNewContext(source.slice(0,source.indexOf("test('browser and server"))+'\nsetup();',{require:createRequire(file)});
+  const helpers=vm.runInNewContext(source.slice(0,source.indexOf("test('browser and server"))+'\n({setup,runtime});',{require:createRequire(file)});
+  const f=helpers.setup();
   const roster=rawRoster().map((a,i)=>({...a,mazeX:20-i,mazeY:20,mazeRoomKey:'4,4,0'}));f.state.setCombatCharactersString(JSON.stringify(roster));
   f.state.getUpdatedGameConsole=()=>partyText('4,4,0');
   const Random=require('../retort/randomEncounters'),count=Random.opportunity(f.state,f.visit,f.player,200000).rules.groupSize;
   const rows=fixtures(count,Array.from({length:count},(_,slot)=>({slot,name:'Scaling Test '+slot,race:'Allip',allegiance:'Hostile'})));
-  const agent={user(){},assistant:{generation:async request=>({content:JSON.stringify({inhabitants:batchRows(rows,request)})})}};
-  await Random.maybeGenerate({...f,now:200000,random:()=>0,runtime:{run:async fn=>fn(agent),retort:fn=>fn}});
+  await Random.maybeGenerate({...f,now:200000,random:()=>0,runtime:helpers.runtime({inhabitants:rows})});
   const enemies=Object.values(f.p.actors).filter(a=>a.supplemental).map(a=>I.parseBlocks(a.sheet)[0]);
   assert.equal(enemies.length,count);assert.ok(enemies.every(a=>a.level>=10&&a.level<=12));
   assert.ok(enemies.every(a=>a.hp>=10));assert.equal(f.p.randomEncounters.count,1);

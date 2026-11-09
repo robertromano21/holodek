@@ -35,7 +35,8 @@ const SidVoice = require('./retort/sidVoice'); // 64-SID speech (Piper analysis 
 const characterTraits = require('./retort/characterTraitSpec');
 const { summarizeDungeon } = require('./dungeonDiagnostics');
 const { actionDice } = require('./retort/actionDice');
-const { finalizeRoomDungeon } = require('./retort/retortWithUserInput');
+const { finalizeRoomDungeon, resolveRoomHazard } = require('./retort/retortWithUserInput');
+const RoomHazards = require('./retort/roomHazards');
 const SecretDoors = require('./retort/secretDoors');
 const { buildEnvironmentLab, descriptions: environmentLabKinds } = require('./retort/environmentLab');
 const { buildInitialWorldConsole, buildInitialGameConsole } = require('./retort/initialGameState');
@@ -532,6 +533,31 @@ app.post('/secret-doors/action', (req, res) => {
     const { dungeon, cells, previousStamp, ...message } = result;
     const event = spellStateEvent(req.body.geoKey, message); broadcast(event); res.json(event);
   } finally { inputTaskInFlight = false; }
+});
+// Walking into a hazard zone (exploration). The server re-checks the actor's synced position; a check pauses only for its roll.
+app.post('/room-hazards/enter', async (req, res) => {
+  const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+  if (req.body?.runId !== sharedState.getDungeonRunId() || req.body?.geoKey !== geoKey) return res.status(409).json({ error: 'That hazard belongs to another room.' });
+  const ready = prepareQuestScene(req); if (ready?.error) return res.status(ready.status).json({ error: ready.error });
+  if (typeof req.body.hazardId !== 'string' || typeof req.body.actor !== 'string') return res.status(400).json({ error: 'Invalid hazard trigger.' });
+  inputTaskInFlight = true;
+  try {
+    const roster = JSON.parse(sharedState.getCombatCharactersString() || '[]'), entry = roster.find(c => c.name === req.body.actor);
+    if (!entry || !['pc', 'npc'].includes(entry.type)) return res.status(409).json({ error: 'Only party members trigger hazards from exploration.' });
+    const to = require('./retort/dungeonReach').position(entry, geoKey);
+    const from = req.body.from && Number.isInteger(req.body.from.x) && Number.isInteger(req.body.from.y) ? req.body.from : null;
+    if (typeof resolveRoomHazard !== 'function') return res.status(503).json({ error: 'Hazards are unavailable.' });
+    const result = await resolveRoomHazard({ kind: 'enter', hazardId: req.body.hazardId, actor: entry.name, to, from });
+    if (!result) return res.json({ ignored: true });
+    if (result.error) return res.status(409).json(result);
+    res.json(result);
+  } catch (error) { console.warn('[RoomHazard]', error.message); res.status(500).json({ error: error.message }); }
+  finally { inputTaskInFlight = false; }
+});
+app.post('/room-hazards/settings', (req, res) => {
+  if (req.body?.runId !== sharedState.getDungeonRunId()) return res.status(409).json({ error: 'That setting belongs to another game.' });
+  if (typeof RoomHazards === 'undefined') return res.json({ pauseRolls: false });
+  RoomHazards.settings.pauseRolls = req.body.pauseRolls === true; res.json({ pauseRolls: RoomHazards.settings.pauseRolls });
 });
 app.post('/combat/wait', (req, res) => {
   const ready = prepareQuestScene(req); if (ready.error) return res.status(ready.status).json({ error: ready.error });
@@ -1200,6 +1226,7 @@ app.post('/updateState7', async (req, res) => {
       if (updatedGameConsole !== undefined) consoleSnapshot = Economy.preserveInventory(sharedState.getUpdatedGameConsole(), updatedGameConsole, sharedState.getRoomNameDatabase());
       if (roomSync) roomSnapshot = Economy.preserve(sharedState.getRoomNameDatabase(), roomSync.json);
       if (roomSnapshot !== undefined && typeof SecretDoors !== 'undefined') roomSnapshot = SecretDoors.preserve(sharedState.getRoomNameDatabase(), roomSnapshot);
+  if (roomSnapshot !== undefined && typeof RoomHazards !== 'undefined') roomSnapshot = RoomHazards.preserve(sharedState.getRoomNameDatabase(), roomSnapshot);
       if (typeof SpellSystem !== 'undefined') {
         const protectedSpells = SpellSystem.preserve(sharedState, consoleSnapshot, roomSnapshot);
         consoleSnapshot = protectedSpells.text; roomSnapshot = protectedSpells.database;

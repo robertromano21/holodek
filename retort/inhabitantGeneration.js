@@ -279,12 +279,13 @@ Each individual needs a UNIQUE short history and personality that suit their rac
       Damage: descriptor.combatArchetype === 'Fighter' ? Math.floor(level / 3) : 0, Armor: 0,
       Magic: SpellRules.classSettings(descriptor.className, level)?.capacity || 0 };
     // All batches have passed validation before allocating stats or equipment.
-    if (descriptor.allegiance === 'Hostile' && equipment.length < 4) {
+    if (!rules.equipPopulation && descriptor.allegiance === 'Hostile') {
       const item = await rules.equipment(actor);
       if (item) equipment.push(item);
     }
     characters.push(actor);
   }
+  if (rules.equipPopulation) equipment.push(...await rules.equipPopulation(characters, normalized));
   const sheets = characters.map(actor => `${actor.Name}\n      ${actor.Sex}\n      ${actor.Race}\n      ${actor.Class}\n      Level: ${actor.Level}\n      AC: ${actor.AC}\n      XP: ${actor.XP}\n      HP: ${actor.HP}\n      MaxHP: ${actor.MaxHP}\n      Equipped: ${Object.entries(actor.Equipped).map(([slot,item]) => `${slot}: ${item?.name || 'None'}`).join(', ')}\n      Attack: ${actor.Attack}\n      Damage: ${actor.Damage}\n      Armor: ${actor.Armor}\n      Magic: ${actor.Magic}\n      State: ${actor.State}`).join('\n');
   const population = Inhabitants.createPopulation(geoKey, normalized, { indoor, starting,groupLimit:6,
     ...(budget ? {residentLimit:count} : floorProgram || routineResidents > 8 ? {residentLimit:routineResidents} : {}) });

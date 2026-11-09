@@ -587,7 +587,7 @@ function command(state, service, input) {
   } catch(error) { return result(state,error.message); }
 }
 function recruitedNames(db) { return new Set(all(db).filter(m=>m.status==='completed' && m.recruitedAt && m.rewardReceiptId ||
-  m.status==='accepted' && m.provisionalJoinedAt && !m.helperDepartedAt).map(m=>key(m.recipient))); }
+  ['accepted','completed'].includes(m.status) && m.provisionalJoinedAt && !m.helperDepartedAt).map(m=>key(m.recipient))); }
 function preserveConsole(oldText, incoming, db) {
   for(const m of all(db).filter(m=>m.helperDepartedAt&&!m.recruitedAt)){
     const stale=I.parseSheets(incoming,'NPCs in Party').find(a=>key(a.name)===key(m.recipient));
@@ -625,7 +625,7 @@ function preserveRoster(state,incoming) {
   }
   for(const actor of current.filter(a=>a.type==='npc' && names.has(key(a.name)))) {
     const row=roster.find(a=>key(a.name)===key(actor.name));
-    if(row){row.type='npc';if(actor.recruitmentLease)row.recruitmentLease=structuredClone(actor.recruitmentLease);if(row.state==='Neutral'||row.state==='Hostile')row.state=actor.state;}
+    if(row){row.type='npc';if(actor.recruitmentLease)row.recruitmentLease=structuredClone(actor.recruitmentLease);else delete row.recruitmentLease;if(row.state==='Neutral'||row.state==='Hostile')row.state=actor.state;}
     else roster.push(structuredClone(actor));
   }
   return JSON.stringify(roster);

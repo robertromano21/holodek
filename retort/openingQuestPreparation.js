@@ -67,7 +67,7 @@ function mergedRooms(artifact, current) {
   }
   return next;
 }
-function bindIntroduction(task, db, targetKey) {
+function bindIntroduction(task, db, targetKey, { companions = [] } = {}) {
   if (!task.story) return task;
   const story = task.story, oldKey = story.hook.roomKey;
   const writing = db[oldKey]?.inscriptions?.find(row => row.id === story.fallback?.readableId);
@@ -88,8 +88,10 @@ function bindIntroduction(task, db, targetKey) {
       !['dead', 'departed', 'recruited'].includes(home?.inhabitants?.actors?.[actor.name]?.status));
     const required = task.requiredElements?.some(element => element.type === 'monster' && element.name === stage.actor) ||
       Q.deliveryBindings(task).some(binding => binding.recipient === stage.actor);
-    if (present || required) continue;
-    // Recruitment during private preparation must not resurrect an incidental scene contact.
+    const record = home?.inhabitants?.actors?.[stage.actor];
+    const companion = companions.includes(stage.actor) && record?.status === 'recruited' && record.hp > 0 && I.isAlive(record);
+    if (present || required && !companion) continue;
+    // Change only the scene contact; the companion's real delivery/research requirements remain bound.
     if (stage.kind === 'objective') delete stage.actor;
     else if (stage.kind === 'dialogue') {
       delete stage.actor;
@@ -102,7 +104,13 @@ function bindIntroduction(task, db, targetKey) {
   room.questScenes ||= {}; room.questScenes[story.id] = { source: 'engine-quest-scene-v1',
     taskBinding: require('./questProgress').taskBinding(task), stage: 'hook', revision: 0, history: [], completed: false };
   if (oldKey !== targetKey) { delete db[oldKey]?.questScenes?.[story.id]; delete db[oldKey]?.questStories?.[story.id]; }
-  if (!require('./questScenes').valid(story, db)) throw Error('Prepared introduction does not fit the selected room.');
+  const issues = [];
+  if (!require('./questScenes').valid(story, db, issues)) {
+    const detail = issues[0];
+    const error = Error('Prepared introduction does not fit the selected room.' +
+      (detail ? ` ${detail.stageId || 'Story'}: ${detail.reason}${detail.actor ? ' (' + detail.actor + ')' : ''}.` : ''));
+    error.code = 'OPENING_QUEST_BINDING_INVALID'; error.issues = issues; throw error;
+  }
   return task;
 }
 async function authorIntroduction($, state, task) {
@@ -252,7 +260,14 @@ function createService(state, { website = require('./websiteAi').service(), mode
     if (!artifact || !valid(current) || !empty(state)) return false;
     const db = mergedRooms(artifact, JSON.parse(state.getRoomNameDatabase() || '{}'));
     if (!db[key]?.populationComplete) throw Error('Opening quest activation requires a completely constructed destination.');
-    const task = bindIntroduction(structuredClone(artifact.task), db, key), saved = state.getRoomDungeonForSimulation(coords(key));
+    const I = require('../assets/dungeonInhabitants');
+    const roster = JSON.parse(state.getCombatCharactersString?.() || '[]');
+    const companions = I.parseSheets(state.getUpdatedGameConsole(), 'NPCs in Party').filter(sheet => sheet.hp > 0 && I.isAlive(sheet) &&
+      roster.some(actor => actor.name === sheet.name && actor.type === 'npc' && actor.hp > 0 && I.isAlive(actor))).map(sheet => sheet.name);
+    let task;
+    try { task = bindIntroduction(structuredClone(artifact.task), db, key, { companions }); }
+    catch (error) { log('binding-rejected', { geoKey: key, code: error.code, issues: error.issues, reason: error.message }); throw error; }
+    const saved = state.getRoomDungeonForSimulation(coords(key));
     if (!saved?.cells) throw Error('Opening quest destination geometry is not ready.');
     const arrival = structuredClone(saved), previous = state.getLastCoords();
     require('./roomEntry').prepare(arrival, { geoKey: key, fromKey: `${previous.x},${previous.y},${previous.z}`, input });

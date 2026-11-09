@@ -24,11 +24,18 @@ function catalog(choices){
 function parameter(choices,{primary,optional=false}={}){
   const properties={};
   for(const [kind,options]of Object.entries(catalog(choices))){
-    const fields={target:C.choice(options.map(c=>c.id)),instruction:C.nonblankText()};
+    const fields={target:C.choice(options.map(c=>c.id)),instruction:C.nonblankText(undefined,
+      'These exact words become your spoken recruitment condition. Speak naturally in your character voice to the player, naming the real target and required action. State the complete condition, not third-person notes or a hidden extra requirement.')};
+    if(kind==='puzzle')fields.instruction.description+=' For recruitment, offer to accompany the player here after acceptance while they solve it; remain together permanently after all agreed group conditions, and stay behind if they leave with the work unfinished.';
     if(kind==='conversation'){fields.exchange=C.choice(EXCHANGES);fields.successCriteria=C.nonblankText();}
     properties[kind]={type:[{type:fields}],minItems:kind===primary&&!optional?1:0,maxItems:primary?1:3};
   }
   return {type:properties,description:primary?'Choose the selected primary task; only a matching book chapter may accompany a retrieval.':'Choose one to three total conditions across the available task kinds; use empty arrays for unused kinds.'};
+}
+function spokenRequest(conditions){
+  const lines=conditions.map(condition=>condition.instruction?.trim());
+  if(!lines.length||lines.some(line=>!literal(line)))throw Error('Every offered condition needs its own complete authored spoken instruction.');
+  return lines.join(' ');
 }
 function literal(value){return typeof value==='string' && !!value.trim() && !/\[\[|\]\]/.test(value);}
 function parse(plan,choices,{primary}={}){
@@ -54,4 +61,4 @@ function parse(plan,choices,{primary}={}){
   if(primary && conditions.some(c=>RETIRED.test(c.instruction)))throw Error('Describe only the actual local objective and its direct completion.');
   return conditions;
 }
-module.exports={KINDS,EXCHANGES,RULES,catalog,parameter,parse,select,RETIRED};
+module.exports={KINDS,EXCHANGES,RULES,catalog,parameter,parse,select,spokenRequest,RETIRED};

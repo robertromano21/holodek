@@ -632,7 +632,17 @@ function choosePlayerSpawnAngle(dungeon, tileX, tileY, fallbackAngle = playerAng
   return candidates[0].angle;
 }
 
+// Fell into a collapse or was thrown back by a ward: land where the server placed the actor.
+window.applyHazardRelocate = function(relocate) {
+  for (const [name, tile] of Object.entries(relocate || {})) {
+    const entry = (window.combatCharacters || []).find(c => c.name === name);
+    if (entry) Object.assign(entry, { mazeX: tile.x, mazeY: tile.y, mazePoint: { x: tile.x + .5, y: tile.y + .5 } });
+    if (entry?.type === 'pc') { playerPosX = tile.x + .5; playerPosY = tile.y + .5; playerDungeonX = tile.x; playerDungeonY = tile.y; window.playerPosX = playerPosX; window.playerPosY = playerPosY; playerZInitialized = false; updatePlayerHeightFromCell(); }
+  }
+};
 window.applyLivingEnvironmentDelta = function(data) {
+  // A hazard change still waiting on its die roll lands before any newer world change.
+  if (!data?._hazardReleased) window.RoomHazardsUi?.flush?.();
   if (!currentDungeon || currentDungeon.geoKey !== data.geoKey) return;
   if(data.runId&&data.runId!==window.dungeonRunId)return;
   if(data.cityStream&&currentDungeon._geometryStamp===data.geometryStamp)return;
@@ -640,10 +650,14 @@ window.applyLivingEnvironmentDelta = function(data) {
     console.error('[DungeonAction] Geometry revision mismatch; ignoring stale update.', data);
     return;
   }
+  if (data.hazardEvent && window.RoomHazardsUi?.hold?.(currentDungeon, data)) return;
   try { window.HolodekSfx?.worldDelta?.(currentDungeon, data); } catch (error) { console.warn('[sfx]', error.message); }
   if (data.physicalPuzzle) window.PhysicalPuzzles?.beginMotion(currentDungeon, currentDungeon.physicalPuzzle, data.physicalPuzzle);
   if (data.secretDoors) window.SecretDoorsUi?.begin(currentDungeon, data.secretDoors);
+  if (data.hazardEvent) window.RoomHazardsUi?.begin(currentDungeon, data);
   Object.assign(currentDungeon.cells, data.cells);
+  if (data.roomHazards) currentDungeon.roomHazards = data.roomHazards;
+  if (data.hazardEvent?.relocate) window.applyHazardRelocate(window.RoomHazardsUi?.relocateNow?.(currentDungeon, data) || data.hazardEvent.relocate);
   if(data.cityStream?.snapshot){
     const snapshot=data.cityStream.snapshot;
     for(const key of ['cells','tiles','sceneStructures','genreLights','cityBlocks','secretDoors','sceneObjects','cityBuildingEntrances','cityArchitecture','cityCirculation'])if(snapshot[key]!==undefined)currentDungeon[key]=snapshot[key];
@@ -903,7 +917,7 @@ eventSource.onmessage = function(event) {
             pcEntry.sprite = selectedSprite;
           }
         }
-                window.combatCharacters = newCombatCharacters;
+                window.combatCharacters = window.reconcileCombatRoster?.(newCombatCharacters) || newCombatCharacters;
                 ensureKnownSpritesInCombatList(window.combatCharacters);
         syncPartyMazeToCombatPositions(false);
         newCombatCharacters = window.combatCharacters;
@@ -1855,7 +1869,7 @@ window.resumeDungeonHeldMovement = () => {
 };
 window.clearDungeonMoveKeys = () => { for (const key of Object.keys(DUNGEON_MOVE.keys)) DUNGEON_MOVE.keys[key] = false; };
 function updateDungeonMovement(now) {
-  if (window.gamePaused || window.actionDiceState?.active || isCombatRoundActive() || window.PlayerControls?.blocked(true)) {
+  if (window.gamePaused || window.actionDiceState?.active || isCombatRoundActive() || window.PlayerControls?.blocked(true) || window.RoomHazardsUi?.falling?.()) {
     window.clearDungeonMoveKeys();
     DUNGEON_MOVE.lastTime = now;
     DUNGEON_MOVE.velX = DUNGEON_MOVE.velY = 0;
@@ -6831,13 +6845,14 @@ if (removeMonsterFromPartyPattern.test(userInput)) {
 
   // Display PC and NPC data
 
-displayAllNPCData(npcsString, 0);
-displayAllNPCData(npcsString, 1);
-displayAllNPCData(npcsString, 2);
-displayAllNPCData(npcsString, 3);
-displayAllNPCData(npcsString, 4);
-displayAllNPCData(npcsString, 5);
-displayPCData(charactersString);
+// A draft is not a party update; retain the confirmed cards and wire sheets.
+if (window.lastServerGameConsole) {
+  charactersString = window._partyInfoPCString ?? charactersString;
+  npcsString = window._partyInfoNPCString ?? npcsString;
+} else {
+  for (let i = 0; i < 6; i++) displayAllNPCData(npcsString, i);
+  displayPCData(charactersString);
+}
 
 completeQuestIfArtifactFound();
 score = (globalArtifactsFound * 55) + (globalQuestsAchieved * 55);
@@ -8032,6 +8047,52 @@ function copyCombatPersistentFields(target, source) {
   }
 }
 
+function captureCombatRosterTurn() {
+  return { runId: window.dungeonRunId, roomKey: currentDungeon?.geoKey,
+    floor: window.CityFloorScope?.token?.() || '', localMovement: !isCombatRoundActive(),
+    positions: new Map((window.combatCharacters || []).map(actor => [actor.name, {
+      x: actor.mazeX, y: actor.mazeY, roomKey: window.DungeonInhabitants.roomKey(actor.mazeRoomKey)
+    }])) };
+}
+
+function reconcileIncomingCombatRoster(incoming, baseline = null) {
+  const I = window.DungeonInhabitants, roomKey = currentDungeon?.geoKey;
+  const sameScope = !baseline || baseline.runId === window.dungeonRunId && baseline.roomKey === roomKey &&
+    baseline.floor === (window.CityFloorScope?.token?.() || '');
+  const live = new Map((window.combatCharacters || []).map(actor => [actor.name, actor]));
+  const visual = ['renderMazeX', 'renderMazeY', '_renderFromMazeX', '_renderFromMazeY', '_renderTweenToX', '_renderTweenToY',
+    '_renderTweenStartedAt', 'moveTweenMs', 'walkFrame', '_lastWalkAnimAt', 'facing', 'mapMoveX', 'mapMoveY', '_nextMazeStepAt', '_nextWanderAt', '_partyCatchingUp',
+    '_behaviorUntil', '_behaviorPhase', '_conversationUntil', '_conversationRecipient', '_conversationGoal', '_conversationListenerPoint'];
+  return incoming.map(saved => {
+    const actor = { ...saved }, previous = live.get(saved.name);
+    if (!previous || !sameScope) return actor;
+    if (!actor.sprite?.dataUrl && previous.sprite?.dataUrl) actor.sprite = previous.sprite;
+    if (!roomKey || I.roomKey(previous.mazeRoomKey) !== roomKey || saved.mazeRoomKey && I.roomKey(saved.mazeRoomKey) !== roomKey ||
+        !Number.isFinite(previous.mazeX) || !Number.isFinite(previous.mazeY)) return actor;
+    const sent = baseline?.positions.get(saved.name);
+    const unchangedEcho = baseline?.localMovement && !isCombatRoundActive() && sent?.roomKey === roomKey &&
+      sent.x === saved.mazeX && sent.y === saved.mazeY;
+    if (unchangedEcho || !Number.isFinite(saved.mazeX) || !Number.isFinite(saved.mazeY)) {
+      actor.mazeX = previous.mazeX; actor.mazeY = previous.mazeY;
+      actor.mazeRoomKey = previous.mazeRoomKey;
+      if (previous.mazePoint) actor.mazePoint = { ...previous.mazePoint };
+    }
+    for (const field of visual) if (previous[field] !== undefined) actor[field] = previous[field];
+    if (actor.mazeX !== previous.mazeX || actor.mazeY !== previous.mazeY) {
+      if (saved.facing) actor.facing = saved.facing;
+      if (Number.isFinite(saved.mapMoveX)) actor.mapMoveX = saved.mapMoveX;
+      if (Number.isFinite(saved.mapMoveY)) actor.mapMoveY = saved.mapMoveY;
+      actor._renderFromMazeX = Number.isFinite(previous.renderMazeX) ? previous.renderMazeX : previous.mazeX;
+      actor._renderFromMazeY = Number.isFinite(previous.renderMazeY) ? previous.renderMazeY : previous.mazeY;
+      actor._renderTweenToX = actor.mazeX; actor._renderTweenToY = actor.mazeY;
+      actor._renderTweenStartedAt = Date.now();
+    }
+    return actor;
+  });
+}
+window.captureCombatRosterTurn = captureCombatRosterTurn;
+window.reconcileCombatRoster = reconcileIncomingCombatRoster;
+
 function isDungeonActorPresent(actor) {
   if (!actor) return false;
   if(actor.ambient)return actor.mazeRoomKey===currentDungeon?.geoKey&&currentDungeon?.cityCrowd?.actors?.[actor.crowdId]?.status==='ambient';
@@ -8724,7 +8785,7 @@ function ensurePartyMazeAnchors(forceReset = false) {
     const cellFloor = (cell && typeof cell.floorHeight === 'number') ? cell.floorHeight : 0;
     const sameFloorBand = Math.abs(cellFloor - originFloor) <= MAX_STEP;
     const hasValidExistingTile = !forceReset
-      && entry.mazeRoomKey === roomKey
+      && window.DungeonInhabitants.roomKey(entry.mazeRoomKey) === window.DungeonInhabitants.roomKey(roomKey)
       && Number.isFinite(entry.mazeX)
       && Number.isFinite(entry.mazeY)
       && cell
@@ -9578,7 +9639,7 @@ window.applyRealtimeCombatResult = async event => {
   if(event.crowd)window.CityCrowdUi?.receive(event);
   if (realtimeCombatResultsSeen.size > 32) realtimeCombatResultsSeen.delete(realtimeCombatResultsSeen.values().next().value);
   if (!event.passive) { window._combatCommandPending = false; window._combatRoundActiveUntil = 0; }
-  if(['quest_scene_result', 'economy_result', 'spell_result', 'player_respawn'].includes(event.type)&&event.roomNameDatabaseString) {
+  if(['quest_scene_result', 'economy_result', 'spell_result', 'player_respawn', 'hazard_result'].includes(event.type)&&event.roomNameDatabaseString) {
     const database=JSON.parse(event.roomNameDatabaseString);
     roomNameDatabaseString=event.roomNameDatabaseString;roomNameDatabasePlainObject=database;roomNameDatabase.clear();
     for(const [key,room] of Object.entries(database))roomNameDatabase.set(key,room);
@@ -9590,7 +9651,7 @@ window.applyRealtimeCombatResult = async event => {
   updateCharacterSheetsFromConsole(text);
   if (event.population) window.DungeonLife?.receivePopulation({ population: event.population, runId: event.runId });
   if (roster) {
-    window.combatCharacters = roster;
+    window.combatCharacters = window.reconcileCombatRoster?.(roster) || roster;
     ensureKnownSpritesInCombatList(window.combatCharacters);
     syncPartyMazeToCombatPositions(false);
   }
@@ -12657,6 +12718,7 @@ function fetchWithTimeout2(resource, options = {}, timeout = TIMEOUT_DURATION2) 
 }
 
 const combatMode = window.combatMode;
+const combatTurnSnapshot = window.captureCombatRosterTurn?.();
 
 try {
   if (!completedStartResult) await syncGameStateBeforeCommand({ personalNarrative, updatedGameConsole, roomNameDatabaseString,
@@ -12942,7 +13004,7 @@ const taskRequest = {
                     console.log('%c[Sprite] Restored player-selected sprite onto received combat PC entry.', 'color:#aaffaa');
                   }
                 }
-        window.combatCharacters = newCombatCharacters;
+        window.combatCharacters = window.reconcileCombatRoster?.(newCombatCharacters, combatTurnSnapshot) || newCombatCharacters;
         ensureKnownSpritesInCombatList(window.combatCharacters);
         syncPartyMazeToCombatPositions(false);
         newCombatCharacters = window.combatCharacters;

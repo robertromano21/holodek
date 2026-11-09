@@ -47,7 +47,7 @@ function captureResidents(snapshot,key,dungeon,population){
   }
   return roster.filter(a=>a.type==='monster');
 }
-async function authorContent(state,database,ref,dungeon,{runner=require('./settingLayer').defaultRunner}={}){
+async function authorContent(state,database,ref,dungeon,{runner=require('./settingLayer').defaultRunner,newRoom=false}={}){
   const room=F.bundle(database,ref).room,record=database[ref.hostKey].cityArchitecture.buildings[ref.buildingId],
     host=database[ref.hostKey],Work=require('./holodekRoomWork');
   return runner(async $=>{
@@ -60,7 +60,14 @@ async function authorContent(state,database,ref,dungeon,{runner=require('./setti
     const description=await require('./roomDescription').generate($,{name,coordinates:ref.hostKey,classification:room.classification,
       room:target,worldContext:{city:host.cityRoom,building:room.cityRoom,physicalPlan:record.floors?.[ref.floor]?.plan||require('../assets/cityBuildingPlans').floor(record.plan,ref.floor)},
       physicalGuidance:['Describe only the existing saved floor geometry, its materials, lighting and purpose. Do not change its room outline, stairs, ceiling heights, doors, objects or occupants.']});
-    return{name,description};
+    let hazardDraft;
+    if(newRoom&&!dungeon.roomHazards){
+      hazardDraft={...dungeon,sceneSpec:{...dungeon.sceneSpec,source:{...dungeon.sceneSpec?.source,roomName:name,description}}};
+      // This is a new, not-yet-delivered floor; its initial layout stamp is not a saved hazard decision.
+      delete hazardDraft._geometryStamp;delete hazardDraft._meta;
+      await require('./roomHazardAuthoring').prepare($,hazardDraft,{runId:state.getDungeonRunId()});
+    }
+    return{name,description,...(hazardDraft?{hazardDraft}:{} )};
   });
 }
 async function transition(state,request,{door=false,author=authorFloor,build=F.geometry,describe}={}){
@@ -109,11 +116,12 @@ async function transition(state,request,{door=false,author=authorFloor,build=F.g
       created=true;
     }
     if(describe&&(!saved.room.description||/^(?:none|null|undefined)$/i.test(saved.room.description))){
-      const prose=await describe(state,database,ref,saved.dungeon);
+      const prose=await describe(state,database,ref,saved.dungeon,{newRoom:created});
       if(typeof prose.name!=='string'||!prose.name.trim())throw Error('Floor authoring returned no location name.');
       saved.room.name=prose.name.trim();saved.room.description=require('./roomDescription').validate(prose.description);delete saved.room.namePending;
       saved.room.descriptionAuthorship={source:'model',method:'room-description'};
       if(saved.dungeon.sceneSpec)saved.dungeon.sceneSpec.source={...saved.dungeon.sceneSpec.source,roomName:saved.room.name,description:saved.room.description};
+      if(created&&prose.hazardDraft)Object.assign(saved.dungeon,{cells:prose.hazardDraft.cells,tiles:prose.hazardDraft.tiles,roomHazards:prose.hazardDraft.roomHazards});
     }
     saved.dungeon=F.normalizeDungeon(saved.dungeon,hostKey,ref);
     const protectedKeys=new Set(Object.values(saved.population?.actors||saved.room.inhabitants?.actors||{}).filter(a=>a.position).map(a=>`${a.position.x},${a.position.y}`));

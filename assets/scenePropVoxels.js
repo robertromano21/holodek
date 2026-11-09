@@ -139,7 +139,11 @@
   if (cityKit) for (const name of cityKit.SHAPES) for (const v of cityKit.variants(name)) architecture[`${name}__v${v}`] = { drawer: 'city', material: 'stone', heightRatio: 1, baseWidth: 1, city: true };
   // world1 PYRAMIDS: stepped, smooth, ruined and terraced pyramids for wasteland features (added shapes only).
   if (designCatalog) for (const name of designCatalog.PYRAMIDS) architecture[name] = { drawer: 'pyramid', material: 'stone', heightRatio: 1, baseWidth: 1, pyramid: true };
-  const shapes = new Set([...treeShapes, ...Object.keys(vegetation), ...Object.keys(architecture), ...biomeShapes, 'exit_marker', 'tomb', 'furnace', 'arch', 'brazier', 'rubble', 'broken_masonry', 'fallen_arch', 'scree', 'pool', 'roots', 'altar', 'crystal', 'stump', 'stalagmite']);
+  const shapes = new Set([...treeShapes, ...Object.keys(vegetation), ...Object.keys(architecture), ...biomeShapes, 'exit_marker', 'tomb', 'furnace', 'arch', 'brazier', 'rubble', 'broken_masonry', 'fallen_arch', 'scree', 'pool', 'roots', 'altar', 'crystal', 'stump', 'stalagmite',
+    // Environmental hazards (retort/roomHazards.js): real cell voxels, not decals.
+    'hazard_bridge', 'hazard_vent', 'hazard_vent_sealed', 'hazard_cracked_floor', 'hazard_ward_stone', 'hazard_ward_stone_dormant', 'hazard_debris', 'hazard_gas_puff',
+    'hazard_bridge_y', 'hazard_bridge_broken', 'hazard_bridge_broken_y', 'hazard_cliff', 'hazard_abyss',
+    'hazard_flames', 'hazard_pool', 'hazard_sand', 'hazard_ice', 'hazard_heat', 'hazard_sparks', 'hazard_geyser', 'hazard_mist', 'hazard_machinery']);
   const puzzleGlyphs = {
     sun: '10101/01110/11111/01110/10101', moon: '00110/01100/11100/01100/00110',
     wave: '00000/01010/10101/01010/10101', crown: '10101/10101/11111/01110/11111',
@@ -254,6 +258,12 @@
       for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         rotated[(size - 1 - y) + x * size + z * size * size] = source[x + y * size + z * size * size];
       }
+      return rotated;
+    }
+    // N-S bridges: the E-W bridge turned a quarter, so planks stay across travel and the rope rails run along it.
+    if (/^hazard_bridge(?:_broken)?_y$/.test(shape)) {
+      const source = build(shape.slice(0, -2), size, seed, appearance), rotated = new Uint8Array(source.length);
+      for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) rotated[y + x * size + z * size * size] = source[x + y * size + z * size * size];
       return rotated;
     }
     const grid = new Uint8Array(size ** 3);
@@ -840,6 +850,61 @@
         box(x, y, 0, x + w, y + w, h);
         box(x + 0.05, y + 0.05, h, x + w - 0.05, y + w - 0.05, h + 0.15);
       }
+    } else if (shape === 'hazard_bridge') {
+      // Planks across the cell (gaps between boards), rope posts at the corners and hand ropes along both edges.
+      for (let i = 0; i < 6; i++) if ((i + seed) % 7 !== 5) box(i / 6 + .01, 0.06, 0, (i + 1) / 6 - .02, 0.94, 0.12);
+      box(0, 0.02, 0.02, 1, 0.08, 0.1); box(0, 0.92, 0.02, 1, 0.98, 0.1);
+      for (const y of [0.0, 0.92]) { box(0.0, y, 0, 0.08, y + 0.08, 1); box(0.92, y, 0, 1, y + 0.08, 1); box(0, y + .02, 0.78, 1, y + .06, 0.84); }
+    } else if (shape === 'hazard_bridge_broken') {
+      // The planks have dropped away: only the two hand ropes, their posts and one narrow stringer remain.
+      box(0, 0.46, 0, 1, 0.54, 0.07); box(0, 0.06, 0, .14, 0.94, 0.12); box(.88, 0.06, 0, 1, 0.94, 0.12);
+      box(0, 0.02, 0.02, 1, 0.08, 0.1); box(0, 0.92, 0.02, 1, 0.98, 0.1);
+      for (const y of [0.0, 0.92]) { box(0.0, y, 0, 0.08, y + 0.08, 1); box(0.92, y, 0, 1, y + 0.08, 1); box(0, y + .02, 0.78, 1, y + .06, 0.84); }
+    } else if (shape === 'hazard_cliff') {
+      // A cliff face column: layered rock with uneven ledges, standing in the chasm against the rim.
+      for (let z = 0; z < size; z++) { const inset = ((z * 7 + seed) % 5) / (size * 1.6); box(inset, inset, z / size, 1 - inset, 1 - inset, (z + 1) / size); }
+    } else if (shape === 'hazard_abyss') {
+      // The chasm floor (water, scree, ice, lava or dark rock by palette) with drifting fog above it.
+      box(0, 0, 0, 1, 1, 0.06);
+      for (let i = 0; i < 5; i++) { const x = .1 + ((i * 37 + seed * 13) % 70) / 100, y = .1 + ((i * 53 + seed * 7) % 70) / 100; box(x, y, .06, x + .12, y + .1, .14 + (i % 3) * .05); }
+      for (let i = 0; i < 3; i++) { const x = .15 + ((i * 41 + seed * 11) % 55) / 100, y = .15 + ((i * 29 + seed * 5) % 55) / 100, z = .45 + i * .16;
+        for (let r = 0; r < 3; r++) box(x - r * .03, y - r * .03, z, x + .22 + r * .03, y + .22 + r * .03, z + .05); }
+    } else if (shape === 'hazard_vent' || shape === 'hazard_vent_sealed') {
+      box(0.12, 0.12, 0, 0.88, 0.88, 0.55);
+      if (shape === 'hazard_vent') for (let z = Math.floor(.25 * size); z < size; z++) for (let y = Math.floor(.2 * size); y < Math.ceil(.8 * size); y++)
+        for (let x = Math.floor(.2 * size); x < Math.ceil(.8 * size); x++) if (y % 3 !== 0) grid[x + y * size + z * size * size] = 0;
+      if (shape === 'hazard_vent') box(0.18, 0.18, 0, 0.82, 0.82, 0.25);
+      for (const [x, y] of [[.1, .1], [.82, .1], [.1, .82], [.82, .82]]) box(x, y, 0, x + .08, y + .08, 1);
+    } else if (shape === 'hazard_cracked_floor') {
+      box(0, 0, 0, 1, 1, 0.6);
+      const crack = (x, y) => { const a = Math.abs(y - (.45 + .18 * Math.sin(x * 9))) < .045, b = Math.abs(x - (.35 + .12 * Math.cos(y * 7))) < .04 && y > .45, c = Math.abs(x + y - 1.3) < .05 && x > .55; return a || b || c; };
+      for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (crack((x + .5) / size, (y + .5) / size)) grid[x + y * size + z * size * size] = 0;
+    } else if (shape === 'hazard_ward_stone' || shape === 'hazard_ward_stone_dormant') {
+      for (let z = 0; z < size; z++) { const t = z / size, r = 0.34 - 0.14 * t + 0.03 * Math.sin(t * 7 + seed); box(0.5 - r, 0.5 - r * 0.7, t, 0.5 + r, 0.5 + r * 0.7, t + 1 / size); }
+      box(0.18, 0.22, 0, 0.82, 0.78, 0.08);
+    } else if (shape === 'hazard_debris') {
+      for (const [x, y, w, h] of [[0.05, 0.08, 0.36, 0.5], [0.45, 0.12, 0.3, 0.35], [0.2, 0.52, 0.42, 0.7], [0.62, 0.5, 0.3, 1], [0.08, 0.7, 0.18, 0.3]]) box(x, y, 0, x + w, y + w * 0.8, h);
+      box(0.1, 0.3, 0.45, 0.9, 0.4, 0.55);
+    } else if (shape === 'hazard_flames' || shape === 'hazard_geyser' || shape === 'hazard_heat') {
+      box(.05,.05,0,.95,.95,.08);
+      for(const [x,y,h] of [[.18,.22,.65],[.4,.5,1],[.68,.25,.8],[.68,.72,.55]])
+        for(let z=0;z<h;z+=1/size){const w=.14*(1-z/h)+.025;box(x-w,y-w,z,x+w,y+w,z+1/size);}
+    } else if (shape === 'hazard_pool' || shape === 'hazard_sand' || shape === 'hazard_ice') {
+      box(0,0,0,1,1,.2);
+      for(let i=0;i<6;i++){const x=.08+(i*.19)% .8,y=.12+(i*.31)% .75;box(x,y,.2,x+.12,y+.1,shape==='hazard_ice'?.55:.32);}
+    } else if (shape === 'hazard_sparks') {
+      box(.08,.08,0,.92,.92,.12);
+      for(let z=0;z<1;z+=1/size){const x=.5+.18*Math.sin(z*18);box(x-.04,.45,z,x+.04,.55,z+1/size);}
+    } else if (shape === 'hazard_machinery') {
+      box(.06,.05,0,.17,.95,1);box(.83,.05,0,.94,.95,1);box(.06,.05,.85,.94,.95,1);
+      box(.42,.3,.2,.58,.7,.9);box(.24,.15,.16,.76,.85,.32);box(.05,.05,0,.95,.95,.1);
+    } else if (shape === 'hazard_mist') {
+      for(const [x,y,z,r]of [[.3,.35,.3,.29],[.65,.6,.55,.32],[.4,.55,.78,.22]])
+        for(let iz=0;iz<size;iz++)for(let iy=0;iy<size;iy++)for(let ix=0;ix<size;ix++)
+          if(Math.hypot((ix+.5)/size-x,(iy+.5)/size-y,(iz+.5)/size-z)<r)grid[ix+iy*size+iz*size*size]=1;
+    } else if (shape === 'hazard_gas_puff') {
+      for (let z = 0; z < size; z++) for (let y = 0; y < size; y++) for (let x = 0; x < size; x++)
+        if (Math.hypot((x + .5) / size - .5, (y + .5) / size - .5, (z + .5) / size - .5) < .45) grid[x + y * size + z * size * size] = 1;
     } else if (shape === 'stump') {
       box(0.1, 0.1, 0, 0.9, 0.9, 0.15);
       box(0.25, 0.25, 0.15, 0.75, 0.75, 0.85);
@@ -1212,6 +1277,22 @@
     else if (shape === 'broken_masonry') hex = z > 0.4 ? '#b88a64' : h > 0.5 ? '#90715a' : '#777469';
     else if (shape === 'arch') hex = Math.floor(z * 20) % 4 === 0 ? '#575b53' : '#a3997f';
     else if (shape === 'crystal') hex = h > 0.7 ? '#aae3dc' : '#3a929f';
+    if (shape.startsWith('hazard_')) {
+      const pal = options.palette || {}, pick = (key, fallback) => pal[key] || fallback;
+      if (/^hazard_bridge(?:_broken)?_y$/.test(shape)) return color(shape.slice(0, -2), y, x, z, [normal[1], normal[0], normal[2]], base, material, options);
+      if (shape === 'hazard_bridge_broken') hex = z > 0.5 ? (Math.abs(z - .81) < .05 ? pick('highlight', '#c9b48e') : pick('secondary', '#5c3f24')) : pick('secondary', '#5c3f24');
+      else if (shape === 'hazard_cliff') hex = z > .95 ? pick('shadow', '#4f6b3a') : Math.floor(z * 9) % 4 === 3 ? pick('highlight', '#2e2b27') : Math.floor(z * 9 + Math.sin(x * 7 + y * 5) * .6) % 2 ? pick('primary', '#6b675a') : pick('secondary', '#7c7766');
+      else if (shape === 'hazard_abyss') hex = z < .08 ? (Math.floor((x + y) * 5) % 2 ? pick('primary', '#141518') : pick('secondary', '#0b0c0e')) : z < .3 ? pick('shadow', '#050506') : pick('highlight', '#3a3f48');
+      else if (shape === 'hazard_bridge') hex = z > 0.5 ? (Math.abs(z - .81) < .05 ? '#c9b48e' : pick('secondary', '#5c3f24')) : Math.floor(x * 6) % 2 ? pick('primary', '#8a6239') : pick('secondary', '#5c3f24');
+      else if (shape === 'hazard_vent') hex = z < 0.3 ? pick('highlight', '#c8d070') : h > 0.6 ? pick('primary', '#5a5650') : pick('shadow', '#1d1c19');
+      else if (shape === 'hazard_vent_sealed') hex = pick('secondary', '#3a3833');
+      else if (shape === 'hazard_cracked_floor') hex = h > 0.8 ? pick('highlight', '#b5ad9b') : pick('primary', '#8d8576');
+      else if (shape === 'hazard_ward_stone') hex = (Math.abs(x - .5) < .05 && z > .3 && z < .85 || Math.abs(z - .55) < .035 || Math.abs(z - .72) < .03) && Math.abs(normal[2]) < .5 ? pick('highlight', '#8fe0ff') : pick('primary', '#7d8088');
+      else if (shape === 'hazard_ward_stone_dormant') hex = pick('secondary', '#4f525a');
+      else if (shape === 'hazard_debris') hex = h > 0.6 ? pick('primary', '#8d8576') : pick('shadow', '#2c2925');
+      else if (shape === 'hazard_gas_puff') hex = pick('highlight', '#c8d070');
+      else hex = h > .8 ? pick('highlight', '#b5ad9b') : z < .15 ? pick('secondary', '#5e584e') : pick('primary', '#8d8576');
+    }
     if (!hex) return base;
     return rgb(hex).map(v => Math.max(0, Math.min(1, v * (0.83 + h * 0.17))));
   }

@@ -110,6 +110,8 @@ function complete(state,db,mission){
 }
 function settle(state,service,group){
   const s=scope(state),g=s.room?.recruitmentInvitations?.[group.id];if(!ready(g,s.db))return '';
+  // Existing helpers must become permanent in the same commit as the last condition.
+  require('./recruitmentProgress').finalize(state);
   const roster=JSON.parse(state.getCombatCharactersString() || '[]'),members=g.members.filter(m=>['ready','conditional'].includes(m.outcome) && !roster.some(a=>a.type==='npc'&&a.name===m.name));
   if(!members.length)return '';
   if(I.parseSheets(state.getUpdatedGameConsole(),'NPCs in Party').length+members.length>12)return 'The group is ready, but the party needs space before they can join.';

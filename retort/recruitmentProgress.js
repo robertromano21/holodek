@@ -17,6 +17,20 @@ function start(state,service,mission){
   const group=require('./recruitmentGroups').linked(state,m,db);if(group && group.status!=='accepted')return '';
   return require('./residentFavors').recruit(state,service,m.recipient,m,m.conditionalConsent,{provisional:true});
 }
+function finalize(state){
+  const db=read(state),s=scope(state,db),roster=JSON.parse(state.getCombatCharactersString() || '[]'),names=[];
+  for(const actor of roster){const lease=actor.recruitmentLease;
+    if(actor.type!=='npc' || lease?.source!==SOURCE || !same(state,db,lease))continue;
+    const m=db[s.key]?.minorMissions?.[lease.missionId],Groups=require('./recruitmentGroups'),group=Groups.linked(state,m,db);
+    if(m?.source!==require('./residentFavors').SOURCE || m.status!=='completed' || !m.rewardReceiptId || m.runId!==lease.runId ||
+      m.recipient!==actor.name || m.roomKey!==s.key || m.floor!==s.floor || m.helperDepartedAt ||
+      m.recruitmentGroupId&&!group || group&&!Groups.ready(group,db))continue;
+    m.recruitedAt ||= Date.now();m.progress=actor.name+' has joined the party.';delete actor.recruitmentLease;names.push(actor.name);
+  }
+  if(names.length){state.setRoomNameDatabase(JSON.stringify(db));state.setCombatCharactersString(JSON.stringify(roster));
+    console.info('[RecruitmentHelper]',JSON.stringify({phase:'permanent',roomKey:s.key,members:names}));}
+  return names;
+}
 function advance(state,service){
   if(running.has(state))return[];running.add(state);
   try{
@@ -24,13 +38,7 @@ function advance(state,service){
     for(const m of Object.values(room?.minorMissions || {}))if(m.source===F.SOURCE && m.runId===state.getDungeonRunId() &&
       m.floor===s.floor && m.status==='accepted' && F.assess(m,db).passed){F.transact(state,db,m,'complete-favor');completed.push(m);}
     if(completed.length)state.setRoomNameDatabase(JSON.stringify(db));
-    let latest=read(state),roster=JSON.parse(state.getCombatCharactersString() || '[]'),changed=false;
-    for(const actor of roster){const lease=actor.recruitmentLease;if(!lease || lease.source!==SOURCE || !same(state,latest,lease))continue;
-      const m=latest[s.key]?.minorMissions?.[lease.missionId],group=require('./recruitmentGroups').linked(state,m,latest);
-      if(m?.status!=='completed' || group&&!require('./recruitmentGroups').ready(group,latest))continue;
-      m.recruitedAt ||= Date.now();m.progress=actor.name+' has joined the party.';delete actor.recruitmentLease;changed=true;
-    }
-    if(changed){state.setRoomNameDatabase(JSON.stringify(latest));state.setCombatCharactersString(JSON.stringify(roster));}
+    finalize(state);
     for(const m of completed)if(m.invitationPending)F.settleConsent(state,service,m.id);
     const acknowledgments=new Map();
     for(const m of completed)acknowledgments.set(m.recruitmentGroupId || m.id,{missionId:m.id,completionId:m.rewardReceiptId});
@@ -90,4 +98,4 @@ async function response(state,service,result,broadcast){
   }
   return {...result,...(result.population?{population:state.getRoomPopulation?.(scope(state).key) || result.population}:{}),updatedGameConsole:state.getUpdatedGameConsole(),roomNameDatabaseString:state.getRoomNameDatabase(),combatCharactersString:state.getCombatCharactersString()};
 }
-module.exports={SOURCE,start,advance,depart,response};
+module.exports={SOURCE,start,finalize,advance,depart,response};

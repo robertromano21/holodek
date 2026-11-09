@@ -22,13 +22,21 @@ function give(state, service, input) {
   text = state.getUpdatedGameConsole() || text;
   const dungeon = state.getRoomDungeonForSimulation?.(coords), population = state.getRoomPopulation?.(geoKey) || service.get(geoKey, text, dungeon);
   const roster = JSON.parse(state.getCombatCharactersString() || '[]'); I.attach(roster, population);
-  const matches = roster.filter(a => (a.type === 'monster' || a.type==='npc'&&a.recruitmentLease?.source===require('./recruitmentProgress').SOURCE) && (key(a.name) === key(command[2]) || key(a.name).startsWith(key(command[2]) + ' ')));
+  const tasks = state.getCurrentTasks?.() || [], taskIndex = state.getCurrentTaskIndex?.() || 0;
+  const task = Q.normalizeDeliveryTask(tasks[taskIndex]), bindings = Q.deliveryBindings(task);
+  const db = JSON.parse(state.getRoomNameDatabase() || '{}');
+  const sheets = I.parseSheets(text, 'NPCs in Party');
+  const boundCompanion = actor => actor.type === 'npc' && task?.status !== 'Completed' && I.roomKey(actor.mazeRoomKey) === geoKey &&
+    population?.actors?.[actor.name]?.status === 'recruited' && sheets.some(sheet => sheet.name === actor.name && sheet.hp > 0 && I.isAlive(sheet)) &&
+    bindings.some(binding => key(binding.item) === key(command[1]) && binding.coords === geoKey &&
+      key(Q.deliveryRecipient(task, db, binding).name) === key(actor.name));
+  const matches = roster.filter(a => (a.type === 'monster' || a.type==='npc'&&a.recruitmentLease?.source===require('./recruitmentProgress').SOURCE || boundCompanion(a)) && (key(a.name) === key(command[2]) || key(a.name).startsWith(key(command[2]) + ' ')));
   const recipient = matches.find(a => key(a.name) === key(command[2])) || (matches.length === 1 ? matches[0] : null);
   const pc = roster.find(a => a.type === 'pc' && (a.hp ?? 1) > 0), record = recipient && population.actors[recipient.name];
   const player = pc && (pc.mazePoint || { x: pc.mazeX + .5, y: pc.mazeY + .5 });
   if (!recipient || !record || !I.isPresent(recipient, population) || recipient.discoveryState === 'pending') return result('That recipient is not present in this room.');
   const reach = I.dialogueReach(dungeon, recipient, player);
-  const db=JSON.parse(state.getRoomNameDatabase() || '{}'),localRequests=Object.values(db[geoKey]?.minorMissions || {}).filter(m=>
+  const localRequests=Object.values(db[geoKey]?.minorMissions || {}).filter(m=>
     m.source==='engine-resident-favor-v1' && m.runId===state.getDungeonRunId() && m.floor===require('./hostLocalFloors').identity(db[geoKey]?.cityFloorContext) &&
     m.status==='accepted' && m.recipient===recipient.name && (m.conditions || [m.objective]).some(o=>o?.kind==='retrieve'&&key(o.item)===key(command[1])));
   if (!pc || !I.canAct(recipient) || !I.canAct(record) || !localRequests.length&&(!reach.canSpeak || !reach.lineOfSight || reach.distance > 3)) return result(`Move closer to ${recipient.name} for the handoff.`);
@@ -44,9 +52,6 @@ function give(state, service, input) {
   let database; try { database = JSON.parse(state.getRoomNameDatabase() || '{}'); } catch { return result('The room records could not be verified. No item was transferred.'); }
   if (!database[geoKey]) return result('The room records could not be verified. No item was transferred.');
   if ((record.inventory?.length || 0) >= 100) return result(`${recipient.name} cannot carry any more items.`);
-  const tasks = state.getCurrentTasks?.() || [], taskIndex = state.getCurrentTaskIndex?.() || 0;
-  const task = Q.normalizeDeliveryTask(tasks[taskIndex]);
-  const bindings = Q.deliveryBindings(task);
   const bound = bindings.find(b => key(b.item) === key(name) && b.coords === geoKey &&
     key(Q.deliveryRecipient(task, database, b).name) === key(recipient.name));
   const questHandoff = task?.status !== 'Completed' && !!bound;

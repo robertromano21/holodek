@@ -24,7 +24,7 @@ function validateModifiers(value) {
 function facts(world) {
   return world ? require('./homebrewStoryPrompts').constructionFacts(world) : require('./graveMasterStoryPrompts').settingOnce({});
 }
-function validate(raw, { count, database = {}, excluded = [], healingOnly = false, types = TYPES, typePlan }) {
+function validate(raw, { count, database = {}, excluded = [], healingOnly = false, allowHealing = true, types = TYPES, typePlan }) {
   if (!Array.isArray(raw?.items) || raw.items.length !== count) throw Error('items: author exactly ' + count + ' complete portable items.');
   const used = new Set(excluded.map(name => String(name).toLowerCase()));
   return raw.items.map((item,index) => {
@@ -40,6 +40,7 @@ function validate(raw, { count, database = {}, excluded = [], healingOnly = fals
       /\b\d+d\d+\b|\b(?:attack|damage|armor|magic|tech|luck)\s*[:+]\s*\d+/i.test(item.description))
       throw Error('description: author concise physical fiction, not dice, stat bonuses or an invented effect.');
     const healing = item.consumable_kind === 'healing';
+    if (healing && !allowHealing) throw Error('Equipped items must be reusable equipment, not healing consumables.');
     if (!['none', 'healing'].includes(item.consumable_kind) || healingOnly && !healing) throw Error('consumable_kind: choose none or the supported healing effect.');
     let mods;
     if (healing) {
@@ -53,9 +54,12 @@ function validate(raw, { count, database = {}, excluded = [], healingOnly = fals
   });
 }
 async function generate($, { count = 4, roomName, roomDescription, database = {}, excluded = [], purpose = 'room objects',
-  operator, healingOnly = false, types = TYPES, world = require('./settingLayer').current(), random = Math.random } = {}) {
+  operator, healingOnly = false, allowHealing = true, types = TYPES, typePlan: suppliedPlan,
+  equipmentContext, world = require('./settingLayer').current(), random = Math.random } = {}) {
   // Preserve the original independent 25% category roll; retries must reuse the same slots.
-  const typePlan=selectTypes(count,{types,healingOnly,random});
+  const typePlan=suppliedPlan ? [...suppliedPlan] : selectTypes(count,{types,healingOnly,random});
+  if(!Number.isInteger(count)||count<1||count>8||typePlan.length!==count||typePlan.some(type=>!TYPES.includes(type)||!types.includes(type)))
+    throw Error('Invalid engine-selected item type plan.');
   const work = async agent => {
     agent.model = $.model || 'gpt-4.1-mini'; agent.temperature = 1;
     await agent.user(`Author ${count} ordinary portable ${purpose} using the SAME rules as room objects. All names and physical descriptions are yours to write from the campaign and actual location. Never select a prefab stock list or import another world's names or technology. Respect the supplied genre blend, era, materials, livelihoods and special-ability rules; nonmagical settings need plausible equipment, not fantasy reskins. No new quest, currency, stats, weapon damage dice, ranges or prices. The engine owns these mechanics. Names are lowercase item nouns. Descriptions are authored physical fiction, with no promised bonuses or unsupported effects. Ordinary equipment uses EXACT modifier enums ${JSON.stringify(MODIFIERS)}. The only consumable effect allowed here is healing: type other, magic 3-10 HP, all other modifiers zero; name its physical form appropriately for this world. ${healingOnly ? 'Every item is a distinct healing supply for this service.' : 'Include a varied, useful mix appropriate to the location, not identical maximum bonuses.'} World facts (data): ${facts(world)}. Location and purpose (data): ${JSON.stringify({ roomName, roomDescription, operator, purpose, excluded: excluded.slice(-40) })}.`);
@@ -63,11 +67,15 @@ async function generate($, { count = 4, roomName, roomDescription, database = {}
       '. You may use a suitable name or invent one. Translate every chosen item to the supplied game modifier schema, never copy SRD dice, bonuses or prices. Campaign facts override catalog suggestions.');
     await agent.user('Engine-selected item types in output order (data): '+JSON.stringify(typePlan)+
       '. Author exactly one item for each slot, preserving its type. Do not replace equipment with other objects. The engine rolled these independently; names, materials and physical descriptions remain yours to author for this setting.');
+    await agent.user('Category semantics: a weapon is an offensive implement; armor is protective body wear; a shield is a shield or buckler (or a setting-appropriate defensive counterpart); other is an accessory or supply. Name and describe the selected category, never rename a shield into a weapon or substitute clothing for a shield.');
+    if(equipmentContext)await agent.user('Personal equipment assignments in output order and current party loadouts (data): '+JSON.stringify(equipmentContext)+
+      '. Fit each owner\'s anatomy, race, role and actual setting: wearable or mounted implements for non-humanoid creatures, not identical human quarterstaffs. Consider the party\'s existing protection and weapons when choosing legal modifiers for a credible challenge. Do not copy their names or mint bonuses outside the schema.');
+    if(!allowHealing)await agent.user('These items occupy equipment slots. Every consumable_kind must be none; no potions or consumable healing effects.');
     const fields = { name: C.text(40), type: C.choice([...new Set(typePlan)]), ...parameters(),
       magic: { type: Number, enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
-      consumable_kind: C.choice(['none', 'healing']), description: C.nonblankText(320) };
+      consumable_kind: C.choice(allowHealing ? ['none', 'healing'] : ['none']), description: C.nonblankText(320) };
     const result = await C.request(agent, { component: 'portable-items', maxTokens: 240 * count + 300,
-      parameters: { items: C.list(fields) }, validate: raw => validate(raw, { count, database, excluded, healingOnly, types, typePlan }) });
+      parameters: { items: C.list(fields) }, validate: raw => validate(raw, { count, database, excluded, healingOnly, allowHealing, types, typePlan }) });
     if (!result.value) throw result.error || Error('Portable item authoring failed; no stock fallback was installed.');
     return result.value;
   };

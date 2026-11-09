@@ -408,9 +408,12 @@
     syncFavorScope();
     for(const [id,offer]of favorOffers)if(shownKey(offer.mission)===shownKey(m))favorOffers.delete(id);
     const offered=group?group.status==='review':m.status==='offered';
-    const held=beginInteraction(m.recipient),status=offered?'Review the complete request before deciding.':'Request accepted. Fulfill the listed requirements.';
+    const remaining=group?.members.filter(member=>member.outcome==='pending' || member.outcome==='conditional'&&member.status!=='completed'&&!member.readyToReport) || [];
+    const held=beginInteraction(m.recipient),status=offered?'Review the complete request before deciding.':
+      group&&remaining.length?`Request accepted. Still needed: ${remaining.map(member=>member.name).join(', ')}. The group joins after every agreed requirement is verified.`:
+      completionReady(m)?'All agreed requirements are verified. The party invitation can be completed.':'Request accepted. Fulfill the listed requirements.';
     const localHelpers=group?.members.some(member=>member.participation==='help-here');
-    const description=group?group.members.map(member=>`${member.name}: ${member.description ||
+    const description=group?group.members.map(member=>`${member.name}${!offered&&member.outcome==='conditional'?(member.status==='completed'||member.readyToReport?' (Verified)':' (Still Needed)'):''}: ${member.description ||
       (member.outcome==='ready'?'Willing to join after the group conditions are approved and completed.':member.outcome==='pending'?'Still considering the invitation.':'Remaining here; not part of the recruitment reward.')}${member.participation==='help-here'?' Helps here after acceptance; stays behind if you leave before the group task is finished.':''}`).join('\n\n')+
       (localHelpers?'\n\nLocal helpers accompany you here after acceptance. Complete every agreed condition for the willing group to remain together.':'\n\nThe willing members join together after every agreed condition is verified.'):m.invitationPending?m.description:m.requestDescription || m.description;
     const box=popup(group?(offered?'Group Recruitment Invitation':'Recruitment Progress'):m.invitationPending?(offered?'Recruitment Invitation':'Recruitment Progress'):'Local Request',`${group?'Encountered Group':m.recipient}\n${status}\n\n${description}`+
@@ -426,7 +429,8 @@
       const later=box.add('Not Now');later.addEventListener('click',()=>{if(!pending){box.close();root.DungeonLife?.releaseAttention?.(m.recipient);root.CombatCharacterUi?.open?.({name:m.recipient},{services:false});}});
     }else{
       const finish=box.add(m.invitationPending?'Complete Party Invitation':'Complete Request',{kind:'complete-recruitment',actor:m.recipient,missionId:m.id});
-      if(m.invitationPending)finish.disabled=!completionReady(m);
+      if(m.invitationPending){finish.disabled=!completionReady(m);if(finish.disabled)finish.title=remaining.length?
+        'Still needed: '+remaining.map(member=>member.name).join(', '):'The agreed requirements are not yet verified.';}
       box.add('Close');
     }
     const business=root.getEconomyResidentInfo?.(m.recipient);

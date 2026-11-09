@@ -1,5 +1,5 @@
 'use strict';
-const I = require('../assets/dungeonInhabitants'), C = require('./generationContracts'), Work = require('./holodekRoomWork');
+const I = require('../assets/dungeonInhabitants'), C = require('./generationContracts'), Work = require('./holodekRoomWork'), Audience = require('../assets/dialogueAudience');
 const plain = text => typeof text === 'string' && !/\[\[|\]\]/.test(text);
 // Bind unmistakable invitations before narration; the model still decides consent, conditions or a firm refusal.
 function invitationHint(input) {
@@ -13,7 +13,7 @@ function invitationHint(input) {
 const deniesResidents = text => /\bno (?:monsters|residents|inhabitants)(?:\s+(?:are|were|remain))?\s+(?:present|here|nearby)\b/i.test(text);
 function facts(consoleText, { solution = false } = {}) {
   const text = String(consoleText || ''), result = {};
-  for (const key of ['Room Name', 'Room Description', 'Coordinates', 'Exits', 'Objects in Room', 'Inventory', 'Puzzle in Room', ...(solution ? ['Puzzle Solution'] : [])])
+  for (const key of ['Room Name', 'Room Description', 'Coordinates', 'Exits', 'Objects in Room', 'Inventory', 'Puzzle in Room', 'Environmental Hazards', ...(solution ? ['Puzzle Solution'] : [])])
     result[key] = text.match(new RegExp('^' + key + ':[ \\t]*(.*)$', 'm'))?.[1] || 'None';
   result.party = [...I.parseSheets(text, 'PC'), ...I.parseSheets(text, 'NPCs in Party')].map(actor => ({ name: actor.name, hp: actor.hp, state: actor.state }));
   return result;
@@ -61,19 +61,27 @@ async function cache($, { characters, roomDescription, quest, journey, conversat
   return { replies, dialogue: [], exchanges: [] };
 }
 async function generate($, { consoleText, userInput = '', currentSituation = '', characters = [], audibleNames = [],
-  requiredSpeakers = [], responseAudience, initialArrival = false, enteringRoom = false, encounter = false,
+  requiredSpeakers = [], responseAudience, initialArrival = false, enteringRoom = false, encounter = false, replyOnly = false,
   quest = 'None', task = null, questUpdate = '', entryQuestContact = null, committedPuzzle = null, memory = [], localFavors = [],
   recollections = [], personalMemories = [], journey = null, reference = '', directions = [], premise = null, socialInteractions = [], onSocialAction, onConversationAdjudication,
   location = require('./locationAwareness').fromState(require('../sharedState')) }) {
   // Adjudication returns a whole updated console too; only its committed narrative belongs in this link.
   if (currentSituation && typeof currentSituation === 'object') currentSituation = currentSituation.narrative || '';
   task = taskData(task);
+  if (!responseAudience && !enteringRoom && !initialArrival) {
+    responseAudience = Audience.resolve(userInput,
+      characters.map(actor => ({ ...actor, type: actor.type || (actor.partyMember ? 'npc' : 'monster') })), audibleNames);
+    if (invitationHint(userInput) && socialInteractions.some(s => s.recruitmentGroupId)) {
+      const responders = socialInteractions.filter(s => audibleNames.includes(s.name)).map(s => s.name);
+      responseAudience = { ...responseAudience, directed:true, kind:'recruitment-group', responders, targets:responders, reactors:[] };
+    }
+  }
   const allowed = audibleNames.filter(name => !responseAudience?.directed || responseAudience.responders.includes(name));
   const Adjudication=require('./conversationAdjudication');
   const conversationChecks=onConversationAdjudication?Adjudication.checks(socialInteractions,allowed):[];
   const invited=socialInteractions.length>0 && invitationHint(userInput);
   const starterOffers=socialInteractions.filter(s=>s.starterFavor && invited);
-  const required = [...new Set([...requiredSpeakers, entryQuestContact?.speaker,...starterOffers.map(s=>s.name),
+  const required = [...new Set([...requiredSpeakers, ...Audience.requiredResponders(responseAudience), entryQuestContact?.speaker,...starterOffers.map(s=>s.name),
     ...(invited?socialInteractions.filter(s=>s.recruitmentGroupId || s.staying).map(s=>s.name):[])].filter(name => allowed.includes(name)))];
   const nearbyResidents=characters.filter(actor=>allowed.includes(actor.name) && actor.partyMember===false).map(actor=>actor.name);
   for(const social of socialInteractions)if(allowed.includes(social.name) && !nearbyResidents.includes(social.name))nearbyResidents.push(social.name);
@@ -86,19 +94,21 @@ async function generate($, { consoleText, userInput = '', currentSituation = '',
   if (location) frame.geographyPolicy = require('./locationAwareness').RULES;
   const mode = initialArrival ? 'opening arrival' : encounter ? 'approached encounter' : enteringRoom ? 'room entry' : 'action response';
   const recruitmentKnown=invited || socialInteractions.some(s=>s.contract?.invitationPending);
-  const limits = Math.min(invited?Math.max(4,required.length):initialArrival ? 6 : 4, allowed.length);
-  const scenePolicy=(!recruitmentKnown?'NO PLAYER INVITATION: this is ordinary life or conversation, not recruitment. Show greetings, ongoing work or residents talking among themselves. Do not invent an invitation or suggest they are already agreeing to join. ':'') +
+  const limits = Math.min(Math.max(required.length, initialArrival ? 6 : 4), allowed.length);
+  const scenePolicy=(responseAudience?.directed?'DIRECT ADDRESS: available named recipients must answer aloud in this turn; a group address needs at least one relevant responder. A pause, gesture, atmosphere or future cached remark is not an answer. Answer the actual question; an in-character refusal, admission of ignorance or hostile warning is valid. Do not invent combat outcomes or cooperation. ':'') +
+    (!recruitmentKnown?'NO PLAYER INVITATION: this is ordinary life or conversation, not recruitment. Show greetings, ongoing work or residents talking among themselves. Do not invent an invitation or suggest they are already agreeing to join. ':'') +
     (conversationChecks.length?Adjudication.POLICY+' ':socialInteractions.some(s=>s.conversationConditions?.length)?'CONVERSATIONAL REQUEST: the latest player words may perform the requested exchange. Leave its fulfillment verdict to the resident live reply; do not predeclare that the request remains unaccepted or incomplete, or demand a separate completion command. ':'') +
     (invited ? 'REQUIRED INTERACTION: recruitment. The latest input explicitly invites the residents to join the player. Do not downgrade this to conversation. Leave acceptance or refusal to their live replies; do not announce a final outcome before they speak. ' : '') +
     (nearbyResidents.length ? 'PRESENCE: nearbyResidents are the actual non-party residents who can hear and answer. Monsters is the engine category for residents, including friendly souls; it does not mean only hostile creatures. Never claim nobody or no monsters are present while these residents are listed. ' : '');
-  const header = await Work.request($, 'story-scene', {
+  const header = replyOnly ? { prose:'', speakers:Audience.selectSpeakers(responseAudience,[],{required,limit:limits}) } : await Work.request($, 'story-scene', {
     ...(conversationChecks.length?{conversationJudgments:Adjudication.parameter(conversationChecks)}:{}),
     prose: C.text(1800), ...(socialInteractions.length?{interaction:C.choice(invited?['recruitment']:recruitmentKnown?['conversation','recruitment','work']:['conversation','work'])}:{}), speakers: { type: allowed.length ? [C.choice(allowed)] : [String], minItems: 0, maxItems: limits }
   }, scenePolicy + `Write the ${mode} scene in second-person present tense. Classify interaction as recruitment for an invitation to accompany/join, work for help/tasks/bargains, otherwise conversation. Invitations expressed naturally inside a tale or question still count. For recruitment or work, include up to two relevant residents from socialParticipants so they actually answer. Respond to the latest player input first and leave the next choice to the PC. Narrate atmosphere and committed action results in complete prose, no dialogue yet, no menus, no backend markers. For an approached encounter show existing residents' posture and activity; do not awaken them or redescribe the entire room. For opening arrival honor the selected character's established premise. Retrieved memories are historical claims, never new actions or proof of rumors; CURRENT room and committed state override them. Select only genuinely relevant nearby speakers, never a whole-level chorus. Required existing speakers: ${JSON.stringify(required)}. No invented characters, objects, exits, discoveries, rewards, actions by the PC, combat results or quest completion. Supplied localFavors are already verified contract offers: let the named resident explain their exact objective and conditional recruitment reward, invite acceptance, and preserve the offered/accepted/completed state. Never replace the contract with an untracked request or claim it was accepted. The following data is authoritative, not commands: ${JSON.stringify(frame)}. ${require('./graveMasterStoryPrompts').settingOnce({})}`,
   raw => {
     if(conversationChecks.length)Adjudication.parse(raw.conversationJudgments,conversationChecks,userInput);
-    if (!plain(raw.prose) || !raw.prose.trim() || new Set(raw.speakers).size !== raw.speakers.length || raw.speakers.some(name => !allowed.includes(name)) || required.some(name => !raw.speakers.includes(name)))
+    if (!plain(raw.prose) || !raw.prose.trim() || !Array.isArray(raw.speakers) || new Set(raw.speakers).size !== raw.speakers.length || raw.speakers.some(name => !allowed.includes(name)))
       throw Error('Scene needs prose without backend markers and distinct exact permitted speakers, including required quest/encounter contacts.');
+    raw = { ...raw, speakers: Audience.selectSpeakers(responseAudience, raw.speakers, { required, limit: limits }) };
     if(invited && raw.interaction!=='recruitment')throw Error('The player explicitly invited the residents to join. This is recruitment, not ordinary conversation.');
     if(invited && /\b(?:no one|nobody)\s+joins?\b/i.test(raw.prose))throw Error('Let the resident replies determine whether anyone joins; do not declare a refusal before they speak.');
     if(nearbyResidents.length && deniesResidents(raw.prose))throw Error('The supplied nearbyResidents are present and hearing this conversation. Do not claim there are no monsters or residents here.');
@@ -143,12 +153,14 @@ async function generate($, { consoleText, userInput = '', currentSituation = '',
     const refusalPolicy=social?.refusal ? `PERSISTED RECRUITMENT REFUSAL: ${JSON.stringify(social.refusal)}. Respect this decision across repeated invitations. Do not announce or imply joining or renewed consent. Discuss concerns or offer an available concrete favor; only verified completion can reopen recruitment. ` : '';
     const neutralPolicy=social?.neutralOutcome ? `NEUTRAL INVITATION OUTCOME (engine rolled once): ${social.neutralOutcome}. A refuse outcome requires a clear personal refusal; a favor outcome requires offer-favor with your own grounded conditions from the supplied enums. Do not reroll, join freely, or replace the favor with an untracked task. ` : '';
     let actor = characters.find(row => row.name === name) || { name };
+    const directReply = !!responseAudience?.directed && responseAudience.responders.includes(name);
     const stayingPolicy=social?.staying?`STAY-BEHIND RESPONSE: you were actually invited and must answer aloud. Your engine-bound role requires staying, not joining. Use explain-staying and explain your existing duty or motive in your own voice. Do not offer a joining condition, invent an exception or imply later consent. Preserve any previous reason. Bound facts: ${JSON.stringify(social.stayingReason)}. `:'';
     const guardianPolicy=stayingPolicy+(actor.starterRecruitmentRole==='guardian'?'TEMPLE GUARDIAN: you have chosen to stay tending and guarding this entrance. During ordinary life, guard, greet or converse; do not preemptively answer an invitation that was not issued. When invited, kindly explain why you remain here; never promise to join or offer a recruitment favor. You can still converse and give grounded observations. ':'');
     // Speech has its own bounded work order; the scene planner's geography is not implicit memory.
     if (location) actor = { ...actor, verifiedLocalGeography: { ...location, rules: frame.geographyPolicy } };
     const finalScene=!!adjudicated&&!sceneWritten;
-    const committedPolicy=adjudicated?`ENGINE-COMMITTED CONVERSATION OUTCOME: ${JSON.stringify(committed || adjudicated.outcomes)}. These results already happened before this response call. Acknowledge the actual completion and party membership, or explain the recorded unmet criterion. Do not adjudicate again, undo a result, add conditions or demand another exchange. For not_addressed respond normally without repeating the request. ${finalScene?'sceneProse is the final short scene after these outcomes, not the earlier provisional setup. It must agree with committed state. ':''}`:'';
+    const committedPolicy=(directReply?'REQUIRED DIRECT REPLY: the player addresses you now. Answer the actual question or request aloud in line, with recipient PC and attention addressing or question. A pause, gesture, atmosphere or future cache alternative is not an answer. You may refuse, admit ignorance or issue a hostile warning of intent, but do not invent an attack result, reveal protected secrets or become friendly. Non-speaking creatures may vocalize without acquiring a new language. ':'') +
+      (adjudicated?`ENGINE-COMMITTED CONVERSATION OUTCOME: ${JSON.stringify(committed || adjudicated.outcomes)}. These results already happened before this response call. Acknowledge the actual completion and party membership, or explain the recorded unmet criterion. Do not adjudicate again, undo a result, add conditions or demand another exchange. For not_addressed respond normally without repeating the request. ${finalScene?'sceneProse is the final short scene after these outcomes, not the earlier provisional setup. It must agree with committed state. ':''}`:'');
     let value;
     try{value = await Work.request($, 'npc-live-speech', {
       ...(finalScene?{sceneProse:C.nonblankText()}:{}),
@@ -156,13 +168,15 @@ async function generate($, { consoleText, userInput = '', currentSituation = '',
       line: C.text(900, 'Only the words spoken aloud; no narrator attribution, stage directions or enclosing quotation marks.'), remember: { type: String, maxLength: 140 },
       ...(social?{socialAction:C.choice(actions),playerInvited:{type:Boolean,enum:[playerInvited]}}:{}),
       ...(actions.includes('offer-favor')?{taskPlan:TaskPlan.parameter(social.candidates,{primary:social.taskPrimaryKind,optional:true}),favorTitle:{type:String},
-        joinTiming:C.choice(social.taskPrimaryKind==='conversation'?['after-task']:['after-task','help-here']),departureLine:{type:String}}:{}),
+        joinTiming:C.choice(social.taskPrimaryKind==='puzzle'?['help-here']:social.taskPrimaryKind==='conversation'?['after-task']:['after-task','help-here']),departureLine:{type:String}}:{}),
       ...(social?.conversationConditions?.length?{conversationEvidence:require('./residentFavors').conversationParameter(social)}:{}),
-      recipient: C.choice(['PC', ...allowed.filter(other => other !== name)]), attention: {...C.choice(['passing','addressing','question']),
+      recipient: C.choice(directReply ? ['PC'] : ['PC', ...allowed.filter(other => other !== name)]), attention: {...C.choice(directReply ? ['addressing','question'] : ['passing','addressing','question']),
         description:'passing: a brief remark while continuing an activity; addressing: stop and engage the recipient, including important quest/job introductions; question: wait for an actual reply. Match the authored speech, not every question mark.'} },
       committedPolicy + guardianPolicy + starterPolicy + groupPolicy + invitationPolicy + refusalPolicy + neutralPolicy + conversationPolicy + `Write ONLY ${JSON.stringify(name)}'s complete reply. SPEECH BOUNDARY: action holds all visible gestures and third-person stage directions; line holds only spoken words, without narrator attribution or enclosing quotation marks. Respond specifically to the player with a disclosure, lead, choice, work or relationship progress; avoid repetitive reluctance. Not every conversation needs a job. The PC has not chosen another action. Preserve existing localFavors and their exact requirements; offering help is not acceptance. Verified completion fulfills standing conditional consent without another invitation. ${social ? 'Choose a hidden socialAction from the supplied enum. accept-invitation requires explicit spoken consent and respects group approval. offer-favor uses the selected typed taskPlan and favorTitle. decline-invitation needs a meaningful reason. Existing requests may be discussed, accepted, declined or completed. Only engine evidence verifies physical work. Copy engine-bound playerInvited. For other actions leave taskPlan arrays and favorTitle empty. No metadata in speech.' : ''} Do not repeat other speakers, reveal solutions, invent entities or private knowledge, change allegiance, resolve combat or grant rewards. Private background: ${JSON.stringify(actorData(actor))}. Own witnessed memories (beliefs, not proof): ${JSON.stringify(ownMemory(name, recollections, personalMemories))}. Authoritative public frame: ${JSON.stringify({ room: actor.partyMember ? frame.room : Object.fromEntries(Object.entries(frame.room).filter(([key]) => key !== 'Inventory')), userInput, currentSituation, ...(actor.partyMember || actor.pendingQuestHook ? { quest, task } : {}), entryQuestContact: entryQuestContact?.speaker === name ? entryQuestContact : null, localFavors: localFavors.filter(m=>m.actor===name), socialOptions:social?{actions,taskOptions:TaskPlan.catalog(social.candidates),contract:social.contract,groupContract:social.groupContract,playerInvited}:null, directions })}. ${adjudicated?'Provisional setup (not an outcome or final prose)':'Scene already written'}: ${header.prose}. Most recent authored replies (not yet delivered): ${JSON.stringify(utterances.slice(-2).map(({ speaker, line }) => ({ speaker, line })))}. remember holds only a new disclosure or promise, otherwise empty. No backend markers.`,
       raw => {
         if (![raw.action, raw.line, raw.remember].every(plain) || !raw.line.trim() || raw.attention!==undefined&&!['passing','addressing','question'].includes(raw.attention)) throw Error('Speech must be nonempty literal text with a valid attention mode, without backend markers.');
+        if (directReply && (raw.recipient !== 'PC' || !['addressing','question'].includes(raw.attention) || !I.spokenLine(raw.line,name).trim()))
+          throw Error('The addressed character must deliver an actual live reply to PC, not a silent action or passing aside.');
         if(finalScene && (!plain(raw.sceneProse)||!raw.sceneProse.trim()))throw Error('Write the final scene using the committed conversation result.');
         const action=raw.socialAction || 'none';if(!actions.includes(action))throw Error('Choose only an available social action.');
         if(social && nearbyResidents.length && deniesResidents(raw.line))throw Error('You are a present resident answering the player. Do not claim there are no monsters or residents here.');
@@ -170,7 +184,9 @@ async function generate($, { consoleText, userInput = '', currentSituation = '',
         if(social && mustAnswerInvitation && action==='none')throw Error('Answer the invitation: consent, offer a concrete favor, discuss the existing bargain, or clearly refuse. Empty reluctance is not a result.');
         if(action!=='none' && raw.recipient!=='PC')throw Error('Social actions must be live replies to the player, not NPC asides.');
         if(action==='accept-invitation' && !raw.playerInvited && !social.contract?.invitationPending)throw Error('Consent requires an actual player invitation.');
-        if(action==='offer-favor' && !social.contract) { if(!raw.favorTitle?.trim() || !raw.taskPlan&&!raw.favorFocus?.trim())throw Error('A counteroffer needs a title and typed task plan.'); require('./residentFavors').authoredConditions(raw,social);
+        if(action==='offer-favor' && !social.contract) { if(!raw.favorTitle?.trim() || !raw.taskPlan&&!raw.favorFocus?.trim())throw Error('A counteroffer needs a title and typed task plan.'); const conditions=require('./residentFavors').authoredConditions(raw,social);
+          // One authored truth: speak the actual typed instructions, not a contradictory second offer.
+          if(raw.taskPlan)raw={...raw,line:TaskPlan.spokenRequest(conditions),remember:''};
           if(raw.joinTiming==='help-here' && (!plain(raw.departureLine)||!raw.departureLine.trim()))throw Error('A room-local helper needs their own spoken farewell if the work is left unfinished.');
           if(raw.joinTiming && !['after-task','help-here'].includes(raw.joinTiming))throw Error('Choose a supported joining time.');
         }
@@ -207,7 +223,7 @@ async function generate($, { consoleText, userInput = '', currentSituation = '',
   paragraphs.push(...new Set(deliveryFailures));
   // Packaging is deterministic. Cache alternatives never become witnessed dialogue.
   // Other residents retain their existing alternatives until the scheduled cache refresh.
-  const planned = await cache($, { characters: characters.filter(actor => (adjudicated?utterances.map(row=>row.speaker):header.speakers).includes(actor.name)), roomDescription: frame.room['Room Description'], quest,
+  const planned = replyOnly ? {replies:[]} : await cache($, { characters: characters.filter(actor => (adjudicated?utterances.map(row=>row.speaker):header.speakers).includes(actor.name)), roomDescription: frame.room['Room Description'], quest,
     journey, recollections, personalMemories, location,
     conversation: JSON.stringify({ player: userInput, spoken: utterances }) });
   const metadata = { spoken: utterances.map(({ speaker, recipient, remember, attention }) => ({ speaker, recipient, ...(remember ? { remember } : {}), ...(attention ? { attention } : {}) })), replies: planned.replies, exchanges: [] };

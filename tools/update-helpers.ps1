@@ -12,7 +12,7 @@ if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvaria
 }
 Write-Host 'Checking the exact verified PC release and all three selected local or website helpers...'
 Write-Host ("Verified engine: {0}" -f $manifest.engineHash)
-# Popup sizing and original exit placement use this exact verified combined release.
+# Prepared quest contact handoffs and all prior fixes use this exact verified release.
 & node $installer --helpers
 if ($LASTEXITCODE -eq 2) {
     Write-Warning 'Update paused before deployment: close and relaunch Holodek (or restart only gameServer if using PM2), then run this command again before playing. Leave gameServer2 untouched.'

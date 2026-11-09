@@ -48,6 +48,7 @@ const BlueprintPillars = require('./blueprintPillars.js');
 const DungeonGeneration = require('./dungeonGeneration.js');
 const IndoorBlueprint = require('./indoorBlueprint.js');
 const SecretDoors = require('./secretDoors');
+const RoomHazards = require('./roomHazards');
 const CampaignPlanningLog = require('./campaignPlanningLog');
 const OutdoorTerrain = require('./outdoorTerrain.js');
 const BlueprintDesign = require('./blueprintDesign.js');
@@ -146,6 +147,7 @@ function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
   if (!cachedGeometry && !dungeon.sceneRoof) applySceneRoofs(dungeon, dungeon.sceneSpec);
   if (!cachedGeometry && !dungeon.roomExits) DungeonExits.install(dungeon);
   if (!cachedGeometry && typeof SecretDoors !== 'undefined') SecretDoors.install(dungeon);
+  if (!cachedGeometry && !dungeon.roomHazards && typeof RoomHazards !== 'undefined') RoomHazards.install(dungeon);
   require('./surfaceArtPlacement').restoreFloorMosaics(dungeon);
   require('./cityCirculation').install(dungeon);
   if (!dungeon.environment) dungeon.environment = buildEnvironment(dungeon);
@@ -899,7 +901,12 @@ function mapToPlainObject(map) {
 
 
 // This function encapsulates your Retort-JS logic, now accepting dynamic input
+// Set by the newest retortWithUserInput call so the /room-hazards/enter route resolves in the live game closure.
+let roomHazardResolver = null, roomHazardQueue = Promise.resolve();
+function resolveRoomHazard(request) { return roomHazardResolver ? roomHazardResolver(request) : Promise.resolve(null); }
 async function retortWithUserInput(userInput, broadcast, combatMode = sharedState.getCombatMode(), options = {}) {
+  // Register first, so walking into a hazard works even when this call returns early (room preparation, startup).
+  roomHazardResolver = resolveRoomHazardLocal;
   if(typeof WorldSetting!=='undefined' && WorldSetting.ensureDeathStory)await WorldSetting.ensureDeathStory(sharedState);
   if (typeof require === 'function') await require('./genreAbilities').ensure(sharedState);
   console.log('Received combatMode in retortWithUserInput:', combatMode);
@@ -2831,21 +2838,16 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
     questSeed: needsQuestIntroduction(sharedState.getCurrentQuest(), records, geoKey, sharedState.getCurrentTaskIndex() || 0) }, {
     random: getRandomInt, sex: getRandomSex, level: pickLevel,
     xp: (level, archetype) => calculateCumulativeXp(xpThresholds[archetype] || 3500, level),
-    equipment: async actor => {
-      const [object] = await require('./itemAuthoring').generate($, { count: 1, types: ['weapon'],
-        roomName, roomDescription, database: records, operator: actor.Name, purpose: 'personal equipment for this resident' });
-      const modifiers = require('./itemAuthoring').validateModifiers(object);
-      actor.Equipped.Weapon = { ...object, ...modifiers };
-      actor.Attack += modifiers.attack_modifier || 0; actor.Damage += modifiers.damage_modifier || 0;
-      actor.Armor += modifiers.ac || 0; actor.AC += modifiers.ac || 0; actor.Magic += modifiers.magic || 0;
-      return { ...object, ...modifiers };
-    }
+    equipPopulation: actors => require('./monsterEquipment').equip($, actors, {
+      roomName, roomDescription, database: records, party, consoleText: updatedGameConsole,
+      excluded: Object.values(records).flatMap(r => Inhabitants.parseEquipmentProperties(r?.inhabitants?.equipmentProperties).map(item => item.name))
+    })
   });
   RegionalAdventure.bindPopulation(room, result);
   if (typeof RoomCast !== 'undefined' && RoomCast.enabled()) try { await RoomCast.generateIsolated(sharedState, { runId: sharedState.getDungeonRunId(), geoKey, roomName, population: result.population, nearbyRooms: RoomCast.nearbyRooms(records, geoKey) }); } catch (error) { console.warn('[RoomCast]', error.message); }
   updatedGameConsole = updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,
     `Monsters in Room: \n${result.sheets || 'None'}\n`);
-  const properties = result.equipment.map(e => `{name: "${e.name}", type: "${e.type}", attack_modifier: ${e.attack_modifier || 0}, damage_modifier: ${e.damage_modifier || 0}, ac: ${e.ac || 0}, magic: ${e.magic || 0}}`).join(', ');
+  const properties = require('./monsterEquipment').serialize(result.equipment);
   // Retain the first seed only for first-time room construction, never as live HP authority.
   result.population.initialSheets=result.sheets;
   result.population.initialEquipmentProperties=properties || 'None';
@@ -4661,6 +4663,7 @@ async function runDungeonTestingMode($, updatedGameConsole, roomNameDatabaseStri
     roomNameDbString = storeSceneSpecInRoomDb(roomNameDbString, geoKey, sceneSpec);
     updatedGameConsole = await require('./secretRoomLoot').prepare($, sharedState, dungeon, updatedGameConsole);
     roomNameDbString = sharedState.getRoomNameDatabase();
+    await require('./roomHazardAuthoring').prepare($, dungeon, { runId: sharedState.getDungeonRunId() });
     const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
     dungeon = finalDungeon;
     sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
@@ -5880,6 +5883,7 @@ try {
     fromKey: `${entryPrevious.x},${entryPrevious.y},${entryPrevious.z}`, input: userInput });
   updatedGameConsole = await require('./secretRoomLoot').prepare($, sharedState, dungeon, updatedGameConsole);
   roomNameDatabaseString = sharedState.getRoomNameDatabase();
+  await require('./roomHazardAuthoring').prepare($, dungeon, { runId: sharedState.getDungeonRunId() });
   const finalDungeon = finalizeRoomDungeon(geoKey, dungeon, customTiles);
   sharedState.setRoomDungeon(geoCoords, finalDungeon, finalDungeon.customTiles || []);
   sharedState.setLastCoords(geoCoords);
@@ -8670,6 +8674,96 @@ async function tryDungeonDoorAction(userInput) {
     }
 }
 
+// Environmental hazards (exploration only; ignored while combat is active). Entering triggers them. A check rolls
+// immediately with a non-blocking dice notice; the optional "Pause on hazard rolls" setting uses the shared dice prompt.
+function resolveRoomHazardLocal(request) {
+    const run = roomHazardQueue.then(() => resolveRoomHazardNow(request));
+    roomHazardQueue = run.catch(() => {});
+    return run;
+}
+async function resolveRoomHazardNow(request) {
+    if (actionDice.active?.kind === 'combat') return null;
+    const coords = sharedState.getLastCoords(), geoKey = `${coords.x},${coords.y},${coords.z}`;
+    const dungeon = sharedState.getRoomDungeon(coords);
+    if (!dungeon?.roomHazards?.hazards?.length) return { error: 'There are no hazards here.' };
+    let roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+    const actorName = request.actor || roster.find(c => c.type === 'pc')?.name;
+    const entry = roster.find(c => c.name === actorName);
+    const point = require('./dungeonReach').position(entry, geoKey);
+    const plan = request.kind === 'enter' ? RoomHazards.planEnter(dungeon, request.hazardId, actorName, request.to || point, request.from || null)
+        : RoomHazards.planAction(dungeon, request.hazardId, actorName, request.kind, point);
+    if (!plan) return null;
+    if (plan.error) return { error: plan.error };
+    const pause = !!plan.check && RoomHazards.settings.pauseRolls && !actionDice.active;
+    // The hazard route can run between turns: read the live console, never a stale turn closure.
+    let consoleText = sharedState.getUpdatedGameConsole() || '';
+    try {
+        let roll = null, dice = null;
+        if (plan.check) {
+            const sheet = typeof CombatLife !== 'undefined' ? CombatLife.actors(consoleText).find(a => a.name === actorName) : null;
+            const modifier = RoomHazards.checkModifier(plan, sheet, typeof CombatLife !== 'undefined' ? CombatLife.saveBonus : undefined);
+            const spec = { actor: actorName, label: plan.check.label, target: plan.hazard.label, modifier, difficulty: plan.check.difficulty };
+            if (pause) {
+                actionDice.begin('exploration', geoKey, broadcast);
+                roll = await actionDice.roll({ ...spec, player: entry?.type === 'pc' });
+                if (!roll) return { content: 'No roll was made. The hazard is unchanged.' };
+                if (sharedState.getRoomDungeon(coords)?._geometryStamp !== dungeon._geometryStamp) return { content: 'The room changed while that roll was pending. Nothing happened.' };
+            } else {
+                // Same d20 source and success rule as ActionDice; no prompt, travel keeps going.
+                const natural = actionDice.random(20);
+                roll = { ...spec, natural, total: natural + modifier, success: natural + modifier >= spec.difficulty, auto: true };
+                // Same record shape as ActionDice results, so the portrait d20 slot animates it without a prompt.
+                dice = { id: require('node:crypto').randomUUID(), actor: actorName, label: spec.label, target: spec.target, sides: 20,
+                    natural, modifier, total: roll.total, difficulty: spec.difficulty, success: roll.success };
+                ActionFeedback.publish(broadcast, sharedState, { kind: 'hazard-roll', title: `${actorName}: ${spec.label}`,
+                    message: `d20 ${natural}${modifier ? (modifier > 0 ? ' + ' : ' - ') + Math.abs(modifier) : ''} = ${roll.total} vs DC ${spec.difficulty}: ${roll.success ? 'success' : 'fail'}`,
+                    result: roll.success ? 'success' : 'failure', actor: actorName, dice: { natural, modifier, total: roll.total, difficulty: spec.difficulty, success: roll.success } });
+            }
+        }
+        const next = JSON.parse(JSON.stringify(dungeon));
+        const result = RoomHazards.outcome(next, plan, plan.check ? roll.success : null, { margin: roll ? roll.total - plan.check.difficulty : 0 });
+        for (const [name, amount] of Object.entries(result.damage)) {
+            if (!(amount > 0)) continue;
+            const outcomes = { trap_damage: { [name]: amount } };
+            if (typeof CombatLife !== 'undefined') await prepareEnvironmentalSurvival(outcomes, consoleText);
+            consoleText = processGameUpdate(outcomes, consoleText);
+        }
+        roster = JSON.parse(sharedState.getCombatCharactersString() || '[]');
+        for (const [name, tile] of Object.entries(result.relocate)) {
+            const r = roster.find(c => c.name === name);
+            if (r) Object.assign(r, { mazeX: tile.x, mazeY: tile.y, mazePoint: { x: tile.x + .5, y: tile.y + .5 } });
+        }
+        sharedState.setCombatCharactersString(JSON.stringify(roster));
+        const finalized = finalizeRoomDungeon(geoKey, next, next.customTiles || []);
+        sharedState.setRoomDungeon(coords, finalized, finalized.customTiles || []);
+        RoomHazards.persist(sharedState, finalized);
+        const cells = Object.fromEntries(Object.keys(result.cells).map(k => [k, finalized.cells[k]]));
+        const text = `${roll ? `${plan.check.label}: d20 ${roll.natural}${roll.modifier ? ' + ' + roll.modifier : ''} vs DC ${plan.check.difficulty}. ` : ''}${result.message}`;
+        broadcast({ type: 'dungeonCellUpdate', geoKey, previousStamp: dungeon._geometryStamp, geometryStamp: finalized._geometryStamp, cells,
+            roomHazards: finalized.roomHazards, hazardEvent: { hazardId: plan.hazard.id, kind: plan.hazard.kind, actor: actorName, effects: result.effects,
+                damage: result.damage, relocate: result.relocate, message: text, rolled: !!roll, paused: pause, dice } });
+        ActionFeedback.publish(broadcast, sharedState, { kind: 'hazard', title: plan.hazard.label.replace(/^./, c => c.toUpperCase()), message: result.message,
+            result: Object.keys(result.damage).length ? 'harmed' : 'observed', actor: actorName });
+        console.info('[RoomHazard]', JSON.stringify({ geoKey, hazard: plan.hazard.id, kind: plan.kind, actor: actorName, roll: roll && { natural: roll.natural, success: roll.success, paused: pause }, damage: result.damage, changed: Object.keys(cells).length }));
+        // A realtime result (eventId, runId, geoKey) so the client applies HP, portraits and the log line at once.
+        return { type: 'hazard_result', passive: true, eventId: require('node:crypto').randomUUID(), runId: sharedState.getDungeonRunId(), geoKey, dice,
+            content: text, updatedGameConsole: sharedState.getUpdatedGameConsole(), combatCharactersString: sharedState.getCombatCharactersString(),
+            roomNameDatabaseString: sharedState.getRoomNameDatabase(), actionOnly: true, roomHazard: true, rolled: !!roll, paused: pause, damage: result.damage, relocate: result.relocate };
+    } finally { if (pause) actionDice.end(); }
+}
+async function tryRoomHazardAction(userInput) {
+    if (actionDice.active?.kind === 'combat') return null;
+    const dungeon = sharedState.getRoomDungeon(sharedState.getLastCoords());
+    const action = RoomHazards.intent(userInput, dungeon);
+    if (!action) return null;
+    const result = await resolveRoomHazardLocal(action);
+    if (!result) return null;
+    if (result.error) return { content: result.error, actionOnly: true };
+    const { type, passive, eventId, ...turnResult } = result; // typed realtime fields belong to the walking route only
+    return turnResult;
+}
+
+roomHazardResolver = resolveRoomHazardLocal;
 let combatSpace = null;
 let combatPopulation = null;
 let combatTurnFlow = null;
@@ -8797,7 +8891,10 @@ function gameConsoleForPerception(consoleText = updatedGameConsole) {
   const population = key && sharedState.getRoomPopulation(key);
   const perception = Inhabitants.perceive(dungeon, roster, population);
   const perceived = Inhabitants.perceivedConsole(consoleText, Inhabitants.nearbyMonsterNames(dungeon, roster, population, perception.player, { conversation:true }));
-  return require('../assets/gameLogContent').withoutLootLists(perceived, { inventory: false });
+  const hazards = typeof RoomHazards !== 'undefined' && dungeon?.roomHazards?.hazards?.length ?
+    require('./roomHazardAuthoring').context(dungeon, perception.player) : [];
+  return require('../assets/gameLogContent').withoutLootLists(perceived, { inventory: false }) +
+    (hazards.length ? '\nEnvironmental Hazards: ' + JSON.stringify(hazards) : '');
 }
 async function handleCombatRound($, userInput, combatMode) {
     const currentConsole = sharedState.getUpdatedGameConsole?.() || updatedGameConsole;
@@ -12834,6 +12931,8 @@ If there are monsters in the room, they may not know who Suzerain is or understa
         else {
             const doorAction = await tryDungeonDoorAction(userInput);
             if (doorAction) return doorAction;
+            const hazardAction = await tryRoomHazardAction(userInput);
+            if (hazardAction) return hazardAction;
         }
     }
     let combatLog = ''; // Declare combatLog with an empty string as the initial value
@@ -13140,6 +13239,7 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   else if (enteringRoom) await $.user`ROOM ENTRY NARRATION: Finish the full Retort entry scene using the room, puzzle, current quest, task-seeding instructions and history already supplied. Carry through the established quest hook and let nearby companions react to the place and its implications. This is not a two-greeting cache update. Do not duplicate the static room description or puzzle that the game already displays. Do not invent quest completion, rewards, equipment, exits, a replacement boss, or dialogue from distant or undiscovered inhabitants.`;
   if (entryQuestContact) await $.user`The entry quest hook has a real, visibly encountered ${entryQuestContact.state} contact within speaking distance: ${JSON.stringify(entryQuestContact)}. Introduce this character naturally and have them seed the EXISTING quest in actual labelled speech, with an invitation or useful next lead supported by the established task instructions. They are not an enemy, and their greeting is not quest completion. No other unseen group members are introduced by association. Do not invent a different quest giver or relay private facts from distant inhabitants.`;
   if (responseAudience?.directed) await $.user(DialogueAudience.prompt(responseAudience));
+  if (responseAudience?.directed && responseAudience.responders.length) await $.user`DIRECT ADDRESS: every explicitly named available recipient must answer the player's actual question aloud in this response; a group address needs at least one relevant responder, not a chorus. A pause, gesture, atmosphere or future cached remark is not an answer. Refusal, ignorance or a hostile warning is valid; do not invent cooperation or combat results.`;
   if (residentFavorContext.length) await $.user`VERIFIED LOCAL FAVOR CONTRACTS: ${JSON.stringify(residentFavorContext)}. These are separate from the main quest. Explain the named resident's actual offer, concrete objective and invitation reward naturally. An offered task has NOT been accepted. Work and recruitment require their real actions; prose cannot complete them. Do not substitute a vague untracked errand or additional conditions.`;
   if (typeof CampaignMemory !== 'undefined') {
     const cacheCharacters = describeCharacters(dialogueRoster, population).filter(actor => replyNames.includes(actor.name));
@@ -13211,13 +13311,29 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
   }
   spoken = Inhabitants.extractDialogue(result.content || result,[...audibleNames,...replyNames],{audibleNames, responsePolicy: responseAudience});
   spoken.dialogue = spoken.dialogue.filter(row=>audibleNames.includes(row.speaker));
+  let unanswered = typeof DialogueAudience !== 'undefined' ? DialogueAudience.missingResponses(responseAudience, spoken.dialogue) : [];
+  if (unanswered.length && !result.socialResults?.length) {
+    console.info('[DirectDialogue]',JSON.stringify({geoKey,phase:'reply-required',speakers:unanswered}));
+    const answer = await require('./holodekNarration').generate($, {
+      consoleText:perceivedGameConsole,userInput,currentSituation:spoken.content,replyOnly:true,
+      characters:describeCharacters(dialogueRoster,population),audibleNames,responseAudience,requiredSpeakers:unanswered,
+      localFavors:residentFavorContext,recollections:characterMemory,journey:population?.journey,
+      personalMemories:typeof CampaignMemory!=='undefined'?CampaignMemory.dialogueContext(sharedState,describeCharacters(dialogueRoster,population),userInput || '',3600):[]
+    });
+    const extracted=Inhabitants.extractDialogue(answer.content,[...audibleNames,...replyNames],{audibleNames,responsePolicy:responseAudience});
+    spoken={...spoken,content:[spoken.content,extracted.content].filter(Boolean).join('\n\n'),
+      dialogue:[...spoken.dialogue,...extracted.dialogue],replies:[...spoken.replies,...extracted.replies]};
+    unanswered=DialogueAudience.missingResponses(responseAudience,spoken.dialogue);
+  }
+  if (unanswered.length && !result.socialResults?.length) throw Error('Direct dialogue did not produce a live response from: '+unanswered.join(', '));
   response = spoken.content;
   if (residentFavorOffers.length) response += '\n\n'+residentFavorOffers.map(m=>`${m.invitationPending?'Recruitment Invitation':'Local Request'} (${m.status}): ${m.invitationPending?m.description:ResidentFavors.requestDescription(m)}`+
     (m.status==='offered'?` Review the request and choose whether to accept it. You can also use "accept request from ${m.recipient}" or "decline request from ${m.recipient}".`:'')).join('\n');
   if (residentFavorOffers.errors?.length) response += '\n\n'+residentFavorOffers.errors.join('\n');
   console.info('[StoryNarration]', JSON.stringify({ geoKey, phase: initialArrival ? 'arrival' : enteringRoom ? 'entry' : 'turn',
     status: response.trim() ? 'story' : 'metadata-only', storyChars: response.length, rawChars: String(result.content || result).length,
-    permittedSpeakers: audibleNames.length, spokenPassages: spoken.dialogue.length, protocolWarnings: spoken.dialogueProtocolWarnings || [] }));
+    permittedSpeakers: audibleNames.length, spokenPassages: spoken.dialogue.length, directed:!!responseAudience?.directed,
+    requestedResponders:responseAudience?.responders || [], unanswered, protocolWarnings: spoken.dialogueProtocolWarnings || [] }));
   if (initialArrival) console.info('[ArrivalNarration]', JSON.stringify({ geoKey, speakers: spoken.dialogue.map(row => row.speaker) }));
   if (enteringRoom) console.info('[EntryDialogue]',JSON.stringify({geoKey,mode:'full-retort',nearby:audibleNames,
     questContact:entryQuestContact?.speaker || null,
@@ -13822,6 +13938,7 @@ async function generatePartyCharacterProfiles(characters, runId) {
 // Export everything the rest of the app needs
 module.exports = {
   finalizeRoomDungeon,
+  resolveRoomHazard,
   retortWithUserInput,
   runNpcAutonomyTick,
   generateCharacterSpriteSpecWithRetort,

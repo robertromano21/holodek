@@ -30,15 +30,19 @@
     return lo > .03 ? lo : hi > .03 ? hi : null;
   }
   function visible(dungeon, camera, dir, t, target) {
+    let lastX,lastY,c,key,solid;
     for (let i = 1; i < Math.ceil(t * 24); i++) {
       const d = i / 24, x = camera.x + dir.x * d, y = camera.y + dir.y * d, z = camera.eyeZ + dir.z * d;
-      const key = `${Math.floor(x)},${Math.floor(y)}`, c = dungeon.cells[key];
+      const cx=Math.floor(x),cy=Math.floor(y);
+      if(cx!==lastX||cy!==lastY){
+        lastX=cx;lastY=cy;key=`${cx},${cy}`;c=dungeon.cells[key];
+        solid=c&&(c.tile==='wall'||c.tile==='torch'||c.tile==='door'&&!c.door?.isOpen||typeof c.tile==='string'&&c.tile.startsWith('custom_')||c.tile==='pillar');
+      }
       if (key === target.key) continue;
       if (!c) return false;
       const renderedFloor = camera.floorHeightAt?.(x, y);
       const f = Number.isFinite(renderedFloor) ? renderedFloor : c.floorHeight || 0;
       if (z < f || c.roof && z >= c.roof.height) return false;
-      const solid = c.tile === 'wall' || c.tile === 'torch' || c.tile === 'door' && !c.door?.isOpen || typeof c.tile === 'string' && c.tile.startsWith('custom_') || c.tile === 'pillar';
       const height = c.structureHeight ?? Math.max(.5, (c.ceilHeight ?? f + 2) - f);
       if (solid && z >= f && z <= f + height) return false;
     }
@@ -99,13 +103,13 @@
         hint: !near ? 'Walk closer to interact' : !inspect && e.state.status === 'complete' ? 'Complete' : '',
         detail: near && f.id === 'plaque' ? P.clue(e.definition) : near && f.id === 'receiver' && e.state.status === 'complete' ? e.definition.lore : '' });
     }
-    for (const item of root.getVisibleSceneObjects?.() || []) {
-      if (Array.isArray(camera?.billboards)) continue;
+    if (!Array.isArray(camera?.billboards)) for (const item of root.getVisibleSceneObjects?.() || []) {
       if (Math.hypot(item.x + .5 - player.x, item.y + .5 - player.y) > 18) continue;
       const near = root.ItemInteractionUi?.reachable(dungeon, player, item);
       result.push({ type: 'item', item, key: `${item.x},${item.y}`, x: item.x + .5, y: item.y + .5,
         width: .55, height: .5, label: item.name, enabled: !!near, hint: near ? '' : 'Walk closer to take' });
     }
+    result.push(...(root.RoomHazardsUi?.candidates(dungeon, player) || []));
     const x = Math.floor(player.x), y = Math.floor(player.y);
     for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
       const key = `${x + dx},${y + dy}`, c = dungeon.cells[key];
@@ -118,7 +122,7 @@
       const props = [];
       for (let dy = -18; dy <= 18; dy++) for (let dx = -18; dx <= 18; dx++) {
         const key = `${x + dx},${y + dy}`, cell = dungeon.cells[key];
-        if (!cell || cell.puzzleFixture || !(cell.tile === 'pillar' || typeof cell.tile === 'string' && cell.tile.startsWith('custom_'))) continue;
+        if (!cell || cell.puzzleFixture || cell.hazardId || !(cell.tile === 'pillar' || typeof cell.tile === 'string' && cell.tile.startsWith('custom_'))) continue;
         const tile = dungeon.tiles?.[cell.tile], spec = tile?.spriteSpec || {};
         const placed = dungeon.sceneLandmarks?.find(p => p.x === x + dx && p.y === y + dy);
         const label = placed?.label || tile?.landmark?.label || placed?.type || tile?.landmark?.type || spec.voxelShape || (cell.tile === 'pillar' ? 'Pillar' : 'Stonework');
@@ -133,10 +137,15 @@
     return result;
   }
   function pick(dungeon, camera, player, u, v) {
+    return pickPrepared(dungeon,camera,player,u,v,()=>candidates(dungeon,player,camera));
+  }
+  function pickPrepared(dungeon, camera, player, u, v, getCandidates, expected = null) {
     if (![u, v, camera?.x, camera?.y, camera?.eyeZ, camera?.dirX, camera?.dirY, camera?.planeScale, camera?.verticalScale].every(Number.isFinite) ||
         u < 0 || u > 1 || v < 0 || v > 1) return null;
-    const dir = ray(camera, u, v), hits = [];
+    const dir = ray(camera, u, v);
+    let nearest = null;
     for (const target of camera.billboards || []) {
+      if (nearest && target.distance >= nearest.distance) continue;
       if (target.character?.discoveryState === 'pending' || (target.character?.hp ?? 1) <= 0 || target.character?.state === 'Dead') continue;
       if (target.character && root.isDungeonActorPresent && !root.isDungeonActorPresent(target.character)) continue;
       const box = target.screen, pixels = target.pixels;
@@ -145,26 +154,35 @@
       const pu = (u - box.left - (box.upperShift || 0) * (1 - pv)) / (box.right - box.left);
       if (pu < 0 || pu >= 1 || pv < 0 || pv >= 1 || !(target.distance > .03)) continue;
       if (pixels?.data && pixels.data[(Math.floor(pv * pixels.h) * pixels.w + Math.floor(pu * pixels.w)) * 4 + 3] < 128) continue;
-      if (visible(dungeon, camera, dir, target.distance, target)) hits.push(target);
+      if (target===expected || visible(dungeon, camera, dir, target.distance, target)) nearest = target;
     }
-    for (const target of candidates(dungeon, player, camera)) {
+    // Discovery only asks whether this exact billboard wins. Check nearer blockers
+    // first; defer its own long geometry trace until it could actually be seen.
+    if (expected && nearest !== expected) return nearest;
+    for (const target of getCandidates()) {
       if(target.type==='art'&&target.art.surface==='wall'&&['x','y'].includes(target.art.axis)&&
         (camera[target.art.axis]-target.art.position[target.art.axis])*(target.art.sign||-1)<0)continue;
       const z = dungeon.cells[target.key]?.floorHeight || 0;
       const distance = intersect({ x: camera.x, y: camera.y, z: camera.eyeZ }, dir,
         target.box || { x: target.x - target.width / 2, y: target.y - target.width / 2, z, sx: target.width, sy: target.width, sz: target.height });
+      if (distance === null || nearest && distance >= nearest.distance) continue;
       if(distance!==null&&target.type==='art'&&target.art.kind==='mosaic'&&root.MosaicDesigns){
         const b=target.box,px=camera.x+dir.x*distance,py=camera.y+dir.y*distance,pz=camera.eyeZ+dir.z*distance;
         const u=target.art.surface==='floor'?(px-b.x)/b.sx:target.art.axis==='x'?(py-b.y)/b.sy:(px-b.x)/b.sx;
         const v=target.art.surface==='floor'?(py-b.y)/b.sy:1-(pz-b.z)/b.sz;
         if(!root.MosaicDesigns.contains(target.art,u,v))continue;
       }
-      if (distance !== null && visible(dungeon, camera, dir, distance, target)) hits.push({ ...target, distance });
+      if (visible(dungeon, camera, dir, distance, target)) {
+        nearest = { ...target, distance };
+        if (expected) return nearest;
+      }
     }
-    return hits.sort((a, b) => a.distance - b.distance)[0] || null;
+    return expected && !visible(dungeon,camera,dir,expected.distance,expected) ? null : nearest;
   }
   function visibleBillboards(dungeon,camera,type=null){
     const targets=camera.billboards||[],result=[];
+    let prepared;
+    const getCandidates=()=>prepared ||= candidates(dungeon,camera,camera);
     for(const target of targets){
       if(type&&target.type!==type)continue;
       const b=target.screen,p=target.pixels;if(!b||!p?.data||!(b.bottom>b.top)||!(b.right>b.left))continue;
@@ -178,7 +196,7 @@
           const v=b.top+(y+.5)/p.h*(b.bottom-b.top);
           const u=b.left+(x+.5)/p.w*(b.right-b.left)+(b.upperShift||0)*(1-(y+.5)/p.h);
           if(u<0||u>1||v<0||v>1)continue;
-          if(pick(dungeon,camera,camera,u,v)===target){seen=true;break;}
+          if(pickPrepared(dungeon,camera,camera,u,v,getCandidates,target)===target){seen=true;break;}
         }
       }
       if(seen)result.push(target);
@@ -186,8 +204,8 @@
     return result;
   }
   function visibleWritings(dungeon,camera,player=camera) {
-    const result=[];
-    for(const target of candidates(dungeon,player,camera).filter(t=>t.type==='writing'&&t.enabled)) {
+    const result=[],prepared=candidates(dungeon,player,camera);
+    for(const target of prepared.filter(t=>t.type==='writing'&&t.enabled)) {
       const b=target.box,x=b.x+b.sx/2,y=b.y+b.sy/2,z=b.z+b.sz/2;
       const dx=x-camera.x,dy=y-camera.y,t=dx*camera.dirX+dy*camera.dirY;
       if(t<=.03)continue;
@@ -195,7 +213,7 @@
       const v=.5+(camera.viewShift||0)-(z-camera.eyeZ)*camera.verticalScale/(2*t);
       if(u<0||u>1||v<0||v>1)continue;
       // Use the same nearest-hit/occlusion rules as clicks, not a room-wide proximity trigger.
-      const hit=pick(dungeon,camera,player,u,v);
+      const hit=pickPrepared(dungeon,camera,player,u,v,()=>prepared);
       if(hit?.type==='writing'&&hit.inscription.id===target.inscription.id)result.push(target);
     }
     return result;

@@ -105,7 +105,7 @@ function enforceDungeon(dungeon, spec = dungeon?.sceneSpec || {}, setting = curr
   const changes = [];
   for (const [tile, entry] of Object.entries(dungeon.tiles || {})) {
     const original = entry?.spriteSpec?.voxelShape;
-    if ((ENGINE_SHAPE.test(original || '') && V.architecture[original]) || entry?.spriteSpec?.puzzleControl) continue;
+    if ((ENGINE_SHAPE.test(original || '') && V.architecture[original]) || entry?.spriteSpec?.puzzleControl || entry?.hazardTile) continue;
     if (!original && tile !== 'pillar') continue;
     // Natural ground cover is an approved shared suite outdoors, not a reason to plant dead trees in a station.
     if (spec.indoor === false && (V.vegetation[original] || V.biomeProps[original])) continue;

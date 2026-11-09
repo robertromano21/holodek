@@ -7,7 +7,7 @@ const LOCAL=new Set(['name','description','roomDescription','indoor','isIndoor',
   'monsters','inhabitants','environmentIntent','cityRoom','campaignSetting','populationComplete','startingResidentsComplete','visited',
   'puzzleDescription','puzzleSolution','puzzleMechanism','sceneSpec','blueprint','customTiles','illustration','preparedBuild','builder',
   'groundInventoryVersion','groundInventory','services','minorMissions','recruitmentInvitations','recruitmentDecisions','market','venueDesk','venueDesks','readables','bookReadings','bookFacts',
-  'questWritings','questStories','questScenes','itemTransfers','deliveryReceipts','deliveryDelegates','templeSuppression','secretDoors','physicalPuzzle',
+  'questWritings','questStories','questScenes','itemTransfers','deliveryReceipts','deliveryDelegates','templeSuppression','secretDoors','physicalPuzzle','roomHazards',
   'randomEncounters','encounters','combatDefeats','defeatEvidence','cityFloorContext','namePending','descriptionAuthorship']);
 const clone=v=>v==null?v:structuredClone(v);
 const keyOf=c=>`${c.x},${c.y},${c.z}`;
