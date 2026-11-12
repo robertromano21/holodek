@@ -125,7 +125,27 @@ for (const component of ['music', 'art', 'mechanism']) test(component + ' actual
       require('../retort/physicalPuzzleDesign').generateDesign($, {
         roomName: 'The Broken Observatory', roomDescription: 'A ruined observatory with a wind-driven bronze orrery.', seed: 'offline' }));
   } finally { Models.restore(before); }
-  const { result, requests } = await runtime($ => C.request($, { ...options, attempts: 1, validate: raw => raw }));
+  const artAnswer = body => {
+    const sample = value(body.response_format.json_schema.schema);
+    const fill = node => {
+      if (Array.isArray(node)) return node.forEach(fill);
+      if (!node || typeof node !== 'object') return;
+      if (node.kind !== undefined && node.x !== undefined) {
+        Object.assign(node, { kind: 'wall', x: 1, y: 1, w: 50, h: 50, count: 1 });
+        if (node.parts) for (const key of Object.keys(node.parts)) node.parts[key] = 'none';
+        if (node.assembly) Object.assign(node.assembly, { preset: 'cottage', condition: 'intact', roof: 'gable',
+          windows: 'arched', material: 'stone', stack: ['wall_seg:stone'], attach: ['lantern@wall.front:0.5'],
+          repeat: ['colonnade_bay:stone*2@right'] });
+      }
+      if (node.sky !== undefined && node.shadow !== undefined)
+        Object.assign(node, { sky: '#8090aa', ground: '#776644', shadow: '#181818', stone: '#998877', light: '#ffeebb' });
+      Object.values(node).forEach(fill);
+    };
+    fill(sample);
+    return sample;
+  };
+  const { result, requests } = await runtime($ => C.request($, { ...options, attempts: 1, validate: raw => raw }),
+    component === 'art' ? artAnswer : undefined);
   assert.ok(result.value, result.error?.message);
   assert.ok(requests.length > 2); assert.ok(requests.every(body => size(body) <= Budget.CEILING));
 });

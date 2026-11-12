@@ -55,7 +55,7 @@ function validate(raw, { count, database = {}, excluded = [], healingOnly = fals
 }
 async function generate($, { count = 4, roomName, roomDescription, database = {}, excluded = [], purpose = 'room objects',
   operator, healingOnly = false, allowHealing = true, types = TYPES, typePlan: suppliedPlan,
-  equipmentContext, world = require('./settingLayer').current(), random = Math.random } = {}) {
+  equipmentContext, world = require('./settingLayer').current(), random = Math.random, budget } = {}) {
   // Preserve the original independent 25% category roll; retries must reuse the same slots.
   const typePlan=suppliedPlan ? [...suppliedPlan] : selectTypes(count,{types,healingOnly,random});
   if(!Number.isInteger(count)||count<1||count>8||typePlan.length!==count||typePlan.some(type=>!TYPES.includes(type)||!types.includes(type)))
@@ -75,7 +75,7 @@ async function generate($, { count = 4, roomName, roomDescription, database = {}
       magic: { type: Number, enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
       consumable_kind: C.choice(allowHealing ? ['none', 'healing'] : ['none']), description: C.nonblankText(320) };
     const result = await C.request(agent, { component: 'portable-items', maxTokens: 240 * count + 300,
-      parameters: { items: C.list(fields) }, validate: raw => validate(raw, { count, database, excluded, healingOnly, allowHealing, types, typePlan }) });
+      parameters: { items: C.list(fields) }, ...(budget ? { budget } : {}), validate: raw => validate(raw, { count, database, excluded, healingOnly, allowHealing, types, typePlan }) });
     if (!result.value) throw result.error || Error('Portable item authoring failed; no stock fallback was installed.');
     return result.value;
   };

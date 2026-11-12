@@ -30,6 +30,11 @@
       const ok = el('button', { className: 'popup-button', textContent: 'Save key', type: 'button' }), no = el('button', { className: 'popup-button', textContent: 'Cancel', type: 'button' });
       d.append(el('p', { textContent: (persistOnly ? name + ' is available for this session, but its key is not stored locally. Enter it once to remember it. The current environment key keeps priority. ' : name + ' needs an API key. ') + 'It is saved locally in keys/' + provider + '.key, outside Git, and loads automatically next time. It is not kept in browser storage or saved on the website.' }), inp, el('div', { className: 'ms-foot' }, [ok, no, msg]));
       const done = v => { inp.value = ''; d.close(); d.remove(); resolve(v); };
+      if (persistOnly) {
+        const session = el('button', { className: 'popup-button', textContent: 'Use session key', type: 'button' });
+        session.addEventListener('click', () => done(true));
+        d.append(session);
+      }
       ok.addEventListener('click', async () => { if(ok.disabled)return; ok.disabled=true; msg.textContent = 'Saving...';
         try { const r = await fetch('/provider-key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, key: inp.value, persistOnly }) }); const v = await r.json(); inp.value = '';
           if (!r.ok) throw Error(v.error || 'Could not save the key.'); done(true); } catch (e) { msg.textContent = e.message; ok.disabled=false; } });

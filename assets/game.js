@@ -9184,6 +9184,8 @@ function updateMonsterWandering(monsterEntries, reservedTiles, now, force = fals
   const roomKey = getCurrentCombatRoomKey();
   let anyMoved = false;
   monsterEntries.forEach(entry => {
+    // Autonomous work moves through host-verified paths, not the unrelated idle random walk.
+      if (['ready','active','paused'].includes(entry.residentPlan?.status)) { resetWalkFrame(entry); return; }
     if (window.DungeonInhabitants?.isDown(entry)) { resetWalkFrame(entry); return; }
     if (window.CommerceUi?.isInteracting?.(entry.name)) { resetWalkFrame(entry); return; }
     if (window.DungeonLife?.isWaitingToSpeak?.(entry.name)) { resetWalkFrame(entry); return; }

@@ -13,7 +13,19 @@ function budget(key) {
 function claim(unit) {
   if (unit.used >= unit.limit) throw Object.assign(Error('Generation recovery budget exhausted: initial attempt plus three retries.'),
     { code: 'GENERATION_BUDGET_EXHAUSTED', unit: unit.key, attempts: unit.used });
+  const operation = unit.operation;
+  if (operation && operation.used >= operation.limit) throw Object.assign(Error('Generation recovery budget exhausted for this operation: one attempt per batch plus three retries in total.'),
+    { code: 'GENERATION_BUDGET_EXHAUSTED', unit: operation.key, attempts: operation.used });
+  if (operation) ++operation.used;
   return ++unit.used;
+}
+// An operation made of independent batches (each a different request): every batch gets its own attempt budget,
+// and the whole operation is bounded by one attempt per batch plus RETRIES retries in total.
+function batches(key, count) {
+  if (!Number.isInteger(count) || count < 1) throw Error('A batched generation needs a positive batch count.');
+  const operation = budget(key + '|operation');
+  if (!operation.batched) Object.assign(operation, { limit: count + RETRIES, batched: true });
+  return index => Object.assign(budget(key + '|batch:' + index + '/' + count), { operation });
 }
 function providerRetry(error) {
   if (error?.recoverable === false || error?.fatal || error?.name === 'AbortError' || /CANCEL|ABORT|REFUS|AUTH|STALE/.test(error?.code || '')) return false;
@@ -39,4 +51,4 @@ function recoverable(error, phase = 'validation') {
   return ['PC_MODEL_EMPTY', 'MODEL_EMPTY_FINAL', 'MODEL_OUTPUT_LIMIT', 'PC_MODEL_OUTPUT_LIMIT', 'MODEL_SCHEMA'].includes(code) ||
     /structured|schema|function call|returned text/i.test(message);
 }
-module.exports = { RETRIES, ATTEMPTS, scope, budget, claim, recoverable, providerRetry, ownsTransport, withTransportOwner, backoff };
+module.exports = { RETRIES, ATTEMPTS, scope, budget, batches, claim, recoverable, providerRetry, ownsTransport, withTransportOwner, backoff };

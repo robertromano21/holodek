@@ -50,7 +50,8 @@
 <script src="/assets/architectureDesigns.js?v=architecture-designs-2"></script>
 <script src="/assets/urbanDesigns.js?v=urban-designs-1"></script>
 <script src="/assets/genreExpansion.js?v=urban-biomes-1-fixtures-2"></script>
- <script src="/assets/roomIllustration.js?v=world1-expansion-1"></script>
+ <script src="/assets/sceneryGrammar.browser.js?v=scenery-grammar-1"></script>
+ <script src="/assets/roomIllustration.js?v=scenery-grammar-1"></script>
  <script src="/assets/artViewerUi.js?v=world1-1"></script>
  <script src="/assets/roomArtUi.js?v=remote-room-art-3"></script>
  <script src="/assets/artPresentation.js?v=genre-fixtures-1"></script>
@@ -62,7 +63,7 @@
  <script defer src="/assets/worldInteractionUi.js?v=stored-read-actions-1-hazards-1-visibility-batch-1"></script>
  <script src="/assets/sceneAtmosphere.js"></script>
  <script src="/assets/renderCharacterSprite.js?v=suzerain-pass-2"></script>
- <script src="/assets/combatCharacterUi.js?v=recruitment-local-tasks-1"></script>
+ <script src="/assets/combatCharacterUi.js?v=recruitment-local-tasks-1-resident-plans-1"></script>
  <script src="/assets/itemGiveUi.js"></script>
 <script src="/assets/questSceneUi.js?v=resident-recruitment-1"></script>
  <script src="/assets/objectDiscovery.js?v=exploration-icons-1"></script>
@@ -129,10 +130,10 @@
 <script src="/assets/roomEntry.js?v=recruitment-delivery-1"></script>
 <script src="/assets/dungeonGeometryStamp.js?v=shared-geometry-1"></script>
 <script src="/assets/websiteRoomReady.js?v=prefetch-stamp-2"></script>
-<script src="/assets/modelSelectUi.js?v=combined-20261022"></script>
+<script src="/assets/modelSelectUi.js?v=combined-20261022-session-key-1"></script>
 <script src="/assets/characterProfiles.js?v=resident-history-2"></script>
 <script src="/assets/dialogueAudience.js?v=mode4-isolation-1-required-response-1"></script>
-<script src="/assets/dungeonInhabitants.js?v=starter-placement-refusal-1-repeat-subtitle-1-equipment-2"></script>
+<script src="/assets/dungeonInhabitants.js?v=starter-placement-refusal-1-repeat-subtitle-1-equipment-2-resident-plans-1"></script>
 <script src="/assets/questWritings.js"></script>
 <script src="/assets/dialogueHistory.js"></script>
 <script src="/assets/campaignMemory.js?v=resident-history-2"></script>
@@ -153,7 +154,7 @@
 <script src="/assets/cityBuildingUi.js?v=street-lobby-no-transition-2"></script>
 <script src="/assets/cityCirculationUi.js?v=full-width-stair-landings-2"></script>
 <script src="/assets/combatMapPoses.js?v=suzerain-pass-1"></script>
-<script src="/assets/game.js?v=quest-handoff-recovery-1-attack-1-hazards-2-party-turn-continuity-1"></script>
+<script src="/assets/game.js?v=quest-handoff-recovery-1-attack-1-hazards-2-party-turn-continuity-1-resident-plans-1"></script>
 <script src="/assets/sidPlayer.js?v=processor-retirement-1"></script>
 <script src="/assets/sfx.js?v=audio-lifecycle-diagnostics-1-poses-2-attack-1"></script>
 <script src="/assets/saveGameTranscript.js"></script>
@@ -706,6 +707,9 @@ function toggleCombatMode() {
       }
       const columns = Array.from(document.querySelectorAll('.character-column'));
       const spriteLookup = getPartyInfoSpriteLookup();
+      const provisionalNames = new Set((window.combatCharacters || [])
+        .filter(entry => entry?.recruitmentLease)
+        .map(entry => String(entry.name || entry.Name || '').toLowerCase()));
       const isPlaceholderLabel = (label) => {
         const normalized = String(label || '').trim();
         return !normalized || /^PC$/i.test(normalized) || /^NPC\s*\d+$/i.test(normalized);
@@ -736,7 +740,7 @@ function toggleCombatMode() {
       });
 
       const rosterEntries = Array.isArray(window.combatCharacters)
-        ? window.combatCharacters.filter(entry => entry && (entry.type === 'pc' || entry.type === 'npc'))
+        ? window.combatCharacters.filter(entry => entry && !entry.recruitmentLease && (entry.type === 'pc' || entry.type === 'npc'))
         : [];
 
       const ordered = [];
@@ -764,12 +768,13 @@ function toggleCombatMode() {
 
       columnEntries.forEach((entry) => {
         const key = String(entry.label || '').toLowerCase();
-        if (isPlaceholderLabel(entry.label)) return;
+        if (isPlaceholderLabel(entry.label) || provisionalNames.has(key)) return;
         if (usedNames.has(key)) return;
         ordered.push(entry);
       });
 
-      return ordered.length ? ordered : columnEntries.filter((entry) => !isPlaceholderLabel(entry && entry.label));
+      return ordered.length ? ordered : columnEntries.filter((entry) =>
+        !isPlaceholderLabel(entry && entry.label) && !provisionalNames.has(String(entry.label || '').toLowerCase()));
     }
 
     function formatPartySheetHtml(entry) {

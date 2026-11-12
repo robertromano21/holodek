@@ -88,6 +88,7 @@ const {prepare:prepareReadableAction} = require('./readableActions');
 const QuestScenes = require('./questScenes');
 const RegionalAdventure = require('./regionalAdventure');
 const FactionMemory = require('./factionMemory');
+const LivingRegion = require('./livingRegion');
 const AdventureJournal = require('./adventureJournal');
 const QuestWritings = require('../assets/questWritings');
 const Inhabitants = require('../assets/dungeonInhabitants');
@@ -160,6 +161,7 @@ function finalizeRoomDungeon(geoKey, dungeon, customTiles = []) {
       !dungeon.sceneObjects?.some(item => item.name === e.name));
     if (missing) Object.assign(dungeon, require('./openingQuestPreparation').installPhysical(dungeon, room, task, geoKey));
     QuestWritings.apply(dungeon, room);
+    if (typeof LivingRegion !== 'undefined') try { LivingRegion.applyPhysical(dungeon, geoKey, sharedState); } catch (error) { console.warn('[LivingRegion] fixture', error.message); }
   }
   if (!cachedGeometry) {
     require('./genreAssetPolicy').enforceDungeon(dungeon);
@@ -1008,6 +1010,7 @@ async function retortWithUserInput(userInput, broadcast, combatMode = sharedStat
   const requestedItem = options.realtimeEncounter || directCombat || typeof ItemTransfer === 'undefined' || !ItemTransfer.request ? null :
     await ItemTransfer.request(sharedState, populationService, userInput);
   if (requestedItem) return requestedItem;
+  if(!options.realtimeEncounter&&!directCombat){const planAction=require('./residentPlans').command(sharedState,userInput);if(planAction)return planAction;}
   const readableResult=options.realtimeEncounter||directCombat?null:await tryReadableItemAction(userInput);
   if(readableResult)return readableResult;
   const physicalPuzzleResult = options.realtimeEncounter || directCombat ? null : await tryPhysicalPuzzleAction(userInput);
@@ -2802,7 +2805,8 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
     const db = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
     records = db;
     room = db[geoKey] || {};
-    usedNames = Object.values(db).flatMap(record => [...Object.keys(record?.inhabitants?.actors || {}), ...(record?.regionalSite?.actors || []).map(a=>a.name)]);
+    usedNames = Object.values(db).flatMap(record => [...Object.keys(record?.inhabitants?.actors || {}), ...(record?.regionalSite?.actors || []).map(a=>a.name)])
+      .concat(typeof LivingRegion !== 'undefined' ? LivingRegion.reservedNames(db, geoKey) : []);
   } catch {}
   const seeded = sharedState.getRoomPopulation?.(geoKey) || room.inhabitants;
   if (seeded?.initialSheets) {
@@ -2844,6 +2848,7 @@ async function generateRoomInhabitantPopulation($, roomName, roomDescription, ge
     })
   });
   RegionalAdventure.bindPopulation(room, result);
+  if (typeof LivingRegion !== 'undefined') LivingRegion.bindPopulation(records, geoKey, result);
   if (typeof RoomCast !== 'undefined' && RoomCast.enabled()) try { await RoomCast.generateIsolated(sharedState, { runId: sharedState.getDungeonRunId(), geoKey, roomName, population: result.population, nearbyRooms: RoomCast.nearbyRooms(records, geoKey) }); } catch (error) { console.warn('[RoomCast]', error.message); }
   updatedGameConsole = updatedGameConsole.replace(/Monsters in Room:[\s\S]*?(?=Monsters Equipped Properties:)/,
     `Monsters in Room: \n${result.sheets || 'None'}\n`);
@@ -6220,6 +6225,11 @@ async function generateMissingRoomDetails($, object, construction = null) {
       currentRoomData = roomNameDatabasePlain[coordKey]; startRoom = roomNameDatabasePlain[startKey];
     }
   }
+  // Living region: a room inside a reserved footprint gets its required exits and identity on the foreground path too.
+  if (!construction && !currentRoomData.backgroundTopology && !currentRoomData.preparedBuild && !currentRoomData.visited && LivingRegion.obligations(roomNameDatabasePlain, coordKey)) {
+    require('./roomBuildTopology').prepare(roomNameDatabasePlain, coordKey, { seed: sharedState.getDungeonRunId?.() || '' });
+    currentRoomData = roomNameDatabasePlain[coordKey]; setRoomSafeLocal(roomNameDatabasePlain, coordKey, currentRoomData);
+  }
   if (construction || currentRoomData.backgroundTopology || currentRoomData.preparedBuild || FortifiedSites.isFloor(currentRoomData) || currentRoomData.cityRoom || currentRoomData.citySites) {
     updatedGameConsole = updatedGameConsole.replace(/^Room Name:.*$/m, `Room Name: ${currentRoomData.name}`);
     const fixed = Object.keys(currentRoomData.exits || {});
@@ -6353,18 +6363,9 @@ async function generateMissingRoomDetails($, object, construction = null) {
         let neighbor = getRoomSafeLocal(roomNameDatabasePlain, targetKey);
         let name = neighbor?.name;
         if (!name || /^(none|null|undefined|empty)$/i.test(String(name).trim())) {
-          if (WorldSetting.current() || (typeof StoryPrompts !== 'undefined' && StoryPrompts.isHolodek1())) {
-            name = await require('./holodekRoomWork').roomName($, { database: roomNameDatabasePlain,
-              sourceKey: coordKey, sourceName: roomName, direction,
-              forceOutdoor: !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0] });
-          } else {
-          $.model = 'gpt-4.1-mini';
-          $.temperature = 1.0;
-          await $.assistant`Generate only a room name for the existing ${direction} exit from ${roomName}. Do not redescribe or repopulate the current room. Current room description: ${roomDescription}`;
-          const response = await $.assistant.generation({ maxTokens: 40 });
-          name = response.content?.trim();
-          if (!name || /^(none|null|undefined|empty)$/i.test(name)) continue;
-          }
+          name = await require('./holodekRoomWork').roomName($, { database: roomNameDatabasePlain,
+            sourceKey: coordKey, sourceName: roomName, direction,
+            forceOutdoor: !WorldSetting.current() && coordKey === startKey && roomExitsArray.length > 1 && direction === roomExitsArray[0] });
         }
         if (!neighbor) {
           let shape;
@@ -6793,12 +6794,12 @@ Use only known facts here, not an invented list of exits. If outdoors, describe 
         attemptedSearches: existingTarget.attemptedSearches ?? 0,
         trapTriggered: existingTarget.trapTriggered ?? false,
         exits: {
-          ...existingTarget.exits,
-          [lockedDirection]: { status: "open", targetCoordinates: coordKey, key: null }
+          ...existingTarget.exits
         },
         objects: existingTarget.objects ?? [],
         monsters: existingTarget.monsters ?? { inRoom: "None", equippedProperties: "None", state: "None" }
       };
+      require('./roomBuildTopology').linkReturn(roomNameDatabasePlain, coordKey, lockedDirection, newCoordKey);
 
       updatedGameConsole = await syncObjectsOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
       updatedGameConsole = await syncKeysOnRoomEntry($, currentCoordinates, roomNameDatabasePlain, updatedGameConsole);
@@ -12375,7 +12376,7 @@ async function logThreadMessages() {
     };
     return runtime.run(runtime.retort(async $ => {
       StoryPrompts.appendOriginal($);
-      await $.user`Background construction work order for ${job.name} at ${job.key}. Author this registered room only, using the supplied adventure, regional and quest context. The PC game server alone owns live state, assignments and commits. Other assigned destinations and visited rooms are read-only context; shared topology is a proposal for the PC. Other assignments: ${(job.assignment?.assignments || []).filter(other => other.owner !== job.id && !['complete', 'failed', 'discarded', 'cancelled'].includes(other.phase)).map(other => other.destination).join(', ') || 'none'}. Do not simulate a player turn, advance a quest or make a character act.\n${updatedGameConsole}`;
+      await $.user`Background construction work order for ${job.name} at ${job.key}. Author this registered room only, using the supplied adventure, regional and quest context. The PC game server alone owns live state, assignments and commits. Other assigned destinations and visited rooms are read-only context; shared topology is a proposal for the PC. Other assignments: ${(job.assignment?.assignments || []).filter(other => other.owner !== job.id && !['complete', 'failed', 'discarded', 'cancelled'].includes(other.phase)).map(other => other.destination).join(', ') || 'none'}. Do not simulate a player turn, advance a quest or make a character act.${job.assignment?.livingRegion ? '\nLiving-region obligations for this room (engine-reserved and checked when the room is returned; keep these exits, this identity and these places, and author the scenery, people and story around them): ' + JSON.stringify(job.assignment.livingRegion) : ''}\n${updatedGameConsole}`;
       if (buildStage === 'all' || buildStage === 'population') await $.run(agent => generateMissingRoomDetails(agent, null, job));
       const populated = JSON.parse(sharedState.getRoomNameDatabase() || '{}');
       populated[job.key].description = updatedGameConsole.match(/^Room Description:[ \t]*(.*)$/m)?.[1] || '';
@@ -12519,6 +12520,12 @@ Backend Integration: Programmatic vs. Narrative Handling`;
         // Call generateMissingRoomDetails and check if a new room was generated
     if (typeof Economy !== 'undefined' && Economy.project(sharedState).initialized === 'new-game') {
       await CampaignSetting.prepareAtlas($, sharedState);
+      roomNameDatabaseString = sharedState.getRoomNameDatabase();
+    }
+    // Living region: authored once per new game (a loaded save keeps its own); failures are reported with a retry command.
+    if (typeof LivingRegion !== 'undefined') {
+      try { await LivingRegion.ensure($, sharedState, { userInput: typeof userInput === 'string' ? userInput : '', consoleText: updatedGameConsole }); }
+      catch (error) { console.warn('[LivingRegion] FAILED', error.message); }
       roomNameDatabaseString = sharedState.getRoomNameDatabase();
     }
     let preparedEntry = null;
@@ -13229,6 +13236,9 @@ if(!enteringRoom && typeof ResidentFavors!=='undefined')responseAudience=require
 const residentFavorOffers = !enteringRoom && typeof ResidentFavors !== 'undefined' ? await ResidentFavors.prepare(sharedState,$,userInput || '',
   { audibleNames,responseAudience,population }) : [];
 const residentFavorContext = typeof ResidentFavors !== 'undefined' ? ResidentFavors.context(sharedState,audibleNames) : [];
+// Living region moments are evaluated only on player turns: travel between its communities, rest in one, or a completed regional quest.
+let livingRegionTurn = null;
+if (typeof LivingRegion !== 'undefined') { try { livingRegionTurn = LivingRegion.turn(sharedState, { userInput: typeof userInput === 'string' ? userInput : '', enteringRoom, geoKey, consoleText: updatedGameConsole }); } catch (error) { console.warn('[LivingRegion] turn failed', error.message); } }
 if (residentFavorOffers.length) { require('./economy').refresh(sharedState); updatedGameConsole = sharedState.getUpdatedGameConsole(); }
 const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabitants.state(a)!=='Dead'&&
   (a.type==='npc'||population?.actors?.[a.name]?.status==='present')).map(a=>a.name);
@@ -13240,6 +13250,7 @@ const replyNames = dialogueRoster.filter(a=>a.type!=='pc'&&(a.hp ?? 1)>0&&Inhabi
   if (entryQuestContact) await $.user`The entry quest hook has a real, visibly encountered ${entryQuestContact.state} contact within speaking distance: ${JSON.stringify(entryQuestContact)}. Introduce this character naturally and have them seed the EXISTING quest in actual labelled speech, with an invitation or useful next lead supported by the established task instructions. They are not an enemy, and their greeting is not quest completion. No other unseen group members are introduced by association. Do not invent a different quest giver or relay private facts from distant inhabitants.`;
   if (responseAudience?.directed) await $.user(DialogueAudience.prompt(responseAudience));
   if (responseAudience?.directed && responseAudience.responders.length) await $.user`DIRECT ADDRESS: every explicitly named available recipient must answer the player's actual question aloud in this response; a group address needs at least one relevant responder, not a chorus. A pause, gesture, atmosphere or future cached remark is not an answer. Refusal, ignorance or a hostile warning is valid; do not invent cooperation or combat results.`;
+  if (livingRegionTurn?.prompt) await $.user(livingRegionTurn.prompt);
   if (residentFavorContext.length) await $.user`VERIFIED LOCAL FAVOR CONTRACTS: ${JSON.stringify(residentFavorContext)}. These are separate from the main quest. Explain the named resident's actual offer, concrete objective and invitation reward naturally. An offered task has NOT been accepted. Work and recruitment require their real actions; prose cannot complete them. Do not substitute a vague untracked errand or additional conditions.`;
   if (typeof CampaignMemory !== 'undefined') {
     const cacheCharacters = describeCharacters(dialogueRoster, population).filter(actor => replyNames.includes(actor.name));
@@ -13330,6 +13341,7 @@ After the prose append [[CHARACTER_DIALOGUE]] {"spoken":[{"speaker":"exact nearb
   if (residentFavorOffers.length) response += '\n\n'+residentFavorOffers.map(m=>`${m.invitationPending?'Recruitment Invitation':'Local Request'} (${m.status}): ${m.invitationPending?m.description:ResidentFavors.requestDescription(m)}`+
     (m.status==='offered'?` Review the request and choose whether to accept it. You can also use "accept request from ${m.recipient}" or "decline request from ${m.recipient}".`:'')).join('\n');
   if (residentFavorOffers.errors?.length) response += '\n\n'+residentFavorOffers.errors.join('\n');
+  if (livingRegionTurn?.notice) response += '\n\n'+livingRegionTurn.notice;
   console.info('[StoryNarration]', JSON.stringify({ geoKey, phase: initialArrival ? 'arrival' : enteringRoom ? 'entry' : 'turn',
     status: response.trim() ? 'story' : 'metadata-only', storyChars: response.length, rawChars: String(result.content || result).length,
     permittedSpeakers: audibleNames.length, spokenPassages: spoken.dialogue.length, directed:!!responseAudience?.directed,

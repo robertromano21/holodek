@@ -34,13 +34,13 @@
 
   function partyRoster(pcText, npcText, characters = []) {
     if (pcText === undefined && npcText === undefined) {
-      return characters.filter(c => c && ['pc', 'npc'].includes(c.type));
+      return characters.filter(c => c && ['pc', 'npc'].includes(c.type) && !c.recruitmentLease);
     }
     const lookup = new Map(characters.map(c => [String(c.name || c.Name).toLowerCase(), c]));
     const seen = new Set();
     return [...parseSheets(pcText, 'pc'), ...parseSheets(npcText, 'npc')].filter(c => {
       const key = c.name.toLowerCase();
-      if (seen.has(key)) return false;
+      if (seen.has(key) || lookup.get(key)?.recruitmentLease) return false;
       seen.add(key);
       return true;
     }).map(c => ({ ...lookup.get(c.name.toLowerCase()), ...c }));

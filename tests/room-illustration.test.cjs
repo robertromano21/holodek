@@ -1,8 +1,9 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict');
-const fs = require('node:fs/promises'), os = require('node:os'), path = require('node:path');
+const fs = require('node:fs/promises'), fsSync = require('node:fs'), os = require('node:os'), path = require('node:path'), vm = require('node:vm');
 const { createCanvas } = require('canvas');
 const Art = require('../assets/roomIllustration'), Service = require('../retort/roomIllustration');
+const Grammar = require('../assets/sceneryGrammar'), Pieces = require('../assets/sceneryPieces');
 const F = require('./fixtures/room-art.cjs');
 function state() {
   let run = 'test-run', coords = { x: 0, y: 0, z: 0 }, db = { '0,0,0': { name: 'The Remembered Portico',
@@ -41,6 +42,20 @@ test('every component renders within a bounded canvas; unknown commands, colors 
   const clean = Art.validate({ ...F.temple(), code: 'bad', layers: F.temple().layers.map(p => ({ ...p, label: '<bad>' })) });
   assert.equal(clean.code, undefined); assert.equal(clean.layers[0].label, undefined);
 });
+test('browser scenery bundle renders invented components with the same grammar as Node', () => {
+  const root = { HolodekFlags: {} }; root.window = root; root.globalThis = root;
+  const asset = name => fsSync.readFileSync(path.join(__dirname, '..', 'assets', name), 'utf8');
+  vm.runInNewContext(asset('sceneryGrammar.browser.js'), root);
+  vm.runInNewContext(asset('roomIllustration.js'), root);
+  assert.equal(typeof root.SceneryGrammar.applyLayout, 'function');
+  const plan = F.temple();
+  plan.layers[0] = { ...plan.layers[0], kind: 'memory_tower', parts: { profile: 'taper', body: 'shaft', cap: 'cone' } };
+  const browser = createCanvas(320, 200);
+  root.RoomIllustration.paint(browser.getContext('2d'), plan, 'same');
+  assert.deepEqual(browser.toBuffer(), render(plan, 'same').toBuffer());
+  const html = fsSync.readFileSync(path.join(__dirname, '..', 'assets', 'index.html'), 'utf8');
+  assert.ok(html.indexOf('/assets/sceneryGrammar.browser.js') < html.indexOf('/assets/roomIllustration.js'));
+});
 test('Modern paintings use unrestricted colors and richer landscape tools; only Retro quantizes them', () => {
   const Retro = require('../assets/retroGraphics'), p = F.vista(), before = JSON.stringify(p), c = render(p);
   const pixels = c.getContext('2d').getImageData(0, 0, 320, 200).data;
@@ -57,12 +72,26 @@ test('Grave Master receives saved identity, enum tools and physical constraints,
   const s = state(); s.db()['0,0,0'].solution = 'hidden secret'; s.db()['0,0,0'].inhabitants = { actors: { unseen: 'spy' } };
   const target = Service.context(s, '0,0,0'), prompts = [];
   const $ = { user: text => { prompts.push(text); }, assistant: { generation: async options => {
-    assert.equal(options.strictParameters, true); assert.deepEqual(options.parameters.layers[0].type.kind.enum, Art.allKinds || Art.kinds); // world1 ART_CATALOG appends kinds; equals Art.kinds when the flag is off
+    assert.equal(options.strictParameters, true); assert.equal(options.parameters.layers[0].type.kind.pattern, '^[a-z][a-z0-9_-]{0,40}$'); // known genre names include hyphens
+    const layer = options.parameters.layers[0].type;
+    for (const [slot, variants] of Object.entries(Grammar.PART_VARIANTS))
+      assert.deepEqual(layer.parts.type[slot].enum, variants);
+    assert.deepEqual(layer.assembly.type.preset.enum, Grammar.presetNames());
+    assert.deepEqual(layer.assembly.type.condition.enum, Grammar.CONDITIONS);
+    assert.deepEqual(layer.assembly.type.roof.enum, Pieces.ROOFS);
+    assert.deepEqual(layer.assembly.type.windows.enum, Pieces.WINDOWS);
+    assert.deepEqual(layer.assembly.type.material.enum, Pieces.MATERIALS);
+    for (const field of ['stack', 'attach', 'repeat']) {
+      const refs = layer.assembly.type[field][0].enum;
+      assert.ok(refs.includes('wall_seg:stone') && refs.includes('roof:onion') && refs.includes('window:arched'));
+      for (const ref of refs) assert.doesNotThrow(() => Grammar.validateAssembly({ [field]: [ref] }));
+    }
     return { content: JSON.stringify(F.temple()) };
   } } };
   assert.deepEqual(await Service.generate($, target), F.temple());
   const prompt = prompts.join(''); assert.ok(prompt.includes(target.name) && prompt.includes(target.description));
   assert.ok(prompt.includes('320x200') && prompt.includes('Room name AND saved description'));
+  assert.ok(prompt.includes('exact symbolic enum values, not descriptive prose'));
   assert.ok(!prompt.includes('hidden secret') && !prompt.includes('spy') && !prompt.includes('second description'));
 });
 test('malformed structured plans are retried, never substituted with an unrelated procedural room', async () => {

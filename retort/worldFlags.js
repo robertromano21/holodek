@@ -8,7 +8,9 @@ const DEFAULTS = {
   CITY_PROPS:true, MOSAIC_HOVER:true, ORNAMENT_FIELDS:true, MOLDINGS:true, PYRAMIDS:true,
   ARCH_THEMES:true, ROOM_PIXEL:true, ART_CATALOG:true, LIBRARY_BOOKS:true, CAMPAIGN_BUILDER:true,
   HOMEBREW:true, GENRE_KITS:true, GENRE_LIGHTS:true, RANGED_COMBAT:true, GENRE_ARCH:true,
-  CITY_SITES:false, GENRE_EXPANSION:false, ARCHITECTURE_EXPANSION:false, CITY_COMPLETE:false, TRADE_ROUTES:false
+  CITY_SITES:false, GENRE_EXPANSION:false, ARCHITECTURE_EXPANSION:false, CITY_COMPLETE:false, TRADE_ROUTES:false,
+  // Living region (retort/livingRegion.js): on by default; disable with HOLODEK_LIVING_REGION=0.
+  LIVING_REGION:true
 };
 function on(name) {
   const raw = process.env['HOLODEK_' + name];

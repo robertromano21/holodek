@@ -6,7 +6,7 @@ const Reach = require('./dungeonReach'), I = require('../assets/dungeonInhabitan
 const VERSION = 1, SEARCH_RADIUS = 2.5, SEARCH_DC = 5;
 const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
 const tileKey = p => `${p.x},${p.y}`;
-function install(dungeon) {
+function install(dungeon, { required = false } = {}) {
   if (dungeon.secretDoors || !dungeon.layout || !dungeon.start || !dungeon.cells) return dungeon.secretDoors;
   const rng = random(`${dungeon.generation?.seed || dungeon.geoKey || 'dungeon'}:secret-doors-v${VERSION}`);
   const target = 2 + Math.floor(rng() * 5), doors = [], { width, height } = dungeon.layout;
@@ -40,7 +40,7 @@ function install(dungeon) {
     for (let depth = 0; depth <= 4; depth++) for (let side = -2; side <= 2; side++) {
       const px = x + dx * depth - dy * side, py = y + dy * depth + dx * side, k = `${px},${py}`, c = dungeon.cells[k];
       if (px < 1 || py < 1 || px >= width - 1 || py >= height - 1 || protectedCell(k, c) ||
-          c.tile !== (enclosure ? 'floor' : 'wall') || enclosure && Math.abs((c.floorHeight || 0) - floor) > .1 ||
+          c.tile !== (enclosure ? 'floor' : 'wall') || enclosure && Math.abs((c.floorHeight || 0) - floor) > (required ? 2 : .1) ||
           px === origin.x && py === origin.y) { valid = false; continue; }
       const inside = depth > 0 && depth < 4 && Math.abs(side) < 2;
       old[k] = c;

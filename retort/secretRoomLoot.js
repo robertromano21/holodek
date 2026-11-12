@@ -3,7 +3,9 @@ const Secrets=require('./secretDoors'),Items=require('./itemAuthoring'),Economy=
 const clone=value=>JSON.parse(JSON.stringify(value));
 async function prepare($,state,dungeon,consoleText,{author=Items.generate}={}){
   if(!dungeon?.cells||!dungeon.geoKey)return consoleText;
-  if(!dungeon.secretDoors&&!dungeon._geometryStamp&&!dungeon._meta?.geometryStamp)Secrets.install(dungeon);
+  if(!dungeon.secretDoors&&!dungeon._geometryStamp&&!dungeon._meta?.geometryStamp)Secrets.install(dungeon,{
+    required:require('./livingRegion').requiresHiddenChamber(JSON.parse(state.getRoomNameDatabase()||'{}'),dungeon.geoKey)});
+  consoleText=require('./livingRegion').sealGoalItems(state,dungeon,consoleText); // living region (on by default; HOLODEK_LIVING_REGION=0 disables); a regional goal item sealed in a chamber
   const doors=dungeon.secretDoors?.doors||[];
   if(!doors.length)return consoleText;
   const key=dungeon.geoKey,runId=state.getDungeonRunId(),database=JSON.parse(state.getRoomNameDatabase()||'{}'),room=database[key];

@@ -409,6 +409,7 @@ for(const mode of ['Combat Map-Based','Interactive Map-Based','No Combat Map']) 
     getCombatCharactersString:()=>wire,setCombatCharactersString:v=>wire=v,getRoomPopulation:()=>p,getRoomNameDatabase:()=> '{}',getDungeonRunId:()=> 'run'};
   const fail=()=>{throw Error('Realtime combat must not call an LLM or regenerate a room.');};
   const context={require:require('node:module').createRequire(require.resolve('../retort/retortWithUserInput')),Inhabitants:I,MonsterConsoleSync:require('../retort/monsterConsoleSync'),createCombatSpace,actionDice:dice,sharedState:s,populationService:{get:()=>p,recordPositions(){},save(){}},
+    StoryPrompts:require('../retort/graveMasterStoryPrompts'),
     console:{log(){},info(){},warn(){},error(){}},roll1d20:()=>10,characterClasses:[{name:'Fighter',baseHP:10}],
     ensureSelectedPCSprite(){},getDelayedPersonalNarrative:fail,getDelayedUpdatedGameConsole:async()=>text,getDelayedRoomNameDatabase:async()=> '{}',
     sanitizeLiveWorldStateForPrompt:()=>null,retort:fail,run:fail,setTimeout:(fn,ms)=>setTimeout(fn,ms===200?0:ms),clearTimeout,setInterval,clearInterval};

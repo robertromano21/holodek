@@ -129,6 +129,11 @@ function validateArtifact(artifact, job, complete = true) {
 }
 function commit(state, job, artifact, { complete = true, protectedKeys = new Set(), reserveWrites, adoptMusic = (song, id) => require('./sidArchive').adopt(song, id) } = {}) {
   validateArtifact(artifact, job, complete);
+  // Living region: a room in a reserved footprint must meet its obligations (missing route exits are restored when safe).
+  { const latestRooms = JSON.parse(state.getRoomNameDatabase() || '{}'), lr = require('./livingRegion').checkArtifact(latestRooms, job.key, artifact);
+    if (lr.repairs.length) console.info('[LivingRegion]', JSON.stringify({ phase: 'obligation-repaired', geoKey: job.key, stage: artifact.stage, repairs: lr.repairs }));
+    if (lr.problems.length) { console.warn('[LivingRegion]', JSON.stringify({ phase: 'obligation-rejected', geoKey: job.key, stage: artifact.stage, problems: lr.problems }));
+      throw Object.assign(Error('Room does not meet its living-region obligations: ' + lr.problems.join('; ')), { code: 'LIVING_REGION_OBLIGATION', retryable: false }); } }
   if ((job.assignment || artifact.leaseId !== undefined) && artifact.leaseId !== job.id) throw Error('Room artifact lease mismatch.');
   if (state.getDungeonRunId() !== job.runId || context(state, job.model) !== job.context) throw Error('Adventure or quest changed during room build.');
   const latest = JSON.parse(state.getRoomNameDatabase() || '{}'), target = latest[job.key];
@@ -195,6 +200,7 @@ function commit(state, job, artifact, { complete = true, protectedKeys = new Set
         !Object.values(other?.exits || {}).some(back => back.targetCoordinates === job.key)) throw conflict(job.key + '.exits.' + direction + ' lacks a reserved return');
   }
   const previous = target.preparedBuild;
+  if (artifact.dungeon) require('./livingRegion').adoptGoalItems(merged, job.key, artifact.dungeon);
   const publishReservations = reserveWrites?.(writes);
   merged[job.key].preparedBuild = { version: 1, id: job.id, runId: job.runId, model: job.model, ready: complete, stage: artifact.stage,
     revision: (previous?.revision || 0) + 1, previousId: previous?.id === job.id ? previous.previousId : previous?.id, at: Date.now() };

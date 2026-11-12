@@ -126,6 +126,7 @@ function buildRoomWorldContext(database, coords, options = {}) {
     nearbySites: (room.fortifiedApproaches || []).slice(0, 2).map(a => ({ ...a, name: rooms.get(a.entryKey)?.name })),
     factionMemory: require('./factionMemory').project(database),
     regionalSite: room.regionalSite ? { flavor: room.regionalSite.flavor, storyId: room.regionalSite.storyId } : null,
+    livingRegion: require('./livingRegion').roomContext(rooms, key),
     campaign: world?{origin:world.topology?.start,destination:world.topology?.goal,finale:world.arc,
       progression:'Only engine-verified objectives can complete this original-world journey.'}:
       { origin: 'Ruined Temple Entrance in Tartarus', destination: 'Hades, the City of the Dead',

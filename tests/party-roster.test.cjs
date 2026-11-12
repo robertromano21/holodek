@@ -17,3 +17,12 @@ test('blank lines, labels, variable sheet length and more than six allies do not
   assert.equal(partyRoster(sheet('PC'), npcText).length, 10);
   assert.equal(partyRoster(sheet('PC'), 'None', [{ name: 'Old Ally', type: 'npc' }]).length, 1);
 });
+
+test('a local puzzle helper is hidden until recruitment is finalized', () => {
+  const helper = { name: 'Temple Keeper', type: 'npc', recruitmentLease: { source: 'engine-local-recruitment-helper-v1' } };
+  const sheets = sheet('Temple Keeper');
+  assert.deepEqual(partyRoster(sheet('Mortacia'), sheets, [helper]).map(actor => actor.name), ['Mortacia']);
+  assert.deepEqual(partyRoster(undefined, undefined, [helper]).map(actor => actor.name), []);
+  delete helper.recruitmentLease;
+  assert.deepEqual(partyRoster(sheet('Mortacia'), sheets, [helper]).map(actor => actor.name), ['Mortacia', 'Temple Keeper']);
+});

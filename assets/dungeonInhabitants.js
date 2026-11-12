@@ -256,6 +256,8 @@
       if(record.sprite?.appearanceLocked){actor.sprite=record.sprite;actor.visualIdentity=record.visualIdentity;}
       actor.encounterId = record.encounterId;
       actor.job = record.job; actor.activity = record.activity; actor.routine = record.routine;
+      actor.residentPlan = record.residentPlan ? { source:record.residentPlan.source,id:record.residentPlan.id,status:record.residentPlan.status,
+        activity:record.residentPlan.activity,intent:record.residentPlan.intent } : undefined;
       actor.personality=record.personality; actor.motivation=record.motivation;
       actor.originProfile = record.profile || actor.originProfile;
       actor.race ||= record.race; actor.className ||= record.className;

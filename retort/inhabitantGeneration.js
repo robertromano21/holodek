@@ -73,6 +73,8 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
   if(budget)require('./encounterPolicy').apply(slots,budget);
   else Balance.plan(slots, { party, starting, encounter, hostileTemple, settled,
     roll: Inhabitants.hash(`${geoKey}:cohort-size`) / 4294967296 });
+  // A slot the engine has made peaceful cannot be answered Hostile (validated below); do not suggest Hostile for it.
+  for(const slot of slots)if(slot.peaceful&&slot.allegiance==='Hostile')slot.allegiance='Neutral';
   const civilianTotal=slots.filter(slot=>!slot.engineEncounter).length;
   const ecology=require('./settingEcology'),table=ecology.get(rooms),nameProfiles=new Map();
   if(cotg && !encounter)CotgAuthoring.apply(slots,{
@@ -88,6 +90,7 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
     Object.assign(slot,{lineage:selected.name,lineageDescription:selected.description});
     if(selected.nameParts)nameProfiles.set(slot.slot,selected.nameParts);
   }
+  require('./livingRegion').reserveSlots(slots,rooms,geoKey,{encounter,starting,questSeed,hostileTemple}); // living region (on by default; HOLODEK_LIVING_REGION=0 disables); fixed regional identities only
   const originalLore = $.messages?.find(message => message instanceof RetortMessage &&
     ['user', 'system'].includes(message.role) && message.content.startsWith('Instructions for the Grave Master:'));
   async function requestBatch(agent, batch, retryReason) {
@@ -98,6 +101,7 @@ async function generateInhabitantsScoped($, { roomName, roomDescription, geoKey,
     const reservedNames=[...partyNames,...usedNames];
     for(const slot of slots){
       if(encounter?.identity)continue;
+      if(slot.regionalIdentity)continue;
       if(slot.slot===0&&introduceQuest)continue;
       if(cotg)continue; // CotG names are authored with their creatures, not suggested from a fixed syllable palette.
       const profile=nameProfiles.get(slot.slot)||(encounter?.races?.length===1?encounter.catalog?.[0]?.nameParts:null);
@@ -174,6 +178,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
     if (!local) await $.user`This is one bounded batch of a ${totalCount}-resident population. Return ONLY slot IDs ${slots.map(s => s.slot).join(', ')}; do not restart numbering or generate other batches. Previously accepted residents (read-only, never repeat or replace): ${JSON.stringify(accepted.map(row => ({ slot: row.slot, name: row.name, race: row.race, job: row.job, allegiance: row.allegiance, encounterId: row.encounterId })))}.`;
     if (majorityBudgets.length) await $.user`Whole-population majority budget for ONLY this batch: ${majorityBudgets.map(budget => `at least ${budget.minimum} of these ${count} residents must be ${budget.label}`).join('; ')}. This is the minimum needed to keep the original room-wide majority achievable after the remaining batches, not a new fixed role or allegiance for any slot. Keep all starting-temple, evil-temple and quest-contact protections. Previously accepted residents cannot be replaced.`;
     if (retryReason) await $.user`The previous attempt for ONLY slots ${slots.map(s => s.slot).join(', ')} timed out before a valid batch was accepted. Retry only this batch from this fresh conversation within its remaining recovery budget. Reason: ${retryReason}. Preserve every original world, race, allegiance and quest rule. Do not regenerate the ${accepted.length} already accepted residents or invent fallback NPCs.`;
+    if(slots.some(s=>s.regionalIdentity))await $.user(require('./livingRegion').slotGuidance(slots));
     return Contracts.request($, { component: 'inhabitants', context: { geoKey, slots: count, slotIds: slots.map(s => s.slot), totalSlots: totalCount }, attempts: 2,
       strictAnswer: true,
       retryHint: 'For each resident, dialogue must be an array of exactly 3 separate, nonblank authored remarks: a greeting or threat, a local remark, and a personal remark. Do not return one combined entry, duplicate a remark, pad missing entries, or split one sentence to fake three remarks. There is no dialogue word-count limit. If a name is duplicated or reserved, invent a genuinely different identity, not a one-letter spelling variant of the rejected name.',
@@ -200,6 +205,7 @@ Each individual needs a UNIQUE short history and personality that suit their rac
         for (const row of rows) {
           if(encounter?.identity&&(row.name!==encounter.identity.name||row.race!==encounter.identity.race))throw Error('Preserve the existing citizen name and race.');
           if (!Number.isInteger(row?.slot) || !slots.some(slot => slot.slot === row.slot) || bySlot.has(row.slot)) throw Error('Unknown or duplicate inhabitant slot: ' + String(row?.slot));
+          const regionalProblem=require('./livingRegion').slotProblem(slots.find(s=>s.slot===row.slot),row);if(regionalProblem)throw Error(regionalProblem);
           for (const field of ['name', 'race', 'class', 'job', 'activity', 'personality', 'voice', 'history', 'motivation'])
             if (typeof row[field] !== 'string' || !row[field].trim()) throw Error(`Slot ${row.slot}.${field} must be nonempty text.`);
           if (!Array.isArray(row.dialogue) || row.dialogue.length !== 3 || row.dialogue.some(line =>

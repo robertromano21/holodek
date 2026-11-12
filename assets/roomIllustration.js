@@ -2,11 +2,13 @@
   const node = typeof module === 'object' && module.exports;
   const api = factory(node ? require('./designCatalog') : root.DesignCatalog,
     name => node ? require('../retort/worldFlags').on(name) : root.HolodekFlags?.[name] === true,
-    node ? require('./genreExpansion') : root.GenreExpansion);
+    node ? require('./genreExpansion') : root.GenreExpansion,
+    node ? require('./sceneryGrammar') : root.SceneryGrammar);
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.RoomIllustration = api;
-})(typeof window === 'object' ? window : globalThis, function(Catalog, flagFn, Expansion) {
+})(typeof window === 'object' ? window : globalThis, function(Catalog, flagFn, Expansion, Grammar) {
   'use strict';
+  if (!Grammar) throw Error('Scenery grammar must load before room illustrations.');
   const flag = flagFn || (() => false);
   const width = 320, height = 200;
   const palette = ['#000000', '#ffffff', '#883932', '#67b6bd', '#8b3f96', '#55a049', '#40318d', '#d6cf6a',
@@ -20,6 +22,231 @@
   const catalogKinds = catalogOn ? Catalog.ILLUSTRATION_KINDS.filter(k => !kinds.includes(k)) : [], allKinds = [...kinds, ...catalogKinds,
     ...(Expansion && flag('ARCHITECTURE_EXPANSION') ? Object.keys(Expansion.SHAPES) : [])];
   const color = c => /^#[0-9a-f]{6}$/i.test(c) || Number.isInteger(c) && c >= 0 && c < palette.length;
+  const materialNames = ['stone', 'masonry', 'cloth', 'metal', 'crystal', 'water', 'sky', 'sand', 'wood', 'foliage', 'earth'];
+  const detailLevels = ['sparse', 'moderate', 'rich'];
+  const rampSteps = ['highlight', 'light', 'mid', 'shade', 'shadow', 'deepShadow'];
+  const accentUsages = ['sky', 'ground', 'crystal', 'masonry', 'glow', 'water', 'vegetation', 'metal', 'light'];
+  const depthBands = ['far', 'mid', 'foreground'];
+  const stampTypes = ['crack', 'carving', 'tuft', 'silhouette', 'gravel', 'moss', 'ripples', 'tiles'];
+  const variantNames = ['fluting', 'cracks', 'weathering', 'base', 'capital', 'ridges', 'snowcap', 'scree', 'pinnacle', 'jagged', 'stones', 'moss', 'erosion', 'dense', 'wisp'];
+  const colorRoles = ['sky', 'ground', 'shadow', 'stone', 'accent', 'light'];
+  const MATERIAL_PRESETS = {
+    stone: { contrast: 1, lift: 0.02, tint: [2, 1, 0] }, masonry: { contrast: 1.08, lift: 0, tint: [4, 2, 0] },
+    cloth: { contrast: 0.68, lift: 0.08, tint: [6, -2, 4] }, metal: { contrast: 1.48, lift: 0.04, tint: [-2, -2, 2] },
+    crystal: { contrast: 1.28, lift: 0.12, tint: [4, 8, 16] }, water: { contrast: 1.12, lift: 0.06, tint: [-6, 4, 12] },
+    sky: { contrast: 0.62, lift: 0.1, tint: [2, 4, 12] }, sand: { contrast: 0.85, lift: 0.08, tint: [12, 4, -6] },
+    wood: { contrast: 0.95, lift: 0.02, tint: [8, 2, -6] }, foliage: { contrast: 0.9, lift: 0.04, tint: [-6, 10, -4] },
+    earth: { contrast: 0.9, lift: 0, tint: [6, 2, -2] }
+  };
+  const BAYER4 = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+  const STAMPS8 = {
+    crack: ['........','...#....','..#.....','..##....','.#..#...','.#......','#..#....','........'],
+    carving: ['...++...','..+##+..','.+#..#+.','+#....#+','+#....#+','.+#..#+.','..+##+..','...++...'],
+    tuft: ['...#....','..#.#...','.#.#.#..','...#....','..#.#...','.#..#.#.','...#....','....#...'],
+    silhouette: ['...##...','..#..#..','..#..#..','...##...','..#..#..','..#..#..','.##..#..','##....#.'],
+    gravel: ['.#...#..','...#..#.','#.#....#','..#.#...','.#...#.#','...#....','#..#.#..','.#....#.'],
+    moss: ['..#.#...','.#.###..','..###.#.','.###.#..','#.#..#..','.###.#..','..#.#.#.','...#....'],
+    ripples: ['........','..+++...','......+.','++++....','......+.','...+++..','.+......','........'],
+    tiles: ['#######.','#.....#.','#.....#.','#.....#.','#.....#.','#.....#.','#######.','........']
+  };
+  const STAMPS16 = {
+    crack: ['................','......#.........','.....#..........','....##..........','...#..#.........','...#....#.......','..#......#......','..#.#...........','.#...#..........','.#..............','#.....#.........','......#.........','.....#..........','....#...........','...#............','................'],
+    carving: ['.......++.......','......+##+......','....++#..#++....','...+#......#+...','..+#........#+..','.+#..........#+.','+#....####....#+','+#...#....#...#+','+#...#....#...#+','+#....####....#+','.+#..........#+.','..+#........#+..','...+#......#+...','....++#..#++....','......+##+......','.......++.......']
+  };
+  function hexOf(c) { return typeof c === 'number' ? palette[c] : c; }
+  function rgbOf(c) { c = hexOf(c); return [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)); }
+  function hexFromRgb(rgb) { return '#' + rgb.map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join(''); }
+  function mixHex(a, b, t) { const A = rgbOf(a), B = rgbOf(b); return hexFromRgb(A.map((v, i) => v * (1 - t) + B[i] * t)); }
+  function shadeRamp(pigment, preset) {
+    const contrast = Math.max(1.15, preset?.contrast ?? 1.2), lift = Math.min(preset?.lift ?? 0, 0.04), tint = (preset?.tint ?? [0, 0, 0]).map(v => v * 0.35);
+    const base = rgbOf(pigment);
+    const luma = base[0] * .3 + base[1] * .59 + base[2] * .11;
+    const chroma = base.map(v => v - luma);
+    const tone = (lumaTarget) => {
+      const l = Math.max(0, Math.min(255, luma + (lumaTarget - luma) * contrast + lift * 255));
+      return hexFromRgb(chroma.map((c, i) => l + c * 1.08 + tint[i]));
+    };
+    const mid = hexFromRgb(base.map((v, i) => v + tint[i]));
+    return { highlight: tone(Math.min(245, luma + 78)), light: tone(Math.min(230, luma + 44)), mid,
+      shade: tone(Math.max(18, luma - 32)), shadow: tone(Math.max(12, luma - 68)), deepShadow: tone(Math.max(8, luma - 104)) };
+  }
+  function rampFromCustom(colors) {
+    if (colors.length === 6) return Object.fromEntries(rampSteps.map((s, i) => [s, colors[i]]));
+    const out = {};
+    for (let i = 0; i < rampSteps.length; i++) {
+      const f = i / (rampSteps.length - 1) * (colors.length - 1), lo = Math.floor(f), hi = Math.min(colors.length - 1, lo + 1);
+      out[rampSteps[i]] = lo === hi ? colors[lo] : mixHex(colors[lo], colors[hi], f - lo);
+    }
+    return out;
+  }
+  function parseMaterialSpec(value) {
+    if (value === 'none' || value == null) return null;
+    if (typeof value === 'string') {
+      if (!materialNames.includes(value)) throw Error('Invalid material name.');
+      return { name: value };
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid material specification.');
+    const out = {};
+    const n = value.name || value.material;
+    if (n !== undefined && n !== 'none') {
+      if (!materialNames.includes(n)) throw Error('Invalid material name.');
+      out.name = n;
+    }
+    if (value.steps !== undefined) {
+      if (!Array.isArray(value.steps) || !value.steps.length || value.steps.length > 6 || value.steps.some(s => !rampSteps.includes(s))) throw Error('Invalid material steps.');
+      out.steps = [...value.steps];
+    }
+    if (value.ramp !== undefined && value.ramp !== "none" && value.ramp !== "") {
+      const ramp = Array.isArray(value.ramp) ? value.ramp : String(value.ramp).split(',').map(s => s.trim()).filter(Boolean);
+      if (ramp.length < 2 || ramp.length > 8 || ramp.some(c => typeof c !== 'string' || !color(c))) throw Error('Invalid custom material ramp.');
+      out.ramp = [...ramp];
+    }
+    if (!out.name && !out.ramp) throw Error('Material needs a name or custom ramp.');
+    return out;
+  }
+  function validateMaterials(raw) {
+    const map = {}, targets = new Set([...colorRoles, ...allKinds]);
+    const add = (kind, spec) => { if (!targets.has(kind)) throw Error('Invalid materials kind ' + kind + '.'); if (spec) map[kind] = spec.name && !spec.ramp && !spec.steps ? spec.name : spec; };
+    if (Array.isArray(raw)) {
+      if (raw.length > 40) throw Error('Invalid materials list.');
+      for (const item of raw) {
+        if (!item || typeof item !== 'object') throw Error('Invalid materials entry.');
+        add(item.kind, parseMaterialSpec(item.ramp || item.steps || (item.material && item.material !== 'none') || item.name ? item : item.material));
+      }
+    } else if (raw && typeof raw === 'object') {
+      for (const [kind, value] of Object.entries(raw)) add(kind, parseMaterialSpec(value));
+    } else throw Error('Invalid materials.');
+    return map;
+  }
+  function validateAccents(raw) {
+    if (raw.length > 2) throw Error('Room art allows at most two accent pigments.');
+    return raw.map((a, i) => {
+      if (!a || !color(a.color) || !accentUsages.includes(a.usage)) throw Error('Invalid accent ' + i + '.');
+      return { color: a.color, usage: a.usage };
+    });
+  }
+  function validateDetails(raw) {
+    if (raw.length > 48) throw Error('Invalid details list.');
+    const integer = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
+    return raw.map((d, i) => {
+      const x = d?.x ?? d?.position?.x, y = d?.y ?? d?.position?.y;
+      if (!d || !stampTypes.includes(d.type) || !integer(x, -80, 319) || !integer(y, -60, 199)) throw Error('Invalid detail stamp ' + i + '.');
+      const out = { type: d.type, x, y };
+      if (d.variant !== undefined) {
+        if (typeof d.variant !== 'string' || !d.variant || d.variant.length > 24) throw Error('Invalid detail variant ' + i + '.');
+        if (d.variant !== 'none' && d.variant !== 'plain') out.variant = d.variant;
+      }
+      if (d.w !== undefined) { if (!integer(d.w, 8, 32)) throw Error('Invalid detail size ' + i + '.'); out.w = d.w; }
+      if (d.h !== undefined) { if (!integer(d.h, 8, 32)) throw Error('Invalid detail size ' + i + '.'); out.h = d.h; }
+      if (d.depth !== undefined) {
+        if (!depthBands.includes(d.depth)) throw Error('Invalid detail depth ' + i + '.');
+        if (d.depth !== 'mid') out.depth = d.depth;
+      }
+      return out;
+    });
+  }
+  function validateDither(raw) {
+    if (raw === false || raw === 'off') return null;
+    if (raw === 'sky' || raw === 'water' || raw === 'both' || raw === 'sky-water')
+      return { pattern: 'bayer', bits: 1, targets: raw === 'both' || raw === 'sky-water' ? ['sky', 'water'] : [raw] };
+    if (raw && typeof raw === 'object') {
+      const pattern = raw.pattern === undefined ? 'bayer' : raw.pattern;
+      if (pattern !== 'bayer') throw Error('Invalid dither pattern.');
+      const bits = raw.bits === undefined ? 1 : raw.bits;
+      if (bits !== 1 && bits !== 2) throw Error('Invalid dither bits.');
+      const targets = raw.targets === undefined ? ['sky'] : raw.targets;
+      if (!Array.isArray(targets) || !targets.length || targets.some(t => t !== 'sky' && t !== 'water')) throw Error('Invalid dither targets.');
+      return { pattern, bits, targets: [...new Set(targets)] };
+    }
+    throw Error('Invalid dither setting.');
+  }
+  function optionalPlan(raw) {
+    const extra = {};
+    if (raw.detailLevel !== undefined) {
+      if (!detailLevels.includes(raw.detailLevel)) throw Error('Invalid detailLevel.');
+      extra.detailLevel = raw.detailLevel;
+    }
+    if (raw.materials !== undefined) {
+      const m = validateMaterials(raw.materials);
+      if (Object.keys(m).length) extra.materials = m;
+    }
+    if (raw.accents !== undefined) {
+      if (!Array.isArray(raw.accents)) throw Error('Invalid accents.');
+      if (raw.accents.length) extra.accents = validateAccents(raw.accents);
+    }
+    if (raw.details !== undefined) {
+      if (!Array.isArray(raw.details)) throw Error('Invalid details.');
+      if (raw.details.length) extra.details = validateDetails(raw.details);
+    }
+    if (raw.dither !== undefined) {
+      const d = validateDither(raw.dither);
+      if (d) extra.dither = d;
+    }
+    if (raw.layout !== undefined) {
+      if (raw.layout === 'auto' || raw.layout === 'manual') extra.layout = raw.layout;
+      else if (raw.layout && typeof raw.layout === 'object') {
+        const mode = raw.layout.mode === 'manual' ? 'manual' : 'auto';
+        const out = { mode };
+        if (raw.layout.symmetry === 'center' || raw.layout.symmetry === 'mirror' || raw.layout.symmetry === 'none') out.symmetry = raw.layout.symmetry;
+        if (typeof raw.layout.hero === 'string' && /^[a-z][a-z0-9_]{0,40}$/.test(raw.layout.hero)) out.hero = raw.layout.hero;
+        if (typeof raw.layout.heroScale === 'number' && raw.layout.heroScale >= 0.3 && raw.layout.heroScale <= 0.6) out.heroScale = raw.layout.heroScale;
+        extra.layout = out;
+      } else throw Error('Invalid layout.');
+    }
+    return extra;
+  }
+  function layerFields(p) {
+    const layer = Object.fromEntries(['kind', 'x', 'y', 'w', 'h', 'color', 'shade', 'detail', 'count', 'pattern'].map(k => [k, p[k]]));
+    if (p.material !== undefined && p.material !== 'none') {
+      const spec = parseMaterialSpec(p.material);
+      if (spec) layer.material = spec.name && !spec.ramp && !spec.steps ? spec.name : spec;
+    }
+    if (p.variant !== undefined) {
+      const list = Array.isArray(p.variant) ? p.variant : [p.variant];
+      if (!list.length || list.length > 6 || list.some(v => v !== 'none' && !variantNames.includes(v))) throw Error('Invalid component variant.');
+      const clean = list.filter(v => v && v !== 'none');
+      if (clean.length) layer.variant = clean.length === 1 ? clean[0] : clean;
+    }
+    if (p.depth !== undefined) {
+      if (!depthBands.includes(p.depth) && p.depth !== 'none') throw Error('Invalid component depth.');
+      if (p.depth === 'far' || p.depth === 'foreground') layer.depth = p.depth;
+    }
+    if (p.steps !== undefined) {
+      if (!Array.isArray(p.steps) || !p.steps.length || p.steps.length > 6 || p.steps.some(s => !rampSteps.includes(s))) throw Error('Invalid component ramp steps.');
+      layer.steps = [...p.steps];
+    }
+    if (p.parts !== undefined) {
+      const parts = Grammar.validateParts(p.parts);
+      if (parts) layer.parts = parts;
+    }
+    if (p.role !== undefined) {
+      const roles = ['hero', 'framing', 'backdrop', 'skyline', 'prop', 'ground', 'sky'];
+      if (!roles.includes(p.role)) throw Error('Invalid component role.');
+      if (p.role !== 'prop') layer.role = p.role;
+    }
+    if (p.assembly !== undefined) {
+      const assembly = Grammar.validateAssembly(p.assembly);
+      if (assembly) layer.assembly = assembly;
+    }
+    return layer;
+  }
+  function orderLayers(layers) {
+    if (!layers.some(p => p.depth)) return layers;
+    const rank = { far: 0, mid: 1, foreground: 2 };
+    return layers.map((p, i) => ({ p, i })).sort((a, b) => (rank[a.p.depth || 'mid'] - rank[b.p.depth || 'mid']) || (a.i - b.i)).map(x => x.p);
+  }
+  function accentKind(usage, kind) {
+    return usage === 'crystal' && kind === 'crystal' || usage === 'water' && (kind === 'pool' || kind === 'river')
+      || usage === 'masonry' && ['wall', 'pillar', 'arch', 'portico', 'tower', 'citadel', 'building', 'door', 'bridge', 'stairs', 'rubble'].includes(kind)
+      || usage === 'glow' && ['brazier', 'sun', 'crystal', 'stars', 'lantern'].includes(kind)
+      || usage === 'vegetation' && ['grass', 'tree', 'roots'].includes(kind)
+      || usage === 'metal' && ['obelisk', 'door', 'gate'].includes(kind)
+      || usage === 'light' && ['brazier', 'sun', 'moon', 'stars', 'lantern'].includes(kind);
+  }
+  function resolveRamp(spec, base) {
+    if (spec.ramp) return rampFromCustom(spec.ramp);
+    return shadeRamp(base, MATERIAL_PRESETS[spec.name] || MATERIAL_PRESETS.stone);
+  }
   function description(room, fallback = '') {
     return [room?.description, room?.roomDescription, room?.sceneSpec?.source?.description, fallback].find(value =>
       typeof value === 'string' && value.trim().length >= 20 && !/^(?:none|undefined|null)$|^A newly discovered room to the\b/i.test(value.trim()))?.trim() || '';
@@ -34,20 +261,23 @@
     if (raw.ground === raw.shadow || raw.stone === raw.shadow || raw.light === raw.shadow) throw Error('Room art needs distinct material, light and shadow colors.');
     if (!Array.isArray(raw.layers) || raw.layers.length < 6 || raw.layers.length > 36) throw Error('Room art needs 6..36 component layers.');
     const layers = raw.layers.map((p, i) => {
-      if (!p || !allKinds.includes(p.kind) || !integer(p.x, -80, 319) || !integer(p.y, -60, 199) ||
+      if (!p || typeof p.kind !== 'string' || (!allKinds.includes(p.kind) && !Grammar.isKindName(p.kind)) || !integer(p.x, -80, 319) || !integer(p.y, -60, 199) ||
           !integer(p.w, 3, 400) || !integer(p.h, 3, 260) || p.x + p.w <= 0 || p.y + p.h <= 0 ||
           !color(p.color) || !color(p.shade) || !color(p.detail) ||
           !integer(p.count, 1, 10) || !patterns.includes(p.pattern)) throw Error(`Invalid room art component ${i}.`);
-      return Object.fromEntries(['kind', 'x', 'y', 'w', 'h', 'color', 'shade', 'detail', 'count', 'pattern'].map(k => [k, p[k]]));
+      const layer = layerFields(p);
+      if (!allKinds.includes(p.kind) && !Grammar.isLibraryKind(p.kind) && !layer.parts && !layer.assembly)
+        throw Error(`Invalid room art component ${i}: unknown kind needs a drawing recipe.`);
+      return layer;
     });
     const picks = catalogOn ? Object.fromEntries([['palette', Object.keys(Catalog.PALETTES)], ['lighting', Catalog.LIGHTING], ['composition', Catalog.COMPOSITIONS], ['motif', Catalog.ORNAMENTS]]
       .map(([k, list]) => [k, Catalog.sanitizeChoice(raw[k], list)]).filter(([, v]) => v)) : {};
     return { view: raw.view, horizon: raw.horizon, vanishing: raw.vanishing,
-      ...Object.fromEntries(colors.map(k => [k, raw[k]])), groundPattern: raw.groundPattern, layers, ...picks };
+      ...Object.fromEntries(colors.map(k => [k, raw[k]])), groundPattern: raw.groundPattern, layers, ...picks, ...optionalPlan(raw) };
   }
   function hash(s) { let h = 2166136261; for (const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
   function paint(ctx, raw, seed = 1) {
-    const plan = validate(raw);
+    const plan = Grammar.applyLayout(validate(raw));
     let state = hash(seed);
     const random = () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296; };
     const rect = (x, y, w, h, c) => {
@@ -140,7 +370,16 @@
       rect(x - 1, y + h - 4, w + 2, 4, s); line(x - 1, y + h - 4, x + w, y + h - 4, d);
     }
     ctx.imageSmoothingEnabled = false;
-    rect(0, 0, width, height, plan.sky);
+    if ((plan.dither && plan.dither.targets || []).includes('sky')) {
+      const skySpec = plan.materials && plan.materials.sky, skyAccent = (plan.accents || []).find(a => a.usage === 'sky');
+      const skyRamp = skySpec && skySpec.ramp ? rampFromCustom(skySpec.ramp) : shadeRamp(plan.sky, MATERIAL_PRESETS[(skySpec && skySpec.name) || 'sky']);
+      const bits = plan.dither.bits || 1;
+      const cols = bits === 2 ? [skyRamp.highlight, skyRamp.light, skyRamp.mid, skyRamp.shade] : [skyRamp.mid, skyAccent ? skyAccent.color : skyRamp.light];
+      for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+        const t = BAYER4[y & 3][x & 3];
+        rect(x, y, 1, 1, cols[bits === 2 ? (t >> 2) : (t >= 8 ? 1 : 0)]);
+      }
+    } else rect(0, 0, width, height, plan.sky);
     rect(0, plan.horizon, width, height - plan.horizon, plan.ground);
     if (plan.groundPattern !== 'tiles') texture(0, plan.horizon, width, height - plan.horizon, plan.groundPattern, plan.shadow, plan.stone);
     if (plan.groundPattern === 'tiles') {
@@ -208,11 +447,343 @@
         case 'campfire': for (let i = 0; i < 4; i++) line(x + i * w / 4, y + h, x + w - i * w / 4, y + h - 3, s); for (let i = 0; i < count + 4; i++) poly([[cx - w * .25 + random() * w * .5, y + h - 2], [cx + (random() - .5) * w * .3, y + random() * h * .6], [cx + w * .1, y + h - 2]], i % 2 ? c : d); break;
       }
     }
-    for (const p of plan.layers) {
-      const { x, y, w, h, color: c, shade: s, detail: d, count, pattern } = p;
+    const ditherTargetsOn = plan.dither && plan.dither.targets || [];
+    const ditherBits = plan.dither && plan.dither.bits || 1;
+    function lumaOf(col) { const [r, g, b] = rgbOf(col); return r * .3 + g * .59 + b * .11; }
+    function lockHue(src, ref) {
+      const A = rgbOf(src), B = rgbOf(ref);
+      const lA = A[0] * .3 + A[1] * .59 + A[2] * .11;
+      const lB = B[0] * .3 + B[1] * .59 + B[2] * .11;
+      return hexFromRgb(B.map(v => lA + (v - lB)));
+    }
+    function punchHex(hex, sat, lift) {
+      const rgb = rgbOf(hex), l = rgb[0] * .3 + rgb[1] * .59 + rgb[2] * .11;
+      let r = (l + (rgb[0] - l) * sat) * lift, g = (l + (rgb[1] - l) * sat) * lift, b = (l + (rgb[2] - l) * sat) * lift;
+      const mx = Math.max(r, g, b);
+      if (mx > 255) { const k = 255 / mx; r *= k; g *= k; b *= k; }
+      return hexFromRgb([r, g, b]);
+    }
+    function layerColors(p) {
+      let c = p.color, s = p.shade, d = p.detail;
+      const raw = p.material || plan.materials && plan.materials[p.kind], spec = raw ? parseMaterialSpec(raw) : null;
+      let ramp = null;
+      if (spec) {
+        ramp = resolveRamp(spec, c);
+        const steps = p.steps || spec.steps;
+        if (steps && steps.length) {
+          d = ramp[steps[0]] || d;
+          c = ramp[steps[Math.floor((steps.length - 1) / 2)]] || c;
+          s = ramp[steps[steps.length - 1]] || s;
+        } else { d = ramp.highlight; c = ramp.mid; s = ramp.shadow; }
+        if (lumaOf(c) < lumaOf(p.color)) c = p.color;
+        if (lumaOf(d) < lumaOf(p.detail)) d = p.detail;
+      }
+      const hit = (plan.accents || []).find(a => accentKind(a.usage, p.kind));
+      if (hit) d = punchHex(typeof hit.color === 'number' ? palette[hit.color] : hit.color, 1.4, 1.18);
+      const depth = p.depth || 'mid';
+      if (depth === 'far') {
+        const haze = plan.sky;
+        c = mixHex(c, haze, .12); s = mixHex(s, haze, .08); d = mixHex(d, plan.light, .06);
+      } else if (depth === 'foreground') {
+        d = punchHex(d, 1.06, 1.06); s = lumaOf(s) > 40 ? mixHex(s, '#000000', .1) : s;
+      }
+      if (['dunes', 'road', 'sandstorm'].includes(p.kind) || raw === 'sand') {
+        c = lockHue(c, p.color); s = lockHue(s, p.shade); d = lockHue(d, p.detail);
+      }
+      return { c, s, d, ramp };
+    }
+    function drawStamp(type, x, y, c, s, large) {
+      const cells = large && STAMPS16[type] || STAMPS8[type];
+      if (!cells) return;
+      for (let j = 0; j < cells.length; j++) for (let i = 0; i < cells[j].length; i++) {
+        const ch = cells[j][i];
+        if (ch !== '.') rect(x + i, y + j, 1, 1, ch === '+' ? s : c);
+      }
+    }
+    function ditherWaterLayer(p, c, s, d) {
+      const bits = ditherBits, cols = bits === 2 ? [d, c, mixHex(c, s, .4), s] : [c, d];
+      const inside = (px, py) => {
+        if (p.kind === 'pool') {
+          const cx = p.x + p.w / 2, cy = p.y + p.h / 2, dx = (px + .5 - cx) / (p.w / 2), dy = (py + .5 - cy) / (p.h / 2);
+          return dx * dx + dy * dy <= 1;
+        }
+        const f = (py - p.y) / Math.max(1, p.h), cx = p.x + p.w * (.5 + f * .05), half = p.w * (.08 + f * .42);
+        return py >= p.y && py < p.y + p.h && Math.abs(px - cx) <= half;
+      };
+      const x0 = Math.max(0, p.x | 0), y0 = Math.max(0, p.y | 0), x1 = Math.min(width, (p.x + p.w) | 0), y1 = Math.min(height, (p.y + p.h) | 0);
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) {
+        if (!inside(xx, yy)) continue;
+        const t = BAYER4[yy & 3][xx & 3];
+        rect(xx, yy, 1, 1, cols[bits === 2 ? (t >> 2) : (t >= 8 ? 1 : 0)]);
+      }
+    }
+    let snapshot = null;
+    const outlineAt = (x, y) => {
+      if (!snapshot || x < 0 || y < 0 || x >= width || y >= height) return false;
+      const k = (Math.round(y) * width + Math.round(x)) * 4, d = snapshot.data;
+      return d[k] + d[k + 1] + d[k + 2] <= 24;
+    };
+    const safeRect = (x, y, w, h, c) => {
+      const x0 = Math.max(0, Math.round(x)), y0 = Math.max(0, Math.round(y));
+      const x1 = Math.min(width, Math.round(x + w)), y1 = Math.min(height, Math.round(y + h));
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) if (!outlineAt(xx, yy)) rect(xx, yy, 1, 1, c);
+    };
+    const prevDrawStamp = drawStamp;
+    drawStamp = (type, x, y, c, s, large) => {
+      const cells = large && STAMPS16[type] || STAMPS8[type];
+      if (!cells) return;
+      for (let j = 0; j < cells.length; j++) for (let i = 0; i < cells[j].length; i++) {
+        const ch = cells[j][i];
+        if (ch !== '.' && !outlineAt(x + i, y + j)) rect(x + i, y + j, 1, 1, ch === '+' ? s : c);
+      }
+    };
+    function applyDetails(band) {
+      if (!plan.detailLevel && !plan.details && !plan.layers.some(p => p.variant)) return;
+      snapshot = ctx.getImageData ? ctx.getImageData(0, 0, width, height) : null;
+      const density = plan.detailLevel ? ({ sparse: .4, moderate: .75, rich: 1 }[plan.detailLevel]) : 1;
+      const inBand = depth => !band || (depth || 'mid') === band;
+      const rnd = key => { let state = hash('detail:' + key + ':' + seed) >>> 0; return () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296; }; };
+      if (plan.details) {
+        const cap = plan.detailLevel === 'sparse' ? 4 : plan.detailLevel === 'moderate' ? 8 : 12;
+        const list = plan.details.filter(d => inBand(d.depth));
+        const n = list.length ? Math.min(cap, Math.max(1, Math.round(list.length * density))) : 0;
+        for (const item of list.slice(0, n)) drawStamp(item.type, item.x, item.y, plan.stone, plan.shadow, (item.w || 8) >= 12 || item.variant === 'large');
+      }
+      for (const p of plan.layers) {
+        if (!inBand(p.depth)) continue;
+        const auto = [];
+        if (plan.detailLevel) {
+          if (['wall', 'pillar', 'portico', 'tower', 'citadel', 'building', 'arch'].includes(p.kind) && plan.detailLevel === 'rich') auto.push('cracks');
+          if ((p.kind === 'mountain' || p.kind === 'ridge') && plan.detailLevel !== 'sparse') auto.push('ridges');
+        }
+        const used = [...new Set([].concat(p.variant || [], auto))];
+        if (!used.length) continue;
+        const { c, s, d, ramp } = layerColors(p);
+        const r = rnd(p.kind + ':' + p.x + ',' + p.y), deep = ramp && ramp.deepShadow || s, hi = ramp && ramp.highlight || d, mid = ramp && ramp.shade || mixHex(c, s, .4);
+        for (const v of used) {
+          if (v === 'cracks' || v === 'erosion') {
+            const count = v === 'erosion' ? (plan.detailLevel === 'rich' ? 3 : 2) : (plan.detailLevel === 'rich' ? 3 : 1);
+            for (let i = 0; i < count; i++) drawStamp('crack', p.x + Math.floor(r() * Math.max(1, p.w - 8)), p.y + Math.floor(r() * Math.max(1, p.h - 8)), s, deep, plan.detailLevel === 'rich' && r() > .8);
+          }
+          if (v === 'weathering') {
+            for (let i = 0, n = plan.detailLevel === 'rich' ? 8 : 4; i < n; i++) {
+              const xx = p.x + 2 + r() * Math.max(1, p.w - 4), yy = p.y + 2 + r() * Math.max(1, p.h - 4);
+              if (!outlineAt(xx, yy)) safeRect(xx, yy, 1, 1, r() > .5 ? s : mid);
+            }
+          }
+          if (v === 'base' && (p.kind === 'pillar' || p.kind === 'portico')) { rect(p.x - 3, p.y + p.h - 6, p.w + 6, 6, s); rect(p.x - 2, p.y + p.h - 5, p.w + 4, 1, hi); }
+          if (v === 'capital' && (p.kind === 'pillar' || p.kind === 'portico')) { rect(p.x - 3, p.y, p.w + 6, 5, s); rect(p.x - 2, p.y + 1, p.w + 4, 1, hi); rect(p.x + 1, p.y + 5, p.w - 2, 2, c); }
+          if (v === 'fluting' && p.kind === 'pillar') for (let f = p.x + 6; f < p.x + p.w - 3; f += 4) line(f + 2, p.y + 7, f + 2, p.y + p.h - 6, mid);
+          if (v === 'snowcap' && !richerDraw && (p.kind === 'mountain' || p.kind === 'ridge')) {
+            const peakX = p.x + p.w * .5, peakY = p.y + p.h * .08;
+            poly([[peakX - p.w * .12, p.y + p.h * .32], [peakX, peakY], [peakX + p.w * .1, p.y + p.h * .3]], hi);
+            poly([[peakX - p.w * .06, p.y + p.h * .28], [peakX, peakY + 2], [peakX + p.w * .08, p.y + p.h * .26]], d);
+          }
+          if ((v === 'scree' || v === 'ridges' || v === 'jagged' || v === 'pinnacle') && (p.kind === 'mountain' || p.kind === 'ridge')) {
+            if (v === 'scree') for (let i = 0, n = plan.detailLevel === 'rich' ? 8 : 4; i < n; i++) { const xx = p.x + r() * p.w, yy = p.y + p.h * (.7 + r() * .28); if (!outlineAt(xx, yy)) safeRect(xx, yy, 1 + r() * 3, 1, r() > .5 ? s : mid); }
+            if (v === 'ridges' || v === 'jagged') for (let i = 1; i <= 2; i++) line(p.x + p.w * (0.3 + i * 0.15), p.y + p.h * .2, p.x + p.w * (.35 + i * .15), p.y + p.h, deep);
+            if (v === 'pinnacle') line(p.x + p.w / 2, p.y, p.x + p.w / 2 + 1, p.y + p.h * .45, deep);
+          }
+          if ((v === 'stones' || v === 'moss') && ['wall', 'building', 'tower', 'citadel'].includes(p.kind)) {
+            if (v === 'stones') {
+              for (let i = 0, n = plan.detailLevel === 'rich' ? 6 : 3; i < n; i++) {
+                const xx = p.x + 2 + r() * Math.max(1, p.w - 10), yy = p.y + 2 + r() * Math.max(1, p.h - 6);
+                if (!outlineAt(xx, yy)) safeRect(xx, yy, 6, 3, r() > .5 ? mid : s);
+              }
+            }
+            if (v === 'moss') {
+              const mossC = (plan.accents || []).find(a => a.usage === 'vegetation')?.color || plan.accent;
+              for (let i = 0, n = plan.detailLevel === 'rich' ? 6 : 3; i < n; i++) {
+                const xx = p.x + r() * p.w, yy = p.y + p.h * (.72 + r() * .25);
+                if (!outlineAt(xx, yy)) safeRect(xx, yy, 2, 1, mossC);
+              }
+            }
+          }
+          if ((v === 'dense' || v === 'wisp') && p.kind === 'cloud') {
+            const n = v === 'dense' ? 10 : 5;
+            for (let i = 0; i < n; i++) if (!outlineAt(p.x + r() * p.w, p.y + r() * p.h)) safeRect(p.x + r() * p.w, p.y + r() * p.h, 2, 1, v === 'dense' ? d : hi);
+          }
+        }
+      }
+      if (plan.detailLevel === 'rich' && inBand('mid')) {
+        const r = rnd('ground');
+        for (let i = 0; i < 2; i++) drawStamp('gravel', 8 + Math.floor(r() * 40) + i * 250, plan.horizon + 16 + Math.floor(r() * 20), plan.shadow, plan.stone, false);
+      }
+    }
+    const richerDraw = !!(plan.detailLevel || plan.materials || plan.accents || plan.details || plan.dither
+      || plan.layout || plan.layers.some(q => q.material || q.variant || q.depth || q.steps || q.parts || q.role || q.assembly || Grammar.isLibraryKind(q.kind)));
+    const sunLayer = plan.layers.find(q => q.kind === 'sun' || q.kind === 'moon');
+    const lightAt = sunLayer
+      ? { x: sunLayer.x + sunLayer.w / 2, y: sunLayer.y + sunLayer.h / 2 }
+      : ({ golden_hour: [300, plan.horizon], moonlit: [60, 20], shaft_from_above: [160, 8], chandelier_glow: [160, 24],
+          candle_pools: [80, 150], twin_braziers: [60, 140], torch_flicker: [50, 100], lamp_reading: [120, 110],
+          crystal_glow: [160, 140], backlit_silhouette: [160, plan.horizon] }[plan.lighting] || [90, 28]);
+    if (Array.isArray(lightAt)) { lightAt.x = lightAt[0]; lightAt.y = lightAt[1]; }
+    const litLeft = cx => lightAt.x <= cx;
+    function columnRich(x, y, w, h, c, s, d) {
+      const litL = litLeft(x + w / 2);
+      const capH = Math.max(3, Math.round(Math.min(8, h * .08 + w * .25)));
+      const baseH = Math.max(3, Math.round(Math.min(8, h * .07 + w * .22)));
+      const shaftY = y + capH, shaftH = Math.max(4, h - capH - baseH);
+      rect(x - 3, y, w + 6, capH, 0);
+      rect(x - 2, y + 1, w + 4, capH - 2, c);
+      rect(litL ? x - 2 : x + w, y + 1, Math.max(2, Math.round(w * .28)), capH - 2, d);
+      rect(litL ? x + w - 1 : x - 2, y + 1, Math.max(2, Math.round(w * .2)), capH - 2, s);
+      line(x - 3, y, x + w + 2, y, d);
+      rect(x - 1, y + capH - 2, w + 2, 2, mixHex(c, d, .35));
+      for (let i = 0; i < shaftH; i++) {
+        const t = i / Math.max(1, shaftH - 1), mid = .62;
+        const wf = t < mid ? .86 + .14 * (t / mid) : 1 - .08 * ((t - mid) / (1 - mid));
+        const ww = Math.max(3, Math.round(w * wf)), xx = Math.round(x + (w - ww) / 2), yy = shaftY + i;
+        rect(xx, yy, 1, 1, 0); rect(xx + ww - 1, yy, 1, 1, 0);
+        rect(xx + 1, yy, ww - 2, 1, c);
+        const edge = Math.max(1, Math.round(ww * .22));
+        if (litL) { rect(xx + 1, yy, edge, 1, d); rect(xx + ww - 1 - edge, yy, edge, 1, s); }
+        else { rect(xx + ww - 1 - edge, yy, edge, 1, d); rect(xx + 1, yy, edge, 1, s); }
+      }
+      if (w > 7) for (let f = x + 4; f < x + w - 3; f += 4) line(f, shaftY + 2, f, shaftY + shaftH - 2, s);
+      rect(x - 3, y + h - baseH, w + 6, baseH, 0);
+      rect(x - 2, y + h - baseH + 1, w + 4, baseH - 2, c);
+      rect(litL ? x - 2 : x + w, y + h - baseH + 1, Math.max(2, Math.round(w * .28)), baseH - 2, d);
+      line(x - 3, y + h - 1, x + w + 2, y + h - 1, s);
+    }
+    function mountainRich(x, y, w, h, c, s, d, count, variants) {
+      const n = Math.max(1, Math.min(count || 1, 6));
+      const litL = litLeft(x + w / 2);
+      const vars = [].concat(variants || []);
+      const snow = vars.includes('snowcap');
+      const ridges = vars.includes('ridges');
+      const pyramid = h / Math.max(1, w) <= 0.62 && n <= 4;
+      for (let i = 0; i < n; i++) {
+        const span = w / Math.max(1, n) * (pyramid ? 1.22 : 1.65);
+        const xx = x + (i - (pyramid ? 0.06 : 0.25)) * w / n;
+        const peakT = pyramid ? 0.46 + (hash('pt' + i + x) % 9) / 100 : 0.35 + (hash('pt' + i + x) % 30) / 100;
+        const peak = xx + span * peakT;
+        const drop = (hash('pk' + i + x) % (pyramid ? 10 : 25)) / 100;
+        const edge = Math.abs(i - (n - 1) / 2) / Math.max(1, n / 2);
+        const yy = y + h * (drop + edge * (pyramid ? 0.05 : 0.12));
+        const baseY = y + h;
+        const body = Grammar.midShadow(c, s, mixHex, lumaOf);
+        poly([[xx, baseY], [peak, yy], [xx + span, baseY]], body, mixHex(s, '#000000', .4));
+        const litW = Math.max(3, span * (pyramid ? 0.28 : 0.16));
+        if (litL) poly([[peak - litW, baseY], [peak, yy], [peak + 1, baseY]], c);
+        else poly([[peak - 1, baseY], [peak, yy], [peak + litW, baseY]], c);
+        const dir = litL ? -1 : 1;
+        if (pyramid) line(peak, yy, peak + dir * 2, yy + h * 0.3, d);
+        else poly([[peak, yy], [peak + dir * span * .15, yy + h * .32], [peak + dir * span * .03, yy + h * .25], [peak - dir * span * .05, yy + h * .44], [peak - dir * span * .12, yy + h * .22]], d);
+        if (ridges) {
+          for (let k = 1; k <= 2; k++) {
+            const t = 0.28 * k, fy = yy + (baseY - yy) * t;
+            line(peak + (xx - peak) * t + 1, fy, peak + (xx + span - peak) * t - 1, fy, mixHex(c, s, .45));
+          }
+        }
+        const hatches = Math.min(pyramid ? 8 : 14, Math.floor(span * h / (pyramid ? 120 : 80)));
+        for (let j = 0; j < hatches; j++) {
+          const f = 0.2 + (hash('h' + i + j + x) % 65) / 100;
+          const px = Math.round(peak + dir * (2 + (hash('hx' + i + j) % 8)));
+          const py = yy + f * (baseY - yy);
+          line(px, py, px + 2, Math.min(baseY - 1, py + 3), j % 3 ? mixHex(c, s, .4) : d);
+        }
+        if (snow) {
+          const sh = h * (pyramid ? 0.07 : 0.14);
+          poly([[peak - span * .06, yy + sh], [peak, yy], [peak + span * .05, yy + sh * .85]], d);
+        }
+      }
+    }
+    function buildingRich(x, y, w, h, c, s, d, count, light) {
+      const litL = litLeft(x + w / 2), eaves = y + h * .32, peakX = x + w * .45, bodyH = y + h - eaves;
+      poly([[x - 3, eaves], [peakX, y], [x + w + 3, eaves]], s, 0);
+      if (litL) poly([[x - 3, eaves], [peakX, y], [peakX, eaves]], mixHex(c, d, .55));
+      else poly([[peakX, y], [x + w + 3, eaves], [peakX, eaves]], mixHex(c, d, .55));
+      line(x - 3, eaves, peakX, y, 0); line(peakX, y, x + w + 3, eaves, 0);
+      rect(x, eaves, w, bodyH, 0);
+      rect(x + 1, eaves + 1, w - 2, bodyH - 2, c);
+      const band = Math.max(2, Math.round(w * .18));
+      rect(litL ? x + 1 : x + w - 1 - band, eaves + 1, band, bodyH - 2, mixHex(c, d, .4));
+      rect(litL ? x + w - 1 - band : x + 1, eaves + 1, band, bodyH - 2, s);
+      const dw = Math.max(3, Math.round(w * .2)), dh = Math.max(7, Math.round(h * .34));
+      const dx = Math.round(x + w / 2 - dw / 2), dy = y + h - dh;
+      rect(dx, dy, dw, dh, 0); rect(dx + 1, dy + 1, dw - 2, dh - 2, s);
+      const nw = Math.min(3, Math.max(1, count));
+      for (let i = 1; i <= nw; i++) {
+        const wx = Math.round(x + i * w / (nw + 1) - 2), wy = Math.round(eaves + bodyH * .16);
+        if (wx + 4 > dx && wx < dx + dw) continue;
+        rect(wx, wy, 4, 5, 0); rect(wx + 1, wy + 1, 2, 3, d);
+      }
+      line(x, y + h - 1, x + w, y + h - 1, 0);
+    }
+    function roadRich(x, y, w, h, c, s, d) {
+      const farL = x + w * .46, farR = x + w * .54;
+      poly([[farL, y], [farR, y], [x + w, y + h], [x, y + h]], c, s);
+      for (let i = 0; i < 3; i++) {
+        const f = .78 + i * .06;
+        rect(x + w / 2 + (i % 2 ? 1 : -1) * w * .16 * f, y + f * h, 2 + f * 2, 1, s);
+      }
+    }
+    function ridgeRich(x, y, w, h, c, s, d, count, hang) {
+      const n = (count || 1) + 2, litL = litLeft(x + w / 2);
+      const pts = [[x, y + h]];
+      for (let i = 0; i <= n; i++) pts.push([x + i * w / n, hang ? y + h - random() * h * .6 : y + random() * h * .6]);
+      pts.push([x + w, y + h]);
+      poly(pts, c, s);
+      for (let i = 1; i + 1 < pts.length; i++) {
+        const face = (pts[i][0] < x + w / 2) === litL ? d : s;
+        line(...pts[i], pts[i][0] + w * .06, hang ? y : y + h, i % 2 ? s : face);
+      }
+    }
+    function obeliskRich(x, y, w, h, c, s, d) {
+      const litL = litLeft(x + w / 2), mid = x + w / 2;
+      poly([[x, y + h], [x + w * .2, y + h * .14], [mid, y], [x + w * .8, y + h * .14], [x + w, y + h]], c, 0);
+      if (litL) {
+        poly([[x, y + h], [x + w * .2, y + h * .14], [mid, y], [mid, y + h]], mixHex(c, d, .45));
+        poly([[mid, y], [x + w * .8, y + h * .14], [x + w, y + h], [mid, y + h]], s);
+      } else {
+        poly([[mid, y], [x + w * .8, y + h * .14], [x + w, y + h], [mid, y + h]], mixHex(c, d, .45));
+        poly([[x, y + h], [x + w * .2, y + h * .14], [mid, y], [mid, y + h]], s);
+      }
+      line(mid, y, mid, y + h, 0);
+      for (let i = 1; i <= 3; i++) rect(x + w * .35, y + h * i / 5, 2, 2, d);
+    }
+    function porticoRich(x, y, w, h, c, s, d, count) {
+      const top = h * .27, litL = litLeft(x + w / 2), cw = Math.max(5, w / (Math.max(2, count) * 3));
+      poly([[x - 2, y + top], [x + w / 2, y], [x + w + 2, y + top]], litL ? c : s, 0);
+      poly([[x + w / 2, y], [x + w + 2, y + top], [x + w / 2, y + top]], litL ? s : c);
+      line(x - 2, y + top, x + w / 2, y, 0); line(x + w / 2, y, x + w + 2, y + top, 0);
+      line(x + 5, y + top - 2, x + w - 5, y + top - 2, d);
+      rect(x, y + top, w, 5, s); rect(x, y + top, w, 1, d);
+      const n = Math.max(2, count);
+      for (let i = 0; i < n; i++) columnRich(x + i * (w - cw) / (n - 1), y + top + 5, cw, h - top - 9, c, s, d);
+      rect(x - 3, y + h - 4, w + 6, 4, s); rect(x - 3, y + h - 4, w + 6, 1, d);
+    }
+    function paintLayer(p) {
+      const { x, y, w, h, count, pattern } = p;
+      const { c, s, d } = layerColors(p);
+      if (richerDraw && Grammar.shouldPaint(p, richerDraw, allKinds)) {
+        Grammar.paintScenery(p, { c, s, d, accent: plan.accent, light: plan.light, foliage: ((plan.accents || []).find(a => a.usage === 'vegetation') || {}).color || mixHex(plan.accent || d, '#3a7a38', .45), lighting: plan.lighting }, { rect, line, poly, ellipse, mixHex, lumaOf, hash, litLeft, ctx, width, height });
+        return;
+      }
+      if (richerDraw) {
+        if (p.kind === 'pillar') { columnRich(x, y, w, h, c, s, d); return; }
+        if (p.kind === 'mountain') {
+          for (let i = 0; i < count; i++) {
+            const span = w / Math.max(1, count) * 1.65;
+            random(); random();
+            for (let j = 0; j < span * h / 20; j++) { random(); random(); random(); }
+          }
+          mountainRich(x, y, w, h, c, s, d, count, p.variant); return;
+        }
+        if (p.kind === 'building') { buildingRich(x, y, w, h, c, s, d, count); return; }
+        if (p.kind === 'road') {
+          for (let i = 0; i < count * 8; i++) { random(); random(); }
+          roadRich(x, y, w, h, c, s, d); return;
+        }
+        if (p.kind === 'ridge' || p.kind === 'stalactite') { ridgeRich(x, y, w, h, c, s, d, count, p.kind === 'stalactite'); return; }
+        if (p.kind === 'obelisk') { obeliskRich(x, y, w, h, c, s, d); return; }
+        if (p.kind === 'portico') { porticoRich(x, y, w, h, c, s, d, count); return; }
+      }
       if (flag('ARCHITECTURE_EXPANSION') && Expansion?.has(p.kind)) {
         Expansion.paint(ctx,p.kind,x,y,w,h,[typeof c==='number'?palette[c]:c,typeof s==='number'?palette[s]:s,typeof d==='number'?palette[d]:d]);
-        continue;
+        return;
       }
       switch (p.kind) {
         case 'cloud': {
@@ -364,13 +935,127 @@
           for (let i = 0; i < count * 3; i++) { const xx = x + random() * w, yy = y + random() * h, ww = 2 + random() * Math.min(10, w / 3); poly([[xx, yy], [xx + ww, yy - 2], [xx + ww + 2, yy + 3], [xx - 1, yy + 3]], i % 2 ? c : s, 0); rect(xx + 1, yy, ww - 1, 1, d); } break;
         default: if (catalogOn) extraKind(p); break;
       }
+      if (ditherTargetsOn.includes('water') && (p.kind === 'pool' || p.kind === 'river')) ditherWaterLayer(p, c, s, d);
     }
+    const ordered = orderLayers(plan.layers);
+    const banded = ordered.some(p => p.depth) || (plan.details || []).some(d => d.depth);
+    if (!banded) { for (const p of ordered) paintLayer(p); applyDetails(null); }
+    else for (const band of depthBands) {
+      for (const p of ordered) if ((p.depth || 'mid') === band) paintLayer(p);
+      applyDetails(band);
+    }
+    const richer = !!(plan.detailLevel || plan.materials || plan.accents || plan.details || plan.dither
+      || plan.layers.some(p => p.material || p.variant || p.depth || p.steps));
+    const preLight = richer && ctx.getImageData ? ctx.getImageData(0, 0, width, height) : null;
     if (catalogOn && plan.lighting) lightingPass(ctx, plan);
-    if (pixelOn && plan.palette && ctx.getImageData) { // only plans that chose a catalog palette; older plans render exactly as before
-      const img = ctx.getImageData(0, 0, width, height), cols = plan.palette ? Catalog.PALETTES[plan.palette] : [plan.sky, plan.ground, plan.stone, plan.shadow, plan.light, plan.accent];
-      Catalog.pixelate(img.data, width, height, cols, 2); ctx.putImageData(img, 0, 0);
+    if (richer && preLight && ctx.getImageData) {
+      const post = ctx.getImageData(0, 0, width, height), A = preLight.data, B = post.data, lit = new Uint8ClampedArray(B);
+      let sumA = 0, sumB = 0, n = width * height;
+      for (let i = 0; i < A.length; i += 4) { sumA += A[i] * .3 + A[i + 1] * .59 + A[i + 2] * .11; sumB += B[i] * .3 + B[i + 1] * .59 + B[i + 2] * .11; }
+      const preMean = sumA / n, litMean = sumB / n;
+      const gain = Math.min(1.08, 1 + 0.4 * Math.max(0, preMean / Math.max(1, litMean) - 1));
+      for (let i = 0; i < B.length; i += 4) {
+        const preL = A[i] * .3 + A[i + 1] * .59 + A[i + 2] * .11, postL = B[i] * .3 + B[i + 1] * .59 + B[i + 2] * .11;
+        let g = gain;
+        if (preL > 170 && postL < preL * .92) g = Math.max(g, Math.min(1.18, preL / Math.max(1, postL)));
+        if (g > 1) {
+          let rr = B[i] * g, gg = B[i + 1] * g, bb = B[i + 2] * g;
+          const mx = Math.max(rr, gg, bb);
+          if (mx > 250) { const k = 250 / mx; rr *= k; gg *= k; bb *= k; }
+          B[i] = rr; B[i + 1] = gg; B[i + 2] = bb;
+        }
+      }
+      let sumC = 0;
+      for (let i = 0; i < B.length; i += 4) sumC += B[i] * .3 + B[i + 1] * .59 + B[i + 2] * .11;
+      const nowMean = sumC / n, headroom = plan.view === 'interior' ? 3 : 10;
+      let capMean = litMean + headroom;
+      if (plan.view === 'interior' && nowMean > 82) capMean = Math.min(capMean, 82);
+      if (nowMean > capMean) {
+        let midSum = 0, midN = 0;
+        const Lof = (arr, i) => arr[i] * .3 + arr[i + 1] * .59 + arr[i + 2] * .11;
+        for (let i = 0; i < B.length; i += 4) { const L = Lof(B, i); if (L < 170 && Lof(A, i) <= 170) { midSum += L; midN++; } }
+        const need = nowMean - capMean;
+        const midMean = midN ? midSum / midN : 0;
+        const drop = midN && midMean > 8 ? Math.min(0.22, need / (midMean * (midN / n))) : 0;
+        if (drop > 0) {
+          for (let i = 0; i < B.length; i += 4) {
+            if (Lof(B, i) >= 170 || Lof(A, i) > 170) continue;
+            B[i] = B[i] * (1 - drop) + lit[i] * drop;
+            B[i + 1] = B[i + 1] * (1 - drop) + lit[i + 1] * drop;
+            B[i + 2] = B[i + 2] * (1 - drop) + lit[i + 2] * drop;
+          }
+        }
+      }
+      if (plan.view === 'interior') {
+        const Lof2 = (arr, i) => arr[i] * .3 + arr[i + 1] * .59 + arr[i + 2] * .11;
+        let sumF = 0;
+        for (let i = 0; i < B.length; i += 4) sumF += Lof2(B, i);
+        const target = 82;
+        if (sumF / n > target + 0.2) {
+          let midSum = 0, hiSum = 0;
+          for (let i = 0; i < B.length; i += 4) {
+            const L = Lof2(B, i);
+            if (L >= 170 || Lof2(A, i) > 170) hiSum += L; else midSum += L;
+          }
+          if (midSum > 0) {
+            const k = Math.max(0.75, Math.min(1, (target * n - hiSum) / midSum));
+            for (let i = 0; i < B.length; i += 4) {
+              if (Lof2(B, i) >= 170 || Lof2(A, i) > 170) continue;
+              B[i] *= k; B[i + 1] *= k; B[i + 2] *= k;
+            }
+          }
+        }
+      }
+      ctx.putImageData(post, 0, 0);
+    }
+    if (pixelOn && plan.palette && ctx.getImageData) {
+      const img = ctx.getImageData(0, 0, width, height);
+      const base = Catalog.PALETTES[plan.palette] || [plan.sky, plan.ground, plan.stone, plan.shadow, plan.light, plan.accent];
+      if (richer) {
+        const extra = [];
+        for (const a of plan.accents || []) if (a && a.color) extra.push(punchHex(typeof a.color === 'number' ? palette[a.color] : a.color, 1.45, 1.22));
+        for (const c of [plan.accent, plan.light]) if (typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c)) extra.push(punchHex(c, 1.2, 1.12));
+        for (const p of plan.layers) if (['dunes', 'road', 'sandstorm'].includes(p.kind) && typeof p.color === 'string') extra.push(p.color, p.shade, p.detail);
+        pixelateRich(img.data, width, height, extra.concat(base), 2);
+      } else {
+        Catalog.pixelate(img.data, width, height, base, 2);
+      }
+      ctx.putImageData(img, 0, 0);
     }
     return ctx.canvas;
+  }
+  const BAYER16 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  function rampPaletteRich(colors) {
+    const out = [[0, 0, 0]], seen = new Set(['0,0,0']);
+    const push = rgb => {
+      const row = rgb.map(v => Math.max(0, Math.min(255, Math.round(v)))), key = row.join(',');
+      if (!seen.has(key)) { seen.add(key); out.push(row); }
+    };
+    const tones = (hex, ks) => {
+      const rgb = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+      for (const k of ks) push(rgb.map(v => k > 1 ? v + (255 - v) * (k - 1) : v * k));
+    };
+    const list = colors.filter(Boolean).map(c => typeof c === 'number' ? palette[c] : c);
+    // Accents first so their hues and bright highlights are never sliced off.
+    for (const hex of list.slice(0, 4)) tones(hex, [0.7, 1, 1.28, 1.5]);
+    for (const hex of list.slice(4, 12)) tones(hex, [0.5, 1, 1.28]);
+    return out.slice(0, 28);
+  }
+  function pixelateRich(data, w, h, colors, factor = 2) {
+    const pal = rampPaletteRich(colors), lw = Math.floor(w / factor), lh = Math.floor(h / factor), low = new Uint8ClampedArray(lw * lh * 3);
+    for (let y = 0; y < lh; y++) for (let x = 0; x < lw; x++) {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let j = 0; j < factor; j++) for (let i = 0; i < factor; i++) { const k = ((y * factor + j) * w + x * factor + i) * 4; r += data[k]; g += data[k + 1]; b += data[k + 2]; n++; }
+      const t = (BAYER16[(y % 4) * 4 + x % 4] / 16 - .5) * 22;
+      const want = [r / n + t, g / n + t, b / n + t];
+      let best = pal[0], bd = Infinity;
+      for (const p of pal) { const d = (p[0] - want[0]) ** 2 * .3 + (p[1] - want[1]) ** 2 * .59 + (p[2] - want[2]) ** 2 * .11; if (d < bd) { bd = d; best = p; } }
+      low.set(best, (y * lw + x) * 3);
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const s = (Math.min(lh - 1, Math.floor(y / factor)) * lw + Math.min(lw - 1, Math.floor(x / factor))) * 3, k = (y * w + x) * 4;
+      data[k] = low[s]; data[k + 1] = low[s + 1]; data[k + 2] = low[s + 2]; data[k + 3] = 255;
+    }
   }
   function lightingPass(ctx, plan) {
     const img = ctx.getImageData(0, 0, width, height), d = img.data, L = plan.lighting;
@@ -388,5 +1073,5 @@
     }
     ctx.putImageData(img, 0, 0);
   }
-  return { width, height, palette, kinds, catalogKinds, allKinds, patterns, validate, hash, paint, description };
+  return { width, height, palette, kinds, catalogKinds, allKinds, patterns, materialNames, detailLevels, rampSteps, accentUsages, depthBands, stampTypes, variantNames, shadeRamp, validate, hash, paint, description, grammar: Grammar };
 });

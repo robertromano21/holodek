@@ -51,9 +51,13 @@ function createRegistry(runId) {
       readOnly: [...relevant].filter(key => key !== job.key && (database[key]?.name || database[key]?.visited || database[key]?.populationComplete || database[key]?.preparedBuild || database[key]?.builder?.mode === 'hand')),
       assignments: [...assigned.values()].filter(other => !other.finished || relevant.has(other.key)).map(other => ({ destination: other.key, owner: other.id,
         phase: other.phase, stage: other.stage, ready: other.stage === 'complete', attempt: other.attempt })),
-      reservations: [...owners].map(([key, owner]) => ({ key, ...owner })) });
+      reservations: [...owners].map(([key, owner]) => ({ key, ...owner })),
+      // Living region: this destination's obligations from the reserved footprint (null outside it).
+      livingRegion: require('./livingRegion').obligations(database, job.key) });
   }
-  return { assign, reserve, release, describe, plan, releaseFrontier };
+  // Keys any active build owns; the living region never reserves over them.
+  function owned() { return [...owners.keys()]; }
+  return { assign, reserve, release, describe, plan, releaseFrontier, owned };
 }
 const registries = new WeakMap();
 function registryFor(state) {

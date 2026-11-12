@@ -45,6 +45,18 @@ test('console-only responses refresh dock membership and reuse the existing mons
   const f=fixture();f.receive([...oldNames,...newNames],false);
   assert.equal(f.drawn.length,6);assert.equal(f.drawn.at(-1).sprite,f.sprites.get(newNames[1]));assert.equal(f.drawn.at(-1).source.type,'npc');
 });
+test('accepted puzzle helpers follow without joining the lower-left dock until verification',()=>{
+  const f=fixture();
+  const helper={name:newNames[0],type:'npc',sprite:f.sprites.get(newNames[0]),recruitmentLease:{source:'engine-local-recruitment-helper-v1'}};
+  f.window.combatCharacters=[{name:'Mortacia',type:'pc'},helper];
+  f.window._partyInfoNPCString=data([newNames[0]]).npcs;
+  f.ctx.renderPartyIconDock();
+  assert.deepEqual(f.drawn.map(entry=>entry.label),['Mortacia']);
+  assert.ok(!f.dock.innerHTML.includes(newNames[0]));
+  delete helper.recruitmentLease;
+  f.drawn.length=0;f.ctx.renderPartyIconDock();
+  assert.deepEqual(f.drawn.map(entry=>entry.label),['Mortacia',newNames[0]]);
+});
 test('realtime results refresh the same dock sources and stale events cannot overwrite them',async()=>{
   const f=fixture();Object.assign(f.ctx,{currentDungeon:{geoKey:'-1,0,0'},currentCoordinates:{x:-1,y:0,z:0},roomNameDatabase:new Map(),
     updateCharacterSheetsFromConsole(){},generateMonstersForRoom(){},updateGameConsole(){},renderDungeonView(){},roomDatabaseSyncClient:{reset(){}},localStorage:{getItem:()=>null}});

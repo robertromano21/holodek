@@ -38,10 +38,12 @@ function merge(value,items){return serialize([...I.parseEquipmentProperties(valu
 async function equip($,actors,options={}){
   const selected=plan(actors,options),items=[],excluded=[...(options.excluded||[]),...selected.party.flatMap(a=>a.items.map(i=>i.name))];
   // Author in bounded batches; commit only after every item's identity and modifiers validate.
+  // Each batch is a separate request with its own attempt budget; the whole pass is bounded (generationPolicy.batches).
+  const count=Math.ceil(selected.assignments.length/8),budgetFor=count?require('./generationPolicy').batches('portable-items|monster-equipment|'+JSON.stringify(selected.assignments.map(a=>[a.owner,a.slot])),count):null;
   for(let start=0;start<selected.assignments.length;start+=8){
     const assignments=selected.assignments.slice(start,start+8);
     const batch=await Items.generate($,{...options,count:assignments.length,typePlan:assignments.map(a=>a.type),allowHealing:false,excluded,
-      purpose:'personal monster equipment',equipmentContext:{assignments,party:selected.party}});
+      purpose:'personal monster equipment',equipmentContext:{assignments,party:selected.party},budget:budgetFor(start/8)});
     for(const [index,item]of batch.entries())items.push({...item,owner:assignments[index].owner,slot:assignments[index].slot});
     excluded.push(...batch.map(item=>item.name));
   }

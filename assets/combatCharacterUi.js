@@ -124,6 +124,12 @@
         give.addEventListener('click',()=>root.ItemGiveUi?.open(actor.name));popup.appendChild(give);
       }
       root.QuestSceneUi?.addAction(popup,actor.name);
+      if(actor.residentPlan){
+        button('Current Activity','resident plan status '+actor.name);
+        if(['ready','active','blocked','paused'].includes(actor.residentPlan.status))
+          button(actor.residentPlan.status==='paused'?'Let Them Continue':'Ask Them To Wait',
+            'resident plan '+(actor.residentPlan.status==='paused'?'resume ':'pause ')+actor.name);
+      }
       root.CommerceUi?.addAction(popup,actor.name);
       root.CombatLifeUi?.addAction(popup,actor.name);
       root.SpellUi?.addTargetAction(popup,actor.name);

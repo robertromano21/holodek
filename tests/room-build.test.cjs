@@ -6,6 +6,16 @@ const os = require('node:os'), crypto = require('node:crypto');
 const root = process.env.HOLODEK_WEBSITE_SOURCE_ROOT || path.resolve(__dirname, '..');
 const Build = require(path.join(root, 'retort/roomBuildState')), Queue = require(path.join(root, 'retort/roomBuildQueue'));
 const Topology = require(path.join(root, 'retort/roomBuildTopology'));
+test('locked diagonal exits create one geometrically correct return doorway', () => {
+  const db = { '0,0,0': { exits: { southeast: { status: 'blocked', targetCoordinates: '1,-1,0', key: 'ash key' } } },
+    '1,-1,0': { exits: { southeast: { status: 'open', targetCoordinates: '0,0,0', key: null },
+      south: { status: 'open', targetCoordinates: '1,-2,0', key: null } } } };
+  Topology.linkReturn(db, '0,0,0', 'southeast', '1,-1,0');
+  assert.deepEqual(Object.keys(db['1,-1,0'].exits).sort(), ['northwest', 'south']);
+  assert.deepEqual(db['1,-1,0'].exits.northwest, { status: 'open', targetCoordinates: '0,0,0', key: null });
+  assert.equal(db['1,-1,0'].exits.south.targetCoordinates, '1,-2,0');
+  assert.throws(() => Topology.linkReturn(db, '0,0,0', 'north', '1,-1,0'), /does not match/);
+});
 const wait = async fn => { for (let n = 0; n < 100 && !fn(); n++) await new Promise(r => setTimeout(r, 5)); assert.ok(fn()); };
 const logger = { info() {} };
 function setup() {
